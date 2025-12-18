@@ -1,21 +1,26 @@
 # Snapshot Reference
 #
+# ⚠️ PLACEHOLDER: This file is a template. Real snapshot references
+# will be generated when you run local filesystem scanning via
+# repolensd or similar tooling.
+#
 # This file contains a reference to the full filesystem snapshot,
-# which is stored as a GitHub Artifact or Release Asset to keep
+# which should be stored as a GitHub Artifact or Release Asset to keep
 # the repository small.
 
 type: artifact
 artifact_name: fs-snapshot-latest
 workflow_run_id: null
-created_at: "2024-12-18T15:26:00Z"
+created_at: null
 expires_at: null
 size_bytes: 0
 
-# To access the full snapshot:
-# 1. Go to the repository's Actions tab
-# 2. Find the latest "Webmaschine Refresh" workflow run
-# 3. Download the artifact named "fs-snapshot-latest"
+# To access a real snapshot (once generated):
+# 1. Run local scanning: repolensd export-webmaschine --out /path/to/webmaschine
+# 2. Upload large snapshot as GitHub Release Asset (recommended) or Artifact
+# 3. Update this file with the reference details
 #
 # Or use the GitHub CLI:
-# gh run list --workflow=webmaschine-refresh.yml
-# gh run download <run-id> --name fs-snapshot-latest
+# gh release list
+# gh release download <tag> --pattern "fs-snapshot-*.json"
+

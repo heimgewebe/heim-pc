@@ -26,7 +26,8 @@
   },
   "metadata": {
     "version": "0.1.0",
-    "last_updated": "2024-12-18T15:26:00Z",
-    "schema_version": "1.0"
+    "last_updated": null,
+    "schema_version": "1.0",
+    "note": "This is placeholder data. Real data should be generated locally via repolensd or similar tooling."
   }
 }

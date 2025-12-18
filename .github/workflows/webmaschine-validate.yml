@@ -1,0 +1,74 @@
+name: Webmaschine Validate
+
+# NOTE: This workflow validates repository structure and provides a mechanism
+# to commit externally-generated data. It does NOT scan your local filesystem.
+# 
+# Real filesystem scanning happens locally via repolensd or similar tooling,
+# which then pushes updated state files to this repository.
+#
+# This workflow only:
+# 1. Validates that state files are present and readable
+# 2. Optionally commits changes made by local tooling
+# 3. Does NOT generate real data (only validates structure)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Repository Structure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install pyyaml
+      
+      - name: Validate state files exist and are readable
+        run: |
+          echo "Validating state files..."
+          python3 -c "import json; json.load(open('state/index.json'))" && echo "✓ state/index.json valid"
+          python3 -c "import json; json.load(open('state/repos.json'))" && echo "✓ state/repos.json valid"
+          python3 -c "import json; json.load(open('state/uncertainties.json'))" && echo "✓ state/uncertainties.json valid"
+      
+      - name: Validate configuration files
+        run: |
+          echo "Validating configuration files..."
+          python3 -c "import yaml; yaml.safe_load(open('config/webmaschine.yml'))" && echo "✓ config/webmaschine.yml valid"
+          python3 -c "import yaml; yaml.safe_load(open('config/zones.yml'))" && echo "✓ config/zones.yml valid"
+      
+      - name: Check for placeholder data
+        run: |
+          echo "Checking if data is still placeholder..."
+          if python3 -c "import json; data=json.load(open('state/index.json')); exit(0 if data['metadata'].get('last_updated') is None else 1)" 2>/dev/null; then
+            echo "⚠️  WARNING: state/index.json contains placeholder data (last_updated is null)"
+            echo "   Real data should be generated locally using repolensd or similar tooling"
+          else
+            echo "✓ State files appear to contain real data"
+          fi
+      
+      - name: Verify directory structure
+        run: |
+          for dir in docs config state timeline snapshots .wgx; do
+            if [ -d "$dir" ]; then
+              echo "✓ Directory $dir exists"
+            else
+              echo "✗ Directory $dir missing"
+              exit 1
+            fi
+          done

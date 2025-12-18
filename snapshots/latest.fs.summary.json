@@ -9,8 +9,9 @@
   "top_directories": [],
   "large_files": [],
   "metadata": {
-    "snapshot_time": "2024-12-18T15:26:00Z",
+    "snapshot_time": null,
     "scan_duration_ms": 0,
-    "version": "1.0"
+    "version": "1.0",
+    "note": "This is placeholder data. Real data should be generated locally via repolensd or similar tooling."
   }
 }

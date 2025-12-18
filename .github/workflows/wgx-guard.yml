@@ -1,5 +1,9 @@
 name: WGX Guard
 
+# NOTE: This is a temporary standalone implementation.
+# TODO: Migrate to fleet-standard reusable workflow from heimgewebe/wgx
+# once the canonical WGX templates are available.
+
 on:
   pull_request:
     branches: ["main"]

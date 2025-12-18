@@ -6,7 +6,8 @@
     "by_severity": {}
   },
   "metadata": {
-    "last_scan": "2024-12-18T15:26:00Z",
-    "version": "1.0"
+    "last_scan": null,
+    "version": "1.0",
+    "note": "This is placeholder data. Real data should be generated locally via repolensd or similar tooling."
   }
 }
