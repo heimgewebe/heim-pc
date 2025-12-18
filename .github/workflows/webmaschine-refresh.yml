@@ -13,6 +13,9 @@ on:
   # schedule:
   #   - cron: '0 4 * * *'  # Daily at 04:00 UTC
 
+permissions:
+  contents: write
+
 jobs:
   refresh:
     name: Refresh Webmaschine Data
