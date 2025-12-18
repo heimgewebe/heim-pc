@@ -87,11 +87,12 @@ jobs:
         if: inputs.include_snapshot == 'true' || github.event_name == 'schedule'
         run: |
           mkdir -p /tmp/snapshot
+          timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           
-          cat > /tmp/snapshot/fs.snapshot.full.json << 'EOF'
+          cat > /tmp/snapshot/fs.snapshot.full.json << EOF
           {
             "version": "1.0",
-            "timestamp": "placeholder",
+            "timestamp": "$timestamp",
             "files": [],
             "directories": [],
             "repositories": [],
@@ -101,7 +102,7 @@ jobs:
           }
           EOF
           
-          echo "Created mock full snapshot"
+          echo "Created mock full snapshot with timestamp $timestamp"
       
       - name: Upload snapshot artifact
         if: inputs.include_snapshot == 'true' || github.event_name == 'schedule'
