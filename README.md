@@ -46,8 +46,8 @@ webmaschine/
 Echte Kartografie-Daten werden **lokal** erzeugt:
 
 ```bash
-# Mit repolensd oder ähnlichem Tooling
-repolensd export-webmaschine --out /path/to/webmaschine
+# Mit rLens oder ähnlichem Tooling
+rlens export-webmaschine --out /path/to/webmaschine
 
 # Prüfen und committen
 cd /path/to/webmaschine
