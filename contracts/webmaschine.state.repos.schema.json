@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://heimgewebe.dev/schemas/webmaschine/state/repos/v1.0.json",
+  "title": "Webmaschine State Repositories",
+  "description": "Repository tracking and activity metrics",
+  "type": "object",
+  "required": ["repositories", "summary", "metadata"],
+  "properties": {
+    "repositories": {
+      "type": "array",
+      "description": "List of repositories",
+      "items": {
+        "type": "object"
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_count", "by_type", "by_zone", "active_last_7d", "active_last_30d", "inactive_count"],
+      "properties": {
+        "total_count": { "type": "integer" },
+        "by_type": { "type": "object" },
+        "by_zone": { "type": "object" },
+        "active_last_7d": { "type": "integer" },
+        "active_last_30d": { "type": "integer" },
+        "inactive_count": { "type": "integer" }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "last_scan": { "type": ["string", "null"] },
+        "scan_duration_ms": { "type": "integer" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

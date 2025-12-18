@@ -7,8 +7,8 @@
 # Root paths to scan (only these directories will be included)
 # TEMPLATE: Replace with your actual paths
 roots: []
-  # Example: /home/username
-  # Example: /mnt/data
+#  - /home/username
+#  - /mnt/data
 
 # Global excludes (patterns to skip during scanning)
 excludes:
