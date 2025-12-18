@@ -28,6 +28,7 @@ webmaschine/
 ├─ state/          # Aktueller Zustand (klein, KI-lesbar)
 ├─ timeline/       # Chronologische Historie (komprimierbar)
 ├─ snapshots/      # Aggregationen & Pointer auf große Daten
+├─ contracts/      # Data contracts & JSON schemas
 └─ .wgx/           # WGX-Integration (Fleet-konform)
 ```
 
@@ -64,20 +65,21 @@ Der `webmaschine-validate` Workflow prüft automatisch:
 
 ## Mehr erfahren
 
-* [Weltmodell-Konzept](docs/model.md) – Was ist das "Weltmodell"?
+* [Weltmodell-Konzept](docs/model.md) – Was ist das "Weltmodell"? (inkl. Beispiele)
 * [Zonen & Bedeutungen](docs/zones.md) – Semantische Bereiche
 * [Drift-Definition](docs/drift.md) – Was bedeutet Drift und wie wird er erkannt?
 * [Sicherheit](docs/security.md) – Token, Pfadgrenzen, Datenpolitik
+* [Contracts](contracts/README.md) – Data schemas & versioning
 
 ## WGX-Integration
 
-Dieses Repo ist Fleet-konform und nutzt WGX:
+Dieses Repo ist Fleet-konform und nutzt WGX reusable workflows:
 
-* **Guard**: Lint-Checks (YAML/JSON, actionlint)
-* **Smoke**: Konsistenz-Tests (Index lesbar? Pfade valide?)
+* **Guard**: Lint-Checks (YAML/JSON, actionlint) via `heimgewebe/wgx`
+* **Smoke**: Konsistenz-Tests (Index lesbar? Pfade valide?) via `heimgewebe/wgx`
 * **Validate**: Struktur-Validierung und Placeholder-Warnung
 
-*Hinweis: Die aktuellen Workflows sind temporäre Standalone-Implementierungen. Migration zu fleet-standard reusable workflows aus `heimgewebe/wgx` ist geplant.*
+Workflows referenzieren zentrale WGX-Templates, um Fleet-Drift zu vermeiden.
 
 ## Lizenz
 

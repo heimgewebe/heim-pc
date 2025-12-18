@@ -1,21 +1,10 @@
 {
   "machine": {
-    "name": "pop-os-alex",
-    "roots": [
-      "/home/alex"
-    ],
-    "hub": "/home/alex/repos"
+    "name": null,
+    "roots": [],
+    "hub": null
   },
-  "hotspots": [
-    {
-      "path": "/home/alex/repos/tools",
-      "why": "active dev"
-    },
-    {
-      "path": "/home/alex/vault-gewebe",
-      "why": "knowledge"
-    }
-  ],
+  "hotspots": [],
   "repos": {
     "count": 0,
     "active_last_7d": []
@@ -28,6 +17,6 @@
     "version": "0.1.0",
     "last_updated": null,
     "schema_version": "1.0",
-    "note": "This is placeholder data. Real data should be generated locally via repolensd or similar tooling."
+    "note": "Placeholder data. Populate via local scanning (repolensd export-webmaschine). See docs/model.md for examples."
   }
 }

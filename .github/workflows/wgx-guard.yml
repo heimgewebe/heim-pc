@@ -1,9 +1,5 @@
 name: WGX Guard
 
-# NOTE: This is a temporary standalone implementation.
-# TODO: Migrate to fleet-standard reusable workflow from heimgewebe/wgx
-# once the canonical WGX templates are available.
-
 on:
   pull_request:
     branches: ["main"]
@@ -14,40 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint and Static Analysis
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          pip install yamllint pyyaml
-      
-      - name: Lint YAML files
-        run: |
-          yamllint -d "{extends: default, rules: {line-length: {max: 120}, document-start: disable}}" \
-            config/ .wgx/ .github/workflows/
-      
-      - name: Validate JSON files
-        run: |
-          for file in $(find state snapshots -name "*.json"); do
-            echo "Validating $file"
-            python3 -m json.tool "$file" > /dev/null
-          done
-      
-      - name: Install actionlint
-        run: |
-          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          sudo mv actionlint /usr/local/bin/
-      
-      - name: Lint GitHub Actions workflows
-        run: |
-          actionlint
+  guard:
+    uses: heimgewebe/wgx/.github/workflows/guard.yml@main
+    with:
+      profile-path: .wgx/profile.yml
+

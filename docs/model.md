@@ -56,3 +56,69 @@ Webmaschine ist **nicht**:
 * Eine Datenbank (es ist ein Abbild, kein aktives System)
 
 Webmaschine ist ein **Orientierungssystem** für KI-Agenten.
+
+## Beispiel-Daten
+
+### Beispiel state/index.json
+
+```json
+{
+  "machine": {
+    "name": "pop-os-alex",
+    "roots": ["/home/alex"],
+    "hub": "/home/alex/repos"
+  },
+  "hotspots": [
+    {"path": "/home/alex/repos/tools", "why": "active dev"},
+    {"path": "/home/alex/vault-gewebe", "why": "knowledge"}
+  ],
+  "repos": {
+    "count": 42,
+    "active_last_7d": ["tools", "metarepo", "wgx"]
+  },
+  "artifacts": {
+    "latest_snapshot": "snapshots/latest.fs.snapshot.ref",
+    "timeline": "timeline/fs.timeline.jsonl"
+  },
+  "metadata": {
+    "version": "0.1.0",
+    "last_updated": "2024-12-18T10:30:00Z",
+    "schema_version": "1.0"
+  }
+}
+```
+
+### Beispiel config/zones.yml
+
+```yaml
+zones:
+  - path: /home/alex/repos
+    name: repos
+    type: development
+    role: active-dev
+    priority: high
+    description: "Main repository directory"
+  
+  - path: /home/alex/vault-gewebe
+    name: vault-gewebe
+    type: knowledge
+    role: knowledge-base
+    priority: high
+    description: "Knowledge management"
+  
+  - path: /home/alex/Downloads
+    name: downloads
+    type: transient
+    role: staging
+    priority: low
+    description: "Temporary downloads"
+```
+
+### Beispiel Hotspot-Typen
+
+* **active dev**: Aktive Entwicklung, häufige Commits
+* **knowledge**: Dokumentation, Notizen, Wikis
+* **staging**: Temporäre Dateien, Work-in-Progress
+* **archive**: Selten genutzt, historisch wichtig
+* **config**: Konfigurationsdateien, Dotfiles
+

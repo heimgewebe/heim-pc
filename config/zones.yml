@@ -2,51 +2,19 @@
 #
 # Zones are semantic areas of your filesystem with defined meaning and role.
 # This is the source of truth for zone configuration.
+#
+# NOTE: These are EXAMPLE zones. Customize to your actual system after initial scan.
 
-zones:
-  # Example zones - customize to your system
-  
-  - path: /home/alex/repos
-    name: repos
-    type: development
-    role: active-dev
-    priority: high
-    description: "Main repository directory for active development"
-  
-  - path: /home/alex/repos/tools
-    name: tools
-    type: development
-    role: active-dev
-    priority: high
-    description: "Development tools and utilities"
-  
-  - path: /home/alex/vault-gewebe
-    name: vault-gewebe
-    type: knowledge
-    role: knowledge-base
-    priority: high
-    description: "Knowledge management and notes for Heimgewebe system"
-  
-  - path: /home/alex/Documents
-    name: documents
-    type: documents
-    role: storage
-    priority: medium
-    description: "Personal documents and files"
-  
-  - path: /home/alex/Downloads
-    name: downloads
-    type: transient
-    role: staging
-    priority: low
-    description: "Temporary downloads and staging area"
-  
-  - path: /home/alex/.config
-    name: dotfiles
-    type: config
-    role: config-source
-    priority: medium
-    description: "System and application configuration files"
+zones: []
+
+# Example zone structure (move to docs/zones.md for reference):
+#
+# - path: /path/to/area
+#   name: area-name
+#   type: development|knowledge|archive|transient|config|media|documents
+#   role: active-dev|maintenance|archived|knowledge-base|staging|config-source|storage
+#   priority: high|medium|low
+#   description: "Human-readable description"
 
 # Zone type definitions
 # - development: Code, repositories, active projects
@@ -70,3 +38,4 @@ zones:
 # - high: Important for daily work
 # - medium: Regularly used
 # - low: Rarely or temporarily used
+

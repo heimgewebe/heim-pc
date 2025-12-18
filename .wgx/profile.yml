@@ -1,49 +1,46 @@
 # WGX Profile for Webmaschine
-#
-# This file configures WGX (fleet-wide CI/CD) for this repository.
+# Schema: WGX v1 (fleet-conform)
 
-profile:
-  name: webmaschine
+wgx:
   version: "1.0"
-  
-  # Guard: Linting and static analysis
-  guard:
-    enabled: true
-    checks:
-      - name: yaml-lint
-        command: yamllint
-        args: ["-d", "{extends: default, rules: {line-length: {max: 120}}}", "."]
-        files: "**/*.yml"
-        
-      - name: json-lint
-        command: python3
-        args: ["-m", "json.tool"]
-        files: "**/*.json"
-        
-      - name: actionlint
-        command: actionlint
-        args: []
-        files: ".github/workflows/*.yml"
-  
-  # Smoke: Basic functionality tests
-  smoke:
-    enabled: true
-    checks:
-      - name: index-readable
-        command: python3
-        args: ["-c", "import json; json.load(open('state/index.json'))"]
-        description: "Verify state/index.json is valid JSON"
-        
-      - name: repos-readable
-        command: python3
-        args: ["-c", "import json; json.load(open('state/repos.json'))"]
-        description: "Verify state/repos.json is valid JSON"
-        
-      - name: config-readable
-        command: python3
-        args: ["-c", "import yaml; yaml.safe_load(open('config/webmaschine.yml'))"]
-        description: "Verify config/webmaschine.yml is valid YAML"
+  profile:
+    name: webmaschine
+    type: data-repository
 
-  # Deployment: Not applicable for this repo
-  deploy:
-    enabled: false
+# Guard tasks: linting and static analysis
+tasks:
+  guard:
+    - id: yaml-lint
+      run: 'yamllint -d "{extends: default, rules: {line-length: {max: 120}, document-start: disable}}" config/ .wgx/ .github/workflows/'
+      
+    - id: json-lint
+      run: |
+        for file in $(find state snapshots -name "*.json"); do
+          python3 -m json.tool "$file" > /dev/null || exit 1
+        done
+      
+    - id: actionlint
+      run: actionlint
+
+  # Smoke tasks: basic functionality validation
+  smoke:
+    - id: state-readable
+      run: |
+        python3 -c "import json; json.load(open('state/index.json'))" && \
+        python3 -c "import json; json.load(open('state/repos.json'))" && \
+        python3 -c "import json; json.load(open('state/uncertainties.json'))"
+      description: "Verify state files are valid JSON"
+      
+    - id: config-readable
+      run: |
+        python3 -c "import yaml; yaml.safe_load(open('config/webmaschine.yml'))" && \
+        python3 -c "import yaml; yaml.safe_load(open('config/zones.yml'))"
+      description: "Verify config files are valid YAML"
+      
+    - id: structure-check
+      run: |
+        for dir in docs config state timeline snapshots .wgx; do
+          test -d "$dir" || exit 1
+        done
+      description: "Verify required directory structure exists"
+

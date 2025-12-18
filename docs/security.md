@@ -6,6 +6,37 @@
 2. **Minimal Exposure** – Nur notwendige Pfade scannen
 3. **Token Security** – Tokens nur für non-loopback
 4. **Error Safety** – Keine sensitiven Details in Exceptions
+5. **Metadata Only** – Weltmodell ist Struktur, nicht Inhalte
+
+## Datenpolitik: Was wird erfasst?
+
+### ✅ Was Webmaschine ERFASST
+
+* **Metadaten**: Dateipfade, Größen, Timestamps, Typen
+* **Struktur**: Verzeichnisbäume, Repository-Listen, Zonen
+* **Aggregationen**: Statistiken, Summaries, Hotspots
+* **Referenzen**: Pointer zu Snapshots (nicht die Snapshots selbst)
+
+### ❌ Was Webmaschine NICHT ERFASST
+
+* **Dateiinhalte**: Keine Dokumente, Code, Notizen gelesen
+* **Credentials**: Keine Passwörter, Keys, Tokens gespeichert
+* **Sensible Pfade**: `.ssh`, `.gnupg`, Browser-Profile ausgeschlossen
+* **Personenbezogene Daten**: Keine E-Mails, Chat-Historie, etc.
+
+### Zwei-Schichten-Architektur
+
+1. **Git-Repository (klein, reviewbar)**:
+   - `state/*.json` – Strukturierte Metadaten (< 100 KB)
+   - `config/*.yml` – Konfiguration
+   - `docs/` – Dokumentation
+
+2. **Externe Storage (groß, ephemeral)**:
+   - Vollständige Snapshots als GitHub Artifacts (90-Tage-Retention)
+   - Oder als Release Assets für langfristige Archivierung
+   - Oder lokal in `~/vault-gewebe/` für persönliche Backups
+
+**Goldene Regel**: Klein committen, groß auslagern.
 
 ## Root-Grenzen
 
@@ -15,7 +46,7 @@ Webmaschine darf **nur** innerhalb definierter Root-Pfade browsen.
 
 ```yaml
 roots:
-  - /home/alex
+  - /home/username  # Nur User-Home
   # NICHT: /home, /, /root, /etc
 ```
 
@@ -24,6 +55,7 @@ roots:
 * Verhindert versehentliches Scannen von System-Bereichen
 * Vermeidet Permission-Probleme
 * Schützt andere Nutzer-Accounts
+* Minimiert Angriffsfläche
 
 ## Excludes
 

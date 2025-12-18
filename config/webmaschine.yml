@@ -1,12 +1,14 @@
 # Webmaschine Configuration
 #
 # This file defines the root paths, excludes, and policies for filesystem scanning.
+#
+# NOTE: This is a TEMPLATE. Customize with your actual root paths after setup.
 
 # Root paths to scan (only these directories will be included)
-roots:
-  - /home/alex
-  # Add additional roots as needed
-  # Example: /home/alex/external-drive
+# TEMPLATE: Replace with your actual paths
+roots: []
+  # Example: /home/username
+  # Example: /mnt/data
 
 # Global excludes (patterns to skip during scanning)
 excludes:

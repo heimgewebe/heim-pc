@@ -1,47 +1,33 @@
 # Webmaschine Summary
 
-> ⚠️ **PLACEHOLDER DATA**: This file contains placeholder data until populated by local filesystem scanning via repolensd or similar tooling.
+> ⚠️ **PLACEHOLDER DATA**: This file contains template placeholders until populated by local filesystem scanning via repolensd or similar tooling.
 
-**Last Updated**: Not yet scanned (awaiting initial data from local tooling)
+**Last Updated**: Awaiting initial scan
 
 ## System Overview
 
-* **Machine**: pop-os-alex (example placeholder)
-* **Roots**: /home/alex (example placeholder)
-* **Repository Hub**: /home/alex/repos (example placeholder)
+* **Machine**: Not yet configured
+* **Roots**: Not yet configured  
+* **Repository Hub**: Not yet configured
 
 ## Quick Stats
 
-* **Repositories**: 0 total (placeholder)
-  * Active (7d): 0
-  * Active (30d): 0
-  * Inactive: 0
-
-* **Zones**: 6 defined in config/zones.yml
-  * High priority: 3
-  * Medium priority: 2
-  * Low priority: 1
-
-## Hotspots
-
-No real data yet. Example hotspots from config:
-1. `/home/alex/repos/tools` – active dev (placeholder)
-2. `/home/alex/vault-gewebe` – knowledge (placeholder)
-
-## Recent Activity
-
-No activity data available yet. Real data should be generated locally using repolensd or similar tooling, then committed to this repository.
+* **Repositories**: 0 (awaiting scan)
+* **Zones**: 0 defined (customize config/zones.yml after scan)
+* **Hotspots**: Not yet identified
 
 ## How to Generate Real Data
 
-1. Run `repolensd export-webmaschine --out /path/to/webmaschine` locally
-2. Review the generated state files
-3. Commit and push the updated files to this repository
-4. The validate workflow will confirm the data is valid
+1. **Configure**: Edit `config/webmaschine.yml` with your actual root paths
+2. **Define zones**: Customize `config/zones.yml` with your filesystem zones
+3. **Scan locally**: Run `repolensd export-webmaschine --out /path/to/webmaschine`
+4. **Review**: Examine generated state files
+5. **Commit**: Push updated files to this repository
+6. **Validate**: CI will confirm data structure is valid
 
-## Uncertainties
+## Example Structure
 
-No uncertainties detected. See `state/uncertainties.json` for details.
+See `docs/model.md` for example data structures and zone configurations.
 
 ---
 
