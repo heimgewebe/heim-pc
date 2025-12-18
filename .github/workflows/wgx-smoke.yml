@@ -1,0 +1,81 @@
+name: WGX Smoke
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install pyyaml
+      
+      - name: Test index.json is readable
+        run: |
+          python3 -c "import json; data = json.load(open('state/index.json')); print(f'✓ index.json valid: {len(data)} keys')"
+      
+      - name: Test repos.json is readable
+        run: |
+          python3 -c "import json; data = json.load(open('state/repos.json')); print(f'✓ repos.json valid: {data[\"summary\"][\"total_count\"]} repos')"
+      
+      - name: Test uncertainties.json is readable
+        run: |
+          python3 -c "import json; data = json.load(open('state/uncertainties.json')); print(f'✓ uncertainties.json valid: {data[\"summary\"][\"total_count\"]} uncertainties')"
+      
+      - name: Test webmaschine.yml is readable
+        run: |
+          python3 -c "import yaml; data = yaml.safe_load(open('config/webmaschine.yml')); print(f'✓ webmaschine.yml valid: {len(data[\"roots\"])} roots')"
+      
+      - name: Test zones.yml is readable
+        run: |
+          python3 -c "import yaml; data = yaml.safe_load(open('config/zones.yml')); print(f'✓ zones.yml valid: {len(data[\"zones\"])} zones')"
+      
+      - name: Verify directory structure
+        run: |
+          for dir in docs config state timeline snapshots .wgx; do
+            if [ -d "$dir" ]; then
+              echo "✓ Directory $dir exists"
+            else
+              echo "✗ Directory $dir missing"
+              exit 1
+            fi
+          done
+      
+      - name: Check for required files
+        run: |
+          required_files=(
+            "README.md"
+            "docs/model.md"
+            "docs/zones.md"
+            "docs/drift.md"
+            "docs/security.md"
+            "config/webmaschine.yml"
+            "config/zones.yml"
+            "state/index.json"
+            "state/repos.json"
+            "state/summary.md"
+            "state/uncertainties.json"
+          )
+          
+          for file in "${required_files[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✓ File $file exists"
+            else
+              echo "✗ File $file missing"
+              exit 1
+            fi
+          done

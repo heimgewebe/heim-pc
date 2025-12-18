@@ -1,0 +1,72 @@
+# Zone Definitions
+#
+# Zones are semantic areas of your filesystem with defined meaning and role.
+# This is the source of truth for zone configuration.
+
+zones:
+  # Example zones - customize to your system
+  
+  - path: /home/alex/repos
+    name: repos
+    type: development
+    role: active-dev
+    priority: high
+    description: "Main repository directory for active development"
+  
+  - path: /home/alex/repos/tools
+    name: tools
+    type: development
+    role: active-dev
+    priority: high
+    description: "Development tools and utilities"
+  
+  - path: /home/alex/vault-gewebe
+    name: vault-gewebe
+    type: knowledge
+    role: knowledge-base
+    priority: high
+    description: "Knowledge management and notes for Heimgewebe system"
+  
+  - path: /home/alex/Documents
+    name: documents
+    type: documents
+    role: storage
+    priority: medium
+    description: "Personal documents and files"
+  
+  - path: /home/alex/Downloads
+    name: downloads
+    type: transient
+    role: staging
+    priority: low
+    description: "Temporary downloads and staging area"
+  
+  - path: /home/alex/.config
+    name: dotfiles
+    type: config
+    role: config-source
+    priority: medium
+    description: "System and application configuration files"
+
+# Zone type definitions
+# - development: Code, repositories, active projects
+# - knowledge: Documentation, notes, wikis
+# - archive: Historical data, old projects
+# - transient: Temporary files, downloads, cache
+# - config: Configuration files, dotfiles
+# - media: Images, videos, audio
+# - documents: Documents, PDFs, office files
+
+# Zone role definitions
+# - active-dev: In active development
+# - maintenance: Maintenance mode
+# - archived: Archived, not active
+# - knowledge-base: Knowledge collection
+# - staging: Temporary area
+# - config-source: Configuration source
+# - storage: Long-term storage
+
+# Priority levels
+# - high: Important for daily work
+# - medium: Regularly used
+# - low: Rarely or temporarily used

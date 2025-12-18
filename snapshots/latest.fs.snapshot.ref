@@ -1,0 +1,21 @@
+# Snapshot Reference
+#
+# This file contains a reference to the full filesystem snapshot,
+# which is stored as a GitHub Artifact or Release Asset to keep
+# the repository small.
+
+type: artifact
+artifact_name: fs-snapshot-latest
+workflow_run_id: null
+created_at: "2024-12-18T15:26:00Z"
+expires_at: null
+size_bytes: 0
+
+# To access the full snapshot:
+# 1. Go to the repository's Actions tab
+# 2. Find the latest "Webmaschine Refresh" workflow run
+# 3. Download the artifact named "fs-snapshot-latest"
+#
+# Or use the GitHub CLI:
+# gh run list --workflow=webmaschine-refresh.yml
+# gh run download <run-id> --name fs-snapshot-latest

@@ -1,0 +1,49 @@
+# WGX Profile for Webmaschine
+#
+# This file configures WGX (fleet-wide CI/CD) for this repository.
+
+profile:
+  name: webmaschine
+  version: "1.0"
+  
+  # Guard: Linting and static analysis
+  guard:
+    enabled: true
+    checks:
+      - name: yaml-lint
+        command: yamllint
+        args: ["-d", "{extends: default, rules: {line-length: {max: 120}}}", "."]
+        files: "**/*.yml"
+        
+      - name: json-lint
+        command: python3
+        args: ["-m", "json.tool"]
+        files: "**/*.json"
+        
+      - name: actionlint
+        command: actionlint
+        args: []
+        files: ".github/workflows/*.yml"
+  
+  # Smoke: Basic functionality tests
+  smoke:
+    enabled: true
+    checks:
+      - name: index-readable
+        command: python3
+        args: ["-c", "import json; json.load(open('state/index.json'))"]
+        description: "Verify state/index.json is valid JSON"
+        
+      - name: repos-readable
+        command: python3
+        args: ["-c", "import json; json.load(open('state/repos.json'))"]
+        description: "Verify state/repos.json is valid JSON"
+        
+      - name: config-readable
+        command: python3
+        args: ["-c", "import yaml; yaml.safe_load(open('config/webmaschine.yml'))"]
+        description: "Verify config/webmaschine.yml is valid YAML"
+
+  # Deployment: Not applicable for this repo
+  deploy:
+    enabled: false

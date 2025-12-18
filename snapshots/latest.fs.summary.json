@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "total_files": 0,
+    "total_directories": 0,
+    "total_size_bytes": 0,
+    "by_zone": {},
+    "by_type": {}
+  },
+  "top_directories": [],
+  "large_files": [],
+  "metadata": {
+    "snapshot_time": "2024-12-18T15:26:00Z",
+    "scan_duration_ms": 0,
+    "version": "1.0"
+  }
+}
