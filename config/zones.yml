@@ -1,0 +1,41 @@
+# Zone Definitions
+#
+# Zones are semantic areas of your filesystem with defined meaning and role.
+# This is the source of truth for zone configuration.
+#
+# NOTE: These are EXAMPLE zones. Customize to your actual system after initial scan.
+
+zones: []
+
+# Example zone structure (move to docs/zones.md for reference):
+#
+# - path: /path/to/area
+#   name: area-name
+#   type: development|knowledge|archive|transient|config|media|documents
+#   role: active-dev|maintenance|archived|knowledge-base|staging|config-source|storage
+#   priority: high|medium|low
+#   description: "Human-readable description"
+
+# Zone type definitions
+# - development: Code, repositories, active projects
+# - knowledge: Documentation, notes, wikis
+# - archive: Historical data, old projects
+# - transient: Temporary files, downloads, cache
+# - config: Configuration files, dotfiles
+# - media: Images, videos, audio
+# - documents: Documents, PDFs, office files
+
+# Zone role definitions
+# - active-dev: In active development
+# - maintenance: Maintenance mode
+# - archived: Archived, not active
+# - knowledge-base: Knowledge collection
+# - staging: Temporary area
+# - config-source: Configuration source
+# - storage: Long-term storage
+
+# Priority levels
+# - high: Important for daily work
+# - medium: Regularly used
+# - low: Rarely or temporarily used
+

@@ -1,0 +1,17 @@
+name: WGX Guard
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    uses: heimgewebe/wgx/.github/workflows/guard.yml@main
+    with:
+      profile-path: .wgx/profile.yml
+

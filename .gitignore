@@ -1,0 +1,63 @@
+# Webmaschine .gitignore
+#
+# This file excludes files that should not be committed to the repository.
+
+# Large raw data (should be artifacts/releases)
+snapshots/*.full.json
+snapshots/*.snapshot.json
+timeline/*.jsonl
+*.jsonl.gz
+
+# Local environment and secrets
+.env
+.env.local
+*.key
+*.pem
+*.p12
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+env/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+build/
+
+# Rust
+target/
+Cargo.lock
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+.cache/
+
+# OS specific
+Thumbs.db
+.Spotlight-V100
+.Trashes

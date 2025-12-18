@@ -1,0 +1,109 @@
+# Webmaschine Configuration
+#
+# This file defines the root paths, excludes, and policies for filesystem scanning.
+#
+# NOTE: This is a TEMPLATE. Customize with your actual root paths after setup.
+
+# Root paths to scan (only these directories will be included)
+# TEMPLATE: Replace with your actual paths
+roots: []
+  # Example: /home/username
+  # Example: /mnt/data
+
+# Global excludes (patterns to skip during scanning)
+excludes:
+  # System & Cache
+  - pattern: "**/.cache"
+    reason: "System cache directory"
+  - pattern: "**/.local/share/Trash"
+    reason: "Trash directory"
+  - pattern: "**/node_modules"
+    reason: "Node.js dependencies"
+  - pattern: "**/.venv"
+    reason: "Python virtual environment"
+  - pattern: "**/venv"
+    reason: "Python virtual environment"
+  - pattern: "**/dist"
+    reason: "Build output"
+  - pattern: "**/build"
+    reason: "Build output"
+  - pattern: "**/target"
+    reason: "Rust/Java build output"
+  - pattern: "**/__pycache__"
+    reason: "Python bytecode cache"
+  - pattern: "**/.mypy_cache"
+    reason: "MyPy cache"
+  - pattern: "**/.pytest_cache"
+    reason: "Pytest cache"
+  
+  # Browser & Sensitive Data
+  - pattern: "**/.mozilla/firefox"
+    reason: "Firefox profiles (sensitive)"
+  - pattern: "**/.config/google-chrome"
+    reason: "Chrome profiles (sensitive)"
+  - pattern: "**/.thunderbird"
+    reason: "Thunderbird profiles (sensitive)"
+  - pattern: "**/.ssh"
+    reason: "SSH keys (sensitive)"
+  - pattern: "**/.gnupg"
+    reason: "GPG keys (sensitive)"
+  - pattern: "**/.password-store"
+    reason: "Password store (sensitive)"
+  - pattern: "**/*.key"
+    reason: "Private keys (sensitive)"
+  - pattern: "**/*.pem"
+    reason: "Certificates (sensitive)"
+  - pattern: "**/*.p12"
+    reason: "Certificates (sensitive)"
+  
+  # Large/Temporary Files
+  - pattern: "**/*.iso"
+    reason: "Large disk images"
+  - pattern: "**/*.img"
+    reason: "Large disk images"
+  - pattern: "**/*.dmg"
+    reason: "Large disk images"
+  - pattern: "**/*.mp4"
+    reason: "Large video files"
+  - pattern: "**/*.mkv"
+    reason: "Large video files"
+  - pattern: "**/*.avi"
+    reason: "Large video files"
+
+# Mount policy (how to handle mounted filesystems)
+mount_policy:
+  # Follow mounts within root paths
+  follow_mounts: false
+  # Skip network mounts
+  skip_network_mounts: true
+
+# Repository detection policy
+repo_policy:
+  # Detect git repositories
+  detect_git: true
+  # Include submodules
+  include_submodules: true
+  # Calculate activity metrics
+  calculate_activity: true
+  # Days threshold for "inactive" repos
+  inactive_threshold_days: 90
+
+# Drift detection thresholds
+drift_thresholds:
+  # File size warnings
+  file_size_warning_mb: 100
+  file_size_alert_mb: 1000
+  # Repository inactivity
+  repo_inactive_days: 90
+  # Zone size limits
+  transient_size_warning_gb: 10
+  transient_size_alert_gb: 50
+
+# Snapshot policy
+snapshot_policy:
+  # Include file hashes (expensive)
+  include_hashes: false
+  # Maximum depth for directory traversal
+  max_depth: 10
+  # Maximum files per snapshot
+  max_files: 100000
