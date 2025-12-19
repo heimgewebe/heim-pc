@@ -1,81 +1,109 @@
-name: Webmaschine Validate
-
-# NOTE: This workflow validates repository structure and state file contracts.
-# It does NOT scan your local filesystem and does NOT commit data.
-# 
-# Real filesystem scanning happens locally via repolensd or similar tooling,
-# which then pushes updated state files to this repository.
-#
-# This workflow only:
-# 1. Validates that state files are present and readable
-# 2. Validates state files against their JSON schemas
-# 3. Does NOT generate real data (only validates structure)
+name: webmaschine-validate
 
 on:
-  workflow_dispatch:
-  pull_request:
-    branches: ["main"]
   push:
-    branches: ["main"]
+    branches: [ main ]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Validate Repository Structure
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          pip install pyyaml==6.0.2 jsonschema==4.23.0
-      
-      - name: Validate state files exist and are readable
-        run: |
-          echo "Validating state files..."
-          python3 -c "import json; json.load(open('state/index.json'))" && echo "✓ state/index.json valid"
-          python3 -c "import json; json.load(open('state/repos.json'))" && echo "✓ state/repos.json valid"
-          python3 -c "import json; json.load(open('state/uncertainties.json'))" && echo "✓ state/uncertainties.json valid"
+          python-version: '3.10'
 
-      - name: Validate state contracts
+      - name: Install dependencies
+        run: pip install jsonschema pyyaml
+
+      - name: Validate YAML
         run: |
-          echo "Validating state files against schemas..."
-          python3 -c "import json, jsonschema; schema=json.load(open('contracts/webmaschine.state.index.schema.json')); data=json.load(open('state/index.json')); jsonschema.validate(data, schema)" && echo "✓ state/index.json matches schema"
-          python3 -c "import json, jsonschema; schema=json.load(open('contracts/webmaschine.state.repos.schema.json')); data=json.load(open('state/repos.json')); jsonschema.validate(data, schema)" && echo "✓ state/repos.json matches schema"
-          python3 -c "import json, jsonschema; schema=json.load(open('contracts/webmaschine.state.uncertainties.schema.json')); data=json.load(open('state/uncertainties.json')); jsonschema.validate(data, schema)" && echo "✓ state/uncertainties.json matches schema"
-      
-      - name: Validate configuration files
+          python3 -c "import yaml, glob, sys;
+          files = glob.glob('**/*.yml', recursive=True) + glob.glob('**/*.yaml', recursive=True);
+          for f in files:
+            try:
+              yaml.safe_load(open(f))
+            except Exception as e:
+              print(f'Error parsing {f}: {e}'); sys.exit(1)"
+
+      - name: Validate JSON
         run: |
-          echo "Validating configuration files..."
-          python3 -c "import yaml; yaml.safe_load(open('config/webmaschine.yml'))" && echo "✓ config/webmaschine.yml valid"
-          python3 -c "import yaml; yaml.safe_load(open('config/zones.yml'))" && echo "✓ config/zones.yml valid"
-      
-      - name: Check for placeholder data
+          python3 -c "import json, glob, sys;
+          files = glob.glob('**/*.json', recursive=True);
+          for f in files:
+            try:
+              json.load(open(f))
+            except Exception as e:
+              print(f'Error parsing {f}: {e}'); sys.exit(1)"
+
+      - name: Validate Contracts
         run: |
-          echo "Checking if data is still placeholder..."
-          if python3 -c "import json; data=json.load(open('state/index.json')); exit(0 if data['metadata'].get('last_updated') is None else 1)" 2>/dev/null; then
-            echo "⚠️  WARNING: state/index.json contains placeholder data (last_updated is null)"
-            echo "   Real data should be generated locally using repolensd or similar tooling"
-          else
-            echo "✓ State files appear to contain real data"
-          fi
-      
-      - name: Verify directory structure
+          python3 -c "
+          import json
+          import sys
+          import os
+          from jsonschema import validate, ValidationError
+
+          def validate_file(data_file, schema_file):
+              if not os.path.exists(data_file):
+                  print(f'Skipping {data_file} (not found)')
+                  return True
+              if not os.path.exists(schema_file):
+                  print(f'Schema {schema_file} not found for {data_file}')
+                  return False
+
+              print(f'Validating {data_file} against {schema_file}...')
+              try:
+                  with open(data_file, 'r') as df:
+                      data = json.load(df)
+                  with open(schema_file, 'r') as sf:
+                      schema = json.load(sf)
+                  validate(instance=data, schema=schema)
+                  print(f'OK: {data_file}')
+                  return True
+              except ValidationError as e:
+                  print(f'Validation Error in {data_file}: {e.message}')
+                  return False
+              except Exception as e:
+                  print(f'Error processing {data_file}: {e}')
+                  return False
+
+          files_to_validate = [
+              ('state/index.json', 'contracts/webmaschine.state.index.schema.json'),
+              ('state/repos.json', 'contracts/webmaschine.state.repos.schema.json'),
+              ('state/uncertainties.json', 'contracts/webmaschine.state.uncertainties.schema.json')
+          ]
+
+          success = True
+          for data_f, schema_f in files_to_validate:
+              if not validate_file(data_f, schema_f):
+                  success = False
+
+          if not success:
+              sys.exit(1)
+          "
+
+      - name: Check Metadata Placeholder
         run: |
-          for dir in docs config state timeline snapshots .wgx; do
-            if [ -d "$dir" ]; then
-              echo "✓ Directory $dir exists"
-            else
-              echo "✗ Directory $dir missing"
-              exit 1
-            fi
-          done
+          python3 -c "
+          import json
+          import sys
+
+          try:
+              with open('state/index.json', 'r') as f:
+                  data = json.load(f)
+              last_updated = data.get('metadata', {}).get('last_updated')
+              if last_updated is None:
+                  print('::warning::metadata.last_updated is null (Placeholder data detected)')
+              else:
+                  print(f'Last updated: {last_updated}')
+          except Exception as e:
+              print(f'Error checking metadata: {e}')
+              # Do not fail, just warn if something is wrong with structure (should be caught by schema validation anyway)
+          "

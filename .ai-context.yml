@@ -1,15 +1,9 @@
 project:
   role: data-repository
-
 heimgewebe:
   wgx:
     profile_expected: true
-
 contracts:
-  path: "contracts/**/*.schema.json"
-
-artifacts:
-  canonical_small:
-    - "state/index.json"
-    - "state/repos.json"
-    - "state/uncertainties.json"
+  paths: [contracts/**/*.schema.json]
+ci:
+  note: "CI validates structure and contracts only."
