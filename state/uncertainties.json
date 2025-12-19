@@ -7,7 +7,7 @@
   },
   "metadata": {
     "last_scan": null,
-    "version": "1.0",
-    "note": "This is placeholder data. Real data should be generated locally via repolensd or similar tooling."
+    "version": "0.1.0",
+    "note": "Placeholder data. Populate via local scanning (repolensd export-webmaschine). See docs/model.md for examples."
   }
 }

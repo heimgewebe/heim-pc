@@ -1,17 +1,32 @@
-name: WGX Smoke
+name: wgx-smoke
 
 on:
-  pull_request:
-    branches: ["main"]
   push:
-    branches: ["main"]
+    branches: [ main ]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   smoke:
-    uses: heimgewebe/wgx/.github/workflows/smoke.yml@main
-    with:
-      profile-path: .wgx/profile.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Checkout WGX Tooling
+        uses: actions/checkout@v4
+        with:
+          repository: heimgewebe/wgx
+          path: .wgx-tooling
+
+      - name: Setup WGX
+        run: |
+          chmod +x .wgx-tooling/cli/wgx
+          echo "${PWD}/.wgx-tooling/cli" >> $GITHUB_PATH
+
+      - name: Verify WGX Profile
+        run: wgx tasks --json --safe || true
+
+      - name: Run WGX Smoke
+        run: wgx task smoke
