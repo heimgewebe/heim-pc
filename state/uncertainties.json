@@ -8,6 +8,6 @@
   "metadata": {
     "last_scan": null,
     "version": "0.1.0",
-    "note": "Placeholder"
+    "note": "Placeholder data. Populate via local scanning (repolensd export-webmaschine). See docs/model.md for examples."
   }
 }

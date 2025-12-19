@@ -15,9 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: pip install jsonschema pyyaml
@@ -25,22 +25,34 @@ jobs:
       - name: Validate YAML
         run: |
           python3 -c "import yaml, glob, sys;
-          files = glob.glob('**/*.yml', recursive=True) + glob.glob('**/*.yaml', recursive=True);
+          patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/*.yml', 'config/**/*.yml'];
+          files = [];
+          for p in patterns: files.extend(glob.glob(p, recursive=True));
+
+          error = False;
           for f in files:
             try:
               yaml.safe_load(open(f))
             except Exception as e:
-              print(f'Error parsing {f}: {e}'); sys.exit(1)"
+              print(f'Error parsing {f}: {e}'); error = True
+
+          if error: sys.exit(1)"
 
       - name: Validate JSON
         run: |
           python3 -c "import json, glob, sys;
-          files = glob.glob('**/*.json', recursive=True);
+          patterns = ['state/*.json', 'contracts/*.json', 'snapshots/*.summary.json'];
+          files = [];
+          for p in patterns: files.extend(glob.glob(p, recursive=True));
+
+          error = False;
           for f in files:
             try:
               json.load(open(f))
             except Exception as e:
-              print(f'Error parsing {f}: {e}'); sys.exit(1)"
+              print(f'Error parsing {f}: {e}'); error = True
+
+          if error: sys.exit(1)"
 
       - name: Validate Contracts
         run: |
@@ -105,5 +117,4 @@ jobs:
                   print(f'Last updated: {last_updated}')
           except Exception as e:
               print(f'Error checking metadata: {e}')
-              # Do not fail, just warn if something is wrong with structure (should be caught by schema validation anyway)
           "

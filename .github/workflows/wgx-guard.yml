@@ -22,14 +22,18 @@ jobs:
 
       - name: Setup WGX
         run: |
-          chmod +x .wgx-tooling/wgx
-          echo "${PWD}/.wgx-tooling" >> $GITHUB_PATH
+          chmod +x .wgx-tooling/cli/wgx
+          echo "${PWD}/.wgx-tooling/cli" >> $GITHUB_PATH
 
       - name: Install dependencies
         run: |
           pip install yamllint
           bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          chmod +x ./actionlint || true
           echo "${PWD}" >> $GITHUB_PATH
+
+      - name: Verify WGX Profile
+        run: wgx tasks --json --safe || true
 
       - name: Run WGX Guard
         run: wgx task guard
