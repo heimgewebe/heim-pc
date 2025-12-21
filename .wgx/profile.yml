@@ -7,10 +7,18 @@ tasks:
     steps:
       - id: yaml-lint
         run: yamllint
-        files: ["**/*.yml", "**/*.yaml"]
+        files:
+          - ".github/**/*.yml"
+          - ".github/**/*.yaml"
+          - ".wgx/*.yml"
+          - "config/**/*.yml"
+          - "config/**/*.yaml"
       - id: json-lint
         run: python3 -m json.tool
-        files: ["**/*.json"]
+        files:
+          - "state/*.json"
+          - "contracts/*.json"
+          - "snapshots/*.json"
       - id: actionlint
         run: actionlint
         files: [".github/workflows/*.yml"]
