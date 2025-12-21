@@ -10,15 +10,16 @@ tasks:
         files:
           - ".github/**/*.yml"
           - ".github/**/*.yaml"
-          - ".wgx/*.yml"
+          - ".wgx/**/*.yml"
+          - ".wgx/**/*.yaml"
           - "config/**/*.yml"
           - "config/**/*.yaml"
       - id: json-lint
         run: python3 -m json.tool
         files:
-          - "state/*.json"
-          - "contracts/*.json"
-          - "snapshots/*.json"
+          - "state/**/*.json"
+          - "contracts/**/*.json"
+          - "snapshots/**/*.json"
       - id: actionlint
         run: actionlint
         files: [".github/workflows/*.yml"]
