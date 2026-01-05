@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+env:
+  METAREPO_REF: "main" # TODO: replace with tag (e.g. v0.1.0) or commit SHA for reproducibility
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout webmaschine
         uses: actions/checkout@v4
@@ -22,6 +27,8 @@ jobs:
         with:
           repository: heimgewebe/metarepo
           path: _metarepo
+          ref: ${{ env.METAREPO_REF }}
+          fetch-depth: 1
       
       - name: Set up Python
         uses: actions/setup-python@v5

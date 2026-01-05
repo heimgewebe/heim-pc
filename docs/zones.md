@@ -14,7 +14,7 @@ Das Zonen-Modell wurde weiterentwickelt, um KI-Agenten eine tiefere, flexiblere 
 
 ## Zonen-Konfiguration
 
-Zonen werden manuell in `config/zones.yml` definiert. Die Struktur wird durch `config/zones.schema.yml` validiert.
+Zonen werden manuell in `config/zones.yml` definiert. Die Struktur wird durch das kanonische Schema im `heimgewebe/metarepo` validiert, um die Konsistenz im gesamten Ökosystem zu gewährleisten.
 
 ### Beispiel-Zonen
 
