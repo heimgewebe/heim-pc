@@ -13,6 +13,11 @@
     "latest_snapshot": "snapshots/latest.fs.snapshot.ref",
     "timeline": "timeline/fs.timeline.jsonl"
   },
+  "statistics": {
+    "total_files": 0,
+    "total_size_mb": 0,
+    "potentially_stale_files": 0
+  },
   "metadata": {
     "version": "0.1.0",
     "last_updated": null,

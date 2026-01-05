@@ -80,6 +80,28 @@
         }
       }
     },
+    "statistics": {
+      "type": "object",
+      "description": "Aggregated filesystem metrics for quick overview",
+      "required": ["total_files", "total_size_mb", "potentially_stale_files"],
+      "properties": {
+        "total_files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of files scanned"
+        },
+        "total_size_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total storage used in megabytes"
+        },
+        "potentially_stale_files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of files not modified in the last 180 days"
+        }
+      }
+    },
     "metadata": {
       "type": "object",
       "description": "Index metadata and versioning",

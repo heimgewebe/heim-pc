@@ -1,41 +1,22 @@
-# Zone Definitions
-#
-# Zones are semantic areas of your filesystem with defined meaning and role.
-# This is the source of truth for zone configuration.
-#
-# NOTE: These are EXAMPLE zones. Customize to your actual system after initial scan.
+# config/zones.yml
+# Defines semantic zones within the filesystem.
+# This file is validated against config/zones.schema.yml
 
-zones: []
+zones:
+  - name: "core-projects"
+    paths:
+      - "/path/to/your/projects"
+    purpose: "Contains primary development projects and active repositories."
+    tags:
+      - "development"
+      - "high-priority"
+    review_frequency: "monthly"
 
-# Example zone structure (move to docs/zones.md for reference):
-#
-# - path: /path/to/area
-#   name: area-name
-#   type: development|knowledge|archive|transient|config|media|documents
-#   role: active-dev|maintenance|archived|knowledge-base|staging|config-source|storage
-#   priority: high|medium|low
-#   description: "Human-readable description"
-
-# Zone type definitions
-# - development: Code, repositories, active projects
-# - knowledge: Documentation, notes, wikis
-# - archive: Historical data, old projects
-# - transient: Temporary files, downloads, cache
-# - config: Configuration files, dotfiles
-# - media: Images, videos, audio
-# - documents: Documents, PDFs, office files
-
-# Zone role definitions
-# - active-dev: In active development
-# - maintenance: Maintenance mode
-# - archived: Archived, not active
-# - knowledge-base: Knowledge collection
-# - staging: Temporary area
-# - config-source: Configuration source
-# - storage: Long-term storage
-
-# Priority levels
-# - high: Important for daily work
-# - medium: Regularly used
-# - low: Rarely or temporarily used
-
+  - name: "archives"
+    paths:
+      - "/path/to/your/archives"
+    purpose: "Long-term storage for completed or inactive projects."
+    tags:
+      - "archive"
+      - "low-priority"
+    review_frequency: "yearly"

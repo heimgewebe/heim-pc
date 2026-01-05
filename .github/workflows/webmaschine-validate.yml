@@ -54,6 +54,32 @@ jobs:
 
           if error: sys.exit(1)"
 
+      - name: Validate Zones Config
+        run: |
+          python3 -c "
+          import yaml
+          import json
+          import sys
+          from jsonschema import validate, ValidationError
+
+          try:
+              with open('config/zones.yml', 'r') as df:
+                  data = yaml.safe_load(df)
+              with open('config/zones.schema.yml', 'r') as sf:
+                  # The schema is YAML, but jsonschema expects a JSON object
+                  schema = yaml.safe_load(sf)
+
+              print('Validating config/zones.yml against config/zones.schema.yml...')
+              validate(instance=data, schema=schema)
+              print('OK: config/zones.yml')
+          except ValidationError as e:
+              print(f'Validation Error in config/zones.yml: {e.message}')
+              sys.exit(1)
+          except Exception as e:
+              print(f'Error processing config/zones.yml: {e}')
+              sys.exit(1)
+          "
+
       - name: Validate Contracts
         run: |
           python3 -c "
@@ -89,7 +115,9 @@ jobs:
           files_to_validate = [
               ('state/index.json', 'contracts/webmaschine.state.index.schema.json'),
               ('state/repos.json', 'contracts/webmaschine.state.repos.schema.json'),
-              ('state/uncertainties.json', 'contracts/webmaschine.state.uncertainties.schema.json')
+              ('state/uncertainties.json', 'contracts/webmaschine.state.uncertainties.schema.json'),
+              ('state/insights.json', 'contracts/webmaschine.state.insights.schema.json'),
+              ('state/drift.json', 'contracts/webmaschine.state.drift.schema.json')
           ]
 
           success = True
@@ -101,20 +129,37 @@ jobs:
               sys.exit(1)
           "
 
-      - name: Check Metadata Placeholder
+      - name: Check Metadata Placeholder and Freshness
         run: |
           python3 -c "
           import json
           import sys
+          from datetime import datetime, timedelta, timezone
 
           try:
               with open('state/index.json', 'r') as f:
                   data = json.load(f)
-              last_updated = data.get('metadata', {}).get('last_updated')
-              if last_updated is None:
+
+              last_updated_str = data.get('metadata', {}).get('last_updated')
+
+              if last_updated_str is None:
                   print('::warning::metadata.last_updated is null (Placeholder data detected)')
               else:
-                  print(f'Last updated: {last_updated}')
+                  print(f'Last updated: {last_updated_str}')
+                  last_updated_dt = datetime.fromisoformat(last_updated_str)
+
+                  if last_updated_dt.tzinfo is None:
+                      last_updated_dt = last_updated_dt.replace(tzinfo=timezone.utc)
+
+                  if datetime.now(timezone.utc) - last_updated_dt > timedelta(days=7):
+                      print('::warning::Stale data detected. The last update was more than 7 days ago.')
+          except FileNotFoundError:
+              print('::error::state/index.json not found.')
+              sys.exit(1)
+          except json.JSONDecodeError:
+              print('::error::Could not decode state/index.json.')
+              sys.exit(1)
           except Exception as e:
-              print(f'Error checking metadata: {e}')
+              print(f'::error::An unexpected error occurred: {e}')
+              sys.exit(1)
           "

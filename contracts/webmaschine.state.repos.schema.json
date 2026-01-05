@@ -10,7 +10,27 @@
       "type": "array",
       "description": "List of repositories",
       "items": {
-        "type": "object"
+        "type": "object",
+        "required": ["path", "last_commit_timestamp", "primary_language", "is_dirty"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to the repository root"
+          },
+          "last_commit_timestamp": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Timestamp of the last commit"
+          },
+          "primary_language": {
+            "type": ["string", "null"],
+            "description": "Dominant programming language (e.g., 'Python', 'TypeScript')"
+          },
+          "is_dirty": {
+            "type": "boolean",
+            "description": "True if the repository has uncommitted changes"
+          }
+        }
       }
     },
     "summary": {
