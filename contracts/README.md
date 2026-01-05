@@ -9,6 +9,14 @@ Contracts ensure that the JSON structure of state files remains stable and predi
 - Multiple machines
 - Heimgewebe system integrations
 
+## Architectural Note: Contract Ownership
+
+**These schemas serve as the local source of truth for the `webmaschine` repository but are considered a downstream implementation of a canonical contract set.**
+
+The long-term vision is for all `Heimgewebe` organism-level schemas to be centralized in a dedicated `heimgewebe/metarepo`. This ensures a single source of truth for data interchange between all system components (e.g., `semantAH`, `hausKI`, `leitstand`).
+
+This repository proceeds with local contracts to enable development but is architecturally aligned to eventually vendor or directly reference the canonical schemas from the `metarepo` once they are established.
+
 ## State File Schemas
 
 ### state/index.json

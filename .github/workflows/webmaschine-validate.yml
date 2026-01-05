@@ -146,6 +146,10 @@ jobs:
                   print('::warning::metadata.last_updated is null (Placeholder data detected)')
               else:
                   print(f'Last updated: {last_updated_str}')
+                  # Defensively parse ISO 8601 timestamps, handling 'Z' suffix for older Python versions
+                  if last_updated_str.endswith("Z"):
+                      last_updated_str = last_updated_str[:-1] + "+00:00"
+
                   last_updated_dt = datetime.fromisoformat(last_updated_str)
 
                   if last_updated_dt.tzinfo is None:
