@@ -1,11 +1,11 @@
 # config/zones.yml
 # Defines semantic zones within the filesystem.
-# This file is validated against config/zones.schema.yml
+# This file is validated against the canonical schema in heimgewebe/metarepo.
 
 zones:
   - name: "core-projects"
-    paths:
-      - "/path/to/your/projects"
+    # User must fill this manually. Example: ["/home/user/dev/projects"]
+    paths: []
     purpose: "Contains primary development projects and active repositories."
     tags:
       - "development"
@@ -13,8 +13,8 @@ zones:
     review_frequency: "monthly"
 
   - name: "archives"
-    paths:
-      - "/path/to/your/archives"
+    # User must fill this manually. Example: ["/mnt/nas/archive"]
+    paths: []
     purpose: "Long-term storage for completed or inactive projects."
     tags:
       - "archive"

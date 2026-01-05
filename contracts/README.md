@@ -1,92 +1,13 @@
-# Webmaschine Contracts
+# Data Contracts: Canonical Source
 
-This directory contains data contracts and schemas for webmaschine state files.
+**This repository is a consumer, not an owner, of data contracts.**
 
-## Purpose
-
-Contracts ensure that the JSON structure of state files remains stable and predictable across:
-- Different scanning tool versions
-- Multiple machines
-- Heimgewebe system integrations
-
-## Architectural Note: Contract Ownership
-
-**These schemas serve as the local source of truth for the `webmaschine` repository but are considered a downstream implementation of a canonical contract set.**
-
-The long-term vision is for all `Heimgewebe` organism-level schemas to be centralized in a dedicated `heimgewebe/metarepo`. This ensures a single source of truth for data interchange between all system components (e.g., `semantAH`, `hausKI`, `leitstand`).
-
-This repository proceeds with local contracts to enable development but is architecturally aligned to eventually vendor or directly reference the canonical schemas from the `metarepo` once they are established.
-
-## State File Schemas
-
-### state/index.json
-
-The KI-Index provides quick orientation for AI systems.
-
-**Schema**: `webmaschine.state.index.schema.json`
-
-**Key fields**:
-- `machine`: Machine identification (name, roots, hub)
-- `hotspots`: Important filesystem areas
-- `repos`: Repository summary counts
-- `artifacts`: Pointers to large data files
-- `metadata`: Version, timestamps, notes
-
-### state/repos.json
-
-Repository tracking and activity metrics.
-
-**Schema**: `webmaschine.state.repos.schema.json`
-
-**Key fields**:
-- `repositories`: Array of repository objects
-- `summary`: Aggregated counts by type/zone
-- `metadata`: Scan information
-
-### state/uncertainties.json
-
-Drift detection and uncertainty tracking.
-
-**Schema**: `webmaschine.state.uncertainties.schema.json`
-
-**Key fields**:
-- `uncertainties`: Array of detected issues
-- `summary`: Counts by category/severity
-- `metadata`: Scan information
-
-## Versioning
-
-State files use semantic versioning in `metadata.schema_version`:
-- Major version: Breaking changes to structure
-- Minor version: Backward-compatible additions
-- Patch version: Documentation/clarifications
-
-Current version: **1.0**
+All JSON schemas that define the structure of the `state/` and `config/` files are centrally managed in the `heimgewebe/metarepo` repository. This ensures a single source of truth for data interchange across the entire Heimgewebe ecosystem.
 
 ## Validation
 
-Schemas can be validated using standard JSON Schema validators:
+The CI pipeline in this repository (`.github/workflows/webmaschine-validate.yml`) is configured to:
+1.  Check out a fresh copy of the `heimgewebe/metarepo`.
+2.  Validate all local data files against the canonical schemas found there.
 
-```bash
-# Using ajv-cli
-ajv validate -s contracts/webmaschine.state.index.schema.json -d state/index.json
-
-# Using Python jsonschema
-python3 -c "import json, jsonschema; \
-  schema = json.load(open('contracts/webmaschine.state.index.schema.json')); \
-  data = json.load(open('state/index.json')); \
-  jsonschema.validate(data, schema)"
-```
-
-## Future Work
-
-- Add formal JSON Schema files for each state file type
-- Link to canonical contracts in `heimgewebe/metarepo`
-- Add contract validation to CI pipeline
-- Define backward compatibility guarantees
-
-## References
-
-- [JSON Schema](https://json-schema.org/)
-- [Semantic Versioning](https://semver.org/)
-- Heimgewebe Metarepo: (TODO: add link when available)
+Local schemas have been intentionally removed to prevent architectural drift. Do not add them back.

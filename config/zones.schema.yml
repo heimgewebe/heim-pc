@@ -45,5 +45,10 @@ properties:
         review_frequency:
           type: string
           description: >-
-            A suggested cadence for reviewing the contents of this zone
-            (e.g., 'monthly', 'quarterly', 'yearly', 'never').
+            A suggested cadence for reviewing the contents of this zone.
+          enum:
+            - "weekly"
+            - "monthly"
+            - "quarterly"
+            - "yearly"
+            - "never"
