@@ -9,13 +9,11 @@ permissions:
   contents: read
 
 env:
-  METAREPO_REF: "main" # TODO: replace with tag (e.g. v0.1.0) or commit SHA for reproducibility
+  METAREPO_REF: "69aa1ad198cec89acad4613924c2556a70b36a80" # Pinned to a specific metarepo commit for reproducibility
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout webmaschine
         uses: actions/checkout@v4
