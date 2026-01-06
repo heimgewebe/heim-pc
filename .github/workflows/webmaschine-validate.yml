@@ -177,6 +177,9 @@ jobs:
 
                   if datetime.now(timezone.utc) - last_updated_dt > timedelta(days=7):
                       print('::warning::Stale data detected. The last update was more than 7 days ago.')
+          except ValueError as e:
+              print(f'::error::Invalid ISO 8601 timestamp in metadata.last_updated: {last_updated_str} ({e})')
+              sys.exit(1)
           except FileNotFoundError:
               print('::error::state/index.json not found.')
               sys.exit(1)
