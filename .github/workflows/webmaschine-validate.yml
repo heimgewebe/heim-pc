@@ -81,10 +81,11 @@ jobs:
           try:
               with open('webmaschine/config/zones.yml', 'r') as df:
                   data = yaml.safe_load(df)
-              with open('_metarepo/contracts/webmaschine/config/zones.schema.yml', 'r') as sf:
-                  schema = yaml.safe_load(sf)
+              # The canonical schema for zones is a JSON file.
+              with open('_metarepo/contracts/webmaschine/config/zones.schema.json', 'r') as sf:
+                  schema = json.load(sf)
 
-              print('Validating config/zones.yml against canonical schema...')
+              print('Validating config/zones.yml against canonical JSON schema...')
               validate(instance=data, schema=schema)
               print('OK: config/zones.yml')
           except ValidationError as e:
