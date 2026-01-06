@@ -8,11 +8,25 @@ on:
 permissions:
   contents: read
 
+env:
+  METAREPO_REF: "23a48938d7ac7d739da7cbaa9768d1a8a4d05b91" # Pinned to a specific, verified metarepo commit for reproducibility
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout webmaschine
+        uses: actions/checkout@v4
+        with:
+          path: webmaschine
+
+      - name: Checkout metarepo for contracts
+        uses: actions/checkout@v4
+        with:
+          repository: heimgewebe/metarepo
+          path: _metarepo
+          ref: ${{ env.METAREPO_REF }}
+          fetch-depth: 1
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,7 +36,8 @@ jobs:
       - name: Install dependencies
         run: pip install jsonschema pyyaml
 
-      - name: Validate YAML
+      - name: Validate YAML Syntax
+        working-directory: ./webmaschine
         run: |
           python3 -c "import yaml, glob, sys;
           patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/*.yml', 'config/**/*.yml'];
@@ -38,10 +53,11 @@ jobs:
 
           if error: sys.exit(1)"
 
-      - name: Validate JSON
+      - name: Validate JSON Syntax
+        working-directory: ./webmaschine
         run: |
           python3 -c "import json, glob, sys;
-          patterns = ['state/*.json', 'contracts/*.json', 'snapshots/*.summary.json'];
+          patterns = ['state/*.json', 'snapshots/*.summary.json'];
           files = [];
           for p in patterns: files.extend(glob.glob(p, recursive=True));
 
@@ -54,7 +70,33 @@ jobs:
 
           if error: sys.exit(1)"
 
-      - name: Validate Contracts
+      - name: Validate Zones Config against Metarepo
+        run: |
+          python3 -c "
+          import yaml
+          import json
+          import sys
+          from jsonschema import validate, ValidationError
+
+          try:
+              with open('webmaschine/config/zones.yml', 'r') as df:
+                  data = yaml.safe_load(df)
+              # The canonical schema for zones is a JSON file.
+              with open('_metarepo/contracts/webmaschine/config/zones.schema.json', 'r') as sf:
+                  schema = json.load(sf)
+
+              print('Validating config/zones.yml against canonical JSON schema...')
+              validate(instance=data, schema=schema)
+              print('OK: config/zones.yml')
+          except ValidationError as e:
+              print(f'Validation Error in config/zones.yml: {e.message}')
+              sys.exit(1)
+          except Exception as e:
+              print(f'Error processing config/zones.yml: {e}')
+              sys.exit(1)
+          "
+
+      - name: Validate State Files against Metarepo
         run: |
           python3 -c "
           import json
@@ -63,33 +105,39 @@ jobs:
           from jsonschema import validate, ValidationError
 
           def validate_file(data_file, schema_file):
-              if not os.path.exists(data_file):
+              # Adjust paths to account for checkout directories
+              data_file_path = f'webmaschine/{data_file}'
+              schema_file_path = f'_metarepo/contracts/webmaschine/{schema_file}'
+
+              if not os.path.exists(data_file_path):
                   print(f'Skipping {data_file} (not found)')
                   return True
-              if not os.path.exists(schema_file):
-                  print(f'Schema {schema_file} not found for {data_file}')
+              if not os.path.exists(schema_file_path):
+                  print(f'::error::Schema {schema_file} not found in metarepo at {schema_file_path}')
                   return False
 
-              print(f'Validating {data_file} against {schema_file}...')
+              print(f'Validating {data_file} against canonical schema {schema_file}...')
               try:
-                  with open(data_file, 'r') as df:
+                  with open(data_file_path, 'r') as df:
                       data = json.load(df)
-                  with open(schema_file, 'r') as sf:
+                  with open(schema_file_path, 'r') as sf:
                       schema = json.load(sf)
                   validate(instance=data, schema=schema)
                   print(f'OK: {data_file}')
                   return True
               except ValidationError as e:
-                  print(f'Validation Error in {data_file}: {e.message}')
+                  print(f'::error::Validation Error in {data_file}: {e.message}')
                   return False
               except Exception as e:
-                  print(f'Error processing {data_file}: {e}')
+                  print(f'::error::Error processing {data_file}: {e}')
                   return False
 
           files_to_validate = [
-              ('state/index.json', 'contracts/webmaschine.state.index.schema.json'),
-              ('state/repos.json', 'contracts/webmaschine.state.repos.schema.json'),
-              ('state/uncertainties.json', 'contracts/webmaschine.state.uncertainties.schema.json')
+              ('state/index.json', 'state/index.schema.json'),
+              ('state/repos.json', 'state/repos.schema.json'),
+              ('state/uncertainties.json', 'state/uncertainties.schema.json'),
+              ('state/insights.json', 'state/insights.schema.json'),
+              ('state/drift.json', 'state/drift.schema.json')
           ]
 
           success = True
@@ -101,20 +149,45 @@ jobs:
               sys.exit(1)
           "
 
-      - name: Check Metadata Placeholder
+      - name: Check Metadata Placeholder and Freshness
+        working-directory: ./webmaschine
         run: |
-          python3 -c "
+          python3 <<'EOF'
           import json
           import sys
+          from datetime import datetime, timedelta, timezone
 
           try:
               with open('state/index.json', 'r') as f:
                   data = json.load(f)
-              last_updated = data.get('metadata', {}).get('last_updated')
-              if last_updated is None:
+
+              last_updated_str = data.get('metadata', {}).get('last_updated')
+
+              if last_updated_str is None:
                   print('::warning::metadata.last_updated is null (Placeholder data detected)')
               else:
-                  print(f'Last updated: {last_updated}')
+                  print(f'Last updated: {last_updated_str}')
+                  # Replace Z with +00:00 for ISO 8601 compliance
+                  if last_updated_str.endswith('Z'):
+                      last_updated_str = last_updated_str[:-1] + '+00:00'
+
+                  last_updated_dt = datetime.fromisoformat(last_updated_str)
+
+                  if last_updated_dt.tzinfo is None:
+                      last_updated_dt = last_updated_dt.replace(tzinfo=timezone.utc)
+
+                  if datetime.now(timezone.utc) - last_updated_dt > timedelta(days=7):
+                      print('::warning::Stale data detected. The last update was more than 7 days ago.')
+          except ValueError as e:
+              print(f'::error::Invalid ISO 8601 timestamp in metadata.last_updated: {last_updated_str} ({e})')
+              sys.exit(1)
+          except FileNotFoundError:
+              print('::error::state/index.json not found.')
+              sys.exit(1)
+          except json.JSONDecodeError:
+              print('::error::Could not decode state/index.json.')
+              sys.exit(1)
           except Exception as e:
-              print(f'Error checking metadata: {e}')
-          "
+              print(f'::error::An unexpected error occurred: {e}')
+              sys.exit(1)
+          EOF
