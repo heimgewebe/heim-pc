@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  METAREPO_REF: "69aa1ad198cec89acad4613924c2556a70b36a80" # Pinned to a specific metarepo commit for reproducibility
+  METAREPO_REF: "23a48938d7ac7d739da7cbaa9768d1a8a4d05b91" # Pinned to a specific, verified metarepo commit for reproducibility
 
 jobs:
   validate:
