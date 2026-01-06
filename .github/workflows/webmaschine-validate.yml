@@ -152,7 +152,7 @@ jobs:
       - name: Check Metadata Placeholder and Freshness
         working-directory: ./webmaschine
         run: |
-          python3 -c "
+          python3 <<'EOF'
           import json
           import sys
           from datetime import datetime, timedelta, timezone
@@ -167,8 +167,9 @@ jobs:
                   print('::warning::metadata.last_updated is null (Placeholder data detected)')
               else:
                   print(f'Last updated: {last_updated_str}')
-                  if last_updated_str.endswith("Z"):
-                      last_updated_str = last_updated_str[:-1] + "+00:00"
+                  # Replace Z with +00:00 for ISO 8601 compliance
+                  if last_updated_str.endswith('Z'):
+                      last_updated_str = last_updated_str[:-1] + '+00:00'
 
                   last_updated_dt = datetime.fromisoformat(last_updated_str)
 
@@ -189,4 +190,4 @@ jobs:
           except Exception as e:
               print(f'::error::An unexpected error occurred: {e}')
               sys.exit(1)
-          "
+          EOF
