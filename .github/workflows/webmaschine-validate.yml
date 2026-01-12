@@ -37,7 +37,7 @@ jobs:
       # which is located in the checked-out repo root (webmaschine/).
       - name: Install dependencies
         working-directory: ./webmaschine
-        run: pip install -r requirements.txt
+        run: python3 -m pip install -r requirements.txt
 
       # Scripts now self-locate relative to __file__, so invoking them from anywhere works
       # as long as the path to the script is correct.
