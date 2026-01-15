@@ -3,6 +3,7 @@
 # This file excludes files that should not be committed to the repository.
 
 # Large raw data (should be artifacts/releases)
+snapshots/latest.fs.summary.json
 snapshots/*.full.json
 snapshots/*.snapshot.json
 timeline/*.jsonl
