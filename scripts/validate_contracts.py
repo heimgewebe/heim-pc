@@ -5,69 +5,66 @@ Validates configuration and state files against canonical schemas from the metar
 import sys
 import os
 import json
-import yaml
-from jsonschema import validate, ValidationError
+from typing import List, Tuple, Any
 
-def validate_zones(config_path, schema_path):
+from jsonschema import validate, ValidationError
+import utils
+
+def validate_zones(config_path: str, schema_path: str) -> bool:
     """Validates the zones configuration."""
-    print(f'Validating {config_path} against canonical JSON schema {schema_path}...')
+    utils.log_info(f'Validating {config_path} against canonical JSON schema {schema_path}...')
 
     if not os.path.exists(config_path):
-        print(f"::error::Config file {config_path} not found.")
+        utils.log_error(f"Config file {config_path} not found.")
         return False
 
     if not os.path.exists(schema_path):
-        print(f"::error::Schema {schema_path} not found.")
+        utils.log_error(f"Schema {schema_path} not found.")
         return False
 
     try:
-        with open(config_path, 'r') as df:
-            data = yaml.safe_load(df)
-        with open(schema_path, 'r') as sf:
-            schema = json.load(sf)
+        data = utils.load_yaml(config_path)
+        schema = utils.load_json(schema_path)
 
         validate(instance=data, schema=schema)
-        print(f'OK: {config_path}')
+        utils.log_info(f'OK: {config_path}')
         return True
     except ValidationError as e:
-        print(f'::error::Validation Error in {config_path}: {e.message}')
+        utils.log_error(f'Validation Error in {config_path}: {e.message}')
         return False
     except Exception as e:
-        print(f'::error::Error processing {config_path}: {e}')
+        utils.log_error(f'Error processing {config_path}: {e}')
         return False
 
-def validate_state_file(data_file, schema_file, base_dir, schema_base_dir):
+def validate_state_file(data_file: str, schema_file: str, base_dir: str, schema_base_dir: str) -> bool:
     """Validates a single state file against its schema."""
     data_file_path = os.path.join(base_dir, data_file)
     schema_file_path = os.path.join(schema_base_dir, schema_file)
 
     if not os.path.exists(data_file_path):
-        print(f'Skipping {data_file} (not found)')
+        utils.log_info(f'Skipping {data_file} (not found)')
         return True
     if not os.path.exists(schema_file_path):
-        print(f'::error::Schema {schema_file} not found in metarepo at {schema_file_path}')
+        utils.log_error(f'Schema {schema_file} not found in metarepo at {schema_file_path}')
         return False
 
-    print(f'Validating {data_file} against canonical schema {schema_file}...')
+    utils.log_info(f'Validating {data_file} against canonical schema {schema_file}...')
     try:
-        with open(data_file_path, 'r') as df:
-            data = json.load(df)
-        with open(schema_file_path, 'r') as sf:
-            schema = json.load(sf)
+        data = utils.load_json(data_file_path)
+        schema = utils.load_json(schema_file_path)
+
         validate(instance=data, schema=schema)
-        print(f'OK: {data_file}')
+        utils.log_info(f'OK: {data_file}')
         return True
     except ValidationError as e:
-        print(f'::error::Validation Error in {data_file}: {e.message}')
+        utils.log_error(f'Validation Error in {data_file}: {e.message}')
         return False
     except Exception as e:
-        print(f'::error::Error processing {data_file}: {e}')
+        utils.log_error(f'Error processing {data_file}: {e}')
         return False
 
-def main():
-    # Ensure we resolve paths relative to the script location
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
+def main() -> None:
+    repo_root = utils.get_repo_root()
 
     # In CI, metarepo is checked out to '_metarepo' as a sibling of 'webmaschine'.
     # So if we are in '.../workspace/webmaschine', metarepo is at '.../workspace/_metarepo'.
@@ -79,12 +76,13 @@ def main():
         # Default assumption for CI structure: sibling directory of the repo root
         metarepo_root = os.path.abspath(os.path.join(repo_root, '..', '_metarepo'))
 
-    print(f"Repo root: {repo_root}")
-    print(f"Metarepo root: {metarepo_root}")
+    utils.log_info(f"Repo root: {repo_root}")
+    utils.log_info(f"Metarepo root: {metarepo_root}")
 
     # Check if metarepo exists
     if not os.path.exists(metarepo_root):
-        print(f"::error::Metarepo directory not found at {metarepo_root}. Cannot validate contracts.")
+        utils.log_error(f"Metarepo directory not found at {metarepo_root}. Cannot validate contracts.")
+        # We exit with 1 because validation cannot occur
         sys.exit(1)
 
     contracts_base = os.path.join(metarepo_root, 'contracts/webmaschine')
@@ -96,7 +94,7 @@ def main():
     )
 
     # 2. Validate State Files
-    files_to_validate = [
+    files_to_validate: List[Tuple[str, str]] = [
         ('state/index.json', 'state/index.schema.json'),
         ('state/repos.json', 'state/repos.schema.json'),
         ('state/uncertainties.json', 'state/uncertainties.schema.json'),
