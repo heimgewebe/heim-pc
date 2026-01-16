@@ -6,7 +6,7 @@ import os
 import sys
 import json
 import yaml
-from typing import Any, Dict, Union, Optional
+from typing import Any
 
 def get_repo_root() -> str:
     """Returns the absolute path to the repository root."""
@@ -19,7 +19,7 @@ def resolve_path(relative_path: str) -> str:
     return os.path.join(get_repo_root(), relative_path)
 
 def load_json(path: str) -> Any:
-    """Loads a JSON file securely."""
+    """Loads a JSON file with error handling."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}")
 
@@ -27,7 +27,7 @@ def load_json(path: str) -> Any:
         return json.load(f)
 
 def load_yaml(path: str) -> Any:
-    """Loads a YAML file securely."""
+    """Loads a YAML file with error handling."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}")
 
