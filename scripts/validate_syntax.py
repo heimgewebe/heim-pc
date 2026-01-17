@@ -3,71 +3,73 @@
 Validates YAML and JSON syntax for the webmaschine repository.
 """
 import sys
+# Standard library imports
 import glob
 import json
 import yaml
 import os
+from typing import List
 
-def validate_yaml(patterns):
+import utils
+
+def validate_yaml(patterns: List[str], repo_root: str) -> bool:
     """Validates YAML files matching the given patterns."""
-    files = []
+    files: List[str] = []
     for p in patterns:
-        files.extend(glob.glob(p, recursive=True))
+        # Construct absolute path pattern
+        abs_pattern = os.path.join(repo_root, p)
+        files.extend(glob.glob(abs_pattern, recursive=True))
 
-    error = False
+    has_error = False
     for f in files:
         try:
-            with open(f, 'r') as stream:
-                yaml.safe_load(stream)
+            utils.load_yaml(f)
         except yaml.YAMLError as e:
-            print(f"Error parsing YAML {f}: {e}")
-            error = True
+            utils.log_error(f"Error parsing YAML {f}: {e}")
+            has_error = True
         except Exception as e:
-            print(f"Unexpected error processing {f}: {e}")
-            error = True
+            utils.log_error(f"Unexpected error processing {f}: {e}")
+            has_error = True
 
-    return error
+    return has_error
 
-def validate_json(patterns):
+def validate_json(patterns: List[str], repo_root: str) -> bool:
     """Validates JSON files matching the given patterns."""
-    files = []
+    files: List[str] = []
     for p in patterns:
-        files.extend(glob.glob(p, recursive=True))
+        abs_pattern = os.path.join(repo_root, p)
+        files.extend(glob.glob(abs_pattern, recursive=True))
 
-    error = False
+    has_error = False
     for f in files:
         try:
-            with open(f, 'r') as stream:
-                json.load(stream)
+            utils.load_json(f)
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON {f}: {e}")
-            error = True
+            utils.log_error(f"Error parsing JSON {f}: {e}")
+            has_error = True
         except Exception as e:
-            print(f"Unexpected error processing {f}: {e}")
-            error = True
+            utils.log_error(f"Unexpected error processing {f}: {e}")
+            has_error = True
 
-    return error
+    return has_error
 
-def main():
-    # Ensure we run from the repository root
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
-    os.chdir(repo_root)
-    print(f"Running syntax validation from: {os.getcwd()}")
+def main() -> None:
+    repo_root = utils.get_repo_root()
+    utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
     yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/*.yml', 'config/**/*.yml']
     json_patterns = ['state/*.json', 'snapshots/*.summary.json']
 
-    print("Validating YAML files...")
-    yaml_error = validate_yaml(yaml_patterns)
+    utils.log_info("Validating YAML files...")
+    yaml_has_error = validate_yaml(yaml_patterns, repo_root)
 
-    print("Validating JSON files...")
-    json_error = validate_json(json_patterns)
+    utils.log_info("Validating JSON files...")
+    json_has_error = validate_json(json_patterns, repo_root)
 
-    if yaml_error or json_error:
+    if yaml_has_error or json_has_error:
         sys.exit(1)
 
-    print("Syntax validation passed.")
+    utils.log_info("Syntax validation passed.")
 
 if __name__ == "__main__":
     main()

@@ -39,14 +39,17 @@ jobs:
         working-directory: ./webmaschine
         run: python3 -m pip install -r requirements.txt
 
+      - name: Verify scripts syntax
+        run: python3 -m compileall -q webmaschine/scripts
+
       # Scripts now self-locate relative to __file__, so invoking them from anywhere works
       # as long as the path to the script is correct.
       # Since we are in the workspace root, and repo is in 'webmaschine', we call webmaschine/scripts/...
-      - name: Validate Syntax
+      - name: Smoke-run validate_syntax
         run: python3 webmaschine/scripts/validate_syntax.py
 
-      - name: Validate Contracts
+      - name: Smoke-run validate_contracts
         run: python3 webmaschine/scripts/validate_contracts.py
 
-      - name: Check Metadata Freshness
+      - name: Smoke-run check_freshness
         run: python3 webmaschine/scripts/check_freshness.py
