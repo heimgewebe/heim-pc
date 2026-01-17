@@ -3,6 +3,7 @@
 Validates YAML and JSON syntax for the webmaschine repository.
 """
 import sys
+# Standard library imports
 import glob
 import json
 import yaml
