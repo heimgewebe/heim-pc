@@ -39,12 +39,8 @@ jobs:
         working-directory: ./webmaschine
         run: python3 -m pip install -r requirements.txt
 
-      - name: Verify scripts existence
-        run: |
-          test -f webmaschine/scripts/validate_syntax.py
-          test -f webmaschine/scripts/validate_contracts.py
-          test -f webmaschine/scripts/check_freshness.py
-          test -f webmaschine/scripts/utils.py
+      - name: Verify scripts syntax
+        run: python3 -m compileall -q webmaschine/scripts
 
       # Scripts now self-locate relative to __file__, so invoking them from anywhere works
       # as long as the path to the script is correct.
