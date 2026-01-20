@@ -20,6 +20,8 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
 
+    files = list(set(files))
+
     has_error = False
     for f in files:
         try:
@@ -39,6 +41,8 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
     for p in patterns:
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
+
+    files = list(set(files))
 
     has_error = False
     for f in files:
