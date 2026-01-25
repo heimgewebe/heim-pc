@@ -20,10 +20,13 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
 
+    # Deduplicate and sort for deterministic output and stable CI logs
     files = sorted(set(files))
 
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_yaml(f)
         except yaml.YAMLError as e:
@@ -42,10 +45,13 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
 
+    # Deduplicate and sort for deterministic output and stable CI logs
     files = sorted(set(files))
 
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_json(f)
         except json.JSONDecodeError as e:
