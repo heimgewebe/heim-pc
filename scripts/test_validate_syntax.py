@@ -8,9 +8,6 @@ import os
 import tempfile
 import glob
 
-# Add scripts directory to path to import validate_syntax
-sys.path.insert(0, os.path.dirname(__file__))
-
 def test_deduplication_and_ordering():
     """Test that overlapping glob patterns produce unique, sorted results."""
     # Create a temporary directory structure
