@@ -26,6 +26,8 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
 
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_yaml(f)
         except yaml.YAMLError as e:
@@ -50,6 +52,8 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
 
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_json(f)
         except json.JSONDecodeError as e:
