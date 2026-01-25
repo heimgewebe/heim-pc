@@ -20,11 +20,12 @@ def resolve_path(relative_path: str) -> str:
 
 def load_json(path: str) -> Any:
     """Loads a JSON file with error handling."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File not found: {path}")
-
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        # Re-raise to ensure the caller handles the missing file.
+        raise
 
 def load_yaml(path: str) -> Any:
     """Loads a YAML file with error handling."""
