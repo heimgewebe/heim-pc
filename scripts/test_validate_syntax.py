@@ -43,8 +43,8 @@ def test_deduplication_and_ordering():
         
         # Verify the raw collection has duplicates
         count_before = len(files_raw)
-        assert count_before > 3, \
-            f"Expected duplicates from overlapping patterns, but got only {count_before} files"
+        assert count_before == 5, \
+            f"Expected 5 files from overlapping patterns (file1 and file2 appear twice, file3 once), but got {count_before}"
         
         # Verify file1 and file2 appeared twice (from both patterns)
         assert files_raw.count(file1) == 2, \
