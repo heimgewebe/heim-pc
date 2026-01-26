@@ -2,14 +2,24 @@
 """
 Validates YAML and JSON syntax for the webmaschine repository.
 """
-import sys
 # Standard library imports
 import glob
 import json
-import yaml
 import os
+import sys
+import traceback
 from typing import List
 
+# Third-party imports
+try:
+    import yaml
+except ModuleNotFoundError as e:
+    if e.name == "yaml":
+        print("::error::PyYAML is missing. Please install it via 'pip install -r requirements.txt'.", file=sys.stderr)
+        sys.exit(1)
+    raise
+
+# Local imports
 import utils
 
 def collect_files(patterns: List[str], repo_root: str) -> List[str]:
@@ -24,7 +34,12 @@ def collect_files(patterns: List[str], repo_root: str) -> List[str]:
     return sorted(set(files))
 
 def validate_yaml(patterns: List[str], repo_root: str) -> bool:
-    """Validates YAML files matching the given patterns."""
+    """
+    Validates YAML files matching the given patterns.
+
+    Returns:
+        bool: True if an error occurred, False otherwise.
+    """
     files = collect_files(patterns, repo_root)
 
     has_error = False
@@ -37,13 +52,21 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
             utils.log_error(f"Error parsing YAML {f}: {e}")
             has_error = True
         except Exception as e:
-            utils.log_error(f"Unexpected error processing {f}: {e}")
+            msg = f"Unexpected error processing {f}: {e}"
+            if os.environ.get('DEBUG'):
+                msg += f"\n{traceback.format_exc()}"
+            utils.log_error(msg)
             has_error = True
 
     return has_error
 
 def validate_json(patterns: List[str], repo_root: str) -> bool:
-    """Validates JSON files matching the given patterns."""
+    """
+    Validates JSON files matching the given patterns.
+
+    Returns:
+        bool: True if an error occurred, False otherwise.
+    """
     files = collect_files(patterns, repo_root)
 
     has_error = False
@@ -56,7 +79,10 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
             utils.log_error(f"Error parsing JSON {f}: {e}")
             has_error = True
         except Exception as e:
-            utils.log_error(f"Unexpected error processing {f}: {e}")
+            msg = f"Unexpected error processing {f}: {e}"
+            if os.environ.get('DEBUG'):
+                msg += f"\n{traceback.format_exc()}"
+            utils.log_error(msg)
             has_error = True
 
     return has_error
