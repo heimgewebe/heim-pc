@@ -2,26 +2,29 @@
 """
 Validates YAML and JSON syntax for the webmaschine repository.
 """
-import sys
 # Standard library imports
 import glob
 import json
-import yaml
 import os
+import sys
 from typing import List
 
+import yaml
+
 import utils
+
 
 def collect_files(patterns: List[str], repo_root: str) -> List[str]:
     """Collects files matching patterns, deduplicates, and sorts them."""
     files: List[str] = []
     for p in patterns:
-        # Construct absolute path pattern
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
 
-    # Deduplicate and sort for deterministic output and stable CI logs
+    # Deduplicate and sort for deterministic output and stable CI logs.
+    # Overlapping glob patterns can match the same files multiple times.
     return sorted(set(files))
+
 
 def validate_yaml(patterns: List[str], repo_root: str) -> bool:
     """Validates YAML files matching the given patterns."""
@@ -42,6 +45,7 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
 
     return has_error
 
+
 def validate_json(patterns: List[str], repo_root: str) -> bool:
     """Validates JSON files matching the given patterns."""
     files = collect_files(patterns, repo_root)
@@ -61,12 +65,18 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
 
     return has_error
 
+
 def main() -> None:
     repo_root = utils.get_repo_root()
     utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
-    yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/*.yml', 'config/**/*.yml']
-    json_patterns = ['state/*.json', 'snapshots/*.summary.json']
+    yaml_patterns = [
+        ".github/workflows/*.yml",
+        ".wgx/profile.yml",
+        "config/*.yml",
+        "config/**/*.yml",
+    ]
+    json_patterns = ["state/*.json", "snapshots/*.summary.json"]
 
     utils.log_info("Validating YAML files...")
     yaml_has_error = validate_yaml(yaml_patterns, repo_root)
@@ -78,6 +88,7 @@ def main() -> None:
         sys.exit(1)
 
     utils.log_info("Syntax validation passed.")
+
 
 if __name__ == "__main__":
     main()
