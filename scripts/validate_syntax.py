@@ -13,9 +13,11 @@ from typing import List
 # Third-party imports
 try:
     import yaml
-except ImportError:
-    print("::error::PyYAML is missing. Please install it via 'pip install -r requirements.txt'.", file=sys.stderr)
-    sys.exit(1)
+except ModuleNotFoundError as e:
+    if e.name == "yaml":
+        print("::error::PyYAML is missing. Please install it via 'pip install -r requirements.txt'.", file=sys.stderr)
+        sys.exit(1)
+    raise
 
 # Local imports
 import utils
