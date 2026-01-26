@@ -12,16 +12,25 @@ from typing import List
 
 import utils
 
-def validate_yaml(patterns: List[str], repo_root: str) -> bool:
-    """Validates YAML files matching the given patterns."""
+def collect_files(patterns: List[str], repo_root: str) -> List[str]:
+    """Collects files matching patterns, deduplicates, and sorts them."""
     files: List[str] = []
     for p in patterns:
         # Construct absolute path pattern
         abs_pattern = os.path.join(repo_root, p)
         files.extend(glob.glob(abs_pattern, recursive=True))
 
+    # Deduplicate and sort for deterministic output and stable CI logs
+    return sorted(set(files))
+
+def validate_yaml(patterns: List[str], repo_root: str) -> bool:
+    """Validates YAML files matching the given patterns."""
+    files = collect_files(patterns, repo_root)
+
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_yaml(f)
         except yaml.YAMLError as e:
@@ -35,13 +44,12 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
 
 def validate_json(patterns: List[str], repo_root: str) -> bool:
     """Validates JSON files matching the given patterns."""
-    files: List[str] = []
-    for p in patterns:
-        abs_pattern = os.path.join(repo_root, p)
-        files.extend(glob.glob(abs_pattern, recursive=True))
+    files = collect_files(patterns, repo_root)
 
     has_error = False
     for f in files:
+        if not os.path.isfile(f):
+            continue
         try:
             utils.load_json(f)
         except json.JSONDecodeError as e:
