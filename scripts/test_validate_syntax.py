@@ -8,6 +8,10 @@ import os
 import tempfile
 import glob
 
+# Import the actual function we're testing
+sys.path.insert(0, os.path.dirname(__file__))
+from validate_syntax import collect_files
+
 def test_deduplication_and_ordering():
     """Test that overlapping glob patterns produce unique, sorted results."""
     # Create a temporary directory structure
@@ -31,41 +35,40 @@ def test_deduplication_and_ordering():
         # 'config/**/*.yml' matches file1, file2, file3
         patterns = ['config/*.yml', 'config/**/*.yml']
         
-        # Collect files using the same logic as validate_yaml/validate_json
-        files = []
+        # First, manually collect files to demonstrate the duplication problem
+        files_raw = []
         for p in patterns:
             abs_pattern = os.path.join(tmpdir, p)
-            files.extend(glob.glob(abs_pattern, recursive=True))
+            files_raw.extend(glob.glob(abs_pattern, recursive=True))
         
-        # Count before deduplication
-        count_before = len(files)
-        
-        # Apply deduplication and sorting (same as in validate_syntax.py)
-        files_deduplicated = sorted(set(files))
-        
-        # Count after deduplication
-        count_after = len(files_deduplicated)
-        
-        # Assertions
-        assert count_before > count_after, \
-            f"Expected duplicates from overlapping patterns, but got {count_before} files before and {count_after} after"
-        
-        assert count_after == 3, \
-            f"Expected exactly 3 unique files, got {count_after}"
-        
-        # Verify deterministic ordering (alphabetical)
-        assert files_deduplicated == sorted(files_deduplicated), \
-            "Files should be in sorted (alphabetical) order"
+        # Verify the raw collection has duplicates
+        count_before = len(files_raw)
+        assert count_before > 3, \
+            f"Expected duplicates from overlapping patterns, but got only {count_before} files"
         
         # Verify file1 and file2 appeared twice (from both patterns)
-        assert files.count(file1) == 2, \
-            f"file1 should appear twice in raw list, got {files.count(file1)}"
-        assert files.count(file2) == 2, \
-            f"file2 should appear twice in raw list, got {files.count(file2)}"
+        assert files_raw.count(file1) == 2, \
+            f"file1 should appear twice in raw list, got {files_raw.count(file1)}"
+        assert files_raw.count(file2) == 2, \
+            f"file2 should appear twice in raw list, got {files_raw.count(file2)}"
+        # Verify file3 appeared exactly once (only from recursive pattern)
+        assert files_raw.count(file3) == 1, \
+            f"file3 should appear once in raw list, got {files_raw.count(file3)}"
+        
+        # Now test the actual implementation
+        files_deduplicated = collect_files(patterns, tmpdir)
+        
+        # Verify deduplication worked
+        assert len(files_deduplicated) == 3, \
+            f"Expected exactly 3 unique files after deduplication, got {len(files_deduplicated)}"
+        
+        # Verify deterministic ordering (alphabetical) with concrete expected values
+        assert files_deduplicated == [file1, file2, file3], \
+            f"Files should be in deterministic alphabetical order: {[file1, file2, file3]}, got {files_deduplicated}"
         
         print("✓ Deduplication test passed: overlapping patterns correctly deduplicated")
         print(f"  Before: {count_before} processings")
-        print(f"  After: {count_after} unique files")
+        print(f"  After: {len(files_deduplicated)} unique files")
         print("✓ Ordering test passed: files are in deterministic alphabetical order")
         
         return True
