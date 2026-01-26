@@ -11,7 +11,11 @@ import traceback
 from typing import List
 
 # Third-party imports
-import yaml
+try:
+    import yaml
+except ImportError:
+    print("::error::PyYAML is missing. Please install it via 'pip install -r requirements.txt'.", file=sys.stderr)
+    sys.exit(1)
 
 # Local imports
 import utils
@@ -46,7 +50,10 @@ def validate_yaml(patterns: List[str], repo_root: str) -> bool:
             utils.log_error(f"Error parsing YAML {f}: {e}")
             has_error = True
         except Exception as e:
-            utils.log_error(f"Unexpected error processing {f}: {e}\n{traceback.format_exc()}")
+            msg = f"Unexpected error processing {f}: {e}"
+            if os.environ.get('DEBUG'):
+                msg += f"\n{traceback.format_exc()}"
+            utils.log_error(msg)
             has_error = True
 
     return has_error
@@ -70,7 +77,10 @@ def validate_json(patterns: List[str], repo_root: str) -> bool:
             utils.log_error(f"Error parsing JSON {f}: {e}")
             has_error = True
         except Exception as e:
-            utils.log_error(f"Unexpected error processing {f}: {e}\n{traceback.format_exc()}")
+            msg = f"Unexpected error processing {f}: {e}"
+            if os.environ.get('DEBUG'):
+                msg += f"\n{traceback.format_exc()}"
+            utils.log_error(msg)
             has_error = True
 
     return has_error
