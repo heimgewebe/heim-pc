@@ -54,6 +54,8 @@ class TestCollectFiles(unittest.TestCase):
         # Check 3: Check specific file presence (Overlap Case)
         # file_a should be present exactly once
         self.assertEqual(result.count(self.file_a), 1, "file_a should appear exactly once")
+        # file_c (subdir) should be present exactly once
+        self.assertEqual(result.count(self.file_c), 1, "file_c should appear exactly once")
 
 if __name__ == '__main__':
     unittest.main()
