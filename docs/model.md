@@ -69,12 +69,12 @@ Webmaschine ist ein **Orientierungssystem** für KI-Agenten.
     "hub": "/home/alex/repos"
   },
   "hotspots": [
-    {"path": "/home/alex/repos/tools", "why": "active dev"},
+    {"path": "/home/alex/repos/lenskit", "why": "active dev"},
     {"path": "/home/alex/vault-gewebe", "why": "knowledge"}
   ],
   "repos": {
     "count": 42,
-    "active_last_7d": ["tools", "metarepo", "wgx"]
+    "active_last_7d": ["lenskit", "metarepo", "wgx"]
   },
   "artifacts": {
     "latest_snapshot": "snapshots/latest.fs.snapshot.ref",
@@ -121,4 +121,3 @@ zones:
 * **staging**: Temporäre Dateien, Work-in-Progress
 * **archive**: Selten genutzt, historisch wichtig
 * **config**: Konfigurationsdateien, Dotfiles
-
