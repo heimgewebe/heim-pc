@@ -4,8 +4,7 @@ Validates configuration and state files against canonical schemas from the metar
 """
 import sys
 import os
-import json
-from typing import List, Tuple, Any
+from typing import List, Tuple
 
 from jsonschema import validate, ValidationError
 import utils
