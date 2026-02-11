@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import traceback
-from typing import List
+from typing import List, Set
 
 # Third-party imports
 try:
@@ -24,7 +24,7 @@ import utils
 
 def collect_files(patterns: List[str], repo_root: str) -> List[str]:
     """Collects files matching patterns, deduplicates, and sorts them."""
-    files = set()
+    files: Set[str] = set()
     for p in patterns:
         # Construct absolute path pattern
         abs_pattern = os.path.join(repo_root, p)
