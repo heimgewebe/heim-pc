@@ -86,6 +86,11 @@ def main() -> None:
 
     contracts_base = os.path.join(metarepo_root, 'contracts/heim-pc')
 
+    # Fallback to webmaschine if heim-pc directory doesn't exist in metarepo yet
+    if not os.path.exists(contracts_base):
+        utils.log_warning(f"Contracts directory {contracts_base} not found. Falling back to 'contracts/webmaschine'.")
+        contracts_base = os.path.join(metarepo_root, 'contracts/webmaschine')
+
     # 1. Validate Zones
     zones_success = validate_zones(
         os.path.join(repo_root, 'config/zones.yml'),
