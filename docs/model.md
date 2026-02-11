@@ -2,11 +2,11 @@
 
 ## Was ist das "Weltmodell"?
 
-Webmaschine erstellt ein **versioniertes Abbild** deines lokalen Rechners, das von KI-Systemen (wie Heimgewebe) gelesen und verstanden werden kann.
+Heim-PC erstellt ein **versioniertes Abbild** deines lokalen Rechners, das von KI-Systemen (wie Heimgewebe) gelesen und verstanden werden kann.
 
 ### Kernidee
 
-Statt dass ein KI-Agent deinen ganzen Rechner "live" durchsuchen muss, bietet Webmaschine:
+Statt dass ein KI-Agent deinen ganzen Rechner "live" durchsuchen muss, bietet Heim-PC:
 
 1. **Einen Index** (`state/index.json`) – Wo anfangen? Was ist wichtig?
 2. **Semantische Zonen** (`config/zones.yml`) – Was bedeuten die Bereiche?
@@ -34,11 +34,11 @@ Statt dass ein KI-Agent deinen ganzen Rechner "live" durchsuchen muss, bietet We
 
 > Das Dateisystem ist wie ein Dachboden. Wenn man "Ordnung" ruft, antwortet es mit 37 "final_v7_neu2.pdf".
 
-Webmaschine akzeptiert diese Realität und schafft **Übersicht ohne Zwang zur Perfektion**.
+Heim-PC akzeptiert diese Realität und schafft **Übersicht ohne Zwang zur Perfektion**.
 
 ## Nutzen für Heimgewebe
 
-Heimgewebe kann durch Webmaschine:
+Heimgewebe kann durch Heim-PC:
 
 1. **Sofort orientieren**: Index zeigt Hotspots und aktive Bereiche
 2. **Semantisch navigieren**: Zonen geben Kontext und Bedeutung
@@ -48,14 +48,14 @@ Heimgewebe kann durch Webmaschine:
 
 ## Abgrenzung
 
-Webmaschine ist **nicht**:
+Heim-PC ist **nicht**:
 
 * Ein Backup-System (nutze dafür restic, borg, etc.)
 * Ein Sync-Tool (nutze dafür syncthing, rclone, etc.)
 * Ein Datei-Manager (nutze dafür ranger, nnn, etc.)
 * Eine Datenbank (es ist ein Abbild, kein aktives System)
 
-Webmaschine ist ein **Orientierungssystem** für KI-Agenten.
+Heim-PC ist ein **Orientierungssystem** für KI-Agenten.
 
 ## Beispiel-Daten
 

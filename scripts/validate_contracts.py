@@ -65,8 +65,8 @@ def validate_state_file(data_file: str, schema_file: str, base_dir: str, schema_
 def main() -> None:
     repo_root = utils.get_repo_root()
 
-    # In CI, metarepo is checked out to '_metarepo' as a sibling of 'webmaschine'.
-    # So if we are in '.../workspace/webmaschine', metarepo is at '.../workspace/_metarepo'.
+    # In CI, metarepo is checked out to '_metarepo' as a sibling of 'heim-pc'.
+    # So if we are in '.../workspace/heim-pc', metarepo is at '.../workspace/_metarepo'.
     # We allow overriding via env var for flexibility.
     metarepo_path_env = os.environ.get('METAREPO_PATH')
     if metarepo_path_env:
@@ -84,7 +84,12 @@ def main() -> None:
         # We exit with 1 because validation cannot occur
         sys.exit(1)
 
-    contracts_base = os.path.join(metarepo_root, 'contracts/webmaschine')
+    contracts_base = os.path.join(metarepo_root, 'contracts/heim-pc')
+
+    # Fallback to webmaschine if heim-pc directory doesn't exist in metarepo yet
+    if not os.path.exists(contracts_base):
+        utils.log_warning(f"Contracts directory {contracts_base} not found. Falling back to 'contracts/webmaschine'.")
+        contracts_base = os.path.join(metarepo_root, 'contracts/webmaschine')
 
     # 1. Validate Zones
     zones_success = validate_zones(

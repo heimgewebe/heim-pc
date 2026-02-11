@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Utility functions for webmaschine scripts.
+Utility functions for heim-pc scripts.
 """
 import os
 import sys

@@ -6,7 +6,7 @@ All JSON schemas that define the structure of the `state/` and `config/` files a
 
 ## Validation
 
-The CI pipeline in this repository (`.github/workflows/webmaschine-validate.yml`) is configured to:
+The CI pipeline in this repository (`.github/workflows/heim-pc-validate.yml`) is configured to:
 1.  Check out a fresh copy of the `heimgewebe/metarepo`.
 2.  Validate all local data files against the canonical schemas found there.
 
