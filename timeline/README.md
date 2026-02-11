@@ -11,7 +11,7 @@ Each line is a JSON object representing an event:
 ```json
 {"timestamp": "2024-12-18T15:26:00Z", "type": "file_added", "path": "/home/alex/repos/new-project/README.md", "size": 1234}
 {"timestamp": "2024-12-18T15:27:00Z", "type": "file_modified", "path": "/home/alex/vault-gewebe/notes.md", "size": 5678}
-{"timestamp": "2024-12-18T15:28:00Z", "type": "repo_commit", "path": "/home/alex/repos/tools", "commit": "abc123"}
+{"timestamp": "2024-12-18T15:28:00Z", "type": "repo_commit", "path": "/home/alex/repos/lenskit", "commit": "abc123"}
 ```
 
 ## Event Types
