@@ -16,7 +16,7 @@ expires_at: null
 size_bytes: 0
 
 # To access a real snapshot (once generated):
-# 1. Run local scanning: repolensd export-webmaschine --out /path/to/webmaschine
+# 1. Run local scanning: repolensd export-heim-pc --out /path/to/heim-pc
 # 2. Upload large snapshot as GitHub Release Asset (recommended) or Artifact
 # 3. Update this file with the reference details
 #

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Validates YAML and JSON syntax for the webmaschine repository.
+Validates YAML and JSON syntax for the heim-pc repository.
 """
 # Standard library imports
 import glob

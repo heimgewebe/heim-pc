@@ -10,14 +10,14 @@
 
 ## Datenpolitik: Was wird erfasst?
 
-### ✅ Was Webmaschine ERFASST
+### ✅ Was Heim-PC ERFASST
 
 * **Metadaten**: Dateipfade, Größen, Timestamps, Typen
 * **Struktur**: Verzeichnisbäume, Repository-Listen, Zonen
 * **Aggregationen**: Statistiken, Summaries, Hotspots
 * **Referenzen**: Pointer zu Snapshots (nicht die Snapshots selbst)
 
-### ❌ Was Webmaschine NICHT ERFASST
+### ❌ Was Heim-PC NICHT ERFASST
 
 * **Dateiinhalte**: Keine Dokumente, Code, Notizen gelesen
 * **Credentials**: Keine Passwörter, Keys, Tokens gespeichert
@@ -40,9 +40,9 @@
 
 ## Root-Grenzen
 
-Webmaschine darf **nur** innerhalb definierter Root-Pfade browsen.
+Heim-PC darf **nur** innerhalb definierter Root-Pfade browsen.
 
-### Konfiguration (config/webmaschine.yml)
+### Konfiguration (config/heim-pc.yml)
 
 ```yaml
 roots:
@@ -90,7 +90,7 @@ Folgende Pfade werden **immer** ausgeschlossen:
 
 ### Custom Excludes
 
-Zusätzliche Excludes in `config/webmaschine.yml`:
+Zusätzliche Excludes in `config/heim-pc.yml`:
 
 ```yaml
 excludes:

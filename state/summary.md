@@ -1,4 +1,4 @@
-# Webmaschine Summary
+# Heim-PC Summary
 
 > ⚠️ **PLACEHOLDER DATA**: This file contains template placeholders until populated by local filesystem scanning via repolensd or similar tooling.
 
@@ -18,9 +18,9 @@
 
 ## How to Generate Real Data
 
-1. **Configure**: Edit `config/webmaschine.yml` with your actual root paths
+1. **Configure**: Edit `config/heim-pc.yml` with your actual root paths
 2. **Define zones**: Customize `config/zones.yml` with your filesystem zones
-3. **Scan locally**: Run `repolensd export-webmaschine --out /path/to/webmaschine`
+3. **Scan locally**: Run `repolensd export-heim-pc --out /path/to/heim-pc`
 4. **Review**: Examine generated state files
 5. **Commit**: Push updated files to this repository
 6. **Validate**: CI will confirm data structure is valid

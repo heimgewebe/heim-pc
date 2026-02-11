@@ -22,6 +22,6 @@
     "version": "0.1.0",
     "last_updated": null,
     "schema_version": "1.0",
-    "note": "Placeholder data. Populate via local scanning (repolensd export-webmaschine). See docs/model.md for examples."
+    "note": "Placeholder data. Populate via local scanning (repolensd export-heim-pc). See docs/model.md for examples."
   }
 }

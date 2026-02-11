@@ -1,10 +1,10 @@
-# webmaschine
+# heim-pc
 
 **Kartografie deines Rechners – ein versioniertes Weltmodell für Heimgewebe**
 
 ## Mission
 
-Webmaschine ist die Verbindung zwischen deinem lokalen Dateisystem und dem Heimgewebe-System. Es dient als:
+Heim-PC ist die Verbindung zwischen deinem lokalen Dateisystem und dem Heimgewebe-System. Es dient als:
 
 * **Kartografie** deines Rechners (Dateisystem, Repositories, Zonen, Drift)
 * **Heimgewebe-taugliche Orientierung** durch Index und Semantik
@@ -22,7 +22,7 @@ Webmaschine ist die Verbindung zwischen deinem lokalen Dateisystem und dem Heimg
 ## Struktur
 
 ```
-webmaschine/
+heim-pc/
 ├─ docs/           # Konzepte & Dokumentation
 ├─ config/         # Konfiguration (Roots, Excludes, Zonen)
 ├─ state/          # Aktueller Zustand (klein, KI-lesbar)
@@ -36,7 +36,7 @@ webmaschine/
 
 ### Initial Setup
 
-1. **Konfiguration anpassen**: `config/webmaschine.yml` mit deinen Root-Pfaden
+1. **Konfiguration anpassen**: `config/heim-pc.yml` mit deinen Root-Pfaden
 2. **Zonen definieren**: `config/zones.yml` für semantische Bereiche
 
 ### Daten Generieren (Lokal)
@@ -47,10 +47,10 @@ Echte Kartografie-Daten werden **lokal** erzeugt:
 
 ```bash
 # Mit rLens oder ähnlichem Tooling
-rlens export-webmaschine --out /path/to/webmaschine
+rlens export-heim-pc --out /path/to/heim-pc
 
 # Prüfen und committen
-cd /path/to/webmaschine
+cd /path/to/heim-pc
 git add state/ snapshots/
 git commit -m "chore: update filesystem snapshot"
 git push
@@ -58,7 +58,7 @@ git push
 
 ### Validierung (CI)
 
-Der `webmaschine-validate` Workflow prüft automatisch:
+Der `heim-pc-validate` Workflow prüft automatisch:
 * JSON/YAML Struktur-Validität
 * Vorhandensein aller erforderlichen Dateien
 * Ob Daten noch Placeholder sind (Warnung)
