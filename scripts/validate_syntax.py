@@ -92,7 +92,10 @@ def main() -> None:
     utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
     yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/**/*.yml']
-    json_patterns = ['state/*.json', 'snapshots/*.summary.json']
+
+    # state/*.json files are validated by scripts/validate_contracts.py (which includes JSON parsing).
+    # Redundant parsing here is unnecessary.
+    json_patterns = ['snapshots/*.summary.json']
 
     utils.log_info("Validating YAML files...")
     yaml_has_error = validate_yaml(yaml_patterns, repo_root)
