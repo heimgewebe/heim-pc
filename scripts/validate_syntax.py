@@ -91,7 +91,7 @@ def main() -> None:
     repo_root = utils.get_repo_root()
     utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
-    # config/**/*.yml covers config/*.yml when using recursive glob
+    # With recursive=True, config/**/*.yml also matches config/*.yml
     yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/**/*.yml']
     # state/*.json are validated by validate_contracts.py in CI; removing here avoids redundant parsing
     json_patterns = ['snapshots/*.summary.json']
