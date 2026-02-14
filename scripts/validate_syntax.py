@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import traceback
-from typing import List, Set
+from typing import List
 
 # Third-party imports
 try:
@@ -24,14 +24,14 @@ import utils
 
 def collect_files(patterns: List[str], repo_root: str) -> List[str]:
     """Collects files matching patterns, deduplicates, and sorts them."""
-    files: Set[str] = set()
+    files: List[str] = []
     for p in patterns:
         # Construct absolute path pattern
         abs_pattern = os.path.join(repo_root, p)
-        files.update(glob.iglob(abs_pattern, recursive=True))
+        files.extend(glob.glob(abs_pattern, recursive=True))
 
     # Deduplicate and sort for deterministic output and stable CI logs
-    return sorted(files)
+    return sorted(set(files))
 
 def validate_yaml(patterns: List[str], repo_root: str) -> bool:
     """
@@ -91,8 +91,10 @@ def main() -> None:
     repo_root = utils.get_repo_root()
     utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
+    # With recursive=True, config/**/*.yml also matches config/*.yml
     yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/**/*.yml']
-    json_patterns = ['state/*.json', 'snapshots/*.summary.json']
+    # state/*.json are validated by validate_contracts.py in CI; removing here avoids redundant parsing
+    json_patterns = ['snapshots/*.summary.json']
 
     utils.log_info("Validating YAML files...")
     yaml_has_error = validate_yaml(yaml_patterns, repo_root)
