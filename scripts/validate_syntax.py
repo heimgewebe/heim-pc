@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import traceback
-from typing import List
+from typing import List, Set
 
 # Third-party imports
 try:
@@ -24,14 +24,14 @@ import utils
 
 def collect_files(patterns: List[str], repo_root: str) -> List[str]:
     """Collects files matching patterns, deduplicates, and sorts them."""
-    files: List[str] = []
+    files: Set[str] = set()
     for p in patterns:
         # Construct absolute path pattern
         abs_pattern = os.path.join(repo_root, p)
-        files.extend(glob.glob(abs_pattern, recursive=True))
+        files.update(glob.iglob(abs_pattern, recursive=True))
 
     # Deduplicate and sort for deterministic output and stable CI logs
-    return sorted(set(files))
+    return sorted(files)
 
 def validate_yaml(patterns: List[str], repo_root: str) -> bool:
     """
