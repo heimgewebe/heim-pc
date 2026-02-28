@@ -23,9 +23,11 @@ Heim-PC ist die Verbindung zwischen deinem lokalen Dateisystem und dem Heimgeweb
 
 ```
 heim-pc/
-├─ docs/           # Konzepte & Dokumentation
+├─ architecture/   # Normatives Wissen (Konzepte, Policies, Security)
+├─ runtime/        # Reality/Observations
+├─ manifest/       # Single source of truth für Dokumente und Checks
 ├─ config/         # Konfiguration (Roots, Excludes, Zonen)
-├─ state/          # Aktueller Zustand (klein, KI-lesbar)
+├─ state/          # Aktueller Zustand (klein, KI-lesbar, "reality outputs")
 ├─ timeline/       # Chronologische Historie (komprimierbar)
 ├─ snapshots/      # Aggregationen & Pointer auf große Daten
 ├─ contracts/      # Data contracts & JSON schemas
@@ -63,12 +65,20 @@ Der `heim-pc-validate` Workflow prüft automatisch:
 * Vorhandensein aller erforderlichen Dateien
 * Ob Daten noch Placeholder sind (Warnung)
 
+## Documentation Zones
+
+The documentation follows a strict zone model governed by `manifest/repo-index.yaml`:
+* **`architecture/`**: Normative knowledge (how things *should* be).
+* **`runtime/`**: Observational knowledge (how things *are*).
+
+For a complete overview of all canonical documents, their review status, and dependencies, see the auto-generated [SYSTEM_MAP.md](SYSTEM_MAP.md).
+
 ## Mehr erfahren
 
-* [Weltmodell-Konzept](docs/model.md) – Was ist das "Weltmodell"? (inkl. Beispiele)
-* [Zonen & Bedeutungen](docs/zones.md) – Semantische Bereiche
-* [Drift-Definition](docs/drift.md) – Was bedeutet Drift und wie wird er erkannt?
-* [Sicherheit](docs/security.md) – Token, Pfadgrenzen, Datenpolitik
+* [Weltmodell-Konzept](architecture/model.md) – Was ist das "Weltmodell"? (inkl. Beispiele)
+* [Zonen & Bedeutungen](architecture/zones.md) – Semantische Bereiche
+* [Drift-Definition](architecture/drift-policy.md) – Was bedeutet Drift und wie wird er erkannt?
+* [Sicherheit](architecture/security.md) – Token, Pfadgrenzen, Datenpolitik
 * [Contracts](contracts/README.md) – Data schemas & versioning
 
 ## WGX-Integration

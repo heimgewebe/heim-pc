@@ -50,10 +50,27 @@ jobs:
       # as long as the path to the script is correct.
       # Since we are in the workspace root, and repo is in 'heim-pc', we call heim-pc/scripts/...
       - name: Smoke-run validate_syntax
-        run: python3 heim-pc/scripts/validate_syntax.py
+        working-directory: ./heim-pc
+        run: python3 scripts/validate_syntax.py
 
       - name: Smoke-run validate_contracts
-        run: python3 heim-pc/scripts/validate_contracts.py
+        working-directory: ./heim-pc
+        run: python3 scripts/validate_contracts.py
 
       - name: Smoke-run check_freshness
-        run: python3 heim-pc/scripts/check_freshness.py
+        working-directory: ./heim-pc
+        run: python3 scripts/check_freshness.py
+
+      - name: Check repo-index consistency
+        working-directory: ./heim-pc
+        run: python3 scripts/ci/check_repo_index_consistency.py
+
+      - name: Check document review age
+        working-directory: ./heim-pc
+        run: python3 scripts/ci/check-doc-review-age.py
+
+      - name: Ensure SYSTEM_MAP.md is up to date
+        working-directory: ./heim-pc
+        run: |
+          python3 scripts/generate-system-map.py
+          git diff --exit-code SYSTEM_MAP.md

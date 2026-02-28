@@ -1,0 +1,18 @@
+zones:
+  norm:
+    path: architecture/
+    canonical_docs:
+      - model.md
+      - security.md
+      - zones.md
+      - drift-policy.md
+      - docmeta.schema.md
+  reality:
+    path: runtime/
+    canonical_docs:
+      - README.md
+
+checks:
+  - scripts/ci/check_repo_index_consistency.py
+  - scripts/ci/check-doc-review-age.py
+  - scripts/generate-system-map.py

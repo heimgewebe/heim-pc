@@ -1,0 +1,2 @@
+default_review_cycle_days: 90
+mode: warn

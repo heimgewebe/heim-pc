@@ -1,3 +1,12 @@
+---
+id: zones
+role: norm
+status: canonical
+last_reviewed: 2026-02-28
+depends_on: []
+verifies_with: []
+---
+
 # Zonen & Bedeutungen
 
 ## Was sind Zonen?
