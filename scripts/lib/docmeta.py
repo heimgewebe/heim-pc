@@ -1,4 +1,5 @@
 import re
+import sys
 from typing import Dict, Any
 
 def parse_frontmatter(file_content: str) -> Dict[str, Any]:
@@ -110,7 +111,7 @@ def parse_repo_index(manifest_content: str) -> Dict[str, Any]:
                     result["zones"][current_zone]["canonical_docs"].append(doc_name)
             elif indent not in (2, 4, 6):
                 # Basic error reporting for unexpected indentation inside zones
-                print(f"WARN: Unexpected indentation {indent} in zone block: {line}")
+                print(f"WARN: Unexpected indentation {indent} in zone block: {line}", file=sys.stderr)
 
         elif current_section == "checks":
             if indent == 2 and stripped.startswith("- "):

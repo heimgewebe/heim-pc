@@ -11,7 +11,7 @@ from scripts.lib.docmeta import parse_repo_index, parse_frontmatter
 def main():
     manifest_path = os.path.join(repo_root, "manifest", "repo-index.yaml")
     if not os.path.exists(manifest_path):
-        print(f"ERROR: Manifest not found at {manifest_path}")
+        print(f"ERROR: Manifest not found at {manifest_path}", file=sys.stderr)
         sys.exit(1)
 
     with open(manifest_path, "r") as f:
@@ -25,7 +25,7 @@ def main():
     for zone, zone_data in manifest_data.get("zones", {}).items():
         zone_path = os.path.join(repo_root, zone_data.get("path", ""))
         if not os.path.isdir(zone_path) and zone_data.get("path"):
-            print(f"ERROR: Zone path {zone_data['path']} for zone '{zone}' does not exist.")
+            print(f"ERROR: Zone path {zone_data['path']} for zone '{zone}' does not exist.", file=sys.stderr)
             errors += 1
 
         for doc_name in zone_data.get("canonical_docs", []):
@@ -33,7 +33,7 @@ def main():
             display_path = os.path.join(zone_data.get("path", ""), doc_name)
 
             if not os.path.exists(full_doc_path):
-                print(f"ERROR: Document listed in manifest not found: {display_path}")
+                print(f"ERROR: Document listed in manifest not found: {display_path}", file=sys.stderr)
                 errors += 1
                 continue
 
@@ -41,33 +41,33 @@ def main():
                 frontmatter = parse_frontmatter(df.read())
 
             if not frontmatter:
-                print(f"ERROR: Missing or invalid frontmatter in {display_path}")
+                print(f"ERROR: Missing or invalid frontmatter in {display_path}", file=sys.stderr)
                 errors += 1
                 continue
 
             doc_id = frontmatter.get("id")
             if not doc_id:
-                print(f"ERROR: Missing 'id' in frontmatter of {display_path}")
+                print(f"ERROR: Missing 'id' in frontmatter of {display_path}", file=sys.stderr)
                 errors += 1
             else:
                 if doc_id in doc_ids:
-                    print(f"ERROR: Duplicate document ID found: {doc_id} in {display_path}")
+                    print(f"ERROR: Duplicate document ID found: {doc_id} in {display_path}", file=sys.stderr)
                     errors += 1
                 doc_ids.add(doc_id)
 
             status = frontmatter.get("status")
             if status != "canonical":
-                print(f"ERROR: Status must be 'canonical' for {display_path}, found '{status}'")
+                print(f"ERROR: Status must be 'canonical' for {display_path}, found '{status}'", file=sys.stderr)
                 errors += 1
 
             role = frontmatter.get("role")
             if role not in ("norm", "reality", "action", "runbooks"):
-                print(f"ERROR: Invalid role '{role}' in {display_path}")
+                print(f"ERROR: Invalid role '{role}' in {display_path}", file=sys.stderr)
                 errors += 1
 
             last_reviewed = frontmatter.get("last_reviewed")
             if not last_reviewed or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(last_reviewed)):
-                print(f"ERROR: Invalid or missing last_reviewed date (must be YYYY-MM-DD) in {display_path}")
+                print(f"ERROR: Invalid or missing last_reviewed date (must be YYYY-MM-DD) in {display_path}", file=sys.stderr)
                 errors += 1
 
             depends_on = frontmatter.get("depends_on", [])
@@ -80,7 +80,7 @@ def main():
                 verifies_with = [verifies_with]
             for script in verifies_with:
                 if script and not os.path.exists(os.path.join(repo_root, script)):
-                    print(f"ERROR: Verification script {script} listed in {display_path} does not exist.")
+                    print(f"ERROR: Verification script {script} listed in {display_path} does not exist.", file=sys.stderr)
                     errors += 1
 
     # Check dependencies and cycles
@@ -100,22 +100,22 @@ def main():
     for doc_id, deps in graph.items():
         for dep in deps:
             if dep not in doc_ids:
-                print(f"ERROR: Document '{doc_id}' depends on non-existent document ID: {dep}")
+                print(f"ERROR: Document '{doc_id}' depends on non-existent document ID: {dep}", file=sys.stderr)
                 errors += 1
 
         if doc_id not in visited_nodes:
             if has_cycle(doc_id, visited_nodes, set()):
-                print(f"ERROR: Cycle detected involving document '{doc_id}'")
+                print(f"ERROR: Cycle detected involving document '{doc_id}'", file=sys.stderr)
                 errors += 1
 
     # Check Checks
     for check in manifest_data.get("checks", []):
         if not os.path.exists(os.path.join(repo_root, check)):
-            print(f"ERROR: Check script {check} listed in manifest does not exist.")
+            print(f"ERROR: Check script {check} listed in manifest does not exist.", file=sys.stderr)
             errors += 1
 
     if errors > 0:
-        print(f"\nFound {errors} errors in repo-index consistency.")
+        print(f"\nFound {errors} errors in repo-index consistency.", file=sys.stderr)
         sys.exit(1)
 
     print("Repo-index consistency check passed.")
