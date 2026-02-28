@@ -12,7 +12,7 @@ def load_review_policy(policy_path):
     policy = {"default_review_cycle_days": 90, "mode": "warn"}
     warnings = 0
     if not os.path.exists(policy_path):
-        print(f"WARN: Policy not found at {policy_path}, using defaults.")
+        print(f"WARN: Policy not found at {policy_path}, using defaults.", file=sys.stderr)
         return policy, warnings
 
     with open(policy_path, "r") as f:
@@ -23,22 +23,24 @@ def load_review_policy(policy_path):
             if match:
                 key = match.group(1)
                 val = match.group(2).strip()
+                val_norm = val.strip().strip('"').strip("'")
                 if key == "default_review_cycle_days":
                     try:
-                        policy[key] = int(val)
+                        policy[key] = int(val_norm)
                     except ValueError:
-                        print(f"WARN: Invalid default_review_cycle_days '{val}', falling back to 90.")
+                        print(f"WARN: Invalid default_review_cycle_days '{val}', falling back to 90.", file=sys.stderr)
                         warnings += 1
                         policy[key] = 90
                 elif key == "mode":
-                    if val in ("warn", "fail"):
-                        policy[key] = val
+                    mode_norm = val_norm.lower()
+                    if mode_norm in ("warn", "fail"):
+                        policy[key] = mode_norm
                     else:
-                        print(f"WARN: Invalid mode '{val}', falling back to 'warn'.")
+                        print(f"WARN: Invalid mode '{val}', falling back to 'warn'.", file=sys.stderr)
                         warnings += 1
                         policy[key] = "warn"
                 else:
-                    print(f"WARN: Unknown key in review-policy.yaml: '{key}'")
+                    print(f"WARN: Unknown key in review-policy.yaml: '{key}'", file=sys.stderr)
                     warnings += 1
     return policy, warnings
 
@@ -52,7 +54,7 @@ def main():
 
     manifest_path = os.path.join(repo_root, "manifest", "repo-index.yaml")
     if not os.path.exists(manifest_path):
-        print(f"ERROR: Manifest not found at {manifest_path}")
+        print(f"ERROR: Manifest not found at {manifest_path}", file=sys.stderr)
         sys.exit(1)
 
     with open(manifest_path, "r") as f:
@@ -77,7 +79,7 @@ def main():
             last_reviewed_str = frontmatter.get("last_reviewed")
             if not last_reviewed_str:
                 msg = f"Missing 'last_reviewed' in {display_path}"
-                print(f"WARN: {msg}")
+                print(f"WARN: {msg}", file=sys.stderr)
                 warnings += 1
                 continue
 
@@ -87,18 +89,18 @@ def main():
                 if age_days > max_days:
                     msg = f"Document {display_path} review age ({age_days} days) exceeds policy ({max_days} days)."
                     if mode == "fail":
-                        print(f"ERROR: {msg}")
+                        print(f"ERROR: {msg}", file=sys.stderr)
                         errors += 1
                     else:
-                        print(f"WARN: {msg}")
+                        print(f"WARN: {msg}", file=sys.stderr)
                         warnings += 1
             except ValueError:
                 msg = f"Invalid 'last_reviewed' format in {display_path}. Expected YYYY-MM-DD, got '{last_reviewed_str}'"
-                print(f"WARN: {msg}")
+                print(f"WARN: {msg}", file=sys.stderr)
                 warnings += 1
 
     if mode == "fail" and errors > 0:
-        print(f"\nFailed: {errors} review age violations found.")
+        print(f"\nFailed: {errors} review age violations found.", file=sys.stderr)
         sys.exit(1)
 
     print(f"\nReview Age Check complete. {warnings} warnings, {errors} errors.")
