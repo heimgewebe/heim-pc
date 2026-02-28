@@ -10,29 +10,45 @@ from scripts.lib.docmeta import parse_repo_index, parse_frontmatter
 
 def load_review_policy(policy_path):
     policy = {"default_review_cycle_days": 90, "mode": "warn"}
+    warnings = 0
     if not os.path.exists(policy_path):
-        return policy
+        print(f"WARN: Policy not found at {policy_path}, using defaults.")
+        return policy, warnings
 
     with open(policy_path, "r") as f:
         for line in f:
+            if not line.strip() or line.strip().startswith("#"):
+                continue
             match = re.match(r"^([a-zA-Z0-9_]+):\s*(.*)$", line.strip())
             if match:
                 key = match.group(1)
-                val = match.group(2)
+                val = match.group(2).strip()
                 if key == "default_review_cycle_days":
                     try:
                         policy[key] = int(val)
                     except ValueError:
-                        pass
+                        print(f"WARN: Invalid default_review_cycle_days '{val}', falling back to 90.")
+                        warnings += 1
+                        policy[key] = 90
                 elif key == "mode":
-                    policy[key] = val
-    return policy
+                    if val in ("warn", "fail"):
+                        policy[key] = val
+                    else:
+                        print(f"WARN: Invalid mode '{val}', falling back to 'warn'.")
+                        warnings += 1
+                        policy[key] = "warn"
+                else:
+                    print(f"WARN: Unknown key in review-policy.yaml: '{key}'")
+                    warnings += 1
+    return policy, warnings
 
 def main():
     policy_path = os.environ.get("REVIEW_POLICY_PATH", os.path.join(repo_root, "manifest", "review-policy.yaml"))
-    policy = load_review_policy(policy_path)
+    policy, policy_warnings = load_review_policy(policy_path)
     max_days = policy["default_review_cycle_days"]
     mode = policy["mode"]
+
+    print(f"Policy parsed with {policy_warnings} warnings. Max review age: {max_days} days. Mode: {mode}.")
 
     manifest_path = os.path.join(repo_root, "manifest", "repo-index.yaml")
     if not os.path.exists(manifest_path):
@@ -42,13 +58,16 @@ def main():
     with open(manifest_path, "r") as f:
         manifest_data = parse_repo_index(f.read())
 
-    warnings = 0
+    warnings = policy_warnings
     errors = 0
     now = datetime.now()
 
     for zone, zone_data in manifest_data.get("zones", {}).items():
-        for doc_path in zone_data.get("docs", []):
-            full_doc_path = os.path.join(repo_root, doc_path)
+        zone_path = zone_data.get("path", "")
+        for doc_name in zone_data.get("canonical_docs", []):
+            full_doc_path = os.path.join(repo_root, zone_path, doc_name)
+            display_path = os.path.join(zone_path, doc_name)
+
             if not os.path.exists(full_doc_path):
                 continue
 
@@ -57,16 +76,16 @@ def main():
 
             last_reviewed_str = frontmatter.get("last_reviewed")
             if not last_reviewed_str:
-                msg = f"Missing 'last_reviewed' in {doc_path}"
+                msg = f"Missing 'last_reviewed' in {display_path}"
                 print(f"WARN: {msg}")
                 warnings += 1
                 continue
 
             try:
-                last_reviewed = datetime.strptime(last_reviewed_str, "%Y-%m-%d")
+                last_reviewed = datetime.strptime(str(last_reviewed_str), "%Y-%m-%d")
                 age_days = (now - last_reviewed).days
                 if age_days > max_days:
-                    msg = f"Document {doc_path} review age ({age_days} days) exceeds policy ({max_days} days)."
+                    msg = f"Document {display_path} review age ({age_days} days) exceeds policy ({max_days} days)."
                     if mode == "fail":
                         print(f"ERROR: {msg}")
                         errors += 1
@@ -74,7 +93,7 @@ def main():
                         print(f"WARN: {msg}")
                         warnings += 1
             except ValueError:
-                msg = f"Invalid 'last_reviewed' format in {doc_path}. Expected YYYY-MM-DD, got '{last_reviewed_str}'"
+                msg = f"Invalid 'last_reviewed' format in {display_path}. Expected YYYY-MM-DD, got '{last_reviewed_str}'"
                 print(f"WARN: {msg}")
                 warnings += 1
 

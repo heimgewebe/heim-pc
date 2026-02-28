@@ -1,15 +1,16 @@
 zones:
   norm:
     path: architecture/
-    docs:
-      - architecture/model.md
-      - architecture/security.md
-      - architecture/zones.md
-      - architecture/drift-policy.md
-      - architecture/docmeta.schema.md
+    canonical_docs:
+      - model.md
+      - security.md
+      - zones.md
+      - drift-policy.md
+      - docmeta.schema.md
   reality:
     path: runtime/
-    docs: []
+    canonical_docs:
+      - README.md
 
 checks:
   - scripts/ci/check_repo_index_consistency.py

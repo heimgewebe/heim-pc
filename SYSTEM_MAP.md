@@ -19,7 +19,9 @@ It provides a complete overview of the canonical documentation zones and their c
 
 **Path**: `runtime/`
 
-_No documents listed in this zone._
+| ID | File | Status | Last Reviewed | Depends On |
+|---|---|---|---|---|
+| runtime.readme | [runtime/README.md](runtime/README.md) | canonical | 2026-02-28 | - |
 
 ## Automated Checks
 

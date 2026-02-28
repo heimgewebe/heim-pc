@@ -30,7 +30,7 @@ def main():
         out_lines.append(f"**Path**: `{path}`")
         out_lines.append("")
 
-        docs = zone_data.get("docs", [])
+        docs = zone_data.get("canonical_docs", [])
         if not docs:
             out_lines.append("_No documents listed in this zone._")
             out_lines.append("")
@@ -39,10 +39,11 @@ def main():
         out_lines.append("| ID | File | Status | Last Reviewed | Depends On |")
         out_lines.append("|---|---|---|---|---|")
 
-        for doc_path in docs:
-            full_doc_path = os.path.join(repo_root, doc_path)
+        for doc_name in docs:
+            display_path = os.path.join(path, doc_name)
+            full_doc_path = os.path.join(repo_root, display_path)
             if not os.path.exists(full_doc_path):
-                out_lines.append(f"| _Missing_ | `{doc_path}` | _Missing_ | _Missing_ | _Missing_ |")
+                out_lines.append(f"| _Missing_ | `{display_path}` | _Missing_ | _Missing_ | _Missing_ |")
                 continue
 
             with open(full_doc_path, "r") as df:
@@ -53,7 +54,7 @@ def main():
             last_reviewed = frontmatter.get("last_reviewed", "N/A")
             depends_on = ", ".join(frontmatter.get("depends_on", [])) or "-"
 
-            out_lines.append(f"| {doc_id} | [{doc_path}]({doc_path}) | {status} | {last_reviewed} | {depends_on} |")
+            out_lines.append(f"| {doc_id} | [{display_path}]({display_path}) | {status} | {last_reviewed} | {depends_on} |")
 
         out_lines.append("")
 

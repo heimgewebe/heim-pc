@@ -43,7 +43,16 @@ def parse_frontmatter(file_content: str) -> Dict[str, Any]:
             # Handle empty lists e.g., '[]'
             if value_str == "[]":
                 frontmatter[key] = []
-                current_list_key = key
+                current_list_key = None # no list mode needed
+            elif value_str.startswith("[") and value_str.endswith("]"):
+                # Handle inline lists [a, b]
+                inner = value_str[1:-1].strip()
+                if inner:
+                    items = [x.strip().strip("'\"") for x in inner.split(",") if x.strip()]
+                    frontmatter[key] = items
+                else:
+                    frontmatter[key] = []
+                current_list_key = None
             elif not value_str:
                 frontmatter[key] = []
                 current_list_key = key
@@ -56,7 +65,7 @@ def parse_frontmatter(file_content: str) -> Dict[str, Any]:
 def parse_repo_index(manifest_content: str) -> Dict[str, Any]:
     """
     Parses manifest/repo-index.yaml line-based to extract zones and checks.
-    Returns: {"zones": {"norm": {"path": "...", "docs": [...]}, ...}, "checks": [...]}
+    Returns: {"zones": {"norm": {"path": "...", "canonical_docs": [...]}, ...}, "checks": [...]}
     """
     result = {"zones": {}, "checks": []}
     lines = manifest_content.splitlines()
@@ -85,21 +94,24 @@ def parse_repo_index(manifest_content: str) -> Dict[str, Any]:
             if indent == 2 and stripped.endswith(":"):
                 current_zone = stripped[:-1]
                 if current_zone not in result["zones"]:
-                    result["zones"][current_zone] = {"path": "", "docs": []}
+                    result["zones"][current_zone] = {"path": "", "canonical_docs": []}
             elif indent == 4 and current_zone:
                 if stripped.startswith("path:"):
                     result["zones"][current_zone]["path"] = stripped.split("path:", 1)[1].strip()
-                elif stripped == "docs:":
-                    current_key = "docs"
-                elif current_key == "docs" and stripped.startswith("- "):
-                    # The array isn't empty! It is populated directly here.
-                    pass
-            elif indent == 6 and current_zone and current_key == "docs" and stripped.startswith("- "):
-                doc_path = stripped[2:].strip()
-                if doc_path:
-                    result["zones"][current_zone]["docs"].append(doc_path)
-            # Handle indentation 6 (or whatever is present for list items inside zones)
-            # Actually, `docs:` is indent 4, and `- ...` is indent 6.
+                elif stripped == "canonical_docs:":
+                    current_key = "canonical_docs"
+                else:
+                    current_key = None
+            elif indent == 6 and current_zone and current_key == "canonical_docs" and stripped.startswith("- "):
+                doc_name = stripped[2:].strip()
+                if doc_name:
+                    # In Manifest, we just keep the filenames in canonical_docs.
+                    # The consumers are responsible for concatenating path + filename.
+                    result["zones"][current_zone]["canonical_docs"].append(doc_name)
+            elif indent not in (2, 4, 6):
+                # Basic error reporting for unexpected indentation inside zones
+                print(f"WARN: Unexpected indentation {indent} in zone block: {line}")
+
         elif current_section == "checks":
             if indent == 2 and stripped.startswith("- "):
                 check_path = stripped[2:].strip()

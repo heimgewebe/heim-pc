@@ -30,6 +30,6 @@ Every canonical document must start with a YAML frontmatter block enclosed by `-
 
 ## Related Components
 
-*   **Manifest (`manifest/repo-index.yaml`)**: Acts as the single source of truth for which documents are considered canonical and which zone they belong to.
+*   **Manifest (`manifest/repo-index.yaml`)**: Acts as the single source of truth for which documents are considered canonical and which zone they belong to. Manifest uses `canonical_docs` to list documents relative to the zone path. The manifest is the single source of truth; SYSTEM_MAP is generated from it, and checks enforce invariants.
 *   **Review Policy (`manifest/review-policy.yaml`)**: Configures the maximum allowed age for the `last_reviewed` date.
 *   **System Map (`SYSTEM_MAP.md`)**: Automatically generated index based on the manifest and document frontmatter.
