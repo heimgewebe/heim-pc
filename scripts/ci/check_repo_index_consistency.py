@@ -1,0 +1,102 @@
+import sys
+import os
+
+# Add repo root to sys.path to resolve scripts.lib
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, repo_root)
+
+from scripts.lib.docmeta import parse_repo_index, parse_frontmatter
+
+def main():
+    manifest_path = os.path.join(repo_root, "manifest", "repo-index.yaml")
+    if not os.path.exists(manifest_path):
+        print(f"ERROR: Manifest not found at {manifest_path}")
+        sys.exit(1)
+
+    with open(manifest_path, "r") as f:
+        manifest_data = parse_repo_index(f.read())
+
+    errors = 0
+    doc_ids = set()
+    graph = {}
+
+    # Check Zones & Docs
+    for zone, zone_data in manifest_data.get("zones", {}).items():
+        zone_path = os.path.join(repo_root, zone_data.get("path", ""))
+        if not os.path.isdir(zone_path) and zone_data.get("path"):
+            print(f"ERROR: Zone path {zone_data['path']} for zone '{zone}' does not exist.")
+            errors += 1
+
+        for doc_path in zone_data.get("docs", []):
+            full_doc_path = os.path.join(repo_root, doc_path)
+            if not os.path.exists(full_doc_path):
+                print(f"ERROR: Document listed in manifest not found: {doc_path}")
+                errors += 1
+                continue
+
+            with open(full_doc_path, "r") as df:
+                frontmatter = parse_frontmatter(df.read())
+
+            if not frontmatter:
+                print(f"ERROR: Missing or invalid frontmatter in {doc_path}")
+                errors += 1
+                continue
+
+            doc_id = frontmatter.get("id")
+            if not doc_id:
+                print(f"ERROR: Missing 'id' in frontmatter of {doc_path}")
+                errors += 1
+            else:
+                if doc_id in doc_ids:
+                    print(f"ERROR: Duplicate document ID found: {doc_id} in {doc_path}")
+                    errors += 1
+                doc_ids.add(doc_id)
+
+            depends_on = frontmatter.get("depends_on", [])
+            graph[doc_id] = depends_on
+
+            for script in frontmatter.get("verifies_with", []):
+                if script and not os.path.exists(os.path.join(repo_root, script)):
+                    print(f"ERROR: Verification script {script} listed in {doc_path} does not exist.")
+                    errors += 1
+
+    # Check dependencies
+    for doc_id, deps in graph.items():
+        for dep in deps:
+            if dep not in doc_ids:
+                print(f"ERROR: Document '{doc_id}' depends on non-existent document ID: {dep}")
+                errors += 1
+
+
+    # Check for cycles using DFS
+    def has_cycle(node, visited, stack):
+        visited.add(node)
+        stack.add(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                if has_cycle(neighbor, visited, stack):
+                    return True
+            elif neighbor in stack:
+                return True
+        stack.remove(node)
+        return False
+
+    for doc_id in graph:
+        if has_cycle(doc_id, set(), set()):
+            print(f"ERROR: Cycle detected involving document '{doc_id}'")
+            errors += 1
+
+    # Check Checks
+    for check in manifest_data.get("checks", []):
+        if not os.path.exists(os.path.join(repo_root, check)):
+            print(f"ERROR: Check script {check} listed in manifest does not exist.")
+            errors += 1
+
+    if errors > 0:
+        print(f"\nFound {errors} errors in repo-index consistency.")
+        sys.exit(1)
+
+    print("Repo-index consistency check passed.")
+
+if __name__ == "__main__":
+    main()

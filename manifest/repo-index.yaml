@@ -1,0 +1,17 @@
+zones:
+  norm:
+    path: architecture/
+    docs:
+      - architecture/model.md
+      - architecture/security.md
+      - architecture/zones.md
+      - architecture/drift-policy.md
+      - architecture/docmeta.schema.md
+  reality:
+    path: runtime/
+    docs: []
+
+checks:
+  - scripts/ci/check_repo_index_consistency.py
+  - scripts/ci/check-doc-review-age.py
+  - scripts/generate-system-map.py
