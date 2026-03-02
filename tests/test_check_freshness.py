@@ -12,14 +12,13 @@ if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
 
 # Scoped mock for yaml to avoid global side effects during session if possible.
-# We use a patcher to manage sys.modules cleanly.
 yaml_patcher = patch.dict(sys.modules, {'yaml': MagicMock()})
 yaml_patcher.start()
 
 try:
     from check_freshness import check_freshness
 except ImportError:
-    # Fallback or re-raise if import still fails
+    yaml_patcher.stop()
     raise
 
 # Define a fixed time for deterministic tests
@@ -71,9 +70,10 @@ class TestCheckFreshness(unittest.TestCase):
         self.assertFalse(result)
         mock_log_error.assert_called_once_with('An unexpected error occurred: Boom!')
 
+    @patch('utils.log_info')
     @patch('check_freshness.datetime')
     @patch('utils.load_json')
-    def test_check_freshness_success(self, mock_load_json, mock_datetime):
+    def test_check_freshness_success(self, mock_load_json, mock_datetime, mock_log_info):
         # Setup: Mock datetime to return fixed values
         mock_datetime.now.return_value = FIXED_NOW
         mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
@@ -90,11 +90,13 @@ class TestCheckFreshness(unittest.TestCase):
 
         # Verify
         self.assertTrue(result)
+        mock_log_info.assert_called_once()
 
+    @patch('utils.log_info')
     @patch('check_freshness.datetime')
     @patch('utils.load_json')
     @patch('utils.log_warning')
-    def test_check_freshness_stale_data(self, mock_log_warning, mock_load_json, mock_datetime):
+    def test_check_freshness_stale_data(self, mock_log_warning, mock_load_json, mock_datetime, mock_log_info):
         # Setup: Mock datetime
         mock_datetime.now.return_value = FIXED_NOW
         mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
@@ -113,6 +115,7 @@ class TestCheckFreshness(unittest.TestCase):
         # Verify
         self.assertTrue(result)
         mock_log_warning.assert_called_once_with('Stale data detected. The last update was more than 7 days ago.')
+        mock_log_info.assert_called_once()
 
     @patch('utils.load_json')
     @patch('utils.log_warning')
@@ -131,9 +134,10 @@ class TestCheckFreshness(unittest.TestCase):
         self.assertTrue(result)
         mock_log_warning.assert_called_once_with('metadata.last_updated is null (Placeholder data detected)')
 
+    @patch('utils.log_info')
     @patch('utils.load_json')
     @patch('utils.log_error')
-    def test_check_freshness_invalid_timestamp(self, mock_log_error, mock_load_json):
+    def test_check_freshness_invalid_timestamp(self, mock_log_error, mock_load_json, mock_log_info):
         # Setup: Mock load_json to return data with invalid timestamp
         mock_load_json.return_value = {
             'metadata': {
@@ -149,6 +153,7 @@ class TestCheckFreshness(unittest.TestCase):
         # Check that log_error was called with the expected message prefix
         called_args = mock_log_error.call_args[0][0]
         self.assertTrue(called_args.startswith('Invalid ISO 8601 timestamp in metadata.last_updated: invalid-date'))
+        mock_log_info.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()
