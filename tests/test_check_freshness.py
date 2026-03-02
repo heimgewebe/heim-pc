@@ -3,24 +3,39 @@ from unittest.mock import patch, MagicMock
 import sys
 import os
 import json
-from datetime import datetime, timezone
-
-# Mock yaml because it's missing in the environment and scripts/utils.py imports it
-sys.modules['yaml'] = MagicMock()
+from datetime import datetime, timezone, timedelta
 
 # Ensure scripts directory is in python path
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(repo_root, 'scripts'))
+scripts_path = os.path.join(repo_root, 'scripts')
+if scripts_path not in sys.path:
+    sys.path.insert(0, scripts_path)
 
-from check_freshness import check_freshness
+# Scoped mock for yaml to avoid global side effects during session if possible.
+# We use a patcher to manage sys.modules cleanly.
+yaml_patcher = patch.dict(sys.modules, {'yaml': MagicMock()})
+yaml_patcher.start()
+
+try:
+    from check_freshness import check_freshness
+except ImportError:
+    # Fallback or re-raise if import still fails
+    raise
+
+# Define a fixed time for deterministic tests
+FIXED_NOW = datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 class TestCheckFreshness(unittest.TestCase):
+
+    @classmethod
+    def tearDownClass(cls):
+        # Stop the YAML patcher after all tests in this class have run
+        yaml_patcher.stop()
 
     @patch('utils.load_json')
     @patch('utils.log_error')
     def test_check_freshness_json_decode_error(self, mock_log_error, mock_load_json):
         # Setup: Mock load_json to raise JSONDecodeError
-        # json.JSONDecodeError requires msg, doc, pos
         mock_load_json.side_effect = json.JSONDecodeError("Expecting value", "{}", 0)
 
         # Execute
@@ -56,12 +71,17 @@ class TestCheckFreshness(unittest.TestCase):
         self.assertFalse(result)
         mock_log_error.assert_called_once_with('An unexpected error occurred: Boom!')
 
+    @patch('check_freshness.datetime')
     @patch('utils.load_json')
-    def test_check_freshness_success(self, mock_load_json):
+    def test_check_freshness_success(self, mock_load_json, mock_datetime):
+        # Setup: Mock datetime to return fixed values
+        mock_datetime.now.return_value = FIXED_NOW
+        mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
+
         # Setup: Mock load_json to return valid data (fresh)
         mock_load_json.return_value = {
             'metadata': {
-                'last_updated': datetime.now(timezone.utc).isoformat()
+                'last_updated': FIXED_NOW.isoformat()
             }
         }
 
@@ -71,13 +91,19 @@ class TestCheckFreshness(unittest.TestCase):
         # Verify
         self.assertTrue(result)
 
+    @patch('check_freshness.datetime')
     @patch('utils.load_json')
     @patch('utils.log_warning')
-    def test_check_freshness_stale_data(self, mock_log_warning, mock_load_json):
-        # Setup: Mock load_json to return stale data (more than 7 days ago)
+    def test_check_freshness_stale_data(self, mock_log_warning, mock_load_json, mock_datetime):
+        # Setup: Mock datetime
+        mock_datetime.now.return_value = FIXED_NOW
+        mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
+
+        # Setup: Mock load_json to return stale data (8 days ago)
+        stale_time = FIXED_NOW - timedelta(days=8)
         mock_load_json.return_value = {
             'metadata': {
-                'last_updated': '2020-01-01T00:00:00Z'
+                'last_updated': stale_time.isoformat()
             }
         }
 
