@@ -12,7 +12,7 @@ sys.modules["yaml"] = MagicMock()
 
 # Ensure scripts directory is in python path
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(repo_root, 'scripts'))
+sys.path.insert(0, os.path.join(repo_root, 'scripts'))
 
 import utils
 
