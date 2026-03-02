@@ -3,7 +3,7 @@ import os
 import re
 from datetime import date
 
-# Pre-compile regex for performance
+# Date format for last_reviewed (ISO 8601)
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Add repo root to sys.path to resolve scripts.lib
@@ -69,17 +69,13 @@ def main():
                 print(f"ERROR: Invalid role '{role}' in {display_path}", file=sys.stderr)
                 errors += 1
 
-            last_reviewed = frontmatter.get("last_reviewed")
-            is_valid_date = False
-            if last_reviewed and DATE_PATTERN.match(str(last_reviewed)):
-                try:
-                    date.fromisoformat(str(last_reviewed))
-                    is_valid_date = True
-                except ValueError:
-                    pass
-
-            if not is_valid_date:
-                print(f"ERROR: Invalid or missing last_reviewed date (must be YYYY-MM-DD) in {display_path}", file=sys.stderr)
+            last_reviewed = str(frontmatter.get("last_reviewed", ""))
+            try:
+                if not DATE_PATTERN.match(last_reviewed):
+                    raise ValueError
+                date.fromisoformat(last_reviewed)
+            except ValueError:
+                print(f"ERROR: Invalid or missing last_reviewed date (must be a valid date in YYYY-MM-DD format) in {display_path}", file=sys.stderr)
                 errors += 1
 
             depends_on = frontmatter.get("depends_on", [])
