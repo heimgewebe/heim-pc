@@ -15,8 +15,16 @@ def get_repo_root() -> str:
     return os.path.dirname(script_dir)
 
 def resolve_path(relative_path: str) -> str:
-    """Resolves a path relative to the repository root."""
-    return os.path.join(get_repo_root(), relative_path)
+    """Resolves a path relative to the repository root and prevents path traversal."""
+    repo_root = get_repo_root()
+    # Use abspath to resolve any '..' and join with repo_root
+    resolved_path = os.path.abspath(os.path.join(repo_root, relative_path))
+
+    # Ensure the resolved path is within the repository root
+    if os.path.commonpath([repo_root, resolved_path]) != repo_root:
+        raise ValueError(f"Path escapes repository root: {relative_path}")
+
+    return resolved_path
 
 def load_json(path: str) -> Any:
     """Loads a JSON file with error handling."""
