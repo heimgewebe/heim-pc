@@ -16,12 +16,18 @@ def get_repo_root() -> str:
 
 def resolve_path(relative_path: str) -> str:
     """Resolves a path relative to the repository root and prevents path traversal."""
-    repo_root = get_repo_root()
+    repo_root = os.path.abspath(get_repo_root())
     # Use abspath to resolve any '..' and join with repo_root
     resolved_path = os.path.abspath(os.path.join(repo_root, relative_path))
 
     # Ensure the resolved path is within the repository root
-    if os.path.commonpath([repo_root, resolved_path]) != repo_root:
+    try:
+        is_common = os.path.commonpath([repo_root, resolved_path]) == repo_root
+    except ValueError:
+        # commonpath raises ValueError if paths are on different drives (Windows)
+        raise ValueError(f"Path escapes repository root (different drive/base): {relative_path}")
+
+    if not is_common:
         raise ValueError(f"Path escapes repository root: {relative_path}")
 
     return resolved_path
