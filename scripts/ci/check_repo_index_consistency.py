@@ -70,14 +70,15 @@ def main():
                 errors += 1
 
             last_reviewed = str(frontmatter.get("last_reviewed", ""))
+            last_reviewed_err = f"ERROR: Invalid or missing last_reviewed date (must be a valid date in YYYY-MM-DD format) in {display_path}"
             if not DATE_PATTERN.match(last_reviewed):
-                print(f"ERROR: Invalid or missing last_reviewed date (must be a valid date in YYYY-MM-DD format) in {display_path}", file=sys.stderr)
+                print(last_reviewed_err, file=sys.stderr)
                 errors += 1
             else:
                 try:
                     date.fromisoformat(last_reviewed)
                 except ValueError:
-                    print(f"ERROR: Invalid or missing last_reviewed date (must be a valid date in YYYY-MM-DD format) in {display_path}", file=sys.stderr)
+                    print(last_reviewed_err, file=sys.stderr)
                     errors += 1
 
             depends_on = frontmatter.get("depends_on", [])
