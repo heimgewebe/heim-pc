@@ -28,13 +28,18 @@ def resolve_path(path: str) -> str:
         candidate = repo_root / candidate
 
     # resolve() handles '..' and symlinks
-    resolved = candidate.resolve()
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError):
+        # Fallback for paths that cannot be resolved (e.g. permission issues or infinite loops)
+        # We still want to check containment if possible
+        resolved = candidate
 
     # Ensure resolved is within repo_root
     try:
         resolved.relative_to(repo_root)
-    except ValueError:
-        raise ValueError(f"Path escapes repository root: {path}")
+    except ValueError as exc:
+        raise ValueError(f"Path escapes repository root: {path}") from exc
 
     return str(resolved)
 
