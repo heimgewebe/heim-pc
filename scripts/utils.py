@@ -5,6 +5,7 @@ Utility functions for heim-pc scripts.
 import os
 import sys
 import json
+from pathlib import Path
 import yaml
 from typing import Any
 
@@ -19,33 +20,23 @@ def resolve_path(path: str) -> str:
     Resolves a path relative to the repository root. Accepts absolute paths within the repo root.
     Prevents path traversal.
     """
-    repo_root = os.path.abspath(get_repo_root())
+    repo_root = Path(get_repo_root()).resolve()
+    candidate = Path(path)
 
-    # If already absolute, don't join with repo_root
-    if os.path.isabs(path):
-        resolved_path = os.path.abspath(path)
-    else:
-        resolved_path = os.path.abspath(os.path.join(repo_root, path))
+    # If path is relative, interpret it relative to repo_root
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
 
-    # Ensure the resolved path is within the repository root
-    # Using commonpath is robust for detecting if resolved_path is inside repo_root
+    # resolve() handles '..' and symlinks
+    resolved = candidate.resolve()
+
+    # Ensure resolved is within repo_root
     try:
-        # We need to ensure that commonpath doesn't just return repo_root for /app-extra
-        # On some systems/versions, commonpath([/app, /app-extra]) is /app.
-        # So we verify that the common path is exactly repo_root AND it is actually a parent.
-        common = os.path.commonpath([repo_root, resolved_path])
-        is_inside = (common == repo_root) and (
-            resolved_path == repo_root or
-            resolved_path.startswith(os.path.join(repo_root, ""))
-        )
+        resolved.relative_to(repo_root)
     except ValueError:
-        # commonpath raises ValueError if paths are on different drives (Windows)
-        raise ValueError(f"Path escapes repository root (different drive/base): {path}")
-
-    if not is_inside:
         raise ValueError(f"Path escapes repository root: {path}")
 
-    return resolved_path
+    return str(resolved)
 
 def load_json(path: str) -> Any:
     """Loads a JSON file with error handling."""
