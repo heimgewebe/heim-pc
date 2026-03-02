@@ -75,6 +75,8 @@ class TestCheckFreshness(unittest.TestCase):
     @patch('utils.load_json')
     def test_check_freshness_success(self, mock_load_json, mock_datetime, mock_log_info):
         # Setup: Mock datetime to return fixed values
+        # Since check_freshness.py uses 'from datetime import datetime',
+        # patching 'check_freshness.datetime' targets the class reference correctly.
         mock_datetime.now.return_value = FIXED_NOW
         mock_datetime.fromisoformat.side_effect = datetime.fromisoformat
 
