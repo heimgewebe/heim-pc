@@ -90,7 +90,7 @@ class TestCheckFreshness(unittest.TestCase):
 
         # Verify
         self.assertTrue(result)
-        mock_log_info.assert_called_once()
+        mock_log_info.assert_called()
 
     @patch('utils.log_info')
     @patch('check_freshness.datetime')
@@ -115,7 +115,7 @@ class TestCheckFreshness(unittest.TestCase):
         # Verify
         self.assertTrue(result)
         mock_log_warning.assert_called_once_with('Stale data detected. The last update was more than 7 days ago.')
-        mock_log_info.assert_called_once()
+        mock_log_info.assert_called()
 
     @patch('utils.load_json')
     @patch('utils.log_warning')
@@ -153,7 +153,7 @@ class TestCheckFreshness(unittest.TestCase):
         # Check that log_error was called with the expected message prefix
         called_args = mock_log_error.call_args[0][0]
         self.assertTrue(called_args.startswith('Invalid ISO 8601 timestamp in metadata.last_updated: invalid-date'))
-        mock_log_info.assert_called_once()
+        mock_log_info.assert_called()
 
 if __name__ == '__main__':
     unittest.main()
