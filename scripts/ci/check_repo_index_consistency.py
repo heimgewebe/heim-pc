@@ -2,6 +2,9 @@ import sys
 import os
 import re
 
+# Pre-compile regex for performance
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # Add repo root to sys.path to resolve scripts.lib
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, repo_root)
@@ -66,7 +69,7 @@ def main():
                 errors += 1
 
             last_reviewed = frontmatter.get("last_reviewed")
-            if not last_reviewed or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(last_reviewed)):
+            if not last_reviewed or not DATE_PATTERN.match(str(last_reviewed)):
                 print(f"ERROR: Invalid or missing last_reviewed date (must be YYYY-MM-DD) in {display_path}", file=sys.stderr)
                 errors += 1
 
