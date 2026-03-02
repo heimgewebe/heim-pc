@@ -1,6 +1,10 @@
 import sys
 import os
 import re
+from datetime import date
+
+# Date format for last_reviewed (ISO 8601)
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Add repo root to sys.path to resolve scripts.lib
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -65,10 +69,17 @@ def main():
                 print(f"ERROR: Invalid role '{role}' in {display_path}", file=sys.stderr)
                 errors += 1
 
-            last_reviewed = frontmatter.get("last_reviewed")
-            if not last_reviewed or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(last_reviewed)):
-                print(f"ERROR: Invalid or missing last_reviewed date (must be YYYY-MM-DD) in {display_path}", file=sys.stderr)
+            last_reviewed = str(frontmatter.get("last_reviewed", ""))
+            last_reviewed_err = f"ERROR: Invalid or missing last_reviewed date (must be a valid date in YYYY-MM-DD format) in {display_path}"
+            if not DATE_PATTERN.match(last_reviewed):
+                print(last_reviewed_err, file=sys.stderr)
                 errors += 1
+            else:
+                try:
+                    date.fromisoformat(last_reviewed)
+                except ValueError:
+                    print(last_reviewed_err, file=sys.stderr)
+                    errors += 1
 
             depends_on = frontmatter.get("depends_on", [])
             if isinstance(depends_on, str):
