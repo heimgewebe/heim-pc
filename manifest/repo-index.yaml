@@ -1,7 +1,12 @@
 zones:
+  entry:
+    path: .
+    canonical_docs:
+      - AGENTS.md
   norm:
     path: architecture/
     canonical_docs:
+      - operatorium-entry.md
       - model.md
       - security.md
       - zones.md
@@ -11,6 +16,7 @@ zones:
     path: runtime/
     canonical_docs:
       - README.md
+      - home-entry.md
 
 checks:
   - scripts/ci/check_repo_index_consistency.py
