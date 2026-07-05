@@ -37,6 +37,17 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen
 
+## Direkter Karten-Pointer
+
+Die systemweite Ökosystemkarte liegt nicht in diesem Repository, sondern in Cabinet:
+
+* Cabinet-Einstieg: `~/repos/cabinet/index.md`
+* Karten-Blueprint: `~/repos/cabinet/docs/blueprints/ecosystem-map-v0.md`
+* Lesbare Mermaid-Übersicht: `~/repos/cabinet/rendered/ecosystem-map.mmd`
+* Generierte Registry-Projektion: `~/repos/cabinet/rendered/ecosystem-registry-map.mmd`
+
+Zum gerenderten Anschauen heute: die `.mmd`-Dateien in einem Editor mit Mermaid-Preview öffnen oder in einen Mermaid-Renderer kopieren. Eine spätere Leitstand-Ansicht ist der passende Dashboard-Ort; Cabinet bleibt Canon.
+
 ## Goldene Regel
 
 > **Klein committen, groß auslagern. Privatflächen nicht zur Orientierung opfern.**
