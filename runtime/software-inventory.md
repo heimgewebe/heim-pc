@@ -12,7 +12,7 @@ verifies_with:
 
 # Software Inventory
 
-Generated at: `2026-07-09T16:12:58Z`
+Generated at: `2026-07-09T17:16:37Z`
 
 ## Boundary
 
@@ -82,13 +82,13 @@ The inventory may record executable names, versions, package managers, local ser
 ## Heim utility containers
 
 ```text
-heim-util-beszel-agent	henrygd/beszel-agent:latest	Up 38 minutes
-heim-util-beszel	henrygd/beszel:latest	Up 8 hours	127.0.0.1:8090->8090/tcp
-heim-util-stirling-pdf	ghcr.io/stirling-tools/s-pdf:latest	Up 12 hours (healthy)	127.0.0.1:8084->8080/tcp
-heim-util-paperless-webserver	ghcr.io/paperless-ngx/paperless-ngx:latest	Up 13 hours (healthy)	127.0.0.1:8010->8000/tcp
-heim-util-paperless-db	postgres:16-alpine	Up 13 hours	5432/tcp
-heim-util-backrest	ghcr.io/garethgeorge/backrest:latest	Up 13 hours	127.0.0.1:9898->9898/tcp
-heim-util-paperless-broker	redis:7-alpine	Up 13 hours	6379/tcp
+heim-util-beszel-agent	henrygd/beszel-agent:latest	Up 2 hours
+heim-util-beszel	henrygd/beszel:latest	Up 9 hours	127.0.0.1:8090->8090/tcp
+heim-util-stirling-pdf	ghcr.io/stirling-tools/s-pdf:latest	Up 14 hours (healthy)	127.0.0.1:8084->8080/tcp
+heim-util-paperless-webserver	ghcr.io/paperless-ngx/paperless-ngx:latest	Up 14 hours (healthy)	127.0.0.1:8010->8000/tcp
+heim-util-paperless-db	postgres:16-alpine	Up 14 hours	5432/tcp
+heim-util-backrest	ghcr.io/garethgeorge/backrest:latest	Up 14 hours	127.0.0.1:9898->9898/tcp
+heim-util-paperless-broker	redis:7-alpine	Up 14 hours	6379/tcp
 ```
 
 ## Selected Flatpak apps
@@ -120,8 +120,8 @@ pipx	1.0.0-1	install ok installed
 
 ```text
 NEXT                         LEFT    LAST PASSED UNIT                           ACTIVATES
-Fri 2026-07-10 03:17:07 CEST 9h left n/a  n/a    heim-paperless-export.timer    heim-paperless-export.service
-Fri 2026-07-10 03:33:49 CEST 9h left n/a  n/a    heim-restic-backup-local.timer heim-restic-backup-local.service
+Fri 2026-07-10 03:19:02 CEST 8h left n/a  n/a    heim-paperless-export.timer    heim-paperless-export.service
+Fri 2026-07-10 03:40:02 CEST 8h left n/a  n/a    heim-restic-backup-local.timer heim-restic-backup-local.service
 
 2 timers listed.
 Pass --all to see loaded but inactive timers, too.
@@ -142,8 +142,8 @@ correspondents 13
 users 1
 _externalAuths 1
 systems 1
-system_stats 44
-container_stats 44
+system_stats 82
+container_stats 82
 containers 11
 system_details 1
 ```
@@ -161,6 +161,20 @@ b9332c01  2026-07-09 10:55:28  heim-pc     heim-utility,paperless-export,local-s
 1 snapshots
 ```
 
+## Taildrop transfer end-state
+
+```text
+heim-taildrop-inbox.service active
+inbox /home/alex/Incoming/Taildrop
+recent gg (1).md 4 bytes
+recent gg.md 4 bytes
+targets available
+100.94.255.115	a54-von-alexander
+100.67.123.113	heimberry
+100.65.197.66	heimserver	offline; last seen 182h48m0s ago
+100.111.206.65	ipad-10th-gen-wifi
+```
+
 ## Known local paths
 
 - `~/.local/bin/node`
@@ -171,6 +185,9 @@ b9332c01  2026-07-09 10:55:28  heim-pc     heim-utility,paperless-export,local-s
 - `~/.local/bin/heim-paperless-export`
 - `~/.local/bin/heim-restic-backup-local`
 - `~/.local/bin/heim-localsend-open`
+- `~/.local/bin/heim-taildrop-get`
+- `~/.local/bin/heim-taildrop-watch`
+- `~/.local/bin/heim-taildrop-send`
 - `~/.local/bin/atuin`
 - `~/.local/bin/difft`
 - `~/.local/bin/rga`
@@ -182,6 +199,10 @@ b9332c01  2026-07-09 10:55:28  heim-pc     heim-utility,paperless-export,local-s
 - `~/.local/share/heim-utilities/easyeffects/profile-plan.md`
 - `~/.config/heim-utilities/restic-heim-pc-local.includes`
 - `~/.config/heim-utilities/restic-heim-pc-local.excludes`
+- `~/.config/systemd/user/heim-taildrop-inbox.service`
+- `~/Incoming/Taildrop`
+- `~/Incoming/Taildrop/paperless-consume`
+- `~/.local/share/heim-utilities/taildrop/probe`
 - `~/Incoming/LocalSend`
 - `~/Incoming/LocalSend/paperless-consume`
 
@@ -192,5 +213,5 @@ b9332c01  2026-07-09 10:55:28  heim-pc     heim-utility,paperless-export,local-s
 - Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.
 - Localhost service availability does not by itself prove UI onboarding. Beszel monitoring is accepted only when the WAL-aware read-only database check shows a monitored `heim-pc` system and non-zero stats rows.
 - Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.
-- LocalSend has inbox paths and a launcher helper, but cross-device transfer still needs iPad/Samsung-side interaction.
+- LocalSend has inbox paths and a launcher helper, but LocalSend cross-device transfer remains LAN-optional and not accepted. Remote device transfer is accepted through Tailscale Taildrop: PC→iPad succeeded and iPad→PC delivered `gg.md` into `~/Incoming/Taildrop`.
 - EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.
