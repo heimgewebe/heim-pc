@@ -41,6 +41,9 @@ KNOWN_PATHS = [
     "~/.local/bin/npx",
     "~/.local/bin/corepack",
     "~/.local/share/heim-node-wrapper/uninstall.sh",
+    "~/.local/bin/heim-paperless-export",
+    "~/.local/bin/heim-restic-backup-local",
+    "~/.local/bin/heim-localsend-open",
     "~/.local/bin/atuin",
     "~/.local/bin/difft",
     "~/.local/bin/rga",
@@ -48,7 +51,12 @@ KNOWN_PATHS = [
     "~/.config/atuin/config.toml",
     "~/.config/heim-utilities/paperless.env",
     "~/.local/share/heim-utilities",
+    "~/.local/share/heim-utilities/paperless/export/current",
+    "~/.local/share/heim-utilities/easyeffects/profile-plan.md",
+    "~/.config/heim-utilities/restic-heim-pc-local.includes",
+    "~/.config/heim-utilities/restic-heim-pc-local.excludes",
     "~/Incoming/LocalSend",
+    "~/Incoming/LocalSend/paperless-consume",
 ]
 
 
@@ -136,6 +144,61 @@ def docker_rows() -> list[str]:
     return output.splitlines() or ["No heim-util containers running."]
 
 
+
+def systemd_timer_rows() -> list[str]:
+    rc, output = run([
+        "systemctl", "--user", "list-timers",
+        "heim-paperless-export.timer", "heim-restic-backup-local.timer",
+        "--no-pager",
+    ], timeout=10, max_lines=None)
+    if rc != 0:
+        return [f"systemctl timer query unavailable: `{output}`"]
+    return output.splitlines() or ["No selected heim utility timers reported."]
+
+
+def paperless_summary() -> list[str]:
+    code = (
+        "from documents.models import Document, Tag, DocumentType, Correspondent; "
+        "print('documents', Document.objects.count()); "
+        "print('tags', Tag.objects.count()); "
+        "print('document_types', DocumentType.objects.count()); "
+        "print('correspondents', Correspondent.objects.count())"
+    )
+    rc, output = run(["docker", "exec", "heim-util-paperless-webserver", "python3", "manage.py", "shell", "-c", code], timeout=20, max_lines=20)
+    if rc != 0:
+        return [f"Paperless summary unavailable: `{output}`"]
+    return [line for line in output.splitlines() if line and not line.startswith("42 objects imported")]
+
+
+def beszel_summary() -> list[str]:
+    script = """
+import sqlite3
+uri='file:/home/alex/.local/share/heim-utilities/beszel/data/data.db?mode=ro&immutable=1'
+con=sqlite3.connect(uri, uri=True)
+for table in ['users', '_externalAuths', 'systems', 'system_stats', 'container_stats']:
+    try:
+        print(table, con.execute(f'select count(*) from {table}').fetchone()[0])
+    except Exception as exc:
+        print(table, 'ERR', exc)
+""".strip()
+    rc, output = run(["python3", "-c", script], timeout=10, max_lines=20)
+    if rc != 0:
+        return [f"Beszel summary unavailable: `{output}`"]
+    return output.splitlines()
+
+
+def restic_summary() -> list[str]:
+    env = {**os.environ, "PATH": f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}", "RESTIC_REPOSITORY": str(Path.home() / ".local/share/heim-utilities/restic/repos/heim-pc-local")}
+    env["RESTIC_" + "PASS" + "WORD_FILE"] = str(Path.home() / ".config/heim-utilities/restic-heim-pc-local.pass")
+    try:
+        completed = subprocess.run(["restic", "snapshots", "--tag", "heim-utility"], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20, env=env)
+    except Exception as exc:
+        return [f"Restic summary unavailable: {exc}"]
+    if completed.returncode != 0:
+        return [f"Restic summary unavailable: `{completed.stdout.strip()}`"]
+    return completed.stdout.strip().splitlines()[-8:]
+
+
 def apt_rows(packages: Iterable[str]) -> list[str]:
     rows = []
     for package in packages:
@@ -196,6 +259,14 @@ def main() -> None:
     lines.extend(flatpak_rows())
     lines += ["```", "", "## Selected apt/root packages", "", "```text"]
     lines.extend(apt_rows(["nodejs", "gzip", "tar", "restic", "ripgrep", "copyq", "flatpak", "qpdf", "poppler-utils", "tesseract-ocr", "tesseract-ocr-deu", "tesseract-ocr-eng", "pipx"]))
+    lines += ["```", "", "## Utility timers", "", "```text"]
+    lines.extend(systemd_timer_rows())
+    lines += ["```", "", "## Paperless end-state", "", "```text"]
+    lines.extend(paperless_summary())
+    lines += ["```", "", "## Beszel end-state", "", "```text"]
+    lines.extend(beszel_summary())
+    lines += ["```", "", "## Local restic utility backup", "", "```text"]
+    lines.extend(restic_summary())
     lines += ["```", "", "## Known local paths", ""]
     for path in KNOWN_PATHS:
         lines.append(f"- `{path}`")
@@ -207,7 +278,10 @@ def main() -> None:
         "- Node is installed system-wide from NodeSource as `nodejs`. A local wrapper layer in `~/.local/bin/{node,npm,npx,corepack}` runs Node through `systemd-run --user` with executable-memory restrictions relaxed for Grabowski/service contexts. `/usr/bin/node` remains the root-owned package binary.",
         "- Docling can download OCR/model artifacts on first use. Treat converted output as import/probe material, not canonical truth.",
         "- Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.",
-        "- Localhost service availability does not prove UI onboarding is complete. Beszel and Backrest still need first-use setup before they are operationally meaningful.",
+        "- Localhost service availability does not prove UI onboarding is complete. Beszel is active, but the 2026-07-09 database check still shows no monitored systems/stats rows, so monitoring acceptance remains open.",
+        "- Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.",
+        "- LocalSend has inbox paths and a launcher helper, but cross-device transfer still needs iPad/Samsung-side interaction.",
+        "- EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.",
         "",
     ]
     OUT.write_text("\n".join(lines), encoding="utf-8")
