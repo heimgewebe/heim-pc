@@ -17,6 +17,7 @@ zones:
     canonical_docs:
       - README.md
       - home-entry.md
+      - software-inventory.md
 
 checks:
   - scripts/ci/check_repo_index_consistency.py
