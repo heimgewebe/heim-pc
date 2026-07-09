@@ -44,6 +44,9 @@ KNOWN_PATHS = [
     "~/.local/bin/heim-paperless-export",
     "~/.local/bin/heim-restic-backup-local",
     "~/.local/bin/heim-localsend-open",
+    "~/.local/bin/heim-taildrop-get",
+    "~/.local/bin/heim-taildrop-watch",
+    "~/.local/bin/heim-taildrop-send",
     "~/.local/bin/atuin",
     "~/.local/bin/difft",
     "~/.local/bin/rga",
@@ -55,6 +58,10 @@ KNOWN_PATHS = [
     "~/.local/share/heim-utilities/easyeffects/profile-plan.md",
     "~/.config/heim-utilities/restic-heim-pc-local.includes",
     "~/.config/heim-utilities/restic-heim-pc-local.excludes",
+    "~/.config/systemd/user/heim-taildrop-inbox.service",
+    "~/Incoming/Taildrop",
+    "~/Incoming/Taildrop/paperless-consume",
+    "~/.local/share/heim-utilities/taildrop/probe",
     "~/Incoming/LocalSend",
     "~/Incoming/LocalSend/paperless-consume",
 ]
@@ -148,7 +155,7 @@ def docker_rows() -> list[str]:
 def systemd_timer_rows() -> list[str]:
     rc, output = run([
         "systemctl", "--user", "list-timers",
-        "heim-paperless-export.timer", "heim-restic-backup-local.timer",
+        "heim-paperless-export.timer", "heim-restic-backup-local.timer", "heim-taildrop-inbox.service",
         "--no-pager",
     ], timeout=10, max_lines=None)
     if rc != 0:
@@ -185,6 +192,30 @@ for table in ['users', '_externalAuths', 'systems', 'system_stats', 'container_s
     if rc != 0:
         return [f"Beszel summary unavailable: `{output}`"]
     return output.splitlines()
+
+
+
+def taildrop_summary() -> list[str]:
+    rows: list[str] = []
+    rc, status = run(["systemctl", "--user", "is-active", "heim-taildrop-inbox.service"], timeout=5, max_lines=5)
+    rows.append(f"heim-taildrop-inbox.service {status.strip() if status.strip() else 'unknown'}")
+    inbox = Path.home() / "Incoming/Taildrop"
+    rows.append(f"inbox {inbox}")
+    recent = []
+    if inbox.exists():
+        for item in sorted(inbox.rglob("*"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+            if item.is_file() and item.name != "README.txt":
+                recent.append(f"{item.name} {item.stat().st_size} bytes")
+            if len(recent) >= 5:
+                break
+    rows.extend(["recent " + entry for entry in recent] or ["recent none"])
+    rc, targets = run(["tailscale", "file", "cp", "--targets"], timeout=10, max_lines=20)
+    if rc == 0:
+        rows.append("targets available")
+        rows.extend(targets.splitlines()[:10])
+    else:
+        rows.append(f"targets unavailable: {targets}")
+    return rows
 
 
 def restic_summary() -> list[str]:
@@ -267,6 +298,8 @@ def main() -> None:
     lines.extend(beszel_summary())
     lines += ["```", "", "## Local restic utility backup", "", "```text"]
     lines.extend(restic_summary())
+    lines += ["```", "", "## Taildrop transfer end-state", "", "```text"]
+    lines.extend(taildrop_summary())
     lines += ["```", "", "## Known local paths", ""]
     for path in KNOWN_PATHS:
         lines.append(f"- `{path}`")
@@ -280,7 +313,7 @@ def main() -> None:
         "- Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.",
         "- Localhost service availability does not by itself prove UI onboarding. Beszel monitoring is accepted only when the WAL-aware read-only database check shows a monitored `heim-pc` system and non-zero stats rows.",
         "- Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.",
-        "- LocalSend has inbox paths and a launcher helper, but cross-device transfer still needs iPad/Samsung-side interaction.",
+        "- LocalSend has inbox paths and a launcher helper, but LocalSend cross-device transfer remains LAN-optional and not accepted. Remote device transfer is accepted through Tailscale Taildrop: PC→iPad succeeded and iPad→PC delivered `gg.md` into `~/Incoming/Taildrop`.",
         "- EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.",
         "",
     ]
