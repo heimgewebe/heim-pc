@@ -32,6 +32,7 @@ It provides a complete overview of the canonical documentation zones and their c
 |---|---|---|---|---|
 | runtime.readme | [runtime/README.md](runtime/README.md) | canonical | 2026-02-28 | - |
 | home-entry | [runtime/home-entry.md](runtime/home-entry.md) | canonical | 2026-07-04 | operatorium-entry, security |
+| software-inventory | [runtime/software-inventory.md](runtime/software-inventory.md) | canonical | 2026-07-09 | home-entry, security |
 
 ## Automated Checks
 
