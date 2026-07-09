@@ -173,9 +173,9 @@ def paperless_summary() -> list[str]:
 def beszel_summary() -> list[str]:
     script = """
 import sqlite3
-uri='file:/home/alex/.local/share/heim-utilities/beszel/data/data.db?mode=ro&immutable=1'
+uri='file:/home/alex/.local/share/heim-utilities/beszel/data/data.db?mode=ro'
 con=sqlite3.connect(uri, uri=True)
-for table in ['users', '_externalAuths', 'systems', 'system_stats', 'container_stats']:
+for table in ['users', '_externalAuths', 'systems', 'system_stats', 'container_stats', 'containers', 'system_details']:
     try:
         print(table, con.execute(f'select count(*) from {table}').fetchone()[0])
     except Exception as exc:
@@ -278,7 +278,7 @@ def main() -> None:
         "- Node is installed system-wide from NodeSource as `nodejs`. A local wrapper layer in `~/.local/bin/{node,npm,npx,corepack}` runs Node through `systemd-run --user` with executable-memory restrictions relaxed for Grabowski/service contexts. `/usr/bin/node` remains the root-owned package binary.",
         "- Docling can download OCR/model artifacts on first use. Treat converted output as import/probe material, not canonical truth.",
         "- Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.",
-        "- Localhost service availability does not prove UI onboarding is complete. Beszel is active, but the 2026-07-09 database check still shows no monitored systems/stats rows, so monitoring acceptance remains open.",
+        "- Localhost service availability does not by itself prove UI onboarding. Beszel monitoring is accepted only when the WAL-aware read-only database check shows a monitored `heim-pc` system and non-zero stats rows.",
         "- Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.",
         "- LocalSend has inbox paths and a launcher helper, but cross-device transfer still needs iPad/Samsung-side interaction.",
         "- EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.",
