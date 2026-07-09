@@ -12,7 +12,7 @@ verifies_with:
 
 # Software Inventory
 
-Generated at: `2026-07-09T09:52:21Z`
+Generated at: `2026-07-09T16:12:58Z`
 
 ## Boundary
 
@@ -82,12 +82,13 @@ The inventory may record executable names, versions, package managers, local ser
 ## Heim utility containers
 
 ```text
-heim-util-beszel	henrygd/beszel:latest	Up 2 hours	127.0.0.1:8090->8090/tcp
-heim-util-stirling-pdf	ghcr.io/stirling-tools/s-pdf:latest	Up 6 hours (healthy)	127.0.0.1:8084->8080/tcp
-heim-util-paperless-webserver	ghcr.io/paperless-ngx/paperless-ngx:latest	Up 6 hours (healthy)	127.0.0.1:8010->8000/tcp
-heim-util-paperless-db	postgres:16-alpine	Up 6 hours	5432/tcp
-heim-util-backrest	ghcr.io/garethgeorge/backrest:latest	Up 6 hours	127.0.0.1:9898->9898/tcp
-heim-util-paperless-broker	redis:7-alpine	Up 6 hours	6379/tcp
+heim-util-beszel-agent	henrygd/beszel-agent:latest	Up 38 minutes
+heim-util-beszel	henrygd/beszel:latest	Up 8 hours	127.0.0.1:8090->8090/tcp
+heim-util-stirling-pdf	ghcr.io/stirling-tools/s-pdf:latest	Up 12 hours (healthy)	127.0.0.1:8084->8080/tcp
+heim-util-paperless-webserver	ghcr.io/paperless-ngx/paperless-ngx:latest	Up 13 hours (healthy)	127.0.0.1:8010->8000/tcp
+heim-util-paperless-db	postgres:16-alpine	Up 13 hours	5432/tcp
+heim-util-backrest	ghcr.io/garethgeorge/backrest:latest	Up 13 hours	127.0.0.1:9898->9898/tcp
+heim-util-paperless-broker	redis:7-alpine	Up 13 hours	6379/tcp
 ```
 
 ## Selected Flatpak apps
@@ -118,9 +119,9 @@ pipx	1.0.0-1	install ok installed
 ## Utility timers
 
 ```text
-NEXT                         LEFT     LAST PASSED UNIT                           ACTIVATES
-Fri 2026-07-10 03:18:07 CEST 15h left n/a  n/a    heim-paperless-export.timer    heim-paperless-export.service
-Fri 2026-07-10 03:46:15 CEST 15h left n/a  n/a    heim-restic-backup-local.timer heim-restic-backup-local.service
+NEXT                         LEFT    LAST PASSED UNIT                           ACTIVATES
+Fri 2026-07-10 03:17:07 CEST 9h left n/a  n/a    heim-paperless-export.timer    heim-paperless-export.service
+Fri 2026-07-10 03:33:49 CEST 9h left n/a  n/a    heim-restic-backup-local.timer heim-restic-backup-local.service
 
 2 timers listed.
 Pass --all to see loaded but inactive timers, too.
@@ -140,9 +141,11 @@ correspondents 13
 ```text
 users 1
 _externalAuths 1
-systems 0
-system_stats 0
-container_stats 0
+systems 1
+system_stats 44
+container_stats 44
+containers 11
+system_details 1
 ```
 
 ## Local restic utility backup
@@ -187,7 +190,7 @@ b9332c01  2026-07-09 10:55:28  heim-pc     heim-utility,paperless-export,local-s
 - Node is installed system-wide from NodeSource as `nodejs`. A local wrapper layer in `~/.local/bin/{node,npm,npx,corepack}` runs Node through `systemd-run --user` with executable-memory restrictions relaxed for Grabowski/service contexts. `/usr/bin/node` remains the root-owned package binary.
 - Docling can download OCR/model artifacts on first use. Treat converted output as import/probe material, not canonical truth.
 - Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.
-- Localhost service availability does not prove UI onboarding is complete. Beszel is active, but the 2026-07-09 database check still shows no monitored systems/stats rows, so monitoring acceptance remains open.
+- Localhost service availability does not by itself prove UI onboarding. Beszel monitoring is accepted only when the WAL-aware read-only database check shows a monitored `heim-pc` system and non-zero stats rows.
 - Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.
 - LocalSend has inbox paths and a launcher helper, but cross-device transfer still needs iPad/Samsung-side interaction.
 - EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.
