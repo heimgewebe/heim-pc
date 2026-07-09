@@ -36,6 +36,11 @@ LOCALHOST_SERVICES = [
 ]
 
 KNOWN_PATHS = [
+    "~/.local/bin/node",
+    "~/.local/bin/npm",
+    "~/.local/bin/npx",
+    "~/.local/bin/corepack",
+    "~/.local/share/heim-node-wrapper/uninstall.sh",
     "~/.local/bin/atuin",
     "~/.local/bin/difft",
     "~/.local/bin/rga",
@@ -190,7 +195,7 @@ def main() -> None:
     lines += ["```", "", "## Selected Flatpak apps", "", "```text"]
     lines.extend(flatpak_rows())
     lines += ["```", "", "## Selected apt/root packages", "", "```text"]
-    lines.extend(apt_rows(["nodejs", "restic", "ripgrep", "copyq", "flatpak", "qpdf", "poppler-utils", "tesseract-ocr", "tesseract-ocr-deu", "tesseract-ocr-eng", "pipx"]))
+    lines.extend(apt_rows(["nodejs", "gzip", "tar", "restic", "ripgrep", "copyq", "flatpak", "qpdf", "poppler-utils", "tesseract-ocr", "tesseract-ocr-deu", "tesseract-ocr-eng", "pipx"]))
     lines += ["```", "", "## Known local paths", ""]
     for path in KNOWN_PATHS:
         lines.append(f"- `{path}`")
@@ -199,7 +204,7 @@ def main() -> None:
         "",
         "## Known caveats",
         "",
-        "- Node is installed system-wide from NodeSource as `nodejs`. In normal interactive shell output on 2026-07-09, `/usr/bin/node -e`, npm, npx and corepack worked. In the restricted Grabowski/service context, Node/V8 can still fail when executable memory is denied; use the documented systemd-run wrapper pattern there.",
+        "- Node is installed system-wide from NodeSource as `nodejs`. A local wrapper layer in `~/.local/bin/{node,npm,npx,corepack}` runs Node through `systemd-run --user` with executable-memory restrictions relaxed for Grabowski/service contexts. `/usr/bin/node` remains the root-owned package binary.",
         "- Docling can download OCR/model artifacts on first use. Treat converted output as import/probe material, not canonical truth.",
         "- Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.",
         "- Localhost service availability does not prove UI onboarding is complete. Beszel and Backrest still need first-use setup before they are operationally meaningful.",
