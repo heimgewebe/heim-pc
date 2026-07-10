@@ -1,0 +1,1172 @@
+{
+  "counts": {
+    "curated_executables": 29361,
+    "desktop_apps": 265,
+    "docker_containers": 19,
+    "executables_added_by_sudo": 14394,
+    "flatpak_apps": 25,
+    "rootfs_executables_non_sudo": 95049,
+    "rootfs_executables_sudo": 109443,
+    "running_process_names": 552,
+    "running_process_rows": 932,
+    "snap_packages": 12
+  },
+  "desktop_groups": {
+    "Audio / Video / Medien": [
+      "Ardour",
+      "Ardour6",
+      "Audacity",
+      "Calf Plugin Pack for JACK",
+      "Carla",
+      "Carla Control",
+      "Easy Effects",
+      "Fullscreen",
+      "Kdenlive",
+      "mpv Media Player",
+      "OBS Studio",
+      "Open in standalone mode",
+      "PulseAudio Volume Control",
+      "Qsynth",
+      "Shortwave",
+      "Sound Juicer",
+      "Spotify",
+      "VLC media player",
+      "Xjadeo"
+    ],
+    "Browser / Kommunikation / Netzwerk": [
+      "Advanced Network Configuration",
+      "Brave Opti",
+      "ChatGPT",
+      "Discord",
+      "Ferdium",
+      "iCloud Drive Auth",
+      "iCloud Drive Mount",
+      "iCloud Drive Status",
+      "LocalSend",
+      "Mattermost",
+      "Mono Signal Generator",
+      "New Incognito Window",
+      "New Window",
+      "Open Profile Manager",
+      "Proton VPN",
+      "Remote Viewer",
+      "Signal",
+      "Sunshine",
+      "Syncthing GTK",
+      "WhatsApp Desktop",
+      "Zoom Workplace"
+    ],
+    "Dokumente / Wissen / Office": [
+      "Calendar",
+      "Contacts",
+      "Document Scanner",
+      "iCloud",
+      "Math",
+      "MuseScore Studio",
+      "New Document",
+      "New Drawing",
+      "New Formula",
+      "New PDF",
+      "New Presentation",
+      "New Spreadsheet",
+      "New Window",
+      "Obsidian"
+    ],
+    "Entwicklung / Operator": [
+      "Antigravity",
+      "DataGrip 2025.3",
+      "DB Browser for SQLite",
+      "Fleet",
+      "Fleet 1.48.261 Public Preview",
+      "GitHub Desktop",
+      "GitKraken",
+      "HausKI Dashboard",
+      "Insomnia",
+      "JetBrains Toolbox",
+      "Neovim",
+      "New Empty Window",
+      "Nsight Eclipse Edition",
+      "NVIDIA Nsight Compute 2024.1.1",
+      "NVIDIA Nsight Compute 2025.1.1",
+      "NVIDIA Nsight Systems 2023.4.4",
+      "NVIDIA Nsight Systems 2024.6.2",
+      "NVIDIA Visual Profiler",
+      "Postman",
+      "PyCharm 2025.3",
+      "Vim"
+    ],
+    "Grafik / Bilder": [
+      "Image Viewer",
+      "ImageMagick (color depth=q16)",
+      "Open launcher"
+    ],
+    "Sonstige Desktop-Starter": [
+      "12 Channel Spectrum Analyzer",
+      "16 Channel Spectrum Analyzer",
+      "Artistic Delay Mono",
+      "Artistic Delay Stereo",
+      "Direct Out 12 Instrument Sample Player",
+      "Direct Out 24 Instrument Sample Player",
+      "Direct out 48 Instrument Sample Player",
+      "Eight Channel Spectrum Analyzer",
+      "Four Channel Spectrum Analyzer",
+      "ICF Bewertungsassistent",
+      "Latency Meter",
+      "Mid-Side Crossover",
+      "Mid-Side Split Multiband Compressor",
+      "Mid-Side Split Multiband Expander",
+      "Mid-Side Split Multiband Gate",
+      "Mid-Side Split Multiband Sidechain Expander",
+      "Mid-Side Split Multiband Sidechain Gate",
+      "Mid-Side Split Stereo Compressor",
+      "Mid-Side Stereo 16 Band Graphic Equalizer",
+      "Mid-Side Stereo 16 Band Parametric Equalizer",
+      "Mid-Side Stereo 32 Band Graphic Equalizer",
+      "Mid-Side Stereo 32 Band Parametric Equalizer",
+      "Mid-Side Stereo Dynamic Processor",
+      "Mid-Side Stereo Dynamic Sidechain Processor",
+      "Mid-Side Stereo Expander",
+      "Mid-Side Stereo Gate",
+      "Mid-Side Stereo Sidechain Expander",
+      "Mid-Side Stereo Sidechain Gate",
+      "Mid-Side Stereo Sidechain Multiband Compressor",
+      "Mid-Side Stero Sidechain Compressor",
+      "Mono 16 Band Graphic Equalizer",
+      "Mono 16 Band Parametric Equalizer",
+      "Mono 32 Band Parametric Equalizer",
+      "Mono Audio Profiler",
+      "Mono Audio Trigger",
+      "Mono Compressor",
+      "Mono Convolution Reverb",
+      "Mono Crossover",
+      "Mono Delay Compensator",
+      "Mono Dynamic Processor",
+      "Mono Dynamic Sidechain Processor",
+      "Mono Expander",
+      "Mono Gate",
+      "Mono Impulse Responses",
+      "Mono Limiter",
+      "Mono Loudness Compensator",
+      "Mono MIDI Sample Player",
+      "Mono MIDI Trigger",
+      "Mono Multiband Compressor",
+      "Mono Multiband Expander",
+      "Mono Multiband Gate",
+      "Mono Multiband Sidechain Expander",
+      "Mono Multiband Sidechain Gate",
+      "Mono Room Impulse Response Builder",
+      "Mono Sidechain Compressor",
+      "Mono Sidechain Expander",
+      "Mono Sidechain Gate",
+      "Mono Sidechain Limiter",
+      "Mono Sidechain Multiband Compressor",
+      "Mono Slap Delay",
+      "Mono Surge Filter",
+      "One Channel Spectrum Analyzer",
+      "Oscilloscope 1 Channel",
+      "Oscilloscope 2 Channels",
+      "Oscilloscope 4 Channels",
+      "Phase Detector",
+      "Split Crossover",
+      "Split Multiband Compressor",
+      "Split Multiband Expander",
+      "Split Multiband Gate",
+      "Split Multiband Sidechain Expander",
+      "Split Multiband Sidechain Gate",
+      "Split Stereo 16 Band Graphic Equalizer",
+      "Split Stereo 16 Band Parametric Equalizer",
+      "Split Stereo 32 Band Graphic Equalizer",
+      "Split Stereo 32 Band Parametric Equalizer",
+      "Split Stereo Compressor",
+      "Split Stereo Delay Compensator",
+      "Split Stereo Dynamic Processor",
+      "Split Stereo Dynamic Sidechain Processor",
+      "Split Stereo Expander",
+      "Split Stereo Gate",
+      "Split Stereo Sidechain Compressor",
+      "Split Stereo Sidechain Expander",
+      "Split Stereo Sidechain Gate",
+      "Split Stereo Sidechain Multiband Compressor",
+      "Stereo 12 Instrument Sample Player",
+      "Stereo 16 Band Graphic Equalizer",
+      "Stereo 16 Band Parametric Equalizer",
+      "Stereo 24 Instrument Sample Player",
+      "Stereo 32 Band Graphic Equalizer",
+      "Stereo 32 Band Parametric Equalizer",
+      "Stereo 48 Instrument Sample Player",
+      "Stereo Audio Profiler",
+      "Stereo Audio Trigger",
+      "Stereo Compressor",
+      "Stereo Convolution Reverb",
+      "Stereo Crossover",
+      "Stereo Delay Compensator",
+      "Stereo Dynamic Processor",
+      "Stereo Dynamic Sidechain Processor",
+      "Stereo Expander",
+      "Stereo Gate",
+      "Stereo Impulse Responses",
+      "Stereo Limiter",
+      "Stereo Loudness Compensator",
+      "Stereo MIDI Sample Player",
+      "Stereo MIDI Trigger",
+      "Stereo Multiband Compressor",
+      "Stereo Multiband Expander",
+      "Stereo Multiband Gate",
+      "Stereo Multiband Sidechain Expander",
+      "Stereo Multiband Sidechain Gate",
+      "Stereo Room Impulse Response Builder",
+      "Stereo Sidechain Expander",
+      "Stereo Sidechain Gate",
+      "Stereo Sidechain Limiter",
+      "Stereo Sidechain Multiband Compressor",
+      "Stereo Slap Delay",
+      "Stereo Surge Filter",
+      "Stero Sidechain Compressor",
+      "Two Channel Spectrum Analyzer"
+    ],
+    "System / Sicherheit / Utilities": [
+      "About Eddy",
+      "Additional Drivers",
+      "Archive Manager",
+      "Bitwarden",
+      "Calculator",
+      "Character Map",
+      "Check for Updates",
+      "CopyQ",
+      "Disk Usage Analyzer",
+      "Disks",
+      "Ente Auth",
+      "Extension Manager",
+      "Extensions",
+      "fish",
+      "Flatseal",
+      "Fonts",
+      "GNOME System Monitor",
+      "GParted",
+      "Help",
+      "IBus Preferences",
+      "Input Method",
+      "kitty",
+      "Language Support",
+      "Mozc Setup",
+      "New Tab",
+      "New Window",
+      "NVIDIA X Server Settings",
+      "OpenJDK Java 8 Policy Tool",
+      "Passwords and Keys",
+      "Popsicle USB Flasher",
+      "Power Statistics",
+      "Preferences",
+      "Printers",
+      "Psensor",
+      "Raspberry Pi Imager",
+      "Repoman",
+      "Settings",
+      "Show Applications",
+      "Show Launcher",
+      "Show Workspaces",
+      "Software",
+      "Software & Updates",
+      "Solaar",
+      "Stacer",
+      "Startup Applications",
+      "Synaptic Package Manager",
+      "System Monitor",
+      "System76 Driver",
+      "Task Terminal",
+      "TeXInfo",
+      "Timeshift",
+      "Tweaks",
+      "UXTerm",
+      "VeraCrypt",
+      "Virtual Machine Manager",
+      "Weather",
+      "WezTerm",
+      "XTerm"
+    ]
+  },
+  "docker_containers": [
+    {
+      "image": "henrygd/beszel:latest",
+      "name": "brave_cori",
+      "ports": "",
+      "status": "Created"
+    },
+    {
+      "image": "rust:1.89.0-bookworm",
+      "name": "compose-api-1",
+      "ports": "",
+      "status": "Created"
+    },
+    {
+      "image": "caddy:2.7",
+      "name": "compose-caddy-1",
+      "ports": "",
+      "status": "Created"
+    },
+    {
+      "image": "postgres:16",
+      "name": "compose-db-1",
+      "ports": "",
+      "status": "Exited (0) 2 weeks ago"
+    },
+    {
+      "image": "edoburu/pgbouncer:latest",
+      "name": "compose-pgbouncer-1",
+      "ports": "",
+      "status": "Exited (0) 2 weeks ago"
+    },
+    {
+      "image": "node:20.19.0-alpine",
+      "name": "compose-web-1",
+      "ports": "",
+      "status": "Created"
+    },
+    {
+      "image": "vsc-weltgewebe-2e0be6136de82270214db448dd0fe39fcc62e683bc65d441110dc01323796585-uid",
+      "name": "cranky_satoshi",
+      "ports": "",
+      "status": "Exited (0) 5 weeks ago"
+    },
+    {
+      "image": "ghcr.io/garethgeorge/backrest:latest",
+      "name": "heim-util-backrest",
+      "ports": "127.0.0.1:9898->9898/tcp",
+      "status": "Up 14 hours"
+    },
+    {
+      "image": "henrygd/beszel:latest",
+      "name": "heim-util-beszel",
+      "ports": "127.0.0.1:8090->8090/tcp",
+      "status": "Up 10 hours"
+    },
+    {
+      "image": "henrygd/beszel-agent:latest",
+      "name": "heim-util-beszel-agent",
+      "ports": "",
+      "status": "Up 2 hours"
+    },
+    {
+      "image": "redis:7-alpine",
+      "name": "heim-util-paperless-broker",
+      "ports": "6379/tcp",
+      "status": "Up 14 hours"
+    },
+    {
+      "image": "postgres:16-alpine",
+      "name": "heim-util-paperless-db",
+      "ports": "5432/tcp",
+      "status": "Up 14 hours"
+    },
+    {
+      "image": "ghcr.io/paperless-ngx/paperless-ngx:latest",
+      "name": "heim-util-paperless-webserver",
+      "ports": "127.0.0.1:8010->8000/tcp",
+      "status": "Up 14 hours (healthy)"
+    },
+    {
+      "image": "ghcr.io/stirling-tools/s-pdf:latest",
+      "name": "heim-util-stirling-pdf",
+      "ports": "127.0.0.1:8084->8080/tcp",
+      "status": "Up 14 hours (healthy)"
+    },
+    {
+      "image": "mattermost/mattermost-team-edition:9.5",
+      "name": "mm-app",
+      "ports": "8067/tcp, 127.0.0.1:8065->8065/tcp, 8074-8075/tcp",
+      "status": "Up 4 days (healthy)"
+    },
+    {
+      "image": "24a90047f2d2",
+      "name": "mm-db",
+      "ports": "5432/tcp",
+      "status": "Up 4 days"
+    },
+    {
+      "image": "mongo:6",
+      "name": "unifi-mongo",
+      "ports": "27017/tcp",
+      "status": "Up 4 days"
+    },
+    {
+      "image": "lscr.io/linuxserver/unifi-network-application",
+      "name": "unifi-network",
+      "ports": "0.0.0.0:1900->1900/udp, [::]:1900->1900/udp, 0.0.0.0:6789->6789/tcp, [::]:6789->6789/tcp, 0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp, 8843/tcp, 0.0.0.0:3478->3478/udp, [::]:3478->3478/udp, 0.0.0.0:10001->10001/udp, [::]:10001->10001/udp, 0.0.0.0:8443->8443/tcp, [::]:8443->8443/tcp, 8880/tcp",
+      "status": "Up 4 days"
+    },
+    {
+      "image": "24a90047f2d2",
+      "name": "wg-pg-proof",
+      "ports": "",
+      "status": "Exited (0) 4 days ago"
+    }
+  ],
+  "flatpak_apps": [
+    {
+      "application": "org.ardour.Ardour",
+      "installation": "user",
+      "name": "Ardour",
+      "version": "9.7.0"
+    },
+    {
+      "application": "com.bitwarden.desktop",
+      "installation": "system",
+      "name": "Bitwarden",
+      "version": "2026.6.1"
+    },
+    {
+      "application": "org.chromium.Chromium",
+      "installation": "user",
+      "name": "Chromium Web Browser",
+      "version": "150.0.7871.100"
+    },
+    {
+      "application": "com.discordapp.Discord",
+      "installation": "user",
+      "name": "Discord",
+      "version": "1.0.146"
+    },
+    {
+      "application": "com.github.wwmm.easyeffects",
+      "installation": "user",
+      "name": "Easy Effects",
+      "version": "8.2.7"
+    },
+    {
+      "application": "io.ente.auth",
+      "installation": "user",
+      "name": "Ente Auth",
+      "version": "4.4"
+    },
+    {
+      "application": "org.ferdium.Ferdium",
+      "installation": "user",
+      "name": "Ferdium",
+      "version": "7.1.2"
+    },
+    {
+      "application": "org.flameshot.Flameshot",
+      "installation": "user",
+      "name": "Flameshot",
+      "version": "14.0.0"
+    },
+    {
+      "application": "com.github.tchx84.Flatseal",
+      "installation": "user",
+      "name": "Flatseal",
+      "version": "2.4.1"
+    },
+    {
+      "application": "io.github.shiftey.Desktop",
+      "installation": "user",
+      "name": "GitHub Desktop",
+      "version": "3.4.13-linux1"
+    },
+    {
+      "application": "com.axosoft.GitKraken",
+      "installation": "user",
+      "name": "GitKraken",
+      "version": "12.3.0"
+    },
+    {
+      "application": "rest.insomnia.Insomnia",
+      "installation": "user",
+      "name": "Insomnia",
+      "version": "12.6.0"
+    },
+    {
+      "application": "org.kde.kdenlive",
+      "installation": "user",
+      "name": "Kdenlive",
+      "version": "26.04.3"
+    },
+    {
+      "application": "org.localsend.localsend_app",
+      "installation": "user",
+      "name": "LocalSend",
+      "version": "1.17.0"
+    },
+    {
+      "application": "com.mattermost.Desktop",
+      "installation": "system",
+      "name": "Mattermost",
+      "version": "6.2.2"
+    },
+    {
+      "application": "com.obsproject.Studio",
+      "installation": "user",
+      "name": "OBS Studio",
+      "version": "32.1.2"
+    },
+    {
+      "application": "md.obsidian.Obsidian",
+      "installation": "system",
+      "name": "Obsidian",
+      "version": "1.12.7"
+    },
+    {
+      "application": "com.getpostman.Postman",
+      "installation": "user",
+      "name": "Postman",
+      "version": "12.18.3"
+    },
+    {
+      "application": "de.haeckerfelix.Shortwave",
+      "installation": "system",
+      "name": "Shortwave",
+      "version": "5.1.0"
+    },
+    {
+      "application": "org.signal.Signal",
+      "installation": "user",
+      "name": "Signal Desktop",
+      "version": "8.17.0"
+    },
+    {
+      "application": "com.spotify.Client",
+      "installation": "system",
+      "name": "Spotify",
+      "version": "1.2.92.147.g5b8f9367"
+    },
+    {
+      "application": "dev.lizardbyte.app.Sunshine",
+      "installation": "system",
+      "name": "Sunshine",
+      "version": "2026.516.143833"
+    },
+    {
+      "application": "me.kozec.syncthingtk",
+      "installation": "user",
+      "name": "Syncthing GTK",
+      "version": "v0.9.4.5"
+    },
+    {
+      "application": "org.wezfurlong.wezterm",
+      "installation": "user",
+      "name": "WezTerm",
+      "version": "20240203-110809-5046fc22"
+    },
+    {
+      "application": "io.github.mimbrero.WhatsAppDesktop",
+      "installation": "user",
+      "name": "WhatsApp Desktop",
+      "version": "1.2.3"
+    }
+  ],
+  "generated_at": "2026-07-09T18:15:00Z",
+  "operator_tools": {
+    "aider": [
+      "~/.local/bin/aider"
+    ],
+    "bats": [
+      "/usr/bin/bats"
+    ],
+    "bw": [
+      "/var/lib/flatpak/app/com.bitwarden.desktop/x86_64/stable/7f3d809af95deb28a4b56a547103b6830e75bf26a5c7228f7bf94f8edab0ebf1/files/bin/bw",
+      "~/.local/bin/bw",
+      "~/.npm-global/bin/bw"
+    ],
+    "claude": [
+      "~/.local/bin/claude"
+    ],
+    "codex": [
+      "~/.local/bin/codex",
+      "~/.npm-global/bin/codex"
+    ],
+    "difft": [
+      "~/.local/bin/difft"
+    ],
+    "docker": [
+      "/usr/bin/docker"
+    ],
+    "docling": [
+      "~/.local/bin/docling"
+    ],
+    "ffmpeg": [
+      "/usr/bin/ffmpeg",
+      "/var/lib/flatpak/.removed/org.freedesktop.Platform-3f0cb4a807750a19ed8a3dea96be9bf562271bd8e84137fb2d678e665b549b73/files/bin/ffmpeg",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/24.08/9a6d66049b19987a22bf81015ce0d1fde260df85a45e54695aad3c82f1e198ee/files/bin/ffmpeg",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/25.08/fdad08cc10905f9175f0224652a7b1c1b4d37fc1a5fa8c97843ccef846c642a0/files/bin/ffmpeg",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/48/0ebc10e5cc1fbe0836505fa203d75902606bcd4763c2c3cb0678795690dc506c/files/bin/ffmpeg"
+    ],
+    "ffprobe": [
+      "/var/lib/flatpak/.removed/org.freedesktop.Platform-3f0cb4a807750a19ed8a3dea96be9bf562271bd8e84137fb2d678e665b549b73/files/bin/ffprobe",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/24.08/9a6d66049b19987a22bf81015ce0d1fde260df85a45e54695aad3c82f1e198ee/files/bin/ffprobe",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/25.08/fdad08cc10905f9175f0224652a7b1c1b4d37fc1a5fa8c97843ccef846c642a0/files/bin/ffprobe",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/48/0ebc10e5cc1fbe0836505fa203d75902606bcd4763c2c3cb0678795690dc506c/files/bin/ffprobe",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/49/4936bdd3020c5d5bae52a4b217b0abe0e3cad28f6ad755d88042e257419aada8/files/bin/ffprobe"
+    ],
+    "gemini": [
+      "~/.local/bin/gemini",
+      "~/.npm-global/bin/gemini"
+    ],
+    "gh": [
+      "/usr/bin/gh",
+      "/var/lib/flatpak/app/md.obsidian.Obsidian/x86_64/stable/888de8f4928c6e0ead8265c71b1defa7c29259090479922ee501de179c61ddc2/files/bin/gh"
+    ],
+    "jq": [
+      "/usr/bin/jq",
+      "/var/lib/flatpak/.removed/org.freedesktop.Platform-3f0cb4a807750a19ed8a3dea96be9bf562271bd8e84137fb2d678e665b549b73/files/bin/jq",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/24.08/9a6d66049b19987a22bf81015ce0d1fde260df85a45e54695aad3c82f1e198ee/files/bin/jq",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/25.08/fdad08cc10905f9175f0224652a7b1c1b4d37fc1a5fa8c97843ccef846c642a0/files/bin/jq",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/48/0ebc10e5cc1fbe0836505fa203d75902606bcd4763c2c3cb0678795690dc506c/files/bin/jq"
+    ],
+    "node": [
+      "~/.local/bin/node"
+    ],
+    "npm": [
+      "/usr/bin/npm",
+      "~/.local/bin/npm"
+    ],
+    "npx": [
+      "/usr/bin/npx",
+      "~/.local/bin/npx"
+    ],
+    "ocrmypdf": [
+      "/usr/bin/ocrmypdf"
+    ],
+    "ollama": [
+      "/usr/local/bin/ollama"
+    ],
+    "openhands": [
+      "~/.local/bin/openhands"
+    ],
+    "pnpm": [
+      "~/.local/bin/pnpm"
+    ],
+    "python3": [
+      "/var/lib/flatpak/.removed/org.freedesktop.Platform-3f0cb4a807750a19ed8a3dea96be9bf562271bd8e84137fb2d678e665b549b73/files/bin/python3",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/24.08/9a6d66049b19987a22bf81015ce0d1fde260df85a45e54695aad3c82f1e198ee/files/bin/python3",
+      "/var/lib/flatpak/runtime/org.freedesktop.Platform/x86_64/25.08/fdad08cc10905f9175f0224652a7b1c1b4d37fc1a5fa8c97843ccef846c642a0/files/bin/python3",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/48/0ebc10e5cc1fbe0836505fa203d75902606bcd4763c2c3cb0678795690dc506c/files/bin/python3",
+      "/var/lib/flatpak/runtime/org.gnome.Platform/x86_64/49/4936bdd3020c5d5bae52a4b217b0abe0e3cad28f6ad755d88042e257419aada8/files/bin/python3"
+    ],
+    "qpdf": [
+      "/usr/bin/qpdf"
+    ],
+    "qwen": [
+      "~/.local/bin/qwen",
+      "~/.npm-global/bin/qwen"
+    ],
+    "rclone": [
+      "/usr/bin/rclone",
+      "~/.local/bin/rclone"
+    ],
+    "repomix": [
+      "~/.npm-global/bin/repomix"
+    ],
+    "restic": [
+      "/usr/bin/restic"
+    ],
+    "rg": [
+      "/usr/bin/rg",
+      "/var/lib/flatpak/app/md.obsidian.Obsidian/x86_64/stable/888de8f4928c6e0ead8265c71b1defa7c29259090479922ee501de179c61ddc2/files/bin/rg"
+    ],
+    "rga": [
+      "~/.local/bin/rga"
+    ],
+    "ruff": [
+      "~/.local/bin/ruff"
+    ],
+    "shellcheck": [
+      "/usr/bin/shellcheck"
+    ],
+    "shfmt": [
+      "/usr/bin/shfmt"
+    ],
+    "tailscale": [
+      "/usr/bin/tailscale"
+    ],
+    "tesseract": [
+      "/usr/bin/tesseract"
+    ],
+    "tmux": [
+      "/usr/bin/tmux",
+      "/usr/local/bin/tmux"
+    ],
+    "uv": [
+      "~/.local/bin/uv"
+    ],
+    "yt-dlp": [
+      "/usr/bin/yt-dlp",
+      "~/.local/bin/yt-dlp"
+    ]
+  },
+  "raw_files_reference": [
+    "PROGRAMME-UEBERSICHT.md",
+    "SUMMARY.md",
+    "apt_manual.txt",
+    "cargo_installs.txt",
+    "collect_program_inventory.py",
+    "desktop_apps.csv",
+    "docker_images.tsv",
+    "docker_ps.tsv",
+    "dpkg_packages.tsv",
+    "executables.csv",
+    "executables_added_by_sudo.csv",
+    "executables_full_rootfs.csv",
+    "executables_full_rootfs_sudo.csv",
+    "executables_full_rootfs_sudo.stderr",
+    "flatpak_apps.tsv",
+    "full-rootfs-scan-result.json",
+    "full-rootfs-sudo-scan-result.json",
+    "npm_globals.txt",
+    "ollama_list.txt",
+    "pipx_list.txt",
+    "pnpm_globals.txt",
+    "processes_ps.tsv",
+    "programs_all.csv",
+    "run-result.json",
+    "running_processes.csv",
+    "snap_list.txt",
+    "sudo-delta-summary.json",
+    "systemd_system_services.txt",
+    "systemd_user_services.txt",
+    "tailscale_targets.txt"
+  ],
+  "running_process_top": [
+    {
+      "count": 112,
+      "name": "bash"
+    },
+    {
+      "count": 55,
+      "name": "tee"
+    },
+    {
+      "count": 18,
+      "name": "postgres"
+    },
+    {
+      "count": 17,
+      "name": "docker-proxy"
+    },
+    {
+      "count": 17,
+      "name": "brave"
+    },
+    {
+      "count": 13,
+      "name": "s6-supervise"
+    },
+    {
+      "count": 13,
+      "name": "ferdium"
+    },
+    {
+      "count": 13,
+      "name": "python"
+    },
+    {
+      "count": 12,
+      "name": "claude"
+    },
+    {
+      "count": 12,
+      "name": "chrome"
+    },
+    {
+      "count": 11,
+      "name": "containerd-shim"
+    },
+    {
+      "count": 11,
+      "name": "bwrap"
+    },
+    {
+      "count": 9,
+      "name": "python3"
+    },
+    {
+      "count": 9,
+      "name": "nvidia-drm/time"
+    },
+    {
+      "count": 8,
+      "name": "node"
+    },
+    {
+      "count": 6,
+      "name": "kworker/R-scsi_"
+    },
+    {
+      "count": 6,
+      "name": "cat"
+    },
+    {
+      "count": 5,
+      "name": "UVM"
+    },
+    {
+      "count": 4,
+      "name": "kworker/R-nvme-"
+    },
+    {
+      "count": 4,
+      "name": "plugin-linux-am"
+    },
+    {
+      "count": 4,
+      "name": "chrome_crashpad"
+    },
+    {
+      "count": 3,
+      "name": "nv_queue"
+    },
+    {
+      "count": 3,
+      "name": "nv_mem_pool_scr"
+    },
+    {
+      "count": 3,
+      "name": "dbus-broker-lau"
+    },
+    {
+      "count": 3,
+      "name": "dbus-broker"
+    },
+    {
+      "count": 3,
+      "name": "sh"
+    },
+    {
+      "count": 3,
+      "name": "xdg-desktop-por"
+    },
+    {
+      "count": 3,
+      "name": "gjs"
+    },
+    {
+      "count": 3,
+      "name": "xdg-dbus-proxy"
+    },
+    {
+      "count": 3,
+      "name": "Web"
+    },
+    {
+      "count": 3,
+      "name": "init-without-oc"
+    },
+    {
+      "count": 3,
+      "name": "espanso"
+    },
+    {
+      "count": 2,
+      "name": "systemd"
+    },
+    {
+      "count": 2,
+      "name": "rcu_exp_par_gp_"
+    },
+    {
+      "count": 2,
+      "name": "kworker/R-md_ll"
+    },
+    {
+      "count": 2,
+      "name": "nvidia-modeset/"
+    },
+    {
+      "count": 2,
+      "name": "kworker/R-kcryp"
+    },
+    {
+      "count": 2,
+      "name": "avahi-daemon"
+    },
+    {
+      "count": 2,
+      "name": "system76-schedu"
+    },
+    {
+      "count": 2,
+      "name": "touchegg"
+    }
+  ],
+  "scan_boundaries": {
+    "excluded_from_git": [
+      "executables_full_rootfs_sudo.csv",
+      "executables_full_rootfs.csv",
+      "programs_all.csv",
+      "raw process/package dumps"
+    ],
+    "included_sources": [
+      "running processes",
+      "systemd services",
+      "Docker containers/images",
+      "Flatpak apps",
+      "Snap packages",
+      "apt/dpkg packages",
+      "desktop starters",
+      "local tool dirs",
+      "rootfs executable metadata scan"
+    ],
+    "permission_warnings": [
+      "find: ‘~/iCloud/Drive’: Keine Berechtigung"
+    ],
+    "repo_policy": "Commit compact summaries and generator logic only; keep raw CSV/TXT inventories local.",
+    "sudo_note": "sudo metadata-only executable scan; no file contents read"
+  },
+  "schema": "program-inventory.v1",
+  "snap_packages": [
+    {
+      "channel": "latest/stable",
+      "name": "bare",
+      "revision": "5",
+      "version": "1.0"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "core18",
+      "revision": "2999",
+      "version": "20260204"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "core20",
+      "revision": "2866",
+      "version": "20260410"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "core22",
+      "revision": "2411",
+      "version": "20260225"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "core24",
+      "revision": "1643",
+      "version": "20260410"
+    },
+    {
+      "channel": "latest/edge",
+      "name": "espanso",
+      "revision": "323",
+      "version": "2.2.4"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "gnome-3-28-1804",
+      "revision": "198",
+      "version": "3.28.0-19-g98f9e67.98f9e67"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "gnome-46-2404",
+      "revision": "153",
+      "version": "0+git.f1cd5fa-sdk0+git.ca9c59c"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "gtk-common-themes",
+      "revision": "1535",
+      "version": "0.1-81-g442e511"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "helm",
+      "revision": "531",
+      "version": "4.2.2"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "mesa-2404",
+      "revision": "1165",
+      "version": "25.0.7-snap211"
+    },
+    {
+      "channel": "latest/stable",
+      "name": "snapd",
+      "revision": "27406",
+      "version": "2.76"
+    }
+  ],
+  "source_inventory_path": "~/.local/share/heim-utilities/program-inventory/20260709-195458",
+  "sudo_delta": {
+    "additional_count": 14394,
+    "top_names": [
+      [
+        "index.js",
+        59
+      ],
+      [
+        "run",
+        54
+      ],
+      [
+        "script",
+        35
+      ],
+      [
+        "hostname",
+        33
+      ],
+      [
+        "install-sh",
+        28
+      ],
+      [
+        "dpkg",
+        26
+      ],
+      [
+        "getconf",
+        24
+      ],
+      [
+        "node-gyp",
+        24
+      ],
+      [
+        "node-gyp.cmd",
+        24
+      ],
+      [
+        "install",
+        21
+      ],
+      [
+        "getent",
+        20
+      ],
+      [
+        "hosts",
+        20
+      ],
+      [
+        "iconv",
+        20
+      ],
+      [
+        "ldconfig",
+        20
+      ],
+      [
+        "ldd",
+        20
+      ],
+      [
+        "resolv.conf",
+        20
+      ],
+      [
+        "setup_dir",
+        20
+      ],
+      [
+        "teardown_dir",
+        20
+      ],
+      [
+        ".dockerenv",
+        19
+      ],
+      [
+        "console",
+        19
+      ],
+      [
+        "cli.js",
+        18
+      ],
+      [
+        "install.sh",
+        18
+      ],
+      [
+        "realpath",
+        17
+      ],
+      [
+        "test",
+        17
+      ],
+      [
+        "apt",
+        16
+      ],
+      [
+        "devcontainer-features.builtin.env",
+        16
+      ],
+      [
+        "id",
+        16
+      ],
+      [
+        "node-gyp.js",
+        16
+      ],
+      [
+        "npm",
+        16
+      ],
+      [
+        "npm.cmd",
+        16
+      ],
+      [
+        "npx",
+        16
+      ],
+      [
+        "npx.cmd",
+        16
+      ],
+      [
+        "setup",
+        16
+      ],
+      [
+        "update",
+        16
+      ],
+      [
+        "basename",
+        15
+      ],
+      [
+        "c_rehash",
+        15
+      ],
+      [
+        "cut",
+        15
+      ],
+      [
+        "dirname",
+        15
+      ],
+      [
+        "gpgv",
+        15
+      ],
+      [
+        "head",
+        15
+      ]
+    ],
+    "top_prefixes": [
+      [
+        "/var/lib",
+        14390
+      ],
+      [
+        "/root/grabowski-power-worker-backup-20260709T072346Z",
+        2
+      ],
+      [
+        "/root/.cache",
+        1
+      ],
+      [
+        "~",
+        1
+      ]
+    ]
+  }
+}

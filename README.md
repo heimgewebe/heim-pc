@@ -35,6 +35,7 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [Operatorium-Entrée](architecture/operatorium-entry.md) – normative Rolle dieses Repositories
 * [Home-Entry Runtime Note](runtime/home-entry.md) – lokale Pointer-Logik und Grenzen
 * [Software-Inventar](runtime/software-inventory.md) – operatorisch relevante Programme, Dienste und bekannte Caveats
+* [Programminventar](runtime/program-inventory-summary.md) – kompakte Übersicht aus Root-/Paket-/Prozessscan; Rohlisten bleiben lokal
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen
 
