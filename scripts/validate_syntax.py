@@ -94,7 +94,7 @@ def main() -> None:
     # With recursive=True, config/**/*.yml also matches config/*.yml
     yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/**/*.yml']
     # state/*.json are validated by validate_contracts.py in CI; removing here avoids redundant parsing
-    json_patterns = ['snapshots/*.summary.json']
+    json_patterns = ['snapshots/*.summary.json', 'runtime/program-inventory.v1.json']
 
     utils.log_info("Validating YAML files...")
     yaml_has_error = validate_yaml(yaml_patterns, repo_root)

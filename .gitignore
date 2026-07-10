@@ -62,3 +62,10 @@ Cargo.lock
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Local raw program inventories: generated on heim-pc, too large/noisy for Git
+runtime/raw-program-inventory/
+runtime/*.raw.csv
+runtime/*.raw.tsv
+runtime/*.raw.txt
+runtime/program-inventory-raw/
