@@ -84,7 +84,7 @@ Heim-PC bleibt die Verbindung zwischen lokalem Dateisystem und Heimgewebe-System
 * Historie und Drift-Tracking durch Timeline-Daten,
 * strukturiertes Wissensmodell statt Dump-Repo.
 
-Diese Rolle ist aber operativ begrenzt: Kartografie bedeutet Metadaten, Struktur und Pointer, nicht private Inhalte.
+Diese Rolle ist aber operativ begrenzt: Kartografie bedeutet Metadaten, Struktur und Pointer, nicht private Inhalte. Atlas unterscheidet dabei logische Dateilänge von tatsächlich belegten Dateisystemblöcken; keine der beiden Größen ist ein Backup- oder Wiederherstellungsbeleg. Konventionelle Core-Dump-Namen bleiben aus Standardkartierungen ausgeschlossen. Atlas löscht sie nicht und ist keine Speicherbereinigung.
 
 ## Daten generieren (lokal)
 
