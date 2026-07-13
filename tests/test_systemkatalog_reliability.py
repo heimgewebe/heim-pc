@@ -116,6 +116,45 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertTrue((state / "last-run.json").exists())
             self.assertEqual(stat.S_IMODE((state / "last-run.json").stat().st_mode), 0o600)
 
+    def test_watchdog_reactivates_closed_candidate_with_supersedes_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
+                encoding="utf-8",
+            )
+            calls = []
+
+            def fake_run(argv, *, cwd=None):
+                calls.append(argv)
+                if "live-list" in argv:
+                    payload = {
+                        "records": [
+                            {
+                                "event_id": 41,
+                                "record": {
+                                    "candidate_id": watchdog.CANDIDATE_ID,
+                                    "status": "closed",
+                                },
+                            }
+                        ]
+                    }
+                    return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+                if "live-register" in argv:
+                    return mock.Mock(returncode=0, stdout=json.dumps({"event_id": 42}), stderr="")
+                raise AssertionError(argv)
+
+            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+                result = watchdog._ensure_bureau_candidate(base, report_path, json.loads(report_path.read_text()))
+
+            self.assertEqual(result["action"], "reactivated")
+            self.assertEqual(result["eventId"], 42)
+            self.assertEqual(result["supersedesEventId"], 41)
+            register = next(argv for argv in calls if "live-register" in argv)
+            supersedes_index = register.index("--supersedes-event-id")
+            self.assertEqual(register[supersedes_index + 1], "41")
+
     def test_watchdog_registers_when_no_active_candidate_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
