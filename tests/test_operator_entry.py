@@ -45,6 +45,10 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertNotIn("/home/", json.dumps(contract, ensure_ascii=False))
         self.assertNotIn("runtimeHealth", contract)
         self.assertNotIn("taskPriority", contract)
+        self.assertIn(
+            "protection_against_adversarial_parent_directory_replacement",
+            contract["doesNotEstablish"],
+        )
 
     def test_ai_context_routes_to_operator_entry(self) -> None:
         ai_context = (ROOT / ".ai-context.yml").read_text(encoding="utf-8")

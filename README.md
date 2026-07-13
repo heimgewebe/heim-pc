@@ -63,7 +63,7 @@ python3 scripts/check_operator_entry.py --require-installed
 
 Der Vertrag enthält absichtlich keine Live-Gesundheit, Taskpriorität, Branchstände oder Merge-Reife. Er nennt nur die Startsequenz, lokale Lokatoren, Primärquellen, ausgeschlossene Scheinquellen und Sicherheitsgrenzen.
 
-Der Installer arbeitet fail-closed: Er sperrt parallele Installationen, bindet Writes an den gelesenen Vorzustand, öffnet Lock- und Bestandsdateien ohne Symlink-Folgen, lehnt Symlink-Ziele ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Der maschinenlesbare Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Die vier Dateien werden einzeln atomar geschrieben; eine atomare Gesamttransaktion über alle Dateien wird ausdrücklich nicht behauptet.
+Der Installer arbeitet fail-closed: Er sperrt parallele Installationen, bindet Writes an den gelesenen Vorzustand, öffnet die jeweilige letzte Pfadkomponente mit `O_NOFOLLOW`, lehnt erkannte Symlink-Ziele und -Eltern ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Ein absichtlicher paralleler Austausch eines übergeordneten Verzeichnisses ist damit nicht vollständig ausgeschlossen. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Der maschinenlesbare Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Die vier Dateien werden einzeln atomar geschrieben; eine atomare Gesamttransaktion über alle Dateien wird ausdrücklich nicht behauptet.
 
 Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 

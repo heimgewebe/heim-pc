@@ -238,7 +238,8 @@
     "current_task_priority",
     "current_repository_state",
     "merge_or_deploy_authority",
-    "secret_access_authority"
+    "secret_access_authority",
+    "protection_against_adversarial_parent_directory_replacement"
   ],
   "pathResolution": {
     "variables": {
