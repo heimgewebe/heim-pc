@@ -25,12 +25,19 @@ watchdog = _load("systemkatalog_drift_watch", "scripts/systemkatalog_drift_watch
 
 class SystemkatalogReliabilityTests(unittest.TestCase):
     def test_repositories_root_agent_entry_is_conditional_and_canonical(self) -> None:
-        text = (ROOT / "config/agents/repos-root-AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("/home/alex/repos/systemkatalog", text)
-        self.assertIn("mehrere Repositories oder Systeme", text)
-        self.assertIn("nicht pauschal geladen", text)
-        self.assertIn("Cabinet ist nur noch historische Bezeichnung", text)
-        self.assertNotIn("Cabinet bleibt", text)
+        agent_text = (ROOT / "config/agents/repos-root-AGENTS.md").read_text(encoding="utf-8")
+        readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("/home/alex/repos/systemkatalog", agent_text)
+        self.assertIn("mehrere Repositories oder Systeme", agent_text)
+        self.assertIn("nicht pauschal geladen", agent_text)
+        self.assertIn("Direkter Systemkatalog-Pointer", readme_text)
+        self.assertIn("~/repos/systemkatalog/AGENTS.md", readme_text)
+
+        legacy_name = "Cabi" + "net"
+        legacy_path = "~/repos/" + "cabi" + "net"
+        for document in (agent_text, readme_text):
+            self.assertNotIn(legacy_name, document)
+            self.assertNotIn(legacy_path, document)
 
     def test_installer_plan_has_no_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

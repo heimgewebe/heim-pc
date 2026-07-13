@@ -26,5 +26,4 @@ Bei gewöhnlicher Codearbeit in nur einem Repository wird der Systemkatalog nich
 
 - Der Systemkatalog beschreibt stabile Semantik; er ist kein Task-, PR-, CI- oder Runtime-Statussystem.
 - Aktuelle Zustände müssen bei GitHub, CI, Bureau, Grabowski, systemd, Logs oder Healthchecks geprüft werden.
-- Cabinet ist nur noch historische Bezeichnung und keine aktive Quelle.
 - Private Inhalte, Credentials und lokale Agentenhistorien dürfen nicht aus dem Katalog abgeleitet oder veröffentlicht werden.
