@@ -2,7 +2,7 @@
 id: operatorium-entry
 role: norm
 status: canonical
-last_reviewed: 2026-07-04
+last_reviewed: 2026-07-13
 depends_on:
   - model
   - security
@@ -25,7 +25,7 @@ Ein lokales Entrée kann leicht zu viel wollen: eine zweite Systemkarte, ein Hom
 
 ## Synthese
 
-`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind. Cabinet bleibt die kanonische Ökosystemkarte. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern.
+`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind. Der Systemkatalog bleibt die kanonische Quelle stabiler Ökosystemsemantik. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern.
 
 ## Rolle im Ökosystem
 
@@ -35,11 +35,11 @@ Ein lokales Entrée kann leicht zu viel wollen: eine zweite Systemkarte, ein Hom
 2. **Versionierte Orientierung:** Die Repo-Dokumente beschreiben stabile Regeln, Zonen, Sicherheitsgrenzen und Drift-Mechanik.
 3. **Aktuelle Prüfung:** GitHub, CI, PR-Diffs und Runtime-Belege bleiben nötig, wenn Aktualität zählt.
 
-Das Repository ersetzt weder Cabinet noch die aktuelle Runtime.
+Das Repository ersetzt weder den Systemkatalog noch aktuelle Runtime-Primärquellen.
 
-## Abgrenzung zu Cabinet
+## Abgrenzung zum Systemkatalog
 
-Cabinet ist der kanonische Ort der systemweiten Ökosystemkarte. `heim-pc` darf auf diese Karte verweisen, aber keine konkurrierende Karte pflegen.
+Der Systemkatalog ist der kanonische Ort für Systemzwecke, Grenzen, Wahrheitsbesitz, stabile Beziehungen und Einstiegspunkte. `heim-pc` darf darauf verweisen und einen unabhängigen Driftalarm betreiben, aber keine konkurrierende Semantik pflegen.
 
 `SYSTEM_MAP.md` in diesem Repository ist enger geschnitten: Es ist eine generierte Karte der kanonischen heim-pc-Dokumentation aus `manifest/repo-index.yaml` und Frontmatter. Es ist keine vollständige Karte des Heimgewebe-Systems.
 
@@ -67,7 +67,7 @@ Nicht geeignet sind:
 * Secrets oder Keymaterial,
 * Browser- oder Keyring-Daten,
 * Chat- oder Agent-Runtime-Historien,
-* eine zweite Ökosystemkarte neben Cabinet.
+* eine zweite Ökosystemkarte neben dem Systemkatalog.
 
 ## Typische Fehlannahmen
 
@@ -77,7 +77,7 @@ Korrektur: Ein kurzer lokaler Pointer reicht. Versionierte Wahrheit gehört in p
 
 **Fehlannahme 2:** `heim-pc` muss die ganze Systemkarte enthalten.
 
-Korrektur: `heim-pc` beschreibt den lokalen Einstieg. Cabinet bleibt die Karte des größeren Systems.
+Korrektur: `heim-pc` beschreibt den lokalen Einstieg. Der Systemkatalog bleibt die stabile Karte des größeren Systems; Leitstand zeigt sie read-only an.
 
 **Fehlannahme 3:** Ein Agent darf zur Orientierung breit im Home-Verzeichnis suchen.
 
