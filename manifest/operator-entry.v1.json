@@ -18,7 +18,8 @@
     "canonicalEntryFile": "${HOME}/repos/heim-pc/manifest/operator-entry.v1.json",
     "installedEntryFile": "${HOME}/.config/heimgewebe/operator-entry.v1.json",
     "agentPointer": "${HOME}/AGENTS.md",
-    "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md"
+    "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
+    "role": "primary_local_operator_host"
   },
   "entrySequence": [
     {
@@ -36,6 +37,15 @@
       "operation": "grabowski_agent_bootstrap",
       "arguments": {},
       "purpose": "load bounded execution rules and immutable boundaries"
+    },
+    {
+      "id": "operator_context",
+      "surface": "grabowski",
+      "operation": "grabowski_context",
+      "arguments": {
+        "profile": "concise"
+      },
+      "purpose": "load compact operator context without treating prose as live truth"
     },
     {
       "id": "local_entry",
@@ -63,6 +73,12 @@
       "surface": "contract",
       "operation": "follow_truth_sources",
       "purpose": "read only the primary sources required by the classified scope"
+    },
+    {
+      "id": "target_specific_live_state",
+      "surface": "primary_sources",
+      "operation": "read_live_state_before_action",
+      "purpose": "verify exact repository, pull request, CI, lease, task, process and runtime state before mutation"
     }
   ],
   "truthSources": {
@@ -108,6 +124,10 @@
         "grabowski_resource_list",
         "grabowski_checkout_inventory",
         "grabowski_task_list"
+      ],
+      "doesNotEstablish": [
+        "connector_client_snapshot_freshness_when_unobservable",
+        "merge_or_deploy_authority"
       ]
     },
     "repositoriesPullRequestsReviews": {
@@ -214,10 +234,12 @@
   },
   "doesNotEstablish": [
     "current_runtime_health",
+    "connector_client_snapshot_freshness",
     "current_task_priority",
     "current_repository_state",
     "merge_or_deploy_authority",
-    "secret_access_authority"
+    "secret_access_authority",
+    "protection_against_adversarial_parent_directory_replacement"
   ],
   "pathResolution": {
     "variables": {

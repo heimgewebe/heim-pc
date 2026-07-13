@@ -144,6 +144,8 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
             errors.append(f"operatorModel.{flag} must be true")
 
     host = _require_object(contract.get("host"), "host", errors)
+    if host.get("role") != "primary_local_operator_host":
+        errors.append("host.role must be primary_local_operator_host")
     for field in (
         "home",
         "repositoriesRoot",
@@ -167,9 +169,11 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     required_entry_ids = {
         "runtime_identity",
         "execution_contract",
+        "operator_context",
         "local_entry",
         "scope_classification",
         "source_resolution",
+        "target_specific_live_state",
     }
     if not required_entry_ids.issubset(set(entry_ids)):
         errors.append("entrySequence is missing required entry steps")

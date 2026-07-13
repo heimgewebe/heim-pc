@@ -48,7 +48,7 @@ python3 scripts/install_operator_entry.py --apply --replace-existing   # nach Pr
 python3 scripts/check_operator_entry.py --require-installed
 ```
 
-Der Installer sperrt parallele Installationen, prüft Zielpfade und Vorzustände, lehnt Symlinks ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Ein maschinenlesbarer Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Der Checker verlangt bei `--require-installed` Bytegleichheit zwischen versionierter Quelle und allen lokalen Projektionen. Zusätzlich prüft er, dass der Installationsbeleg an den aktuellen Vertrags-Hash gebunden ist und die darin attestierten Zieldateien noch exakt übereinstimmen.
+Der Installer sperrt parallele Installationen, prüft Zielpfade und Vorzustände, öffnet die jeweilige letzte Pfadkomponente mit `O_NOFOLLOW`, lehnt erkannte Symlink-Ziele und -Eltern ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Ein absichtlicher paralleler Austausch eines übergeordneten Verzeichnisses bleibt außerhalb dieses Schutzbelegs. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Ein maschinenlesbarer Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Der Checker verlangt bei `--require-installed` Bytegleichheit zwischen versionierter Quelle und allen lokalen Projektionen. Zusätzlich prüft er, dass der Installationsbeleg an den aktuellen Vertrags-Hash gebunden ist und die darin attestierten Zieldateien noch exakt übereinstimmen.
 
 ## Bekannte Grenzen
 
@@ -71,7 +71,7 @@ Ohne ausdrücklichen Auftrag und Zweckprüfung dürfen nicht gelesen oder ausgeg
 ## Betriebslogik
 
 1. lokal über `/home/alex/AGENTS.md`, `/home/alex/repos/AGENTS.md` oder den installierten JSON-Vertrag landen,
-2. Grabowski-Laufzeit und Bootstrap frisch prüfen,
+2. Grabowski-Laufzeit, Bootstrap und kompakten Operator-Kontext frisch prüfen,
 3. Auftrag als Einzelrepo-, systemweiten, Host-, Task- oder Historienfall klassifizieren,
 4. nur die im Vertrag referenzierten Primärquellen lesen,
 5. vor Mutation Repo-, PR-, CI-, Lease-, Worktree-, Task- und Prozesszustand prüfen,

@@ -6,7 +6,7 @@ Diese Datei ist ein lokaler Pointer für Arbeiten unter `/home/alex/repos`. Repo
 
 Lies zuerst den installierten Host-Vertrag unter `/home/alex/.config/heimgewebe/operator-entry.v1.json`. Seine versionierte Quelle liegt in `/home/alex/repos/heim-pc/manifest/operator-entry.v1.json`.
 
-Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")` und `grabowski_agent_bootstrap()`. ChatGPT über Grabowski ist der Operator; der Mensch liefert Ziel, Bedeutung, Freigaben und Abbruchentscheidungen und soll nicht als Shell-Ausführer benutzt werden.
+Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`. ChatGPT über Grabowski ist der Operator; der Mensch liefert Ziel, Bedeutung, Freigaben und Abbruchentscheidungen und soll nicht als Shell-Ausführer benutzt werden.
 
 ## Systemweite Orientierung
 

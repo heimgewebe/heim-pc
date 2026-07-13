@@ -10,7 +10,7 @@ Lies zuerst:
 2. `~/repos/heim-pc/AGENTS.md`
 3. bei systemweiten Fragen `~/repos/systemkatalog/AGENTS.md`
 
-Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")` und `grabowski_agent_bootstrap()`.
+Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`.
 
 ## Rollen
 
