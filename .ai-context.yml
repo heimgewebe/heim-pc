@@ -1,9 +1,14 @@
 project:
-  role: data-repository
+  role: operator-entry
+  canonical_entry: manifest/operator-entry.v1.json
+  human_role: meaning_approval_abort
+operator:
+  kind: chatgpt_via_grabowski
+  machine_first: true
 heimgewebe:
   wgx:
     profile_expected: true
 contracts:
-  paths: [contracts/**/*.schema.json]
+  central_root: ../metarepo/contracts/heim-pc
 ci:
-  note: "CI validates structure and contracts only."
+  note: "CI validates the static entry contract and repository structure; live state requires fresh primary-source reads."

@@ -97,13 +97,16 @@ def main() -> None:
         os.path.join(contracts_base, 'config/zones.schema.json')
     )
 
-    # 2. Validate State Files
+    # 2. Validate provenance-bearing state files. Legacy placeholder fixtures
+    # state/index.json and state/repos.json are intentionally excluded from
+    # the active truth path until a generator binds them to source evidence.
+    # Current heim-pc contracts use a namespaced filename; the pinned legacy
+    # webmaschine fallback keeps the older generic filename.
+    schema_prefix = 'heim-pc.state.' if os.path.basename(contracts_base) == 'heim-pc' else ''
     files_to_validate: List[Tuple[str, str]] = [
-        ('state/index.json', 'state/index.schema.json'),
-        ('state/repos.json', 'state/repos.schema.json'),
-        ('state/uncertainties.json', 'state/uncertainties.schema.json'),
-        ('state/insights.json', 'state/insights.schema.json'),
-        ('state/drift.json', 'state/drift.schema.json')
+        ('state/uncertainties.json', f'state/{schema_prefix}uncertainties.schema.json'),
+        ('state/insights.json', f'state/{schema_prefix}insights.schema.json'),
+        ('state/drift.json', f'state/{schema_prefix}drift.schema.json')
     ]
 
     state_success = True

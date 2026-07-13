@@ -2,131 +2,97 @@
 id: model
 role: norm
 status: canonical
-last_reviewed: 2026-02-28
-depends_on: []
-verifies_with: []
+last_reviewed: 2026-07-13
+depends_on:
+  - security
+verifies_with:
+  - scripts/check_operator_entry.py
 ---
 
-# Weltmodell-Konzept
+# Lokales Weltmodell
 
-## Was ist das "Weltmodell"?
+## Dialektische Einordnung
 
-Heim-PC erstellt ein **versioniertes Abbild** deines lokalen Rechners, das von KI-Systemen (wie Heimgewebe) gelesen und verstanden werden kann.
+**These:** Ein kleiner, maschinenlesbarer Hostzustand im Repository kann einem Operator schnelle Orientierung geben.
 
-### Kernidee
+**Antithese:** Repo-gebundene Zustandsabbilder veralten, duplizieren Livewahrheit und können einen Agenten mit scheinpräzisen, aber falschen Daten fehlleiten.
 
-Statt dass ein KI-Agent deinen ganzen Rechner "live" durchsuchen muss, bietet Heim-PC:
+**Synthese:** `heim-pc` versioniert den statischen Einstieg, Lokatoren, Schemata und Sicherheitsgrenzen. Volatile Zustände werden frisch aus ihren Primärquellen gelesen oder lokal außerhalb Git als quellengebundene Receipts erzeugt. Prosa und Snapshots sind Projektionen, keine zweite Wahrheit.
 
-1. **Einen Index** (`state/index.json`) – Wo anfangen? Was ist wichtig?
-2. **Semantische Zonen** (`config/zones.yml`) – Was bedeuten die Bereiche?
-3. **Repository-Tracking** (`state/repos.json`) – Welche Repos sind aktiv?
-4. **Drift-Erkennung** – Was hat sich verändert? Warum?
-5. **Timeline** – Chronologische Historie der Änderungen
+## Drei Ebenen
 
-### Zwei-Schichten-Architektur
+### 1. Statischer Host-Einstieg
 
-#### Schicht 1: Kanonische, kleine Artefakte (im Git-Repo)
+Kanonisch im Repository:
 
-* `state/index.json` – Einstiegspunkt für KI (< 10 KB)
-* `state/repos.json` – Repository-Übersicht (< 50 KB)
-* `state/summary.md` – Mensch-lesbarer Überblick
-* `snapshots/latest.fs.summary.json` – Aggregationen (< 100 KB)
+* `manifest/operator-entry.v1.json` – Einstiegskette, Pfadvorlagen, Wahrheitszuständigkeiten und Grenzen;
+* `.ai-context.yml` – kompakte Rollenklassifikation;
+* `AGENTS.md` – Arbeits- und Stop-Regeln;
+* `config/agents/` – installierbare lokale Pointer;
+* `config/zones.yml` – semantische Hostzonen ohne Inhaltsdump.
 
-#### Schicht 2: Große Rohdaten (außerhalb Git)
+Diese Ebene darf keine aktuelle Gesundheit, Taskpriorität, Branchstände oder Merge-Reife behaupten.
 
-* Vollständige Filesystem-Snapshots als GitHub Artifacts
-* Release Assets für archivierte Snapshots
-* Optionally: Git LFS für große Binärdaten
-* Lokal in `~/vault-gewebe/...` für persönliche Archivierung
+### 2. Lokale quellengebundene Betriebsartefakte
 
-### Philosophie
+Außerhalb Git unter `~/.local/state/heim-pc/`:
 
-> Das Dateisystem ist wie ein Dachboden. Wenn man "Ordnung" ruft, antwortet es mit 37 "final_v7_neu2.pdf".
+* Installationsreceipts;
+* Driftberichte;
+* große oder volatile Inventare;
+* Generatorausgaben mit Zeitpunkt, Quelle und Hashbindung.
 
-Heim-PC akzeptiert diese Realität und schafft **Übersicht ohne Zwang zur Perfektion**.
+Ein lokales Artefakt gilt nur für die im Receipt belegte Quelle und den belegten Zeitpunkt.
 
-## Nutzen für Heimgewebe
+### 3. Primärquellen für Livezustand
 
-Heimgewebe kann durch Heim-PC:
+* Grabowski: Laufzeit, Werkzeuge, Leases und Ausführung;
+* Bureau: Aufgaben, Claims und Receipts;
+* Git und GitHub: Branches, Commits, Pull Requests und Reviews;
+* CI: technische Checks am exakten Head;
+* systemd, Logs und Healthchecks: Dienste und Runtime;
+* Systemkatalog: stabile Ökosystemsemantik, nicht Livegesundheit;
+* RepoBrief/Lenskit: quellengebundener Repository-Kontext, nicht ungeprüfte Livewahrheit.
 
-1. **Sofort orientieren**: Index zeigt Hotspots und aktive Bereiche
-2. **Semantisch navigieren**: Zonen geben Kontext und Bedeutung
-3. **Drift verstehen**: Was hat sich warum verändert?
-4. **Historie nutzen**: Timeline für zeitbasierte Analysen
-5. **Effizient arbeiten**: Keine Live-Scans, sondern strukturierte Daten
+## Status der alten State-Dateien
+
+`state/index.json` und `state/repos.json` sind historische Placeholder-Fixtures. Sie sind:
+
+* kein Agenteneinstieg;
+* keine aktive Host- oder Repository-Wahrheit;
+* aus der aktiven Contract-Validierung und Frischeprüfung ausgeschlossen;
+* im Operator-Entry-Vertrag ausdrücklich als aktuelle Wahrheit gesperrt.
+
+Sie bleiben vorerst nur erhalten, weil bestehende zentrale Schemata und historische Dokumentation darauf verweisen. Eine spätere Entfernung oder ein neuer Generatorpfad benötigt einen eigenen, quellengebundenen Slice.
+
+Andere Dateien unter `state/` dürfen nur dann aktuelle Aussagen tragen, wenn Herkunft, Zeitpunkt und Frischegrenze maschinenlesbar belegt sind.
+
+## Kartografie ohne Inhaltsopfer
+
+Heim-PC darf Struktur, Zonen, Programme, Dienste und technische Metadaten beschreiben. Es darf daraus keinen breiten Home-Scan oder privaten Inhaltsindex ableiten.
+
+Nicht ohne ausdrücklichen Zweck und Autorität erfassen:
+
+* Secrets, Schlüssel, Tokens und Keyrings;
+* Browserprofile und Sessions;
+* private Inhaltsbäume;
+* Agentenverläufe;
+* Rohdumps ohne Datenminimierung.
+
+## Generatorvertrag für künftige Zustandsartefakte
+
+Ein neuer Generator gilt erst als kanonisch nutzbar, wenn sein Ergebnis mindestens enthält:
+
+* Schema- und Generatorversion;
+* Erzeugungszeitpunkt in UTC;
+* konkrete Quellen und erlaubte Scanbereiche;
+* Quell- oder Ergebnis-Hashes;
+* Frischeklasse oder Ablaufgrenze;
+* ausgeschlossene Behauptungen;
+* Tests gegen Placeholder, unaufgelöste Pfade, Secrets und ungebundene Momentaufnahmen.
+
+Ohne diese Angaben bleibt das Ergebnis eine nichtkanonische Beobachtung.
 
 ## Abgrenzung
 
-Heim-PC ist **nicht**:
-
-* Ein Backup-System (nutze dafür restic, borg, etc.)
-* Ein Sync-Tool (nutze dafür syncthing, rclone, etc.)
-* Ein Datei-Manager (nutze dafür ranger, nnn, etc.)
-* Eine Datenbank (es ist ein Abbild, kein aktives System)
-
-Heim-PC ist ein **Orientierungssystem** für KI-Agenten.
-
-## Beispiel-Daten
-
-### Beispiel state/index.json
-
-```json
-{
-  "machine": {
-    "name": "pop-os-alex",
-    "roots": ["/home/alex"],
-    "hub": "/home/alex/repos"
-  },
-  "hotspots": [
-    {"path": "/home/alex/repos/lenskit", "why": "active dev"},
-    {"path": "/home/alex/vault-gewebe", "why": "knowledge"}
-  ],
-  "repos": {
-    "count": 42,
-    "active_last_7d": ["lenskit", "metarepo", "wgx"]
-  },
-  "artifacts": {
-    "latest_snapshot": "snapshots/latest.fs.snapshot.ref",
-    "timeline": "timeline/fs.timeline.jsonl"
-  },
-  "metadata": {
-    "version": "0.1.0",
-    "last_updated": "2024-12-18T10:30:00Z",
-    "schema_version": "1.0"
-  }
-}
-```
-
-### Beispiel config/zones.yml
-
-```yaml
-zones:
-  - path: /home/alex/repos
-    name: repos
-    type: development
-    role: active-dev
-    priority: high
-    description: "Main repository directory"
-  
-  - path: /home/alex/vault-gewebe
-    name: vault-gewebe
-    type: knowledge
-    role: knowledge-base
-    priority: high
-    description: "Knowledge management"
-  
-  - path: /home/alex/Downloads
-    name: downloads
-    type: transient
-    role: staging
-    priority: low
-    description: "Temporary downloads"
-```
-
-### Beispiel Hotspot-Typen
-
-* **active dev**: Aktive Entwicklung, häufige Commits
-* **knowledge**: Dokumentation, Notizen, Wikis
-* **staging**: Temporäre Dateien, Work-in-Progress
-* **archive**: Selten genutzt, historisch wichtig
-* **config**: Konfigurationsdateien, Dotfiles
+`heim-pc` ist kein Backup, kein Sync-Werkzeug, kein Dateimanager, keine Ökosystemdatenbank und kein Runtime-Dashboard. Es ist der private lokale Maschinen-Einstieg mit schmalen, überprüfbaren Pointern zu den jeweiligen Wahrheitsquellen.
