@@ -41,7 +41,7 @@ Der kanonische Maschinenvertrag ist `manifest/operator-entry.v1.json`. Die lokal
 
 ## Erster Leseweg
 
-1. Bei ChatGPT über Grabowski: `grabowski_status(view="evidence")` und `grabowski_agent_bootstrap()`.
+1. Bei ChatGPT über Grabowski: `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`.
 2. `manifest/operator-entry.v1.json` für lokale Lokatoren, Einstiegskette und Wahrheitsauflösung.
 3. `README.md` für die Rolle des Repositories.
 4. `SYSTEM_MAP.md` für die kanonischen Dokumente dieses Repositories.

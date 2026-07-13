@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat as stat_module
 import tempfile
 import sys
 from datetime import datetime, timezone
@@ -83,6 +84,46 @@ def _atomic_write(target: Path, value: bytes, mode: int, *, expected_before: byt
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _no_follow_flags(base_flags: int) -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise InstallConflict("platform lacks O_NOFOLLOW; refusing security-sensitive installation")
+    return base_flags | no_follow | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_lock_file(lock_path: Path):
+    if lock_path.is_symlink():
+        raise InstallConflict(f"refusing symlink lock file: {lock_path}")
+    try:
+        descriptor = os.open(lock_path, _no_follow_flags(os.O_RDWR | os.O_CREAT), 0o600)
+    except OSError as exc:
+        raise InstallConflict(f"cannot safely open lock file {lock_path}: {exc}") from exc
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            raise InstallConflict(f"lock path is not a regular file: {lock_path}")
+        os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, "r+b")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _chmod_unchanged_regular(target: Path, expected_bytes: bytes, mode: int) -> None:
+    try:
+        descriptor = os.open(target, _no_follow_flags(os.O_RDONLY))
+    except OSError as exc:
+        raise InstallConflict(f"cannot safely reopen unchanged target {target}: {exc}") from exc
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            raise InstallConflict(f"unchanged target is not a regular file: {target}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            if handle.read() != expected_bytes:
+                raise InstallConflict(f"target changed after preflight: {target}")
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
 
 
 def _backup_path(home: Path, target: Path, before_sha256: str) -> Path:
@@ -174,7 +215,8 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
     _assert_safe_target(home, state_root / "placeholder")
     state_root.mkdir(parents=True, exist_ok=True)
     lock_path = home / LOCK_RELATIVE_PATH
-    with lock_path.open("a+b") as lock_handle:
+    _assert_safe_target(home, lock_path)
+    with _open_lock_file(lock_path) as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         plan = _plan(home)
         conflicts = [str(item["target"]) for item in plan if item["requiresReplacement"]]
@@ -204,7 +246,7 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
                     expected_before=item["beforeBytes"],
                 )
             else:
-                os.chmod(item["target"], item["mode"])
+                _chmod_unchanged_regular(item["target"], item["sourceBytes"], item["mode"])
             public_files.append(_public_item(item, backup=backup))
 
         receipt_path = home / RECEIPT_RELATIVE_PATH

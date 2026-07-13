@@ -29,8 +29,12 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(contract["operatorModel"]["operator"], "chatgpt_via_grabowski")
         self.assertEqual(contract["operatorModel"]["humanRole"], "meaning_approval_abort")
         self.assertTrue(contract["operatorModel"]["machineFirst"])
+        self.assertEqual(contract["host"]["role"], "primary_local_operator_host")
         self.assertEqual(contract["host"]["installedEntryFile"], "${HOME}/.config/heimgewebe/operator-entry.v1.json")
         self.assertEqual(contract["host"]["repositoriesAgentPointer"], "${HOME}/repos/AGENTS.md")
+        entry_ids = {item["id"] for item in contract["entrySequence"]}
+        self.assertIn("operator_context", entry_ids)
+        self.assertIn("target_specific_live_state", entry_ids)
         self.assertIn("stableEcosystemSemantics", contract["truthSources"])
         self.assertIn("executionRuntimeLeases", contract["truthSources"])
         excluded = {item["path"] for item in contract["sourcePolicy"]["excludedAsCurrentTruth"]}
@@ -111,6 +115,17 @@ class OperatorEntryTests(unittest.TestCase):
             (home / "AGENTS.md").symlink_to(outside)
             with self.assertRaises(installer.InstallConflict):
                 installer.install(home=home, apply=False)
+
+    def test_installer_rejects_symlink_lock_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            state_root = home / ".local/state/heim-pc"
+            state_root.mkdir(parents=True)
+            outside = home / "outside.lock"
+            outside.write_text("outside\n", encoding="utf-8")
+            (state_root / "operator-entry-install.lock").symlink_to(outside)
+            with self.assertRaises(installer.InstallConflict):
+                installer.install(home=home, apply=True)
 
     def test_checker_rejects_receipt_not_bound_to_current_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

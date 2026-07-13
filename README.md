@@ -63,16 +63,17 @@ python3 scripts/check_operator_entry.py --require-installed
 
 Der Vertrag enthält absichtlich keine Live-Gesundheit, Taskpriorität, Branchstände oder Merge-Reife. Er nennt nur die Startsequenz, lokale Lokatoren, Primärquellen, ausgeschlossene Scheinquellen und Sicherheitsgrenzen.
 
-Der Installer arbeitet fail-closed: Er sperrt parallele Installationen, bindet Writes an den gelesenen Vorzustand, lehnt Symlink-Ziele ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Der maschinenlesbare Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Die vier Dateien werden einzeln atomar geschrieben; eine atomare Gesamttransaktion über alle Dateien wird ausdrücklich nicht behauptet.
+Der Installer arbeitet fail-closed: Er sperrt parallele Installationen, bindet Writes an den gelesenen Vorzustand, öffnet Lock- und Bestandsdateien ohne Symlink-Folgen, lehnt Symlink-Ziele ab und ersetzt abweichende bestehende Pointer nur mit `--replace-existing`. Vor dem atomaren Ersetzen werden Backups unter `~/.local/state/heim-pc/operator-entry-backups/` angelegt. Der maschinenlesbare Installationsbeleg liegt unter `~/.local/state/heim-pc/operator-entry-install-receipt.v1.json`. Die vier Dateien werden einzeln atomar geschrieben; eine atomare Gesamttransaktion über alle Dateien wird ausdrücklich nicht behauptet.
 
 Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 
 1. `grabowski_status(view="evidence")` für Runtime-Identität, Integrität und Connector-Warnungen;
 2. `grabowski_agent_bootstrap()` für den gebundenen Ausführungsvertrag;
-3. Lesen des installierten JSON-Vertrags;
-4. Auflösen von `${HOME}` gegen das absolute Operator-Home; unaufgelöste Variablen blockieren Dateizugriffe;
-5. Klassifikation als Einzelrepo-, systemweiter, Host-, Task- oder Historienfall;
-6. gezieltes Lesen der dort referenzierten Primärquellen.
+3. `grabowski_context(profile="concise")` für kompakten Operator-Kontext ohne Prosa als Livewahrheit;
+4. Lesen des installierten JSON-Vertrags;
+5. Auflösen von `${HOME}` gegen das absolute Operator-Home; unaufgelöste Variablen blockieren Dateizugriffe;
+6. Klassifikation als Einzelrepo-, systemweiter, Host-, Task- oder Historienfall;
+7. gezieltes Lesen der referenzierten Primärquellen und abschließender zielbezogener Live-Read vor Mutation.
 
 ## Direkter Systemkatalog-Pointer
 
