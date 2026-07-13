@@ -24,3 +24,4 @@ checks:
   - scripts/ci/check_repo_index_consistency.py
   - scripts/ci/check-doc-review-age.py
   - scripts/generate-system-map.py
+  - scripts/check_operator_entry.py

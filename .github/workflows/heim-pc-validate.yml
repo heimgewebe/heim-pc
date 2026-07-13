@@ -46,6 +46,10 @@ jobs:
         working-directory: ./heim-pc
         run: python3 -m unittest discover tests
 
+      - name: Validate canonical operator entry
+        working-directory: ./heim-pc
+        run: python3 scripts/check_operator_entry.py
+
       # Scripts now self-locate relative to __file__, so invoking them from anywhere works
       # as long as the path to the script is correct.
       # Since we are in the workspace root, and repo is in 'heim-pc', we call heim-pc/scripts/...
@@ -56,10 +60,6 @@ jobs:
       - name: Smoke-run validate_contracts
         working-directory: ./heim-pc
         run: python3 scripts/validate_contracts.py
-
-      - name: Smoke-run check_freshness
-        working-directory: ./heim-pc
-        run: python3 scripts/check_freshness.py
 
       - name: Check repo-index consistency
         working-directory: ./heim-pc

@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "kind": "heim_pc_operator_entry",
+  "authority": "static_local_entry_contract",
+  "operatorModel": {
+    "operator": "chatgpt_via_grabowski",
+    "humanRole": "meaning_approval_abort",
+    "machineFirst": true,
+    "proseIsProjection": true,
+    "liveStateRequiresFreshRead": true,
+    "doNotDelegateShellToHuman": true
+  },
+  "host": {
+    "id": "heim-pc",
+    "home": "${HOME}",
+    "repositoriesRoot": "${HOME}/repos",
+    "canonicalEntryRepository": "${HOME}/repos/heim-pc",
+    "canonicalEntryFile": "${HOME}/repos/heim-pc/manifest/operator-entry.v1.json",
+    "installedEntryFile": "${HOME}/.config/heimgewebe/operator-entry.v1.json",
+    "agentPointer": "${HOME}/AGENTS.md",
+    "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md"
+  },
+  "entrySequence": [
+    {
+      "id": "runtime_identity",
+      "surface": "grabowski",
+      "operation": "grabowski_status",
+      "arguments": {
+        "view": "evidence"
+      },
+      "purpose": "verify runtime identity, integrity, policy and connector warnings"
+    },
+    {
+      "id": "execution_contract",
+      "surface": "grabowski",
+      "operation": "grabowski_agent_bootstrap",
+      "arguments": {},
+      "purpose": "load bounded execution rules and immutable boundaries"
+    },
+    {
+      "id": "local_entry",
+      "surface": "filesystem",
+      "operation": "grabowski_read_text",
+      "arguments": {
+        "path": "${HOME}/.config/heimgewebe/operator-entry.v1.json"
+      },
+      "purpose": "resolve local canonical repositories and source locators"
+    },
+    {
+      "id": "scope_classification",
+      "surface": "agent",
+      "operation": "classify_scope",
+      "allowedResults": [
+        "single_repository",
+        "cross_repository",
+        "host_runtime",
+        "task_selection",
+        "historical_evidence"
+      ]
+    },
+    {
+      "id": "source_resolution",
+      "surface": "contract",
+      "operation": "follow_truth_sources",
+      "purpose": "read only the primary sources required by the classified scope"
+    }
+  ],
+  "truthSources": {
+    "stableEcosystemSemantics": {
+      "repository": "${HOME}/repos/systemkatalog",
+      "agentEntry": "${HOME}/repos/systemkatalog/AGENTS.md",
+      "nodes": "${HOME}/repos/systemkatalog/registry/ecosystem/nodes.json",
+      "relations": "${HOME}/repos/systemkatalog/registry/ecosystem/edges.json",
+      "authorityMatrix": "${HOME}/repos/systemkatalog/registry/ecosystem/authority-matrix.v1.json",
+      "queryArgv": [
+        "python3",
+        "${HOME}/repos/systemkatalog/scripts/systemkatalog_query.py"
+      ],
+      "doesNotEstablish": [
+        "runtime_health",
+        "task_state",
+        "merge_readiness"
+      ]
+    },
+    "tasksClaimsReceipts": {
+      "repository": "${HOME}/repos/bureau",
+      "machineCommandPrefix": [
+        "python3",
+        "-m",
+        "bureau.cli",
+        "--root",
+        "${HOME}/repos/bureau",
+        "--json"
+      ],
+      "preferredReads": [
+        "what-now",
+        "repo-balls",
+        "live-conflicts",
+        "doctor"
+      ]
+    },
+    "executionRuntimeLeases": {
+      "repository": "${HOME}/repos/grabowski",
+      "surface": "grabowski_mcp",
+      "preferredReads": [
+        "grabowski_status",
+        "grabowski_context",
+        "grabowski_resource_list",
+        "grabowski_checkout_inventory",
+        "grabowski_task_list"
+      ]
+    },
+    "repositoriesPullRequestsReviews": {
+      "source": "git_and_github",
+      "preferredReads": [
+        "grabowski_git_status",
+        "grabowski_git_diff",
+        "grabowski_github_pr_view",
+        "grabowski_github_checks"
+      ]
+    },
+    "technicalChecks": {
+      "source": "ci_and_local_tests",
+      "rule": "bind results to the exact head and diff"
+    },
+    "repositoryContext": {
+      "repository": "${HOME}/repos/lenskit",
+      "publicName": "RepoBrief",
+      "preferredReads": [
+        "rlens_freshness_check",
+        "rlens_context_pack",
+        "rlens_query",
+        "rlens_range_get"
+      ],
+      "rule": "unknown or stale provenance is not current repository truth"
+    },
+    "appendOnlyHistory": {
+      "repository": "${HOME}/repos/chronik"
+    },
+    "fleetMembershipAndContracts": {
+      "repository": "${HOME}/repos/metarepo",
+      "fleetRegistry": "${HOME}/repos/metarepo/fleet/repos.yml",
+      "contractsRoot": "${HOME}/repos/metarepo/contracts"
+    },
+    "repositoryReadiness": {
+      "repository": "${HOME}/repos/steuerboard",
+      "authority": "read_only_observation"
+    },
+    "generalObservability": {
+      "repository": "${HOME}/repos/leitstand",
+      "authority": "read_only_projection"
+    },
+    "boundedExperiments": {
+      "repository": "${HOME}/repos/vibe-lab",
+      "authority": "evidence_experiments_only"
+    },
+    "visualProjection": {
+      "repository": "${HOME}/repos/schauwerk",
+      "authority": "projection_only"
+    }
+  },
+  "sourcePolicy": {
+    "excludedAsCurrentTruth": [
+      {
+        "path": "${HOME}/repos/heim-pc/state/index.json",
+        "reason": "placeholder data without timestamp or source provenance"
+      },
+      {
+        "path": "${HOME}/repos/heim-pc/state/repos.json",
+        "reason": "placeholder repository inventory without scan provenance"
+      }
+    ],
+    "rule": "excluded paths may not establish host, repository, activity or freshness claims until replaced by provenance-bound generated data"
+  },
+  "repositoryResolution": {
+    "canonicalPattern": "${HOME}/repos/<repository>",
+    "repositoryAgentEntry": "AGENTS.md",
+    "beforeMutation": [
+      "read live branch head dirty state and upstream",
+      "read open pull requests and checks",
+      "read active leases worktrees tasks and processes",
+      "assess overlap before parallel work"
+    ]
+  },
+  "safety": {
+    "neverBroadScan": [
+      "${HOME}/.ssh",
+      "${HOME}/.gnupg",
+      "${HOME}/.password-store",
+      "browser profiles",
+      "keyrings",
+      "private content trees",
+      "agent runtime histories"
+    ],
+    "neverInfer": [
+      "live health from static documentation",
+      "task priority from repository prose",
+      "merge readiness from process exit",
+      "execution authority from this contract"
+    ],
+    "mutationRule": "one bounded effect followed by target-state readback",
+    "conflictRule": "foreign dirty states leases worktrees processes and branches remain untouched"
+  },
+  "projection": {
+    "source": "manifest/operator-entry.v1.json",
+    "aiContext": ".ai-context.yml",
+    "installedContract": "${HOME}/.config/heimgewebe/operator-entry.v1.json",
+    "homeAgentPointer": "${HOME}/AGENTS.md",
+    "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
+    "homeReadmePointer": "${HOME}/README.md",
+    "installer": "scripts/install_operator_entry.py",
+    "checker": "scripts/check_operator_entry.py",
+    "byteIdenticalContractRequired": true
+  },
+  "doesNotEstablish": [
+    "current_runtime_health",
+    "current_task_priority",
+    "current_repository_state",
+    "merge_or_deploy_authority",
+    "secret_access_authority"
+  ],
+  "pathResolution": {
+    "variables": {
+      "HOME": {
+        "source": "operator_process_home",
+        "required": true,
+        "mustResolveToAbsoluteDirectory": true
+      }
+    },
+    "rule": "resolve ${HOME} before filesystem access; unresolved variables block the operation",
+    "publicTemplateContainsResolvedHostPath": false
+  }
+}

@@ -1,7 +1,12 @@
 # Heimgewebe Repositories – Agenteneinstieg
 
-Diese Datei gilt als gemeinsame Orientierung für Arbeiten unter `/home/alex/repos`.
-Repository-eigene `AGENTS.md`-Dateien bleiben für die konkrete Arbeit vorrangig.
+Diese Datei ist ein lokaler Pointer für Arbeiten unter `/home/alex/repos`. Repository-eigene `AGENTS.md`-Dateien bleiben für die konkrete Arbeit vorrangig.
+
+## Kanonischer Maschinenstart
+
+Lies zuerst den installierten Host-Vertrag unter `/home/alex/.config/heimgewebe/operator-entry.v1.json`. Seine versionierte Quelle liegt in `/home/alex/repos/heim-pc/manifest/operator-entry.v1.json`.
+
+Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")` und `grabowski_agent_bootstrap()`. ChatGPT über Grabowski ist der Operator; der Mensch liefert Ziel, Bedeutung, Freigaben und Abbruchentscheidungen und soll nicht als Shell-Ausführer benutzt werden.
 
 ## Systemweite Orientierung
 
@@ -24,6 +29,7 @@ Bei gewöhnlicher Codearbeit in nur einem Repository wird der Systemkatalog nich
 
 ## Grenzen
 
-- Der Systemkatalog beschreibt stabile Semantik; er ist kein Task-, PR-, CI- oder Runtime-Statussystem.
-- Aktuelle Zustände müssen bei GitHub, CI, Bureau, Grabowski, systemd, Logs oder Healthchecks geprüft werden.
-- Private Inhalte, Credentials und lokale Agentenhistorien dürfen nicht aus dem Katalog abgeleitet oder veröffentlicht werden.
+- Der Host-Vertrag und der Systemkatalog beschreiben Einstieg und stabile Semantik; sie sind keine Task-, PR-, CI- oder Runtime-Statussysteme.
+- Aktuelle Zustände müssen bei GitHub, CI, Bureau, Grabowski, systemd, Logs oder Healthchecks frisch geprüft werden.
+- Private Inhalte, Credentials und lokale Agentenhistorien dürfen nicht aus dem Katalog abgeleitet oder ohne ausdrücklichen Zweck gelesen werden.
+- Fremde Dirty-States, Worktrees, Leases, Prozesse, Branches und laufende Arbeiten bleiben unverändert.
