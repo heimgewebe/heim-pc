@@ -9,7 +9,7 @@ It provides a complete overview of the canonical documentation zones and their c
 
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
-| agents.entry | [./AGENTS.md](./AGENTS.md) | canonical | 2026-07-04 | operatorium-entry, home-entry, security |
+| agents.entry | [./AGENTS.md](./AGENTS.md) | canonical | 2026-07-13 | operatorium-entry, home-entry, security |
 
 ## Zone: norm
 
@@ -17,7 +17,7 @@ It provides a complete overview of the canonical documentation zones and their c
 
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
-| operatorium-entry | [architecture/operatorium-entry.md](architecture/operatorium-entry.md) | canonical | 2026-07-04 | model, security, zones, drift-policy |
+| operatorium-entry | [architecture/operatorium-entry.md](architecture/operatorium-entry.md) | canonical | 2026-07-13 | model, security, zones, drift-policy |
 | model | [architecture/model.md](architecture/model.md) | canonical | 2026-02-28 | - |
 | security | [architecture/security.md](architecture/security.md) | canonical | 2026-02-28 | - |
 | zones | [architecture/zones.md](architecture/zones.md) | canonical | 2026-02-28 | - |
@@ -31,7 +31,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
 | runtime.readme | [runtime/README.md](runtime/README.md) | canonical | 2026-02-28 | - |
-| home-entry | [runtime/home-entry.md](runtime/home-entry.md) | canonical | 2026-07-04 | operatorium-entry, security |
+| home-entry | [runtime/home-entry.md](runtime/home-entry.md) | canonical | 2026-07-13 | operatorium-entry, security |
 | software-inventory | [runtime/software-inventory.md](runtime/software-inventory.md) | canonical | 2026-07-09 | home-entry, security |
 | program-inventory-summary | [runtime/program-inventory-summary.md](runtime/program-inventory-summary.md) | canonical | 2026-07-09 | software-inventory |
 

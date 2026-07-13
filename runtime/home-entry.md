@@ -2,7 +2,7 @@
 id: home-entry
 role: reality
 status: canonical
-last_reviewed: 2026-07-04
+last_reviewed: 2026-07-13
 depends_on:
   - operatorium-entry
   - security
@@ -24,7 +24,7 @@ Diese Runtime-Notiz beschreibt die beabsichtigte Betriebsform: kurze lokale Poin
 Ein späterer lokaler Home-Pointer darf knapp sein:
 
 * Verweis auf `~/repos/heim-pc` als Operatorium-Entrée für den lokalen Rechner.
-* Verweis auf `~/repos/cabinet` als kanonische Ökosystemkarte.
+* Verweis auf `~/repos/systemkatalog` als kanonische Quelle stabiler Ökosystemsemantik.
 * Warnung, keine privaten Inhaltsflächen ohne Auftrag und Sicherheitsprüfung zu lesen.
 
 Der Pointer soll kein vollständiges Inhaltsverzeichnis von `/home/alex` sein.

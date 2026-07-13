@@ -19,12 +19,12 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 
 **Antithese:** Es darf nicht zu einer zweiten Ökosystemkarte, einem Home-Spiegel oder einem stillen Inhaltsdump werden.
 
-**Synthese:** `heim-pc` pflegt kleine, reviewbare Einstiegs- und Orientierungsartefakte. Cabinet bleibt der kanonische Ort der Ökosystemkarte. `/home/alex` bekommt nur kurze lokale Pointer.
+**Synthese:** `heim-pc` pflegt kleine, reviewbare Einstiegs- und Orientierungsartefakte. Der Systemkatalog bleibt der kanonische Ort stabiler Ökosystemsemantik. `/home/alex` bekommt nur kurze lokale Pointer.
 
 ## Wahrheitsordnung
 
 1. GitHub, CI, PR-Diffs und aktuelle Runtime-Belege sind Primärquellen für gegenwärtigen Zustand.
-2. Cabinet ist die kanonische Quelle für die systemweite Ökosystemkarte.
+2. Der statische Systemkatalog ist die kanonische Quelle für Systemzwecke, Grenzen, Wahrheitsbesitz, stabile Beziehungen und Einstiegspunkte.
 3. `manifest/repo-index.yaml` ist die Quelle für kanonische Dokumente in diesem Repository.
 4. `SYSTEM_MAP.md` wird daraus generiert und ist nur die Repo-Dokumentationskarte.
 5. Lokale Pointer in `/home/alex` sind Wegweiser, keine versionierte Wahrheit.
@@ -39,16 +39,28 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen
 
-## Direkter Karten-Pointer
+## Direkter Systemkatalog-Pointer
 
-Die systemweite Ökosystemkarte liegt nicht in diesem Repository, sondern in Cabinet:
+Die systemweite stabile Semantik liegt nicht in diesem Repository, sondern im Systemkatalog:
 
-* Cabinet-Einstieg: `~/repos/cabinet/index.md`
-* Karten-Blueprint: `~/repos/cabinet/docs/blueprints/ecosystem-map-v0.md`
-* Lesbare Mermaid-Übersicht: `~/repos/cabinet/rendered/ecosystem-map.mmd`
-* Generierte Registry-Projektion: `~/repos/cabinet/rendered/ecosystem-registry-map.mmd`
+* Agenteneinstieg: `~/repos/systemkatalog/AGENTS.md`
+* Lesbare Katalogansicht: `~/repos/systemkatalog/rendered/system-catalog.md`
+* Generierte Registry-Karte: `~/repos/systemkatalog/rendered/ecosystem-registry-map.mmd`
+* Commit- und hashgebundener Verbraucher-Lieferschein: `~/repos/systemkatalog/rendered/ecosystem-map-artifact-manifest.json`
+* Deterministische Abfrage: `python3 ~/repos/systemkatalog/scripts/systemkatalog_query.py system <name>`
 
-Zum gerenderten Anschauen heute: die `.mmd`-Dateien in einem Editor mit Mermaid-Preview öffnen oder in einen Mermaid-Renderer kopieren. Eine spätere Leitstand-Ansicht ist der passende Dashboard-Ort; Cabinet bleibt Canon.
+Leitstand zeigt die Karte read-only an. Für aktuelle Aufgaben, PRs, CI oder Runtime-Gesundheit gelten weiterhin Bureau, GitHub, CI, Grabowski, systemd, Logs und Healthchecks.
+
+## Gemeinsamer Agenteneinstieg und Drift-Watchdog
+
+`config/agents/repos-root-AGENTS.md` ist die versionierte Vorlage für `/home/alex/repos/AGENTS.md`. Sie verweist nur bei repositoryübergreifenden Systemfragen auf den Systemkatalog und vermeidet unnötige Kontextladung bei gewöhnlicher Einzelrepo-Arbeit.
+
+Der stündliche `systemkatalog-drift-watch.timer` prüft unabhängig vom GitHub-Zeitplan Organisations-, Fleet- und Primärquellendrift. Er darf keine Semantik schreiben oder mergen. Bei materieller Drift registriert er höchstens einen deduplizierten Bureau-Kandidaten und legt Bericht sowie proposal-only Vorschlag lokal unter `~/.local/state/heim-pc/systemkatalog-drift-watch/` ab.
+
+```bash
+python3 scripts/install_systemkatalog_reliability.py          # Plan anzeigen
+python3 scripts/install_systemkatalog_reliability.py --apply --enable
+```
 
 ## Goldene Regel
 
@@ -57,7 +69,7 @@ Zum gerenderten Anschauen heute: die `.mmd`-Dateien in einem Editor mit Mermaid-
 * Rohdaten → lokal, CI-Artefakte oder Releases, nicht in Git-Historie
 * Nur kleine, reviewbare, kanonische Artefakte im Repository
 * Keine Secrets, Browserprofile, Keyrings oder privaten Inhaltsflächen lesen oder ausgeben
-* Keine zweite Systemkarte neben Cabinet pflegen
+* Keine zweite Systemkarte neben dem Systemkatalog pflegen
 
 ## Struktur
 
