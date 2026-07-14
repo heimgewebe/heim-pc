@@ -32,6 +32,12 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(contract["host"]["role"], "primary_local_operator_host")
         self.assertEqual(contract["host"]["installedEntryFile"], "${HOME}/.config/heimgewebe/operator-entry.v1.json")
         self.assertEqual(contract["host"]["repositoriesAgentPointer"], "${HOME}/repos/AGENTS.md")
+        transfer = contract["transferPaths"]["heimPcToIPad"]
+        self.assertEqual(transfer["canonicalDirectory"], "${HOME}/iCloud/Drive/halde")
+        self.assertEqual(transfer["transport"], "icloud_drive")
+        self.assertEqual(transfer["direction"], "heim_pc_to_ipad")
+        self.assertEqual(transfer["fallbackTransport"], "tailscale_taildrop")
+        self.assertIn("ipad_to_heim_pc_transfer_path", transfer["doesNotEstablish"])
         entry_ids = {item["id"] for item in contract["entrySequence"]}
         self.assertIn("operator_context", entry_ids)
         self.assertIn("target_specific_live_state", entry_ids)
