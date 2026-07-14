@@ -21,6 +21,24 @@
     "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
     "role": "primary_local_operator_host"
   },
+  "transferPaths": {
+    "heimPcToIPad": {
+      "canonicalDirectory": "${HOME}/iCloud/Drive/halde",
+      "transport": "icloud_drive",
+      "direction": "heim_pc_to_ipad",
+      "purpose": "default handoff location for files that must be available on the iPad",
+      "preconditions": [
+        "iCloud Drive mount is active",
+        "canonicalDirectory resolves to an existing directory",
+        "the completed file is readable after write"
+      ],
+      "fallbackTransport": "tailscale_taildrop",
+      "doesNotEstablish": [
+        "icloud_sync_completed_on_ipad",
+        "ipad_to_heim_pc_transfer_path"
+      ]
+    }
+  },
   "entrySequence": [
     {
       "id": "runtime_identity",
