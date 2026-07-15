@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.storage_lifecycle_policy",
+  "policy_id": "storage-lifecycle.v1",
+  "classes": {
+    "canonical": {
+      "automatic_cleanup": false
+    },
+    "durable_evidence": {
+      "automatic_cleanup": false
+    },
+    "temporary_workspace": {
+      "automatic_cleanup": false
+    },
+    "regenerable_cache": {
+      "automatic_cleanup": false
+    }
+  },
+  "filesystem_thresholds_percent": {
+    "notice": 60,
+    "warning": 75,
+    "critical": 85
+  },
+  "growth_thresholds_bytes_24h": {
+    "warning": 5368709120,
+    "hard": 16106127360
+  },
+  "global_temporary_budget_bytes": {
+    "warning": 107374182400,
+    "hard": 161061273600
+  },
+  "snapshot_retention": {
+    "max_count": 168
+  },
+  "producers": [
+    {
+      "id": "repo-worktrees",
+      "class": "temporary_workspace",
+      "owner": "grabowski-checkout-lifecycle",
+      "paths": [
+        "${HOME}/repos/.weltgewebe-worktrees",
+        "${HOME}/worktrees"
+      ],
+      "budget_bytes": {
+        "warning": 85899345920,
+        "hard": 128849018880
+      },
+      "cleanup_strategy": "checkout-lifecycle-only"
+    },
+    {
+      "id": "repobrief-auto",
+      "class": "temporary_workspace",
+      "owner": "lenskit-repobrief",
+      "paths": [
+        "${HOME}/repos/merges/repobrief-auto"
+      ],
+      "budget_bytes": {
+        "warning": 21474836480,
+        "hard": 42949672960
+      },
+      "cleanup_strategy": "manifest-and-retention-only"
+    },
+    {
+      "id": "user-cache",
+      "class": "regenerable_cache",
+      "owner": "heim-pc-storage-maintenance",
+      "paths": [
+        "${HOME}/.cache"
+      ],
+      "budget_bytes": {
+        "warning": 37580963840,
+        "hard": 53687091200
+      },
+      "cleanup_strategy": "policy-lru"
+    },
+    {
+      "id": "trash",
+      "class": "temporary_workspace",
+      "owner": "desktop-user",
+      "paths": [
+        "${HOME}/.local/share/Trash"
+      ],
+      "budget_bytes": {
+        "warning": 10737418240,
+        "hard": 21474836480
+      },
+      "cleanup_strategy": "age-policy"
+    },
+    {
+      "id": "grabowski-releases",
+      "class": "durable_evidence",
+      "owner": "grabowski-runtime",
+      "paths": [
+        "${HOME}/.local/share/grabowski-mcp-releases"
+      ],
+      "budget_bytes": {
+        "warning": 10737418240,
+        "hard": 21474836480
+      },
+      "cleanup_strategy": "active-plus-fallbacks"
+    },
+    {
+      "id": "vm-data",
+      "class": "canonical",
+      "owner": "desktop-user",
+      "paths": [
+        "${HOME}/vm"
+      ],
+      "budget_bytes": {
+        "warning": 53687091200,
+        "hard": 107374182400
+      },
+      "cleanup_strategy": "manual-only"
+    }
+  ],
+  "safety": {
+    "follow_symlinks": false,
+    "cross_filesystems": false,
+    "unknown_owner_auto_cleanup": false,
+    "does_not_establish": [
+      "permission_to_delete",
+      "worktree_obsolescence",
+      "docker_volume_safety",
+      "backup_sufficiency"
+    ]
+  },
+  "unowned_discovery": {
+    "minimum_bytes": 2147483648,
+    "roots": [
+      {
+        "path": "${HOME}/repos",
+        "max_depth": 1,
+        "name_globs": [
+          ".*-worktrees",
+          "*-worktrees"
+        ]
+      },
+      {
+        "path": "${HOME}",
+        "max_depth": 1,
+        "name_globs": [
+          "worktrees",
+          "grabowski-workspace",
+          "*-workspace"
+        ]
+      }
+    ]
+  }
+}
