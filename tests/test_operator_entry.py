@@ -34,6 +34,12 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(contract["host"]["repositoriesAgentPointer"], "${HOME}/repos/AGENTS.md")
         policy = contract["transferPolicy"]
         self.assertEqual(policy["principle"], "role_based_dual_transport")
+        self.assertEqual(policy["scope"], "heim_pc_mobile_devices")
+        self.assertEqual(
+            policy["mobileTargetsManifest"],
+            "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
+        )
+        self.assertTrue(policy["targetAvailabilityRequiresFreshRead"])
         self.assertEqual(policy["sharedExchangeTransport"], "icloudSharedExchange")
         self.assertEqual(policy["directDeliveryTransport"], "taildropDirectDelivery")
         self.assertEqual(policy["selectionRules"]["sharedPersistentWorkspace"], "icloudSharedExchange")
@@ -56,10 +62,30 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(direct["role"], "direct_delivery")
         self.assertEqual(direct["transport"], "tailscale_taildrop")
         self.assertEqual(direct["direction"], "bidirectional")
-        self.assertEqual(direct["endpoints"], ["heim_pc", "ipad"])
+        self.assertEqual(direct["endpoints"], ["heim_pc", "mobile_devices"])
         self.assertEqual(direct["heimPcInbox"], "${HOME}/Incoming/Taildrop")
         self.assertEqual(direct["heimPcSendCommand"], "${HOME}/.local/bin/heim-taildrop-send")
-        self.assertEqual(direct["ipadTarget"], "ipad-10th-gen-wifi")
+        target_resolution = policy["directDeliveryTargetResolution"]
+        self.assertEqual(
+            target_resolution["manifest"],
+            "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
+        )
+        self.assertEqual(target_resolution["route"], "directOneShotDelivery")
+        self.assertEqual(
+            target_resolution["liveTargetsArgv"],
+            ["tailscale", "file", "cp", "--targets"],
+        )
+        self.assertNotIn("ipadTarget", direct)
+
+        mobile_targets = json.loads(
+            (ROOT / "manifest/mobile-transfer-targets.v1.json").read_text(encoding="utf-8")
+        )
+        targets = {item["id"]: item for item in mobile_targets["targets"]}
+        self.assertEqual(targets["ipad"]["taildropTarget"], "ipad-10th-gen-wifi")
+        self.assertEqual(targets["a54"]["taildropTarget"], "a54-von-alexander")
+        route = mobile_targets["routing"][target_resolution["route"]]
+        self.assertEqual(route["eligibleTargets"], ["ipad", "a54"])
+        self.assertEqual(route["remoteFallbackOrder"], ["ipad", "a54"])
         self.assertEqual(direct["fileManagerDiscovery"]["kind"], "gtk_favorite")
         self.assertEqual(direct["fileManagerDiscovery"]["target"], "${HOME}/Incoming/Taildrop")
         self.assertEqual(direct["fileManagerDiscovery"]["management"], "user_managed")
