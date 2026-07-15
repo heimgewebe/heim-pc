@@ -10,6 +10,7 @@ from unittest.mock import patch
 from scripts.storage_inventory import (
     PolicyError,
     _atomic_write_json,
+    _producer_status,
     collect,
     load_policy,
     publish_snapshot,
@@ -327,6 +328,41 @@ class StorageInventoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PolicyError, "unknown_owner_auto_cleanup"):
                 load_policy(policy_path)
+
+
+    def test_producer_budget_boundaries_are_inclusive(self) -> None:
+        self.assertEqual(_producer_status(9, 10, 20, False, 0), "ok")
+        self.assertEqual(_producer_status(10, 10, 20, False, 0), "warning")
+        self.assertEqual(_producer_status(19, 10, 20, False, 0), "warning")
+        self.assertEqual(_producer_status(20, 10, 20, False, 0), "hard_limit")
+
+    def test_collect_is_stable_for_fixed_observation_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            producer = tmp_path / "producer"
+            producer.mkdir()
+            (producer / "payload").write_bytes(b"stable")
+            policy_path = make_policy(
+                tmp_path / "policy.json", producer, warning=1, hard=2
+            )
+            policy = load_policy(policy_path)
+
+            with (
+                patch.dict(
+                    collect.__globals__,
+                    {"_utc_now": lambda: "2026-07-15T04:00:00Z"},
+                ),
+                patch.object(
+                    collect.__globals__["socket"],
+                    "gethostname",
+                    return_value="heim-pc",
+                ),
+            ):
+                first = collect(policy, home=tmp_path, filesystem_root=tmp_path)
+                second = collect(policy, home=tmp_path, filesystem_root=tmp_path)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first["inventory_sha256"], second["inventory_sha256"])
 
 
 if __name__ == "__main__":
