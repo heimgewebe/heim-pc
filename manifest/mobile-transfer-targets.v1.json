@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "kind": "heim_pc_mobile_transfer_targets",
+  "authority": "static_target_identity_and_role_contract",
+  "availabilityRequiresFreshRead": true,
+  "host": {
+    "id": "heim-pc"
+  },
+  "targets": [
+    {
+      "id": "ipad",
+      "deviceClass": "tablet",
+      "platform": "ios",
+      "taildropTarget": "ipad-10th-gen-wifi",
+      "roles": [
+        "remote_primary",
+        "shared_exchange_client",
+        "direct_delivery_client"
+      ],
+      "transports": [
+        "icloud_drive",
+        "tailscale_taildrop"
+      ]
+    },
+    {
+      "id": "a54",
+      "deviceClass": "phone",
+      "platform": "android",
+      "taildropTarget": "a54-von-alexander",
+      "roles": [
+        "remote_fallback",
+        "direct_delivery_client"
+      ],
+      "transports": [
+        "tailscale_taildrop"
+      ]
+    }
+  ],
+  "routing": {
+    "sharedPersistentWorkspace": {
+      "transport": "icloud_drive",
+      "directory": "${HOME}/iCloud/Drive/halde",
+      "eligibleTargets": [
+        "ipad"
+      ]
+    },
+    "directOneShotDelivery": {
+      "transport": "tailscale_taildrop",
+      "heimPcInbox": "${HOME}/Incoming/Taildrop",
+      "heimPcSendCommand": "${HOME}/.local/bin/heim-taildrop-send",
+      "eligibleTargets": [
+        "ipad",
+        "a54"
+      ],
+      "remoteFallbackOrder": [
+        "ipad",
+        "a54"
+      ]
+    }
+  },
+  "doesNotEstablish": [
+    "target_online_now",
+    "taildrop_transfer_completed",
+    "icloud_sync_completed",
+    "mobile_application_import_completed"
+  ]
+}
