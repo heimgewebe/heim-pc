@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.managed_build_policy",
+  "cache_root": "${HOME}/.cache/heim-pc/managed-builds",
+  "state_root": "${HOME}/.local/state/heim-pc/managed-builds",
+  "executable_search_paths": [
+    "${HOME}/.cargo/bin",
+    "${HOME}/.local/bin",
+    "${HOME}/.npm-global/bin",
+    "/usr/local/bin",
+    "/usr/bin"
+  ],
+  "interactive_shell_behavior": "unchanged",
+  "automatic_cleanup_authorized": false,
+  "managed_worktree_budget_bytes": {
+    "warning": 2147483648,
+    "hard": 5368709120
+  },
+  "per_identity_cache_budget_bytes": {
+    "warning": 10737418240,
+    "hard": 21474836480
+  },
+  "max_receipts": 100,
+  "tools": {
+    "cargo": {
+      "executables": [
+        "cargo"
+      ],
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "worktree_payloads": [
+        "target"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "target"
+      }
+    },
+    "node": {
+      "executables": [
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn"
+      ],
+      "lockfiles": [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package.json"
+      ],
+      "worktree_payloads": [
+        "node_modules",
+        ".yarn",
+        ".npm",
+        "dist",
+        "build"
+      ],
+      "environment": {
+        "NPM_CONFIG_CACHE": "npm",
+        "PNPM_STORE_DIR": "pnpm-store",
+        "YARN_CACHE_FOLDER": "yarn",
+        "npm_config_cache": "npm"
+      }
+    },
+    "python": {
+      "executables": [
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "pytest",
+        "uv"
+      ],
+      "lockfiles": [
+        "pyproject.toml",
+        "poetry.lock",
+        "uv.lock",
+        "requirements.txt",
+        "requirements-dev.txt"
+      ],
+      "worktree_payloads": [
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "dist",
+        "build"
+      ],
+      "environment": {
+        "PIP_CACHE_DIR": "pip",
+        "PYTHONPYCACHEPREFIX": "pycache",
+        "UV_CACHE_DIR": "uv"
+      }
+    },
+    "playwright": {
+      "executables": [
+        "playwright"
+      ],
+      "lockfiles": [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt"
+      ],
+      "worktree_payloads": [
+        "test-results",
+        "playwright-report",
+        "blob-report"
+      ],
+      "environment": {
+        "PLAYWRIGHT_BROWSERS_PATH": "browsers"
+      }
+    }
+  },
+  "does_not_establish": [
+    "permission to delete worktree or managed cache payloads",
+    "execution authority for child commands",
+    "build correctness",
+    "global shell environment changes",
+    "safe cache reuse after repository, toolchain, lockfile or profile identity changes"
+  ]
+}

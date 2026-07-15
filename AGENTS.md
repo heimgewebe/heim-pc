@@ -59,6 +59,7 @@ Der kanonische Maschinenvertrag ist `manifest/operator-entry.v1.json`. Die lokal
 * `/home/alex/AGENTS.md`, `/home/alex/repos/AGENTS.md`, `/home/alex/README.md` und `~/.config/heimgewebe/operator-entry.v1.json` werden aus den versionierten Quellen durch `scripts/install_operator_entry.py` installiert.
 * Keine Behauptung über aktuellen GitHub-, CI-, Task- oder Runtime-Stand ohne frische Prüfung.
 * Kleine, reviewbare Dokument- und Vertrags-Slices bevorzugen; große Rohdaten oder Snapshots gehören nicht in die Git-Historie.
+* Verwaltete automatisierte Builds müssen über `python3 scripts/managed_build.py plan` beziehungsweise `run` laufen; direkte interaktive Werkzeugaufrufe bleiben unverändert. Pins benötigen Grund und Ablaufzeit und erteilen weder Ausführungs- noch Löschberechtigung.
 * Wenn lokaler Zustand, GitHub-Stand und Dokumentation widersprechen, bleibt der Widerspruch sichtbar und wird als Drift behandelt.
 * Vor Mutation Branch, Head, Dirty-State, offene PRs, CI, Leases, Worktrees, Tasks und Prozesse prüfen; danach Zielzustand erneut lesen.
 

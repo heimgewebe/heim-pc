@@ -85,6 +85,24 @@
       ]
     }
   },
+  "managedBuilds": {
+    "policy": "${HOME}/repos/heim-pc/config/managed-build.v1.json",
+    "entryArgv": [
+      "python3",
+      "${HOME}/repos/heim-pc/scripts/managed_build.py"
+    ],
+    "automationRule": "operator_managed_builds_use_entry",
+    "interactiveShellBehavior": "unchanged",
+    "worktreeWarningBytes": 2147483648,
+    "worktreeHardBytes": 5368709120,
+    "automaticCleanupAuthorized": false,
+    "doesNotEstablish": [
+      "execution_authority_for_child_commands",
+      "build_correctness",
+      "permission_to_delete_worktree_or_cache_payloads",
+      "global_shell_environment_changes"
+    ]
+  },
   "entrySequence": [
     {
       "id": "runtime_identity",
