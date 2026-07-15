@@ -21,8 +21,23 @@
     "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
     "role": "primary_local_operator_host"
   },
+  "transferPolicy": {
+    "scope": "heim_pc_ipad",
+    "principle": "role_based_dual_transport",
+    "sharedExchangeTransport": "icloudSharedExchange",
+    "directDeliveryTransport": "taildropDirectDelivery",
+    "selectionRules": {
+      "sharedPersistentWorkspace": "icloudSharedExchange",
+      "iterativeCrossDeviceWork": "icloudSharedExchange",
+      "directOneShotDelivery": "taildropDirectDelivery",
+      "largeOrSensitiveDelivery": "taildropDirectDelivery",
+      "icloudUnavailable": "taildropDirectDelivery",
+      "taildropUnavailable": "icloudSharedExchange"
+    }
+  },
   "transferPaths": {
-    "heimPcAndIPad": {
+    "icloudSharedExchange": {
+      "role": "shared_exchange",
       "canonicalDirectory": "${HOME}/iCloud/Drive/halde",
       "transport": "icloud_drive",
       "direction": "bidirectional",
@@ -30,16 +45,43 @@
         "heim_pc",
         "ipad"
       ],
-      "purpose": "default handoff location for files transferred between the heim-pc and the iPad",
+      "purpose": "persistent shared workspace for files that must remain discoverable and editable from both devices",
       "preconditions": [
         "iCloud Drive mount is active",
         "canonicalDirectory resolves to an existing directory",
         "the completed file is readable after write"
       ],
-      "fallbackTransport": "tailscale_taildrop",
       "doesNotEstablish": [
         "icloud_sync_completed_on_heim_pc",
         "icloud_sync_completed_on_ipad"
+      ]
+    },
+    "taildropDirectDelivery": {
+      "role": "direct_delivery",
+      "transport": "tailscale_taildrop",
+      "direction": "bidirectional",
+      "endpoints": [
+        "heim_pc",
+        "ipad"
+      ],
+      "heimPcInbox": "${HOME}/Incoming/Taildrop",
+      "heimPcSendCommand": "${HOME}/.local/bin/heim-taildrop-send",
+      "ipadTarget": "ipad-10th-gen-wifi",
+      "fileManagerDiscovery": {
+        "kind": "gtk_favorite",
+        "target": "${HOME}/Incoming/Taildrop",
+        "management": "user_managed"
+      },
+      "purpose": "direct one-shot delivery between devices without using a persistent shared workspace",
+      "preconditions": [
+        "tailscaled is active on the heim-pc",
+        "both endpoints are signed into the same tailnet",
+        "the recipient endpoint supports Taildrop"
+      ],
+      "doesNotEstablish": [
+        "persistent_shared_workspace",
+        "source_or_destination_file_deleted_after_transfer",
+        "recipient_application_import_completed"
       ]
     }
   },
