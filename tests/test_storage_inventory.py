@@ -347,6 +347,7 @@ class StorageInventoryTests(unittest.TestCase):
             )
             policy = load_policy(policy_path)
 
+            fixed_filesystem = collect.__globals__["os"].statvfs(tmp_path)
             with (
                 patch.dict(
                     collect.__globals__,
@@ -356,6 +357,11 @@ class StorageInventoryTests(unittest.TestCase):
                     collect.__globals__["socket"],
                     "gethostname",
                     return_value="heim-pc",
+                ),
+                patch.object(
+                    collect.__globals__["os"],
+                    "statvfs",
+                    return_value=fixed_filesystem,
                 ),
             ):
                 first = collect(policy, home=tmp_path, filesystem_root=tmp_path)
