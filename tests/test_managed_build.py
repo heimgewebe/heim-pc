@@ -231,6 +231,33 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(observation["entries"][0]["relative_path"], "target")
             self.assertGreaterEqual(observation["entries"][0]["logical_bytes"], 7)
 
+    def test_toolchain_probe_uses_resolved_cargo_and_sibling_rustc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            cargo = bin_dir / "cargo"
+            rustc = bin_dir / "rustc"
+            for executable in (cargo, rustc):
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+            calls: list[list[str]] = []
+
+            def observe(argv: list[str], *, cwd: Path, timeout_seconds: int = 5) -> str:
+                calls.append(argv)
+                return "rc=0\nfixture"
+
+            with patch.object(managed_build, "_run_readonly", side_effect=observe):
+                digest = managed_build._toolchain_digest(
+                    "cargo",
+                    [str(cargo), "test"],
+                    root,
+                )
+
+            self.assertEqual(calls[0], [str(cargo), "--version"])
+            self.assertEqual(calls[1], [str(rustc.absolute()), "-Vv"])
+            self.assertNotIn("unavailable", json.dumps(digest))
+
     def test_budget_boundaries_are_inclusive(self) -> None:
         budget = {"warning": 2, "hard": 5}
         self.assertEqual(managed_build._status(1, budget), "ok")

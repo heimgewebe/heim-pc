@@ -365,6 +365,13 @@ def infer_profile(tool: str, command: Sequence[str], explicit_profile: str | Non
     return "default"
 
 
+def _companion_executable(executable: str, companion: str) -> str:
+    candidate = Path(executable).parent / companion
+    if candidate.exists() and os.access(candidate, os.X_OK):
+        return str(candidate.absolute())
+    return companion
+
+
 def _toolchain_digest(
     tool: str,
     command: Sequence[str],
@@ -373,13 +380,15 @@ def _toolchain_digest(
     basename = _command_basename(command)
     observations: dict[str, str] = {}
     if tool == "cargo":
-        observations["cargo"] = _run_readonly(["cargo", "--version"], cwd=repo)
-        observations["rustc"] = _run_readonly(["rustc", "-Vv"], cwd=repo)
+        observations["cargo"] = _run_readonly([command[0], "--version"], cwd=repo)
+        rustc = _companion_executable(command[0], "rustc")
+        observations["rustc"] = _run_readonly([rustc, "-Vv"], cwd=repo)
         observations["files"] = _files_digest(
             repo, ["rust-toolchain", "rust-toolchain.toml"]
         )["sha256"]
     elif tool in {"node", "playwright"}:
-        observations["node"] = _run_readonly(["node", "--version"], cwd=repo)
+        node = command[0] if basename == "node" else _companion_executable(command[0], "node")
+        observations["node"] = _run_readonly([node, "--version"], cwd=repo)
         if basename not in {"npx"}:
             observations[basename] = _run_readonly([command[0], "--version"], cwd=repo)
     else:
