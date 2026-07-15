@@ -22,7 +22,7 @@
     "role": "primary_local_operator_host"
   },
   "transferPolicy": {
-    "scope": "heim_pc_ipad",
+    "scope": "heim_pc_mobile_devices",
     "principle": "role_based_dual_transport",
     "sharedExchangeTransport": "icloudSharedExchange",
     "directDeliveryTransport": "taildropDirectDelivery",
@@ -33,6 +33,19 @@
       "largeOrSensitiveDelivery": "taildropDirectDelivery",
       "icloudUnavailable": "taildropDirectDelivery",
       "taildropUnavailable": "icloudSharedExchange"
+    },
+    "mobileTargetsManifest": "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
+    "targetAvailabilityRequiresFreshRead": true,
+    "directDeliveryTargetResolution": {
+      "manifest": "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
+      "route": "directOneShotDelivery",
+      "liveTargetsArgv": [
+        "tailscale",
+        "file",
+        "cp",
+        "--targets"
+      ],
+      "selectionRule": "use requested mobile device when specified; otherwise follow remoteFallbackOrder among currently available targets"
     }
   },
   "transferPaths": {
@@ -62,11 +75,10 @@
       "direction": "bidirectional",
       "endpoints": [
         "heim_pc",
-        "ipad"
+        "mobile_devices"
       ],
       "heimPcInbox": "${HOME}/Incoming/Taildrop",
       "heimPcSendCommand": "${HOME}/.local/bin/heim-taildrop-send",
-      "ipadTarget": "ipad-10th-gen-wifi",
       "fileManagerDiscovery": {
         "kind": "gtk_favorite",
         "target": "${HOME}/Incoming/Taildrop",
