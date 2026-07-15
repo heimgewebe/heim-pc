@@ -12,6 +12,7 @@ from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "manifest/operator-entry.v1.json"
+MANAGED_BUILD_POLICY_PATH = ROOT / "config/managed-build.v1.json"
 AI_CONTEXT_PATH = ROOT / ".ai-context.yml"
 AGENT_POINTER_PATH = ROOT / "config/agents/home-AGENTS.md"
 REPOS_AGENT_POINTER_PATH = ROOT / "config/agents/repos-root-AGENTS.md"
@@ -156,6 +157,64 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         "repositoriesAgentPointer",
     ):
         _require_host_path(host.get(field), f"host.{field}", errors)
+
+    managed_builds = _require_object(contract.get("managedBuilds"), "managedBuilds", errors)
+    _require_host_path(managed_builds.get("policy"), "managedBuilds.policy", errors)
+    expected_managed_build_argv = [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/managed_build.py",
+    ]
+    if managed_builds.get("entryArgv") != expected_managed_build_argv:
+        errors.append("managedBuilds.entryArgv must name the canonical managed build entry")
+    if managed_builds.get("automationRule") != "operator_managed_builds_use_entry":
+        errors.append("managedBuilds.automationRule must require the canonical entry")
+    if managed_builds.get("interactiveShellBehavior") != "unchanged":
+        errors.append("managedBuilds.interactiveShellBehavior must remain unchanged")
+    warning_bytes = managed_builds.get("worktreeWarningBytes")
+    hard_bytes = managed_builds.get("worktreeHardBytes")
+    if (
+        not isinstance(warning_bytes, int)
+        or isinstance(warning_bytes, bool)
+        or not isinstance(hard_bytes, int)
+        or isinstance(hard_bytes, bool)
+        or warning_bytes < 0
+        or hard_bytes < warning_bytes
+    ):
+        errors.append("managedBuilds worktree budgets must be ordered non-negative integers")
+    if managed_builds.get("automaticCleanupAuthorized") is not False:
+        errors.append("managedBuilds.automaticCleanupAuthorized must remain false")
+    managed_limits = managed_builds.get("doesNotEstablish")
+    required_managed_limits = {
+        "execution_authority_for_child_commands",
+        "build_correctness",
+        "permission_to_delete_worktree_or_cache_payloads",
+        "global_shell_environment_changes",
+    }
+    if not isinstance(managed_limits, list) or not required_managed_limits.issubset(set(managed_limits)):
+        errors.append("managedBuilds.doesNotEstablish is incomplete")
+
+    try:
+        managed_policy = json.loads(MANAGED_BUILD_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        managed_policy = {}
+        errors.append(f"cannot read managed build policy: {exc}")
+    if managed_policy.get("schema_version") != 1:
+        errors.append("managed build policy schema_version must be 1")
+    if managed_policy.get("kind") != "heim_pc.managed_build_policy":
+        errors.append("managed build policy kind is unsupported")
+    if managed_policy.get("interactive_shell_behavior") != "unchanged":
+        errors.append("managed build policy must preserve interactive shell behavior")
+    if managed_policy.get("automatic_cleanup_authorized") is not False:
+        errors.append("managed build policy must not authorize automatic cleanup")
+    _require_host_path(managed_policy.get("cache_root"), "managed build policy cache_root", errors)
+    _require_host_path(managed_policy.get("state_root"), "managed build policy state_root", errors)
+    policy_budget = _require_object(
+        managed_policy.get("managed_worktree_budget_bytes"),
+        "managed build policy managed_worktree_budget_bytes",
+        errors,
+    )
+    if policy_budget.get("warning") != warning_bytes or policy_budget.get("hard") != hard_bytes:
+        errors.append("managedBuilds worktree budgets must match the managed build policy")
 
     entry_sequence = contract.get("entrySequence")
     if not isinstance(entry_sequence, list) or not entry_sequence:

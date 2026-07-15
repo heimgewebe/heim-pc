@@ -13,6 +13,7 @@ zones:
       - drift-policy.md
       - docmeta.schema.md
       - storage-lifecycle.md
+      - managed-builds.md
   reality:
     path: runtime/
     canonical_docs:

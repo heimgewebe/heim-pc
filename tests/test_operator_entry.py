@@ -6,6 +6,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -91,6 +92,21 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(direct["fileManagerDiscovery"]["management"], "user_managed")
         self.assertNotIn("heimPcAndIPad", contract["transferPaths"])
         self.assertNotIn("heimPcToIPad", contract["transferPaths"])
+        managed = contract["managedBuilds"]
+        self.assertEqual(managed["policy"], "${HOME}/repos/heim-pc/config/managed-build.v1.json")
+        self.assertEqual(
+            managed["entryArgv"],
+            ["python3", "${HOME}/repos/heim-pc/scripts/managed_build.py"],
+        )
+        self.assertEqual(managed["automationRule"], "operator_managed_builds_use_entry")
+        self.assertEqual(managed["interactiveShellBehavior"], "unchanged")
+        self.assertEqual(managed["worktreeWarningBytes"], 2 * 1024**3)
+        self.assertEqual(managed["worktreeHardBytes"], 5 * 1024**3)
+        self.assertFalse(managed["automaticCleanupAuthorized"])
+        self.assertIn(
+            "permission_to_delete_worktree_or_cache_payloads",
+            managed["doesNotEstablish"],
+        )
         entry_ids = {item["id"] for item in contract["entrySequence"]}
         self.assertIn("operator_context", entry_ids)
         self.assertIn("target_specific_live_state", entry_ids)
@@ -121,6 +137,27 @@ class OperatorEntryTests(unittest.TestCase):
             receipt = checker.check(home=Path(directory), require_installed=False)
         self.assertTrue(receipt["valid"], receipt["errors"])
         self.assertFalse(receipt["projection"]["contract"]["exists"])
+
+    def test_checker_rejects_managed_build_cleanup_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            contract["managedBuilds"]["automaticCleanupAuthorized"] = True
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            policy_path = ROOT / "config/managed-build.v1.json"
+            with (
+                patch.object(checker, "CONTRACT_PATH", contract_path),
+                patch.object(checker, "MANAGED_BUILD_POLICY_PATH", policy_path),
+            ):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertFalse(receipt["valid"])
+            self.assertIn(
+                "managedBuilds.automaticCleanupAuthorized must remain false",
+                receipt["errors"],
+            )
 
     def test_installer_plan_has_no_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

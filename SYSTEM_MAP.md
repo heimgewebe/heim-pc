@@ -24,6 +24,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | drift-policy | [architecture/drift-policy.md](architecture/drift-policy.md) | canonical | 2026-02-28 | - |
 | docmeta.schema | [architecture/docmeta.schema.md](architecture/docmeta.schema.md) | canonical | 2026-02-28 | - |
 | storage-lifecycle | [architecture/storage-lifecycle.md](architecture/storage-lifecycle.md) | canonical | 2026-07-14 | security |
+| managed-builds | [architecture/managed-builds.md](architecture/managed-builds.md) | canonical | 2026-07-15 | storage-lifecycle, operatorium-entry, security |
 
 ## Zone: reality
 
