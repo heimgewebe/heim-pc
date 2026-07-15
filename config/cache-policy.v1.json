@@ -1,0 +1,107 @@
+{
+  "automatic_apply": false,
+  "classes": {
+    "docker_build_cache": {
+      "apply_authorized": true,
+      "builder": "default",
+      "max_used_space_bytes": 10737418240,
+      "minimum_unused_seconds": 604800,
+      "reserved_space_bytes": 2147483648
+    },
+    "docker_images": {
+      "apply_authorized": true,
+      "dangling_only": true,
+      "minimum_age_seconds": 2592000
+    },
+    "filesystem_cache": {
+      "apply_authorized": true,
+      "targets": [
+        {
+          "id": "managed-build-cache",
+          "minimum_unused_seconds": 1209600,
+          "path": "${HOME}/.cache/heim-pc/managed-builds"
+        },
+        {
+          "id": "pip-cache",
+          "minimum_unused_seconds": 2592000,
+          "path": "${HOME}/.cache/pip"
+        },
+        {
+          "id": "uv-cache",
+          "minimum_unused_seconds": 2592000,
+          "path": "${HOME}/.cache/uv"
+        },
+        {
+          "id": "playwright-browser-cache",
+          "minimum_unused_seconds": 2592000,
+          "path": "${HOME}/.cache/ms-playwright"
+        }
+      ]
+    },
+    "grabowski_releases": {
+      "apply_authorized": true,
+      "deployment_manifest": "${HOME}/.local/share/grabowski-mcp/deployment-manifest.json",
+      "keep_newest_fallbacks": 3,
+      "minimum_age_seconds": 1209600,
+      "root": "${HOME}/.local/share/grabowski-mcp-releases"
+    },
+    "maintenance_journal": {
+      "apply_authorized": true,
+      "keep_newest_per_root": 168,
+      "minimum_age_seconds": 2592000,
+      "roots": [
+        "${HOME}/.local/state/heim-pc/cache-maintenance/plans",
+        "${HOME}/.local/state/heim-pc/cache-maintenance/receipts"
+      ]
+    },
+    "trash": {
+      "apply_authorized": true,
+      "minimum_age_seconds": 2592000,
+      "root": "${HOME}/.local/share/Trash"
+    },
+    "user_journal": {
+      "apply_authorized": false,
+      "observation_command": [
+        "journalctl",
+        "--user",
+        "--disk-usage"
+      ],
+      "reason": "journalctl vacuum does not expose an exact removable entry set"
+    }
+  },
+  "kind": "heim_pc.cache_maintenance_policy",
+  "limits": {
+    "max_docker_records": 1000,
+    "max_entries_per_candidate": 100000,
+    "max_open_file_descriptors": 32768,
+    "max_plan_candidates": 10000,
+    "max_plan_seconds": 180,
+    "max_processes": 4096,
+    "max_scan_seconds_per_candidate": 30,
+    "receipt_retention_count": 168
+  },
+  "pins": {
+    "max_ttl_hours": 720,
+    "path": "${HOME}/.local/state/heim-pc/cache-maintenance/pins.json"
+  },
+  "policy_id": "cache-maintenance.v1",
+  "safety": {
+    "active_build_cache_authorized": false,
+    "cross_filesystems": false,
+    "docker_volumes_authorized": false,
+    "does_not_establish": [
+      "permission_to_delete_unknown_paths",
+      "permission_to_prune_docker_volumes",
+      "permission_to_remove_referenced_images",
+      "permission_to_vacuum_system_or_user_journald",
+      "backup_sufficiency"
+    ],
+    "follow_symlinks": false,
+    "referenced_images_authorized": false,
+    "require_exact_candidate_set": true,
+    "require_exact_plan_hash": true,
+    "unknown_owner_authorized": false
+  },
+  "schema_version": 1,
+  "state_root": "${HOME}/.local/state/heim-pc/cache-maintenance"
+}
