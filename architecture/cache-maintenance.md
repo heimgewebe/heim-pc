@@ -46,12 +46,15 @@ Ein Plan enthält:
 - vor der Wirkung beobachtete Größen;
 - Zustandsdigests für Dateisystemziele;
 - exakte BuildKit-Record-IDs beziehungsweise Docker-Image-SHAs;
+- eine klassenbezogene Bindung jedes Kandidaten an die registrierte Policywurzel oder Docker-Policy;
 - alle Ausschlüsse mit Grund;
 - die explizite Aussage `automatic_cleanup_authorized=false`.
 
 Der Planhash bindet den Erzeugungszeitpunkt, die Policy und sämtliche Beobachtungen. Damit ist jede Planinstanz unveränderlich adressiert und kann keine frühere Instanz mit gleichem Kandidatensatz überschreiben. Bei festem Zeitpunkt und identischen Beobachtungen ist der Hash deterministisch. Der Speicherpfad selbst ist nicht Teil des Hashs.
 
 ### Apply
+
+Alle Apply-Vorgänge desselben State-Roots werden über eine eigentümerkontrollierte, nicht symlinkfähige `flock`-Datei exklusiv serialisiert. Dadurch können parallele Operatorläufe weder dasselbe Receipt noch dieselbe Quarantäne gleichzeitig verändern.
 
 Apply benötigt gleichzeitig:
 
@@ -60,7 +63,7 @@ Apply benötigt gleichzeitig:
 3. `APPLY:<plan_id>` als Bestätigung;
 4. eine explizite, eindeutige Liste von Kandidaten-IDs.
 
-Vor jeder Wirkung wird der Zielzustand erneut geprüft. Drift blockiert fail-closed.
+Vor jeder Wirkung wird der Zielzustand erneut geprüft. Zusätzlich werden Plan-Home, Kandidatenform, Kandidaten-ID und die Zugehörigkeit zu einer registrierten Policywurzel neu validiert. Ein selbst korrekt gehashter, aber frei konstruierter Plan kann daher keine unbekannten Pfade oder abweichenden Docker-Parameter autorisieren. Drift blockiert fail-closed.
 
 Dateisystemziele werden zunächst atomar in ein transaktionsgebundenes Quarantäneverzeichnis auf demselben Dateisystem verschoben. Bei einem normalen Fehler während der Verschiebung werden die in diesem Versuch bewegten Pfade zurückgestellt. Nach einem Prozessabbruch erkennt der nächste identische Apply jede bereits verschobene Teilmenge über eine verschiebungsstabile Identität aus Gerät, Inode, Modus, Größe und `mtime`; Pfad und durch `rename` veränderte `ctime` sind dafür bewusst nicht Teil der Recovery-Identität. Unbekannte Quarantäneeinträge oder Identitätsdrift blockieren. Das Receipt wird vor jedem Kandidaten aktualisiert; ein erneuter identischer Apply wiederholt vollständig abgeschlossene Kandidaten nicht.
 
@@ -79,7 +82,7 @@ Dateisystemkandidaten werden ausgeschlossen, wenn:
 
 Interne Symlinks werden als eigene Inode-Metadaten erfasst, aber nie verfolgt. Dadurch kann beispielsweise eine Python-Umgebung mit `lib64 -> lib` als vollständiger Cachebaum verschoben werden, ohne dass das Symlinkziel außerhalb des Kandidaten gelesen oder gelöscht wird.
 
-BuildKit-Prune wird zusätzlich blockiert, wenn ein `docker build`, `docker buildx build` oder `buildctl build` beobachtet wird. Mutable BuildKit-Datensätze sind nie Kandidaten.
+BuildKit-Prune wird zusätzlich blockiert, wenn die Prozesssicht unvollständig ist oder ein `docker build`, `docker buildx build` beziehungsweise `buildctl build` beobachtet wird. Mutable BuildKit-Datensätze sind nie Kandidaten.
 
 ### Docker-Grenzen
 
@@ -98,7 +101,7 @@ Docker-Volumes sind kategorisch außerhalb des Vertrags. Journald-Vacuum bleibt 
 
 ## Pins
 
-`pin` schützt eine Kandidaten-ID, einen Release-Namen, einen vollständigen Pfad oder eine Docker-ID zeitlich begrenzt. Jeder Pin benötigt Grund und TTL. Pins werden beim Plan, zu Beginn des Apply und unmittelbar vor jedem einzelnen Kandidaten erneut geprüft. Sie erteilen keine positive Löschbefugnis.
+`pin` schützt eine Kandidaten-ID, einen Release-Namen, einen vollständigen Pfad oder eine Docker-ID zeitlich begrenzt. Jeder Pin benötigt Grund und TTL. Pins werden beim Plan, zu Beginn des Apply und unmittelbar vor jedem einzelnen Kandidaten erneut geprüft. Pin-Änderungen verwenden denselben exklusiven State-Lock wie Apply und können daher nicht zwischen finalem Readback und Wirkung rutschen. Sie erteilen keine positive Löschbefugnis.
 
 ## Receipts
 

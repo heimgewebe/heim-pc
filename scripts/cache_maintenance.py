@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import configparser
+import fcntl
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -110,6 +112,30 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _exclusive_state_lock(path: Path) -> Iterable[None]:
+    _ensure_private_directory(path.parent)
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise ApplyError(f"cannot open exclusive state lock: {path}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise ApplyError("exclusive state lock is not owner controlled")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _read_json_file(path: Path, *, max_bytes: int = 4 * 1024 * 1024) -> tuple[dict[str, Any], bytes]:
@@ -1193,6 +1219,8 @@ def _observe_docker_build_cache(
     class_id = "docker_build_cache"
     spec = policy["classes"][class_id]
     exclusions: list[dict[str, Any]] = []
+    if not processes.get("complete"):
+        return _process_visibility_block(class_id, processes)
     try:
         records = _build_cache_records(
             runner,
@@ -1678,8 +1706,23 @@ def build_plan(
 def _verify_plan(plan: dict[str, Any], policy: dict[str, Any], expected_sha256: str) -> None:
     if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
         raise ApplyError("plan schema or kind mismatch")
-    if plan.get("policy_id") != policy["policy_id"] or plan.get("policy_sha256") != policy["policy_sha256"]:
+    if (
+        plan.get("policy_id") != policy["policy_id"]
+        or plan.get("policy_sha256") != policy["policy_sha256"]
+    ):
         raise ApplyError("plan policy identity mismatch")
+    if plan.get("home") != policy["resolved_home"]:
+        raise ApplyError("plan home identity mismatch")
+    classes = plan.get("classes")
+    if not isinstance(classes, dict) or set(classes) != set(policy["classes"]):
+        raise ApplyError("plan classes do not match policy classes")
+    for class_id, value in classes.items():
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("candidates"), list)
+            or not isinstance(value.get("exclusions"), list)
+        ):
+            raise ApplyError(f"plan class structure is invalid: {class_id}")
     supplied = plan.get("plan_sha256")
     calculated = _sha256_json(_plan_material(plan))
     if supplied != calculated or supplied != expected_sha256 or SHA256_RE.fullmatch(expected_sha256) is None:
@@ -1709,7 +1752,194 @@ def _read_receipt(path: Path) -> dict[str, Any]:
     return value
 
 
-def _all_candidates(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _absolute_lexical_path(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value or not value.startswith("/"):
+        raise ApplyError(f"{label} must be an absolute path")
+    normalized = Path(os.path.normpath(value))
+    if str(normalized) != value:
+        raise ApplyError(f"{label} is not lexically normalized")
+    return normalized
+
+
+def _candidate_snapshot_paths(candidate: dict[str, Any]) -> list[Path]:
+    paths = candidate.get("paths")
+    if not isinstance(paths, list):
+        raise ApplyError("candidate paths must be a list")
+    result: list[Path] = []
+    for snapshot in paths:
+        if not isinstance(snapshot, dict):
+            raise ApplyError("candidate snapshot must be an object")
+        path = _absolute_lexical_path(
+            snapshot.get("path"), "candidate snapshot path"
+        )
+        for key in (
+            "identity_sha256",
+            "content_identity_sha256",
+            "movable_identity_sha256",
+        ):
+            if (
+                not isinstance(snapshot.get(key), str)
+                or SHA256_RE.fullmatch(snapshot[key]) is None
+            ):
+                raise ApplyError(f"candidate snapshot {key} is invalid")
+        for key in (
+            "entry_count",
+            "allocated_bytes",
+            "apparent_bytes",
+            "max_mtime_ns",
+            "device",
+        ):
+            value = snapshot.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ApplyError(f"candidate snapshot {key} is invalid")
+        result.append(path)
+    return result
+
+
+def _validate_plan_candidate_authorization(
+    candidate: dict[str, Any], policy: dict[str, Any]
+) -> None:
+    class_id = candidate.get("class_id")
+    stable_key = candidate.get("stable_key")
+    kind = candidate.get("kind")
+    metadata = candidate.get("metadata")
+    allocated = candidate.get("allocated_bytes")
+    candidate_id = candidate.get("candidate_id")
+    if not isinstance(class_id, str) or class_id not in policy["classes"]:
+        raise ApplyError("candidate class is not registered")
+    if not isinstance(stable_key, str) or not stable_key:
+        raise ApplyError("candidate stable key is invalid")
+    if not isinstance(metadata, dict):
+        raise ApplyError("candidate metadata must be an object")
+    if not isinstance(allocated, int) or isinstance(allocated, bool) or allocated < 0:
+        raise ApplyError("candidate allocated bytes are invalid")
+    if candidate.get("automatic_cleanup_authorized") is not False:
+        raise ApplyError("candidate automatic cleanup flag must remain false")
+    if candidate_id != _candidate_id(class_id, stable_key):
+        raise ApplyError("candidate id does not match class and stable key")
+    paths = _candidate_snapshot_paths(candidate)
+    home = Path(policy["resolved_home"])
+
+    filesystem_classes = {
+        "filesystem_cache",
+        "trash",
+        "grabowski_releases",
+        "maintenance_journal",
+    }
+    if class_id in filesystem_classes and allocated != sum(
+        snapshot["allocated_bytes"] for snapshot in candidate["paths"]
+    ):
+        raise ApplyError("filesystem candidate byte total is inconsistent")
+
+    if class_id == "filesystem_cache":
+        if kind != "filesystem_entry" or len(paths) != 1:
+            raise ApplyError("filesystem cache candidate shape is invalid")
+        target_id = metadata.get("target_id")
+        targets = {
+            item["id"]: _expand_path(item["path"], home)
+            for item in policy["classes"][class_id]["targets"]
+        }
+        root = targets.get(target_id)
+        stable = _absolute_lexical_path(stable_key, "filesystem stable key")
+        if root is None or stable.parent != root or paths != [stable]:
+            raise ApplyError("filesystem cache candidate is outside its registered root")
+        return
+
+    if class_id == "trash":
+        if kind != "trash_pair" or len(paths) != 2:
+            raise ApplyError("trash candidate shape is invalid")
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ApplyError("trash candidate name is invalid")
+        root = _expand_path(policy["classes"][class_id]["root"], home)
+        payload = root / "files" / name
+        info = root / "info" / f"{name}.trashinfo"
+        stable = _absolute_lexical_path(stable_key, "trash stable key")
+        if stable != payload or paths != [payload, info]:
+            raise ApplyError("trash candidate is outside the registered pair")
+        return
+
+    if class_id == "grabowski_releases":
+        if kind != "release_directory" or len(paths) != 1:
+            raise ApplyError("release candidate shape is invalid")
+        release_id = metadata.get("release_id")
+        if (
+            not isinstance(release_id, str)
+            or not release_id
+            or Path(release_id).name != release_id
+        ):
+            raise ApplyError("release candidate identity is invalid")
+        root = _expand_path(policy["classes"][class_id]["root"], home)
+        expected = root / release_id
+        stable = _absolute_lexical_path(stable_key, "release stable key")
+        if stable != expected or paths != [expected]:
+            raise ApplyError("release candidate is outside the registered root")
+        return
+
+    if class_id == "maintenance_journal":
+        if kind != "journal_file" or len(paths) != 1:
+            raise ApplyError("maintenance journal candidate shape is invalid")
+        stable = _absolute_lexical_path(stable_key, "journal stable key")
+        roots = [
+            _expand_path(value, home)
+            for value in policy["classes"][class_id]["roots"]
+        ]
+        if stable.suffix != ".json" or stable.parent not in roots or paths != [stable]:
+            raise ApplyError("maintenance journal candidate is outside registered roots")
+        return
+
+    if class_id == "docker_build_cache":
+        spec = policy["classes"][class_id]
+        record_ids = metadata.get("record_ids")
+        if (
+            kind != "docker_build_cache_set"
+            or paths
+            or not isinstance(record_ids, list)
+            or not record_ids
+            or record_ids != sorted(set(record_ids))
+            or any(
+                not isinstance(item, str)
+                or BUILD_RECORD_ID_RE.fullmatch(item) is None
+                for item in record_ids
+            )
+        ):
+            raise ApplyError("BuildKit candidate shape is invalid")
+        expected_stable = f"{spec['builder']}:{_sha256_json(record_ids)}"
+        if (
+            stable_key != expected_stable
+            or metadata.get("builder") != spec["builder"]
+            or metadata.get("filter") != _build_filter(spec)
+            or metadata.get("reserved_space_bytes")
+            != spec["reserved_space_bytes"]
+            or metadata.get("max_used_space_bytes")
+            != spec["max_used_space_bytes"]
+            or not isinstance(metadata.get("records_sha256"), str)
+            or SHA256_RE.fullmatch(metadata["records_sha256"]) is None
+        ):
+            raise ApplyError("BuildKit candidate is not policy bound")
+        return
+
+    if class_id == "docker_images":
+        image_id = metadata.get("image_id")
+        if (
+            kind != "docker_dangling_image"
+            or paths
+            or not isinstance(image_id, str)
+            or IMAGE_ID_RE.fullmatch(image_id) is None
+            or stable_key != image_id
+            or metadata.get("reported_virtual_size_bytes") != allocated
+            or not isinstance(metadata.get("inspect_sha256"), str)
+            or SHA256_RE.fullmatch(metadata["inspect_sha256"]) is None
+        ):
+            raise ApplyError("Docker image candidate shape is invalid")
+        return
+
+    raise ApplyError(f"candidate class cannot be applied: {class_id}")
+
+
+def _all_candidates(
+    plan: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
     candidates: dict[str, dict[str, Any]] = {}
     for class_id, value in plan["classes"].items():
         for candidate in value["candidates"]:
@@ -1718,6 +1948,7 @@ def _all_candidates(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 raise ApplyError("duplicate candidate id in plan")
             if candidate.get("class_id") != class_id:
                 raise ApplyError("candidate class mismatch")
+            _validate_plan_candidate_authorization(candidate, policy)
             candidates[candidate_id] = candidate
     return candidates
 
@@ -1898,6 +2129,10 @@ def _apply_build_cache_candidate(
     candidate: dict[str, Any], policy: dict[str, Any], runner: CommandRunner
 ) -> dict[str, Any]:
     processes = _process_observation(policy)
+    if not processes.get("complete"):
+        raise ApplyError(
+            "process observation is incomplete before BuildKit prune"
+        )
     if processes["active_docker_build_pids"]:
         raise ApplyError("active Docker build detected before prune")
     expected_ids = candidate["metadata"]["record_ids"]
@@ -1995,6 +2230,85 @@ def _apply_docker_image_candidate(
     }
 
 
+def _require_candidate_still_policy_eligible(
+    candidate: dict[str, Any],
+    policy: dict[str, Any],
+    home: Path,
+    now: int,
+) -> None:
+    class_id = candidate["class_id"]
+    metadata = candidate["metadata"]
+    max_entries = policy["limits"]["max_entries_per_candidate"]
+    deadline = (
+        time.monotonic()
+        + policy["limits"]["max_scan_seconds_per_candidate"]
+    )
+
+    if class_id == "filesystem_cache":
+        target_id = metadata["target_id"]
+        target = next(
+            item
+            for item in policy["classes"][class_id]["targets"]
+            if item["id"] == target_id
+        )
+        snapshot = _tree_snapshot(
+            Path(candidate["stable_key"]),
+            max_entries=max_entries,
+            deadline_monotonic=deadline,
+        )
+        age = max(0, now - snapshot["max_mtime_ns"] // 1_000_000_000)
+        if age < target["minimum_unused_seconds"]:
+            raise ApplyError("filesystem cache candidate no longer meets age policy")
+        return
+
+    if class_id == "trash":
+        info_path = Path(candidate["paths"][1]["path"])
+        deleted_at = _trash_deletion_unix(info_path)
+        age = max(0, now - deleted_at)
+        if age < policy["classes"][class_id]["minimum_age_seconds"]:
+            raise ApplyError("trash candidate no longer meets age policy")
+        return
+
+    if class_id == "grabowski_releases":
+        snapshot = _tree_snapshot(
+            Path(candidate["stable_key"]),
+            max_entries=max_entries,
+            deadline_monotonic=deadline,
+        )
+        age = max(0, now - snapshot["max_mtime_ns"] // 1_000_000_000)
+        if age < policy["classes"][class_id]["minimum_age_seconds"]:
+            raise ApplyError("release candidate no longer meets age policy")
+        return
+
+    if class_id == "maintenance_journal":
+        path = Path(candidate["stable_key"])
+        spec = policy["classes"][class_id]
+        files = [
+            item
+            for item in path.parent.glob("*.json")
+            if item.is_file() and not item.is_symlink()
+        ]
+        files.sort(
+            key=lambda item: (item.stat().st_mtime_ns, item.name),
+            reverse=True,
+        )
+        try:
+            rank = files.index(path)
+        except ValueError as exc:
+            raise ApplyError("maintenance journal candidate disappeared") from exc
+        if rank < spec["keep_newest_per_root"]:
+            raise ApplyError("maintenance journal candidate became retained newest")
+        snapshot = _tree_snapshot(
+            path,
+            max_entries=1,
+            deadline_monotonic=deadline,
+        )
+        age = max(0, now - snapshot["max_mtime_ns"] // 1_000_000_000)
+        if age < spec["minimum_age_seconds"]:
+            raise ApplyError("maintenance journal candidate no longer meets age policy")
+        return
+
+
 def _protected_release_ids(
     policy: dict[str, Any], home: Path
 ) -> set[str]:
@@ -2079,12 +2393,35 @@ def apply_plan(
     runner: CommandRunner = _default_runner,
     now: int | None = None,
 ) -> dict[str, Any]:
+    lock_path = Path(policy["resolved_state_root"]) / "apply.lock"
+    with _exclusive_state_lock(lock_path):
+        return _apply_plan_locked(
+            policy,
+            plan,
+            expected_plan_sha256=expected_plan_sha256,
+            confirmation=confirmation,
+            selected_candidate_ids=selected_candidate_ids,
+            runner=runner,
+            now=now,
+        )
+
+
+def _apply_plan_locked(
+    policy: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    expected_plan_sha256: str,
+    confirmation: str,
+    selected_candidate_ids: list[str],
+    runner: CommandRunner = _default_runner,
+    now: int | None = None,
+) -> dict[str, Any]:
     _verify_plan(plan, policy, expected_plan_sha256)
     if confirmation != f"APPLY:{plan['plan_id']}":
         raise ApplyError("confirmation mismatch")
     if not selected_candidate_ids or len(selected_candidate_ids) != len(set(selected_candidate_ids)):
         raise ApplyError("selected candidate ids must be a unique non-empty list")
-    candidates = _all_candidates(plan)
+    candidates = _all_candidates(plan, policy)
     unknown = sorted(set(selected_candidate_ids) - set(candidates))
     if unknown:
         raise ApplyError(f"unknown candidate ids: {unknown}")
@@ -2165,6 +2502,10 @@ def apply_plan(
                 home=home,
                 now=int(time.time()),
             )
+            current_time = int(time.time())
+            _require_candidate_still_policy_eligible(
+                candidate, policy, home, current_time
+            )
             _require_release_candidate_unprotected(
                 candidate, policy, home
             )
@@ -2220,6 +2561,27 @@ def apply_plan(
 
 
 def update_pin(
+    policy: dict[str, Any],
+    *,
+    target: str,
+    reason: str,
+    ttl_hours: int,
+    home: Path | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    lock_path = Path(policy["resolved_state_root"]) / "apply.lock"
+    with _exclusive_state_lock(lock_path):
+        return _update_pin_locked(
+            policy,
+            target=target,
+            reason=reason,
+            ttl_hours=ttl_hours,
+            home=home,
+            now=now,
+        )
+
+
+def _update_pin_locked(
     policy: dict[str, Any],
     *,
     target: str,

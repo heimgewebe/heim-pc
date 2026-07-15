@@ -52,8 +52,31 @@ class CacheMaintenanceTests(unittest.TestCase):
         }
 
     def make_plan(self, candidate: dict[str, object]) -> dict[str, object]:
+        class_id = str(candidate["class_id"])
+        stable_key = str(candidate["stable_key"])
+        metadata = candidate["metadata"]
+        if not isinstance(metadata, dict):
+            raise AssertionError("fixture candidate metadata must be a dict")
+        if class_id == "filesystem_cache":
+            self.policy["classes"][class_id]["targets"] = [
+                {
+                    "id": metadata["target_id"],
+                    "path": str(Path(stable_key).parent),
+                    "minimum_unused_seconds": 1,
+                }
+            ]
+        elif class_id == "maintenance_journal":
+            self.policy["classes"][class_id]["roots"] = [
+                str(Path(stable_key).parent)
+            ]
+            self.policy["classes"][class_id]["keep_newest_per_root"] = 0
+            self.policy["classes"][class_id]["minimum_age_seconds"] = 1
+        elif class_id == "grabowski_releases":
+            self.policy["classes"][class_id]["root"] = str(
+                Path(stable_key).parent
+            )
         classes = self.empty_classes()
-        classes[candidate["class_id"]]["candidates"] = [candidate]
+        classes[class_id]["candidates"] = [candidate]
         plan: dict[str, object] = {
             "schema_version": 1,
             "kind": cache_maintenance.PLAN_KIND,
@@ -559,6 +582,100 @@ class CacheMaintenanceTests(unittest.TestCase):
 
         self.assertNotEqual(first["plan_sha256"], second["plan_sha256"])
 
+    def test_apply_lock_rejects_symlink(self) -> None:
+        state_root = Path(self.policy["resolved_state_root"])
+        state_root.mkdir(parents=True)
+        victim = self.home / "victim"
+        victim.write_text("keep", encoding="utf-8")
+        (state_root / "apply.lock").symlink_to(victim)
+
+        with self.assertRaisesRegex(
+            cache_maintenance.ApplyError,
+            "exclusive state lock",
+        ):
+            cache_maintenance.apply_plan(
+                self.policy,
+                {},
+                expected_plan_sha256="0" * 64,
+                confirmation="invalid",
+                selected_candidate_ids=["invalid"],
+                now=self.now,
+            )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+
+    def test_apply_rejects_forged_path_outside_registered_root(self) -> None:
+        path = self.home / "forged"
+        path.write_text("payload", encoding="utf-8")
+        snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
+        candidate = cache_maintenance._candidate(
+            "filesystem_cache",
+            str(path),
+            "filesystem_entry",
+            [snapshot],
+            allocated_bytes=snapshot["allocated_bytes"],
+            metadata={"target_id": "fixture"},
+        )
+        plan = self.make_plan(candidate)
+        allowed = self.home / "allowed-cache"
+        allowed.mkdir()
+        self.policy["classes"]["filesystem_cache"]["targets"] = [
+            {
+                "id": "fixture",
+                "path": str(allowed),
+                "minimum_unused_seconds": 1,
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            cache_maintenance.ApplyError,
+            "outside its registered root",
+        ):
+            cache_maintenance.apply_plan(
+                self.policy,
+                plan,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                selected_candidate_ids=[candidate["candidate_id"]],
+                now=self.now,
+            )
+
+        self.assertTrue(path.exists())
+
+    def test_apply_rejects_plan_home_mismatch(self) -> None:
+        path = self.home / "journal.json"
+        path.write_text("{}", encoding="utf-8")
+        snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
+        candidate = cache_maintenance._candidate(
+            "maintenance_journal",
+            str(path),
+            "journal_file",
+            [snapshot],
+            allocated_bytes=snapshot["allocated_bytes"],
+            metadata={},
+        )
+        plan = self.make_plan(candidate)
+        plan["home"] = "/tmp/forged-home"
+        digest = cache_maintenance._sha256_json(
+            cache_maintenance._plan_material(plan)
+        )
+        plan["plan_id"] = digest
+        plan["plan_sha256"] = digest
+
+        with self.assertRaisesRegex(
+            cache_maintenance.ApplyError, "home identity"
+        ):
+            cache_maintenance.apply_plan(
+                self.policy,
+                plan,
+                expected_plan_sha256=digest,
+                confirmation=f"APPLY:{digest}",
+                selected_candidate_ids=[candidate["candidate_id"]],
+                now=self.now,
+            )
+
+        self.assertTrue(path.exists())
+
     def test_apply_requires_exact_plan_hash_and_confirmation(self) -> None:
         path = self.home / "candidate"
         path.write_text("payload", encoding="utf-8")
@@ -616,10 +733,13 @@ class CacheMaintenanceTests(unittest.TestCase):
             "now": self.now,
         }
 
-        with patch.object(
-            cache_maintenance,
-            "_process_observation",
-            return_value=self.process_observation(),
+        with (
+            patch.object(
+                cache_maintenance,
+                "_process_observation",
+                return_value=self.process_observation(),
+            ),
+            patch.object(cache_maintenance.time, "time", return_value=self.now),
         ):
             applied = cache_maintenance.apply_plan(
                 self.policy, plan, **arguments
@@ -638,7 +758,7 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertEqual(applied["receipt_sha256"], replayed["receipt_sha256"])
 
     def test_apply_blocks_identity_drift_without_removing_target(self) -> None:
-        path = self.home / "candidate"
+        path = self.home / "candidate.json"
         path.write_text("before", encoding="utf-8")
         snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
         candidate = cache_maintenance._candidate(
@@ -652,10 +772,13 @@ class CacheMaintenanceTests(unittest.TestCase):
         plan = self.make_plan(candidate)
         path.write_text("after", encoding="utf-8")
 
-        with patch.object(
-            cache_maintenance,
-            "_process_observation",
-            return_value=self.process_observation(),
+        with (
+            patch.object(
+                cache_maintenance,
+                "_process_observation",
+                return_value=self.process_observation(),
+            ),
+            patch.object(cache_maintenance.time, "time", return_value=self.now),
         ):
             result = cache_maintenance.apply_plan(
                 self.policy,
@@ -668,6 +791,7 @@ class CacheMaintenanceTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "blocked")
         self.assertEqual(result["error"]["class"], "ApplyError")
+        self.assertIn("identity drift", result["error"]["message"])
         self.assertTrue(path.exists())
         self.assertEqual(path.read_text(encoding="utf-8"), "after")
 
@@ -717,6 +841,91 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertFalse(first.exists())
         self.assertFalse(second.exists())
         self.assertFalse(quarantine.exists())
+
+    def test_filesystem_apply_rechecks_age_policy(self) -> None:
+        root = self.home / "cache-root"
+        root.mkdir()
+        path = root / "young"
+        path.write_text("payload", encoding="utf-8")
+        os.utime(path, (self.now, self.now))
+        snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
+        candidate = cache_maintenance._candidate(
+            "filesystem_cache",
+            str(path),
+            "filesystem_entry",
+            [snapshot],
+            allocated_bytes=snapshot["allocated_bytes"],
+            metadata={"target_id": "fixture"},
+        )
+        plan = self.make_plan(candidate)
+        self.policy["classes"]["filesystem_cache"]["targets"][0][
+            "minimum_unused_seconds"
+        ] = 3600
+
+        with (
+            patch.object(
+                cache_maintenance,
+                "_process_observation",
+                return_value=self.process_observation(),
+            ),
+            patch.object(
+                cache_maintenance.time, "time", return_value=self.now
+            ),
+        ):
+            result = cache_maintenance.apply_plan(
+                self.policy,
+                plan,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                selected_candidate_ids=[candidate["candidate_id"]],
+                now=self.now,
+            )
+
+        self.assertEqual(result["state"], "blocked")
+        self.assertIn("age policy", result["error"]["message"])
+        self.assertTrue(path.exists())
+
+    def test_journal_apply_rechecks_retained_newest(self) -> None:
+        root = self.home / "journal-root"
+        root.mkdir()
+        path = root / "newest.json"
+        path.write_text("{}", encoding="utf-8")
+        snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
+        candidate = cache_maintenance._candidate(
+            "maintenance_journal",
+            str(path),
+            "journal_file",
+            [snapshot],
+            allocated_bytes=snapshot["allocated_bytes"],
+            metadata={},
+        )
+        plan = self.make_plan(candidate)
+        self.policy["classes"]["maintenance_journal"][
+            "keep_newest_per_root"
+        ] = 1
+
+        with (
+            patch.object(
+                cache_maintenance,
+                "_process_observation",
+                return_value=self.process_observation(),
+            ),
+            patch.object(
+                cache_maintenance.time, "time", return_value=self.now
+            ),
+        ):
+            result = cache_maintenance.apply_plan(
+                self.policy,
+                plan,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                selected_candidate_ids=[candidate["candidate_id"]],
+                now=self.now,
+            )
+
+        self.assertEqual(result["state"], "blocked")
+        self.assertIn("retained newest", result["error"]["message"])
+        self.assertTrue(path.exists())
 
     def test_filesystem_apply_blocks_incomplete_process_visibility(self) -> None:
         path = self.home / "candidate"
@@ -776,7 +985,7 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertTrue(path.exists())
 
     def test_apply_rechecks_release_alias_pin(self) -> None:
-        path = self.home / "release"
+        path = self.home / "release-v1"
         path.mkdir()
         snapshot = cache_maintenance._tree_snapshot(path, max_entries=1)
         candidate = cache_maintenance._candidate(
@@ -824,21 +1033,84 @@ class CacheMaintenanceTests(unittest.TestCase):
             "plan-time-budget-exceeded",
         )
 
-    def test_build_cache_apply_blocks_candidate_set_drift(self) -> None:
-        expected_ids = ["expected12345678"]
+    def test_build_cache_blocks_incomplete_process_visibility(self) -> None:
+        result = cache_maintenance._observe_docker_build_cache(
+            self.policy,
+            lambda _argv: {
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+            },
+            self.process_observation(complete=False),
+            {},
+        )
+
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(
+            result["exclusions"][0]["reason"],
+            "process-observation-incomplete",
+        )
+
+    def test_build_cache_apply_rechecks_complete_process_visibility(self) -> None:
+        record_ids = ["expected12345678"]
+        spec = self.policy["classes"]["docker_build_cache"]
+        stable = (
+            f"{spec['builder']}:"
+            f"{cache_maintenance._sha256_json(record_ids)}"
+        )
         candidate = cache_maintenance._candidate(
             "docker_build_cache",
-            "default:fixture",
+            stable,
             "docker_build_cache_set",
             [],
             allocated_bytes=100,
             metadata={
-                "builder": "default",
-                "filter": "until=168h",
+                "builder": spec["builder"],
+                "filter": cache_maintenance._build_filter(spec),
+                "record_ids": record_ids,
+                "records_sha256": "a" * 64,
+                "reserved_space_bytes": spec["reserved_space_bytes"],
+                "max_used_space_bytes": spec["max_used_space_bytes"],
+            },
+        )
+        plan = self.make_plan(candidate)
+        with patch.object(
+            cache_maintenance,
+            "_process_observation",
+            return_value=self.process_observation(complete=False),
+        ):
+            result = cache_maintenance.apply_plan(
+                self.policy,
+                plan,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                selected_candidate_ids=[candidate["candidate_id"]],
+                now=self.now,
+            )
+
+        self.assertEqual(result["state"], "blocked")
+        self.assertIn("incomplete", result["error"]["message"])
+
+    def test_build_cache_apply_blocks_candidate_set_drift(self) -> None:
+        expected_ids = ["expected12345678"]
+        spec = self.policy["classes"]["docker_build_cache"]
+        stable = (
+            f"{spec['builder']}:"
+            f"{cache_maintenance._sha256_json(expected_ids)}"
+        )
+        candidate = cache_maintenance._candidate(
+            "docker_build_cache",
+            stable,
+            "docker_build_cache_set",
+            [],
+            allocated_bytes=100,
+            metadata={
+                "builder": spec["builder"],
+                "filter": cache_maintenance._build_filter(spec),
                 "record_ids": expected_ids,
                 "records_sha256": "a" * 64,
-                "reserved_space_bytes": 1,
-                "max_used_space_bytes": 2,
+                "reserved_space_bytes": spec["reserved_space_bytes"],
+                "max_used_space_bytes": spec["max_used_space_bytes"],
             },
         )
         plan = self.make_plan(candidate)
