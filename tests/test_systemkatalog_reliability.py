@@ -109,19 +109,20 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
     def test_fetch_remote_main_is_bound_to_verified_origin_and_commit(self) -> None:
         calls: list[list[str]] = []
         commit = "a" * 40
+        remote_url = "git@github.com:heimgewebe/systemkatalog.git"
 
         def fake_run(argv, *, cwd=None):
             calls.append(argv)
             if argv[-3:] == ["remote", "get-url", "origin"]:
+                return mock.Mock(returncode=0, stdout=remote_url + "\n", stderr="")
+            if "ls-remote" in argv:
                 return mock.Mock(
                     returncode=0,
-                    stdout="git@github.com:heimgewebe/systemkatalog.git\n",
+                    stdout=f"{commit}\trefs/heads/main\n",
                     stderr="",
                 )
-            if "fetch" in argv:
+            if "fetch" in argv or "cat-file" in argv:
                 return mock.Mock(returncode=0, stdout="", stderr="")
-            if "rev-parse" in argv:
-                return mock.Mock(returncode=0, stdout=commit + "\n", stderr="")
             raise AssertionError(argv)
 
         with mock.patch.object(watchdog, "_run", side_effect=fake_run):
@@ -130,13 +131,12 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             )
 
         self.assertEqual(resolved, commit)
+        listed = next(argv for argv in calls if "ls-remote" in argv)
+        self.assertEqual(listed[-2:], [remote_url, "refs/heads/main"])
         fetch = next(argv for argv in calls if "fetch" in argv)
-        self.assertIn(
-            "+refs/heads/main:refs/remotes/origin/main",
-            fetch,
-        )
-        verify = next(argv for argv in calls if "rev-parse" in argv)
-        self.assertEqual(verify[-1], "refs/remotes/origin/main^{commit}")
+        self.assertEqual(fetch[-2:], [remote_url, commit])
+        verify = next(argv for argv in calls if "cat-file" in argv)
+        self.assertEqual(verify[-1], f"{commit}^{{commit}}")
 
     def test_fetch_remote_main_rejects_wrong_origin_before_fetch(self) -> None:
         calls: list[list[str]] = []

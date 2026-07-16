@@ -23,7 +23,6 @@ ACTIVE_STATUSES = {"active", "paused", "waiting", "blocked", "in_progress"}
 SYSTEMKATALOG_REPOSITORY = "heimgewebe/systemkatalog"
 METAREPO_REPOSITORY = "heimgewebe/metarepo"
 REMOTE_NAME = "origin"
-REMOTE_MAIN_REF = "refs/remotes/origin/main"
 GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -88,11 +87,29 @@ def _fetch_remote_main(repo_root: Path, expected_repository: str) -> str:
         raise RuntimeError(
             f"cannot read {expected_repository} origin: {_command_error(remote)}"
         )
-    observed_repository = _github_repository_from_remote(remote.stdout)
+    remote_url = remote.stdout.strip()
+    observed_repository = _github_repository_from_remote(remote_url)
     if observed_repository is None or observed_repository.lower() != expected_repository.lower():
         raise RuntimeError(
-            f"unexpected origin for {repo_root}: {remote.stdout.strip()!r}; "
+            f"unexpected origin for {repo_root}: {remote_url!r}; "
             f"expected GitHub repository {expected_repository}"
+        )
+    listed = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-remote",
+            "--exit-code",
+            remote_url,
+            "refs/heads/main",
+        ]
+    )
+    fields = listed.stdout.strip().split()
+    commit = fields[0].lower() if len(fields) == 2 and fields[1] == "refs/heads/main" else ""
+    if listed.returncode != 0 or GIT_SHA_RE.fullmatch(commit) is None:
+        raise RuntimeError(
+            f"cannot resolve remote {expected_repository} main: {_command_error(listed)}"
         )
     fetched = _run(
         [
@@ -102,28 +119,20 @@ def _fetch_remote_main(repo_root: Path, expected_repository: str) -> str:
             "fetch",
             "--quiet",
             "--no-tags",
-            REMOTE_NAME,
-            f"+refs/heads/main:{REMOTE_MAIN_REF}",
+            remote_url,
+            commit,
         ]
     )
     if fetched.returncode != 0:
         raise RuntimeError(
-            f"cannot fetch {expected_repository} main: {_command_error(fetched)}"
+            f"cannot fetch {expected_repository} commit {commit}: {_command_error(fetched)}"
         )
-    resolved = _run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "rev-parse",
-            "--verify",
-            f"{REMOTE_MAIN_REF}^{{commit}}",
-        ]
+    verified = _run(
+        ["git", "-C", str(repo_root), "cat-file", "-e", f"{commit}^{{commit}}"]
     )
-    commit = resolved.stdout.strip().lower()
-    if resolved.returncode != 0 or GIT_SHA_RE.fullmatch(commit) is None:
+    if verified.returncode != 0:
         raise RuntimeError(
-            f"cannot resolve fetched {expected_repository} main: {_command_error(resolved)}"
+            f"fetched {expected_repository} commit is unavailable: {_command_error(verified)}"
         )
     return commit
 
