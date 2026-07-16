@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import stat
+import tarfile
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -80,7 +82,93 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
         }
         self.assertEqual(watchdog._latest_candidate_status(payload, watchdog.CANDIDATE_ID), "paused")
 
-    def test_watchdog_deduplicates_material_drift(self) -> None:
+    def test_github_repository_parser_accepts_supported_remote_forms(self) -> None:
+        expected = "heimgewebe/systemkatalog"
+        self.assertEqual(
+            watchdog._github_repository_from_remote("git@github.com:heimgewebe/systemkatalog.git"),
+            expected,
+        )
+        self.assertEqual(
+            watchdog._github_repository_from_remote(
+                "org-236528253@github.com:heimgewebe/systemkatalog.git"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            watchdog._github_repository_from_remote("https://github.com/heimgewebe/systemkatalog.git"),
+            expected,
+        )
+        self.assertEqual(
+            watchdog._github_repository_from_remote("ssh://git@github.com/heimgewebe/systemkatalog.git"),
+            expected,
+        )
+        self.assertIsNone(
+            watchdog._github_repository_from_remote("https://example.invalid/heimgewebe/systemkatalog.git")
+        )
+
+    def test_fetch_remote_main_is_bound_to_verified_origin_and_commit(self) -> None:
+        calls: list[list[str]] = []
+        commit = "a" * 40
+
+        def fake_run(argv, *, cwd=None):
+            calls.append(argv)
+            if argv[-3:] == ["remote", "get-url", "origin"]:
+                return mock.Mock(
+                    returncode=0,
+                    stdout="git@github.com:heimgewebe/systemkatalog.git\n",
+                    stderr="",
+                )
+            if "fetch" in argv:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if "rev-parse" in argv:
+                return mock.Mock(returncode=0, stdout=commit + "\n", stderr="")
+            raise AssertionError(argv)
+
+        with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+            resolved = watchdog._fetch_remote_main(
+                Path("/tmp/systemkatalog"), watchdog.SYSTEMKATALOG_REPOSITORY
+            )
+
+        self.assertEqual(resolved, commit)
+        fetch = next(argv for argv in calls if "fetch" in argv)
+        self.assertIn(
+            "+refs/heads/main:refs/remotes/origin/main",
+            fetch,
+        )
+        verify = next(argv for argv in calls if "rev-parse" in argv)
+        self.assertEqual(verify[-1], "refs/remotes/origin/main^{commit}")
+
+    def test_fetch_remote_main_rejects_wrong_origin_before_fetch(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv, *, cwd=None):
+            calls.append(argv)
+            return mock.Mock(
+                returncode=0,
+                stdout="git@github.com:someone-else/systemkatalog.git\n",
+                stderr="",
+            )
+
+        with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "unexpected origin"):
+                watchdog._fetch_remote_main(
+                    Path("/tmp/systemkatalog"), watchdog.SYSTEMKATALOG_REPOSITORY
+                )
+        self.assertEqual(len(calls), 1)
+
+    def test_git_archive_extraction_rejects_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "unsafe.tar"
+            with tarfile.open(archive_path, mode="w") as archive:
+                link = tarfile.TarInfo("unsafe-link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "/tmp/outside"
+                archive.addfile(link)
+            with self.assertRaisesRegex(RuntimeError, "unsupported non-regular"):
+                watchdog._extract_git_archive(archive_path, root / "output")
+
+    def test_watchdog_deduplicates_material_drift_from_fresh_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             systemkatalog = base / "systemkatalog"
@@ -93,6 +181,15 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             fleet.write_text("repositories: []\n", encoding="utf-8")
             for name in ("read_github_catalog_observations.py", "system_catalog_drift.py"):
                 (systemkatalog / "scripts" / name).write_text("# fixture\n", encoding="utf-8")
+
+            @contextmanager
+            def fake_sources(**kwargs):
+                yield watchdog.SourceSnapshot(
+                    systemkatalog_root=systemkatalog,
+                    fleet_file=fleet,
+                    systemkatalog_commit="a" * 40,
+                    metarepo_commit="b" * 40,
+                )
 
             def fake_run(argv, *, cwd=None):
                 if "read_github_catalog_observations.py" in " ".join(argv):
@@ -124,7 +221,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
                 raise AssertionError(argv)
 
-            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+            with (
+                mock.patch.object(watchdog, "_fresh_source_snapshot", side_effect=fake_sources),
+                mock.patch.object(watchdog, "_run", side_effect=fake_run),
+            ):
                 receipt = watchdog.run_watch(
                     systemkatalog_root=systemkatalog,
                     fleet_file=fleet,
@@ -133,6 +233,8 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 )
             self.assertTrue(receipt["materialDrift"])
             self.assertEqual(receipt["bureau"]["action"], "deduplicated")
+            self.assertEqual(receipt["sources"]["systemkatalog"]["commit"], "a" * 40)
+            self.assertEqual(receipt["sources"]["fleet"]["commit"], "b" * 40)
             self.assertTrue((state / "last-run.json").exists())
             self.assertEqual(stat.S_IMODE((state / "last-run.json").stat().st_mode), 0o600)
 
