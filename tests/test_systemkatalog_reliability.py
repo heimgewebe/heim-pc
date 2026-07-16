@@ -69,6 +69,17 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
         }
         self.assertEqual(watchdog._latest_candidate_status(payload, watchdog.CANDIDATE_ID), "active")
 
+    def test_latest_candidate_status_accepts_bureau_result_envelope(self) -> None:
+        payload = {
+            "result": {
+                "records": [
+                    {"event_id": 41, "record": {"candidate_id": watchdog.CANDIDATE_ID, "status": "closed"}},
+                    {"event_id": 42, "record": {"candidate_id": watchdog.CANDIDATE_ID, "status": "paused"}},
+                ]
+            }
+        }
+        self.assertEqual(watchdog._latest_candidate_status(payload, watchdog.CANDIDATE_ID), "paused")
+
     def test_watchdog_deduplicates_material_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -100,7 +111,16 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     proposal_path.write_text(json.dumps({"proposalOnly": True}), encoding="utf-8")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 if "live-list" in argv:
-                    payload = {"records": [{"event_id": 9, "record": {"candidate_id": watchdog.CANDIDATE_ID, "status": "active"}}]}
+                    payload = {
+                        "result": {
+                            "records": [
+                                {
+                                    "event_id": 9,
+                                    "record": {"candidate_id": watchdog.CANDIDATE_ID, "status": "active"},
+                                }
+                            ]
+                        }
+                    }
                     return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
                 raise AssertionError(argv)
 
@@ -130,19 +150,21 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 calls.append(argv)
                 if "live-list" in argv:
                     payload = {
-                        "records": [
-                            {
-                                "event_id": 41,
-                                "record": {
-                                    "candidate_id": watchdog.CANDIDATE_ID,
-                                    "status": "closed",
-                                },
-                            }
-                        ]
+                        "result": {
+                            "records": [
+                                {
+                                    "event_id": 41,
+                                    "record": {
+                                        "candidate_id": watchdog.CANDIDATE_ID,
+                                        "status": "closed",
+                                    },
+                                }
+                            ]
+                        }
                     }
                     return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
                 if "live-register" in argv:
-                    return mock.Mock(returncode=0, stdout=json.dumps({"event_id": 42}), stderr="")
+                    return mock.Mock(returncode=0, stdout=json.dumps({"result": {"event_id": 42}}), stderr="")
                 raise AssertionError(argv)
 
             with mock.patch.object(watchdog, "_run", side_effect=fake_run):
@@ -159,15 +181,18 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             report_path = base / "report.json"
-            report_path.write_text(json.dumps({"changeCount": 2, "changes": [{"kind": "repository_unclassified"}]}), encoding="utf-8")
+            report_path.write_text(
+                json.dumps({"changeCount": 2, "changes": [{"kind": "repository_unclassified"}]}),
+                encoding="utf-8",
+            )
             calls = []
 
             def fake_run(argv, *, cwd=None):
                 calls.append(argv)
                 if "live-list" in argv:
-                    return mock.Mock(returncode=0, stdout=json.dumps({"records": []}), stderr="")
+                    return mock.Mock(returncode=0, stdout=json.dumps({"result": {"records": []}}), stderr="")
                 if "live-register" in argv:
-                    return mock.Mock(returncode=0, stdout=json.dumps({"event_id": 42}), stderr="")
+                    return mock.Mock(returncode=0, stdout=json.dumps({"result": {"event_id": 42}}), stderr="")
                 raise AssertionError(argv)
 
             with mock.patch.object(watchdog, "_run", side_effect=fake_run):
@@ -176,6 +201,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             register = next(argv for argv in calls if "live-register" in argv)
             self.assertIn("--promotion-required", register)
             self.assertIn("repo.systemkatalog", register)
+
+    def test_command_error_uses_stdout_when_stderr_is_empty(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="structured failure", stderr="")
+        self.assertEqual(watchdog._command_error(completed), "structured failure")
 
 
 if __name__ == "__main__":
