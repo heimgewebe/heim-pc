@@ -29,8 +29,18 @@ def _write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def _result_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept both legacy direct JSON and the current Bureau result envelope."""
+    result = payload.get("result")
+    return result if isinstance(result, dict) else payload
+
+
+def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
+    return completed.stderr.strip() or completed.stdout.strip() or f"exit status {completed.returncode}"
+
+
 def _latest_candidate(payload: dict[str, Any], candidate_id: str) -> tuple[int, str | None] | None:
-    records = payload.get("records")
+    records = _result_payload(payload).get("records")
     if not isinstance(records, list):
         return None
     matching: list[tuple[int, str | None]] = []
@@ -62,7 +72,7 @@ def _ensure_bureau_candidate(bureau_root: Path, report_path: Path, report: dict[
         "--kind", "candidate_task", "--repo", "repo.systemkatalog", "--limit", "500",
     ])
     if listed.returncode != 0:
-        raise RuntimeError(f"bureau live-list failed: {listed.stderr.strip()}")
+        raise RuntimeError(f"bureau live-list failed: {_command_error(listed)}")
     payload = json.loads(listed.stdout)
     latest = _latest_candidate(payload, CANDIDATE_ID)
     latest_event_id = latest[0] if latest is not None else None
@@ -100,8 +110,8 @@ def _ensure_bureau_candidate(bureau_root: Path, report_path: Path, report: dict[
     ])
     registered = _run(register_argv)
     if registered.returncode != 0:
-        raise RuntimeError(f"bureau live-register failed: {registered.stderr.strip()}")
-    receipt = json.loads(registered.stdout)
+        raise RuntimeError(f"bureau live-register failed: {_command_error(registered)}")
+    receipt = _result_payload(json.loads(registered.stdout))
     result = {
         "action": "reactivated" if latest_event_id is not None else "registered",
         "candidateId": CANDIDATE_ID,
@@ -140,7 +150,7 @@ def run_watch(
         "--output", str(observations),
     ], cwd=systemkatalog_root)
     if observed.returncode != 0:
-        raise RuntimeError(f"GitHub observation failed: {observed.stderr.strip()}")
+        raise RuntimeError(f"GitHub observation failed: {_command_error(observed)}")
     drift = _run([
         sys.executable,
         str(systemkatalog_root / "scripts/system_catalog_drift.py"),
@@ -151,7 +161,7 @@ def run_watch(
         "--proposal-output", str(proposal_path),
     ], cwd=systemkatalog_root)
     if drift.returncode != 0:
-        raise RuntimeError(f"drift report failed: {drift.stderr.strip()}")
+        raise RuntimeError(f"drift report failed: {_command_error(drift)}")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     bureau = None
     if report.get("materialDrift") is True:
