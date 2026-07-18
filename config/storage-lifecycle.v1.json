@@ -39,7 +39,11 @@
       "owner": "grabowski-checkout-lifecycle",
       "paths": [
         "${HOME}/repos/.weltgewebe-worktrees",
-        "${HOME}/worktrees"
+        "${HOME}/worktrees",
+        "${HOME}/repos/.semantah-worktrees",
+        "${HOME}/repos/.heimlern-worktrees",
+        "${HOME}/repos/.operator-redundancy-worktrees",
+        "${HOME}/repos/.hauski-worktrees"
       ],
       "budget_bytes": {
         "warning": 85899345920,

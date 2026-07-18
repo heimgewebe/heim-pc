@@ -1,0 +1,13 @@
+[Unit]
+Description=Run bounded Rust worktree target maintenance every six hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+AccuracySec=1min
+Unit=heim-pc-worktree-target-maintenance.service
+
+[Install]
+WantedBy=timers.target
