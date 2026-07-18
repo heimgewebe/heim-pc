@@ -2,7 +2,7 @@
 id: agents.entry
 role: action
 status: canonical
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-18
 depends_on:
   - operatorium-entry
   - home-entry
@@ -60,6 +60,8 @@ Der kanonische Maschinenvertrag ist `manifest/operator-entry.v1.json`. Die lokal
 * Keine Behauptung über aktuellen GitHub-, CI-, Task- oder Runtime-Stand ohne frische Prüfung.
 * Kleine, reviewbare Dokument- und Vertrags-Slices bevorzugen; große Rohdaten oder Snapshots gehören nicht in die Git-Historie.
 * Verwaltete automatisierte Builds müssen über `python3 scripts/managed_build.py plan` beziehungsweise `run` laufen; direkte interaktive Werkzeugaufrufe bleiben unverändert. Pins benötigen Grund und Ablaufzeit und erteilen weder Ausführungs- noch Löschberechtigung.
+* Externe KI-Dienste, Agentenläufe, Benchmarks, Cloudmodelle und API-Aufrufe dürfen keine zusätzlichen oder nutzungsabhängigen Kosten auslösen. Zulässig sind nur kostenlose Kontingente, lokale Modelle und bereits bestehende Flatrate-Berechtigungen ohne Mehrverbrauchskosten.
+* Pay-as-you-go, Credit-Käufe, Auto-Top-ups, Abonnement-Upgrades und metered API keys sind standardmäßig gesperrt. Unklarer Billingstatus blockiert vor der ersten Inferenz; jedes Budget über 0 USD benötigt eine neue, eng begrenzte ausdrückliche Freigabe und darf nicht aus früheren Freigaben fortgeschrieben werden.
 * Wenn lokaler Zustand, GitHub-Stand und Dokumentation widersprechen, bleibt der Widerspruch sichtbar und wird als Drift behandelt.
 * Vor Mutation Branch, Head, Dirty-State, offene PRs, CI, Leases, Worktrees, Tasks und Prozesse prüfen; danach Zielzustand erneut lesen.
 

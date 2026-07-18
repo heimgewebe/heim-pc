@@ -115,6 +115,41 @@
       "global_shell_environment_changes"
     ]
   },
+  "costPolicy": {
+    "objective": "zero_incremental_cost",
+    "scope": [
+      "external_ai_services",
+      "metered_api_usage",
+      "agent_competitions",
+      "benchmarks",
+      "cloud_model_endpoints",
+      "media_generation"
+    ],
+    "allowed": [
+      "free_tier_with_hard_stop",
+      "existing_flat_rate_without_usage_overage",
+      "local_model_without_paid_external_compute"
+    ],
+    "forbidden": [
+      "pay_as_you_go",
+      "prepaid_credit_purchase",
+      "auto_top_up",
+      "subscription_purchase_or_upgrade",
+      "metered_api_key_usage",
+      "soft_budget_above_zero"
+    ],
+    "defaultBudgetUsd": 0,
+    "requireHardBudget": true,
+    "billingStateMustBeVerifiedBeforeInference": true,
+    "unknownBillingState": "block",
+    "priorBudgetAuthorizationsCarryForward": false,
+    "humanAuthorizationRequiredForAnyNonzeroIncrementalCost": true,
+    "doesNotEstablish": [
+      "existing_subscription_has_no_incremental_cost",
+      "provider_terms_will_not_change",
+      "absence_of_hidden_third_party_costs"
+    ]
+  },
   "entrySequence": [
     {
       "id": "runtime_identity",

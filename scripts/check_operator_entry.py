@@ -193,6 +193,61 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     if not isinstance(managed_limits, list) or not required_managed_limits.issubset(set(managed_limits)):
         errors.append("managedBuilds.doesNotEstablish is incomplete")
 
+    cost_policy = _require_object(contract.get("costPolicy"), "costPolicy", errors)
+    if cost_policy.get("objective") != "zero_incremental_cost":
+        errors.append("costPolicy.objective must be zero_incremental_cost")
+    required_cost_scope = {
+        "external_ai_services",
+        "metered_api_usage",
+        "agent_competitions",
+        "benchmarks",
+        "cloud_model_endpoints",
+        "media_generation",
+    }
+    cost_scope = cost_policy.get("scope")
+    if not isinstance(cost_scope, list) or not required_cost_scope.issubset(set(cost_scope)):
+        errors.append("costPolicy.scope is incomplete")
+    required_cost_allowed = {
+        "free_tier_with_hard_stop",
+        "existing_flat_rate_without_usage_overage",
+        "local_model_without_paid_external_compute",
+    }
+    cost_allowed = cost_policy.get("allowed")
+    if not isinstance(cost_allowed, list) or not required_cost_allowed.issubset(set(cost_allowed)):
+        errors.append("costPolicy.allowed is incomplete")
+    required_cost_forbidden = {
+        "pay_as_you_go",
+        "prepaid_credit_purchase",
+        "auto_top_up",
+        "subscription_purchase_or_upgrade",
+        "metered_api_key_usage",
+        "soft_budget_above_zero",
+    }
+    cost_forbidden = cost_policy.get("forbidden")
+    if not isinstance(cost_forbidden, list) or not required_cost_forbidden.issubset(set(cost_forbidden)):
+        errors.append("costPolicy.forbidden is incomplete")
+    default_budget = cost_policy.get("defaultBudgetUsd")
+    if not isinstance(default_budget, int) or isinstance(default_budget, bool) or default_budget != 0:
+        errors.append("costPolicy.defaultBudgetUsd must be the integer 0")
+    if cost_policy.get("requireHardBudget") is not True:
+        errors.append("costPolicy.requireHardBudget must be true")
+    if cost_policy.get("billingStateMustBeVerifiedBeforeInference") is not True:
+        errors.append("costPolicy.billingStateMustBeVerifiedBeforeInference must be true")
+    if cost_policy.get("unknownBillingState") != "block":
+        errors.append("costPolicy.unknownBillingState must be block")
+    if cost_policy.get("priorBudgetAuthorizationsCarryForward") is not False:
+        errors.append("costPolicy.priorBudgetAuthorizationsCarryForward must be false")
+    if cost_policy.get("humanAuthorizationRequiredForAnyNonzeroIncrementalCost") is not True:
+        errors.append("costPolicy.humanAuthorizationRequiredForAnyNonzeroIncrementalCost must be true")
+    required_cost_limits = {
+        "existing_subscription_has_no_incremental_cost",
+        "provider_terms_will_not_change",
+        "absence_of_hidden_third_party_costs",
+    }
+    cost_limits = cost_policy.get("doesNotEstablish")
+    if not isinstance(cost_limits, list) or not required_cost_limits.issubset(set(cost_limits)):
+        errors.append("costPolicy.doesNotEstablish is incomplete")
+
     try:
         managed_policy = json.loads(MANAGED_BUILD_POLICY_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
