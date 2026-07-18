@@ -103,6 +103,16 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(managed["worktreeWarningBytes"], 2 * 1024**3)
         self.assertEqual(managed["worktreeHardBytes"], 5 * 1024**3)
         self.assertFalse(managed["automaticCleanupAuthorized"])
+        cost = contract["costPolicy"]
+        self.assertEqual(cost["objective"], "zero_incremental_cost")
+        self.assertEqual(cost["defaultBudgetUsd"], 0)
+        self.assertTrue(cost["requireHardBudget"])
+        self.assertTrue(cost["billingStateMustBeVerifiedBeforeInference"])
+        self.assertEqual(cost["unknownBillingState"], "block")
+        self.assertFalse(cost["priorBudgetAuthorizationsCarryForward"])
+        self.assertTrue(cost["humanAuthorizationRequiredForAnyNonzeroIncrementalCost"])
+        self.assertIn("pay_as_you_go", cost["forbidden"])
+        self.assertIn("metered_api_key_usage", cost["forbidden"])
         self.assertIn(
             "permission_to_delete_worktree_or_cache_payloads",
             managed["doesNotEstablish"],
@@ -156,6 +166,33 @@ class OperatorEntryTests(unittest.TestCase):
             self.assertFalse(receipt["valid"])
             self.assertIn(
                 "managedBuilds.automaticCleanupAuthorized must remain false",
+                receipt["errors"],
+            )
+
+    def test_checker_rejects_nonzero_or_soft_cost_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            contract["costPolicy"]["defaultBudgetUsd"] = 1
+            contract["costPolicy"]["requireHardBudget"] = False
+            contract["costPolicy"]["unknownBillingState"] = "allow"
+            contract["costPolicy"]["priorBudgetAuthorizationsCarryForward"] = True
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            policy_path = ROOT / "config/managed-build.v1.json"
+            with (
+                patch.object(checker, "CONTRACT_PATH", contract_path),
+                patch.object(checker, "MANAGED_BUILD_POLICY_PATH", policy_path),
+            ):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertFalse(receipt["valid"])
+            self.assertIn("costPolicy.defaultBudgetUsd must be the integer 0", receipt["errors"])
+            self.assertIn("costPolicy.requireHardBudget must be true", receipt["errors"])
+            self.assertIn("costPolicy.unknownBillingState must be block", receipt["errors"])
+            self.assertIn(
+                "costPolicy.priorBudgetAuthorizationsCarryForward must be false",
                 receipt["errors"],
             )
 
