@@ -176,6 +176,8 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     resolver = _require_object(managed_builds.get("environmentResolver"), "managedBuilds.environmentResolver", errors)
     if resolver.get("entryArgv") != [*expected_installed_managed_build_argv, "resolve-environment"]:
         errors.append("managedBuilds.environmentResolver.entryArgv must use the installed managed build entry")
+    if resolver.get("prepareArgv") != [*expected_installed_managed_build_argv, "prepare-environment"]:
+        errors.append("managedBuilds.environmentResolver.prepareArgv must use the installed managed build entry")
     if resolver.get("identityAuthority") != "same_managed_build_identity_algorithm":
         errors.append("managedBuilds.environmentResolver.identityAuthority must preserve the T002 identity algorithm")
     if resolver.get("interactiveShellBehavior") != "unchanged":

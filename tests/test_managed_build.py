@@ -219,6 +219,47 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertFalse(Path(resolved["cache_path"]).exists())
             self.assertEqual(os.environ, environment_before)
 
+    def test_prepare_environment_creates_only_secure_external_cache_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            (repo / "Cargo.lock").write_text("version = 3\n", encoding="utf-8")
+            with patch.object(
+                managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()
+            ):
+                prepared = managed_build.prepare_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="operator-task",
+                )
+
+            target = Path(prepared["environment"]["CARGO_TARGET_DIR"])
+            self.assertEqual(prepared["kind"], "heim_pc.managed_build_environment_prepared")
+            self.assertTrue(target.is_dir())
+            self.assertTrue(target.is_relative_to(home / ".cache/heim-pc/managed-builds/cargo"))
+            self.assertFalse(target.is_relative_to(repo))
+            self.assertIn(str(target), prepared["prepared_paths"])
+
+    def test_prepare_environment_rejects_symlinked_cache_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            (repo / "Cargo.lock").write_text("version = 3\n", encoding="utf-8")
+            outside = root / "outside"
+            outside.mkdir()
+            (home / ".cache").symlink_to(outside, target_is_directory=True)
+            with (
+                patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()),
+                self.assertRaisesRegex(managed_build.ManagedBuildError, "not a real directory"),
+            ):
+                managed_build.prepare_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="operator-task",
+                )
+
     def test_environment_resolver_separates_lockfile_toolchain_and_profile_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

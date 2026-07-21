@@ -121,6 +121,14 @@ class OperatorEntryTests(unittest.TestCase):
             managed["environmentResolver"]["identityAuthority"],
             "same_managed_build_identity_algorithm",
         )
+        self.assertEqual(
+            managed["environmentResolver"]["prepareArgv"],
+            [
+                "python3",
+                "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+                "prepare-environment",
+            ],
+        )
         self.assertEqual(managed["automationRule"], "operator_managed_builds_use_entry")
         self.assertEqual(managed["interactiveShellBehavior"], "unchanged")
         self.assertEqual(managed["worktreeWarningBytes"], 2 * 1024**3)

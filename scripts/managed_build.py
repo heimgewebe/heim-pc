@@ -575,6 +575,44 @@ def resolve_environment(
     }
 
 
+def prepare_environment(
+    policy: dict[str, Any],
+    *,
+    repo: Path,
+    command: Sequence[str],
+    home: Path,
+    explicit_tool: str,
+    explicit_profile: str,
+) -> dict[str, Any]:
+    resolved = resolve_environment(
+        policy,
+        repo=repo,
+        command=command,
+        home=home,
+        explicit_tool=explicit_tool,
+        explicit_profile=explicit_profile,
+    )
+    cache_path = Path(resolved["cache_path"])
+    _ensure_secure_directory(cache_path, home)
+    prepared: list[str] = [str(cache_path)]
+    for value in resolved["environment"].values():
+        path = Path(value)
+        _ensure_secure_directory(path, home)
+        prepared.append(str(path))
+    return {
+        **resolved,
+        "kind": "heim_pc.managed_build_environment_prepared",
+        "prepared_paths": sorted(set(prepared)),
+        "prepared_paths_sha256": _sha256_json(sorted(set(prepared))),
+        "does_not_establish": [
+            "execution authority for any child command",
+            "permission to delete worktree or cache payloads",
+            "build correctness",
+            "that the caller will consume the returned environment",
+        ],
+    }
+
+
 def build_plan(
     policy: dict[str, Any],
     *,
@@ -833,6 +871,15 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument("--profile", required=True)
     resolve.add_argument("--executable", required=True)
 
+    prepare = subparsers.add_parser(
+        "prepare-environment",
+        help="prepare one identity-bound managed environment without executing a build",
+    )
+    prepare.add_argument("--repo", type=Path, required=True)
+    prepare.add_argument("--tool", choices=["cargo", "node", "python", "playwright"], required=True)
+    prepare.add_argument("--profile", required=True)
+    prepare.add_argument("--executable", required=True)
+
     guard = subparsers.add_parser("guard", help="inspect worktree build payloads")
     guard.add_argument("--repo", type=Path, required=True)
     guard.add_argument("--tool", choices=["cargo", "node", "python", "playwright"])
@@ -897,9 +944,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
-        if args.operation == "resolve-environment":
+        if args.operation in {"resolve-environment", "prepare-environment"}:
             command = _normalized_command([args.executable], policy=policy, home=home)
-            result = resolve_environment(
+            operation = (
+                resolve_environment
+                if args.operation == "resolve-environment"
+                else prepare_environment
+            )
+            result = operation(
                 policy,
                 repo=args.repo,
                 command=command,
