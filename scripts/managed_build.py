@@ -491,7 +491,7 @@ def _build_environment(tool: str, base: Path, spec: dict[str, Any]) -> dict[str,
     return environment
 
 
-def build_plan(
+def _build_identity_context(
     policy: dict[str, Any],
     *,
     repo: Path,
@@ -499,7 +499,6 @@ def build_plan(
     home: Path,
     explicit_tool: str | None = None,
     explicit_profile: str | None = None,
-    now_epoch: int | None = None,
 ) -> dict[str, Any]:
     facts = repository_facts(repo)
     root = Path(facts["root"])
@@ -524,6 +523,81 @@ def build_plan(
         raise ManagedBuildError("managed cache path must stay outside the repository")
     if state_root == root or root in state_root.parents:
         raise ManagedBuildError("managed state path must stay outside the repository")
+    return {
+        "policy_sha256": _sha256_json(policy),
+        "repository_root": str(root),
+        "git_common_dir": facts["git_common_dir"],
+        "repository_identity_sha256": facts["repository_identity_sha256"],
+        "tool": tool,
+        "profile": profile,
+        "identity": identity_payload,
+        "cache_key": cache_key,
+        "cache_path": str(cache_path),
+        "state_root": str(state_root),
+        "environment": _build_environment(tool, cache_path, spec),
+        "command": {
+            "executable": _command_basename(command),
+            "argv_sha256": _sha256_json(list(command)),
+        },
+    }
+
+
+def resolve_environment(
+    policy: dict[str, Any],
+    *,
+    repo: Path,
+    command: Sequence[str],
+    home: Path,
+    explicit_tool: str,
+    explicit_profile: str,
+) -> dict[str, Any]:
+    context = _build_identity_context(
+        policy,
+        repo=repo,
+        command=command,
+        home=home,
+        explicit_tool=explicit_tool,
+        explicit_profile=explicit_profile,
+    )
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.managed_build_environment",
+        "generated_at": _utc_now(),
+        **context,
+        "interactive_shell_behavior": "unchanged",
+        "automatic_cleanup_authorized": False,
+        "does_not_establish": [
+            "execution authority for any child command",
+            "permission to delete worktree or cache payloads",
+            "build correctness",
+            "that the caller will consume the returned environment",
+        ],
+    }
+
+
+def build_plan(
+    policy: dict[str, Any],
+    *,
+    repo: Path,
+    command: Sequence[str],
+    home: Path,
+    explicit_tool: str | None = None,
+    explicit_profile: str | None = None,
+    now_epoch: int | None = None,
+) -> dict[str, Any]:
+    context = _build_identity_context(
+        policy,
+        repo=repo,
+        command=command,
+        home=home,
+        explicit_tool=explicit_tool,
+        explicit_profile=explicit_profile,
+    )
+    root = Path(context["repository_root"])
+    tool = str(context["tool"])
+    spec = policy["tools"][tool]
+    state_root = Path(context["state_root"])
+    cache_path = Path(context["cache_path"])
 
     worktree = scan_worktree_payloads(root, spec["worktree_payloads"])
     worktree_budget = _require_nonnegative_budget(
@@ -533,7 +607,7 @@ def build_plan(
     worktree_status = _status(worktree["allocated_bytes"], worktree_budget)
     pin = read_pin(
         state_root,
-        facts["repository_identity_sha256"],
+        str(context["repository_identity_sha256"]),
         tool,
         now_epoch=now_epoch,
     )
@@ -552,21 +626,7 @@ def build_plan(
         "schema_version": 1,
         "kind": "heim_pc.managed_build_plan",
         "generated_at": _utc_now(),
-        "policy_sha256": _sha256_json(policy),
-        "repository_root": str(root),
-        "git_common_dir": facts["git_common_dir"],
-        "repository_identity_sha256": facts["repository_identity_sha256"],
-        "tool": tool,
-        "profile": profile,
-        "identity": identity_payload,
-        "cache_key": cache_key,
-        "cache_path": str(cache_path),
-        "state_root": str(state_root),
-        "environment": _build_environment(tool, cache_path, spec),
-        "command": {
-            "executable": _command_basename(command),
-            "argv_sha256": _sha256_json(list(command)),
-        },
+        **context,
         "guard": {
             "status": "blocked" if blocked else worktree_status,
             "blocked": blocked,
@@ -588,7 +648,6 @@ def build_plan(
             "safe reuse across changed repository, toolchain, lockfile or profile identities",
         ],
     }
-
 
 def _fsync_directory(directory: Path) -> None:
     flags = os.O_RDONLY
@@ -765,6 +824,15 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--profile")
     plan.add_argument("command", nargs=argparse.REMAINDER)
 
+    resolve = subparsers.add_parser(
+        "resolve-environment",
+        help="resolve one identity-bound managed environment without executing or scanning payloads",
+    )
+    resolve.add_argument("--repo", type=Path, required=True)
+    resolve.add_argument("--tool", choices=["cargo", "node", "python", "playwright"], required=True)
+    resolve.add_argument("--profile", required=True)
+    resolve.add_argument("--executable", required=True)
+
     guard = subparsers.add_parser("guard", help="inspect worktree build payloads")
     guard.add_argument("--repo", type=Path, required=True)
     guard.add_argument("--tool", choices=["cargo", "node", "python", "playwright"])
@@ -826,6 +894,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reason=args.reason,
                 ttl_hours=args.ttl_hours,
                 home=home,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.operation == "resolve-environment":
+            command = _normalized_command([args.executable], policy=policy, home=home)
+            result = resolve_environment(
+                policy,
+                repo=args.repo,
+                command=command,
+                home=home,
+                explicit_tool=args.tool,
+                explicit_profile=args.profile,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0

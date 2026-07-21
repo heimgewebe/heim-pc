@@ -180,6 +180,82 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertNotEqual(dev["cache_key"], release["cache_key"])
             self.assertNotEqual(dev["cache_key"], changed["cache_key"])
 
+    def test_environment_resolver_reuses_identity_without_scanning_or_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            (repo / "Cargo.lock").write_text("version = 3\n", encoding="utf-8")
+            environment_before = os.environ.copy()
+
+            with (
+                patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()),
+                patch.object(managed_build, "scan_worktree_payloads") as scan,
+            ):
+                resolved = managed_build.resolve_environment(
+                    self.policy,
+                    repo=repo,
+                    command=["cargo"],
+                    home=home,
+                    explicit_tool="cargo",
+                    explicit_profile="test",
+                )
+            with patch.object(
+                managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()
+            ):
+                planned = managed_build.build_plan(
+                    self.policy,
+                    repo=repo,
+                    command=["cargo", "test"],
+                    home=home,
+                )
+
+            scan.assert_not_called()
+            self.assertEqual(resolved["kind"], "heim_pc.managed_build_environment")
+            self.assertEqual(resolved["cache_key"], planned["cache_key"])
+            self.assertEqual(resolved["environment"], planned["environment"])
+            self.assertEqual(resolved["profile"], "test")
+            self.assertFalse(Path(resolved["cache_path"]).exists())
+            self.assertEqual(os.environ, environment_before)
+
+    def test_environment_resolver_separates_lockfile_toolchain_and_profile_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            lockfile = repo / "Cargo.lock"
+            lockfile.write_text("version = 3\n", encoding="utf-8")
+            with patch.object(
+                managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()
+            ):
+                first = managed_build.resolve_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="operator-task",
+                )
+                other_profile = managed_build.resolve_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="release",
+                )
+                lockfile.write_text("version = 4\n", encoding="utf-8")
+                other_lock = managed_build.resolve_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="operator-task",
+                )
+            with patch.object(
+                managed_build, "_toolchain_digest",
+                return_value={"observations": {"fixture": "2"}, "sha256": "b" * 64},
+            ):
+                other_toolchain = managed_build.resolve_environment(
+                    self.policy, repo=repo, command=["cargo"], home=home,
+                    explicit_tool="cargo", explicit_profile="operator-task",
+                )
+
+            self.assertNotEqual(first["cache_key"], other_profile["cache_key"])
+            self.assertNotEqual(first["cache_key"], other_lock["cache_key"])
+            self.assertNotEqual(other_lock["cache_key"], other_toolchain["cache_key"])
+
     def test_node_python_and_playwright_are_explicitly_classified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
