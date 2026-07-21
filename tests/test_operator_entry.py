@@ -98,6 +98,37 @@ class OperatorEntryTests(unittest.TestCase):
             managed["entryArgv"],
             ["python3", "${HOME}/repos/heim-pc/scripts/managed_build.py"],
         )
+        self.assertEqual(
+            managed["installedEntryArgv"],
+            [
+                "python3",
+                "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+            ],
+        )
+        self.assertEqual(
+            managed["installedPolicy"],
+            "${HOME}/.local/lib/heim-pc/managed-build/config/managed-build.v1.json",
+        )
+        self.assertEqual(
+            managed["environmentResolver"]["entryArgv"],
+            [
+                "python3",
+                "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+                "resolve-environment",
+            ],
+        )
+        self.assertEqual(
+            managed["environmentResolver"]["identityAuthority"],
+            "same_managed_build_identity_algorithm",
+        )
+        self.assertEqual(
+            managed["environmentResolver"]["prepareArgv"],
+            [
+                "python3",
+                "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+                "prepare-environment",
+            ],
+        )
         self.assertEqual(managed["automationRule"], "operator_managed_builds_use_entry")
         self.assertEqual(managed["interactiveShellBehavior"], "unchanged")
         self.assertEqual(managed["worktreeWarningBytes"], 2 * 1024**3)
@@ -206,6 +237,9 @@ class OperatorEntryTests(unittest.TestCase):
             self.assertFalse((home / "AGENTS.md").exists())
             self.assertFalse((home / "repos/AGENTS.md").exists())
             self.assertFalse((home / ".config/heimgewebe/operator-entry.v1.json").exists())
+            self.assertFalse(
+                (home / ".local/lib/heim-pc/managed-build/scripts/managed_build.py").exists()
+            )
 
     def test_installer_blocks_unreviewed_replacement_then_backs_up_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -240,6 +274,23 @@ class OperatorEntryTests(unittest.TestCase):
                 (ROOT / "manifest/operator-entry.v1.json").read_bytes(),
             )
             self.assertEqual(stat.S_IMODE((home / "AGENTS.md").stat().st_mode), 0o644)
+            installed_root = home / ".local/lib/heim-pc/managed-build"
+            self.assertEqual(
+                (installed_root / "scripts/managed_build.py").read_bytes(),
+                (ROOT / "scripts/managed_build.py").read_bytes(),
+            )
+            self.assertEqual(
+                (installed_root / "scripts/storage_inventory.py").read_bytes(),
+                (ROOT / "scripts/storage_inventory.py").read_bytes(),
+            )
+            self.assertEqual(
+                (installed_root / "config/managed-build.v1.json").read_bytes(),
+                (ROOT / "config/managed-build.v1.json").read_bytes(),
+            )
+            self.assertEqual(
+                stat.S_IMODE((installed_root / "scripts/managed_build.py").stat().st_mode),
+                0o755,
+            )
             receipt_path = Path(first["receiptPath"])
             self.assertTrue(receipt_path.is_file())
             self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
