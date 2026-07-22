@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -60,6 +61,41 @@ def repository_identity(root: Path) -> tuple[str, bool]:
         raise InstallError("repository HEAD is invalid")
     status = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root).stdout
     return head, bool(status.strip())
+
+
+def verify_unit_files(service_path: Path, timer_path: Path) -> dict[str, Any]:
+    argv = [
+        "systemd-analyze", "--user", "--generators=no", "--man=no",
+        "verify", str(service_path), str(timer_path),
+    ]
+    completed = subprocess.run(
+        argv, text=True, capture_output=True, check=False
+    )
+    target_paths = (str(service_path), str(timer_path))
+    target_diagnostics = [
+        line
+        for line in completed.stderr.splitlines()
+        if any(path in line for path in target_paths)
+    ]
+    if target_diagnostics:
+        raise InstallError(
+            "unit verification reported target diagnostics: "
+            + " | ".join(target_diagnostics[:10])
+        )
+    if completed.returncode == 0:
+        return {"status": "verified", "returncode": 0}
+    known_host_failure = (
+        completed.returncode == -signal.SIGABRT
+        and "Failed to allocate device monitor" in completed.stderr
+        and "Assertion '*_head == _item' failed" in completed.stderr
+    )
+    if known_host_failure:
+        return {
+            "status": "host-verifier-unavailable",
+            "returncode": completed.returncode,
+        }
+    detail = (completed.stderr or completed.stdout).strip()
+    raise InstallError(f"systemd-analyze verify failed: {detail[:1000]}")
 
 
 def systemd_path(path: Path, *, label: str) -> str:
@@ -175,6 +211,7 @@ def install(
     ]
     installed: list[dict[str, Any]] = []
     systemd = "not-applied"
+    unit_verification: dict[str, Any] = {"status": "not-applied"}
     if apply:
         runtime_directories = [
             home / ".local/state/heim-pc/worktree-target-maintenance",
@@ -190,8 +227,17 @@ def install(
             installed.append(atomic_install(path, data, mode))
         installed.append(atomic_install(service_target, rendered_service, 0o644))
         installed.append(atomic_install(timer_target, timer_data, 0o644))
-        run(["systemd-analyze", "--user", "verify", str(service_target), str(timer_target)])
+        unit_verification = verify_unit_files(service_target, timer_target)
         run(["systemctl", "--user", "daemon-reload"])
+        for unit_name in (f"{UNIT_NAME}.service", f"{UNIT_NAME}.timer"):
+            load_state = run([
+                "systemctl", "--user", "show", unit_name,
+                "--property=LoadState", "--value",
+            ]).stdout.strip()
+            if load_state != "loaded":
+                raise InstallError(
+                    f"systemd unit did not load after daemon-reload: {unit_name}={load_state!r}"
+                )
         if enable:
             run(["systemctl", "--user", "enable", "--now", f"{UNIT_NAME}.timer"])
             systemd = "timer-enabled"
@@ -220,6 +266,7 @@ def install(
         "planned": planned,
         "installed": installed,
         "systemd": systemd,
+        "unit_verification": unit_verification,
         "does_not_establish": [
             "future_cleanup_success",
             "candidate_obsolescence",

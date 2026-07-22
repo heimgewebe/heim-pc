@@ -27,6 +27,11 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             release_root = base / "releases"
 
             def fake_run(argv: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+                if (
+                    argv[:3] == ["systemctl", "--user", "show"]
+                    and "--property=LoadState" in argv
+                ):
+                    return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             policy = json.loads(installer.POLICY_SOURCE.read_text(encoding="utf-8"))
@@ -41,6 +46,10 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
                 patch.object(installer, "repository_identity", return_value=(head, False)),
                 patch.object(installer, "repository_blob", side_effect=lambda _root, *, head, relative_path: blobs[relative_path]),
                 patch.object(installer, "run", side_effect=fake_run),
+                patch.object(
+                    installer, "verify_unit_files",
+                    return_value={"status": "verified", "returncode": 0},
+                ),
             ):
                 receipt = installer.install(
                     home=home,
@@ -64,7 +73,7 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             self.assertNotIn("@HOME@", service)
             self.assertNotIn("@READ_WRITE_PATHS@", service)
             self.assertIn(
-                f"ConditionPathIsExecutable={home}/.local/share/grabowski-mcp/.venv/bin/python",
+                f"ConditionFileIsExecutable={home}/.local/share/grabowski-mcp/.venv/bin/python",
                 service,
             )
             self.assertIn(
@@ -79,6 +88,35 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
                 for root in repository["worktree_roots"]:
                     self.assertIn(f"ReadWritePaths=-{root}", service)
             self.assertTrue((home / ".local/state/heim-pc/worktree-target-maintenance").is_dir())
+
+    def test_verify_unit_files_accepts_exact_known_host_crash(self) -> None:
+        service = Path("/tmp/example.service")
+        timer = Path("/tmp/example.timer")
+        stderr = (
+            "Failed to allocate device monitor: unsupported\n"
+            "Assertion '*_head == _item' failed at src/core/device.c:51\n"
+        )
+        completed = subprocess.CompletedProcess(
+            ["systemd-analyze"], -installer.signal.SIGABRT, "", stderr
+        )
+        with patch.object(installer.subprocess, "run", return_value=completed):
+            result = installer.verify_unit_files(service, timer)
+        self.assertEqual(result["status"], "host-verifier-unavailable")
+
+    def test_verify_unit_files_rejects_target_diagnostics_even_on_known_host_crash(self) -> None:
+        service = Path("/tmp/example.service")
+        timer = Path("/tmp/example.timer")
+        stderr = (
+            "Failed to allocate device monitor: unsupported\n"
+            f"{service}:4: Unknown key name 'BrokenKey' in section 'Unit'\n"
+            "Assertion '*_head == _item' failed at src/core/device.c:51\n"
+        )
+        completed = subprocess.CompletedProcess(
+            ["systemd-analyze"], -installer.signal.SIGABRT, "", stderr
+        )
+        with patch.object(installer.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(installer.InstallError, "target diagnostics"):
+                installer.verify_unit_files(service, timer)
 
     def test_systemd_path_rejects_unsafe_unit_syntax(self) -> None:
         for path in (Path("/home/alex/bad path"), Path("/home/%u/runtime"), Path('/home/alex/"bad"')):
