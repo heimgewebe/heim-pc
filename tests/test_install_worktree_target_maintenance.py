@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,9 +29,11 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             def fake_run(argv: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
+            policy = json.loads(installer.POLICY_SOURCE.read_text(encoding="utf-8"))
+            policy["quarantine_root"] = str(home / "repos/.worktree-target-quarantine")
             blobs = {
                 "scripts/worktree_target_maintenance.py": installer.SCRIPT_SOURCE.read_bytes(),
-                "config/worktree-target-policy.v1.json": installer.POLICY_SOURCE.read_bytes(),
+                "config/worktree-target-policy.v1.json": (json.dumps(policy) + "\n").encode("utf-8"),
                 "systemd/user/heim-pc-worktree-target-maintenance.service.in": installer.SERVICE_TEMPLATE.read_bytes(),
                 "systemd/user/heim-pc-worktree-target-maintenance.timer": installer.TIMER_SOURCE.read_bytes(),
             }

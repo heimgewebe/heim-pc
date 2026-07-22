@@ -20,8 +20,10 @@ SPEC.loader.exec_module(maintenance)
 
 class WorktreeTargetMaintenanceTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.test_repo_root = Path.home() / "repos"
+        self.test_repo_root.mkdir(parents=True, exist_ok=True)
         self.base_context = tempfile.TemporaryDirectory(
-            prefix="heim-pc-target-test-", dir="/home/alex/repos"
+            prefix="heim-pc-target-test-", dir=self.test_repo_root
         )
         self.base = Path(self.base_context.name)
         self.repository = self.base / "repo"
