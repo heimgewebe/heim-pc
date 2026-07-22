@@ -57,13 +57,14 @@ Node- und Python-Projektionsverzeichnisse werden nicht blind umgebogen, weil der
 * Eine Ausnahme benötigt einen begründeten, werkzeug- und repositorygebundenen Pin mit Ablaufzeit von höchstens sieben Tagen.
 * Pins erteilen keine Lösch-, Merge- oder Ausführungsberechtigung.
 * Pro Identitätscache werden 10 GiB als Warn- und 20 GiB als Hartgrenze beobachtet.
-* Für die Gesamtheit der verwalteten Cargo-Identitäten gilt zusätzlich eine bounded Retention: 50 GiB Maximalbudget, 30 GiB Zielbudget, mindestens sieben Tage unbenutzte Zeit und höchstens 20 GiB Reclaim pro Apply. Diese Werte steuern nur die Kandidatenauswahl und sind keine automatische Löschberechtigung.
+* Für die Gesamtheit der verwalteten Cargo-Identitäten gilt zusätzlich eine bounded Retention: 50 GiB Maximalbudget, 30 GiB Zielbudget, mindestens sieben Tage unbenutzte Zeit, höchstens 20 GiB Reclaim und höchstens acht Identitäten pro Apply. Diese Werte steuern nur die Kandidatenauswahl und sind keine automatische Löschberechtigung.
+* Überschreitet eine einzelne löschbare Identität das 20-GiB-Apply-Budget, wird sie nicht still verworfen und das Budget auch nicht automatisch überschritten: `plan` weist sie als `oversized_identity_requires_policy_override` mit dem minimal erforderlichen Budget aus. Erst eine explizite Policy-Änderung plus neuer Plan kann sie freigeben.
 
 ## Ablauf
 
 1. `plan` liest Repository, Toolchain, Lockfiles, Profil und aktuelle Worktree-Ausgaben und erzeugt einen JSON-Plan ohne Verzeichnisse anzulegen.
 2. `run --dry-run` entspricht dem Plan und liefert bei harter Sperre Exitcode 3.
-3. `run` erzeugt ausschließlich die externen Cache- und Receipt-Verzeichnisse, setzt die Umgebung nur für den Kindprozess und führt ohne Shell aus.
+3. `run` erzeugt ausschließlich die externen Cache-, Receipt- und Lifecycle-Lock-Verzeichnisse, setzt die Umgebung nur für den Kindprozess und führt ohne Shell aus. Für Cargo wird der exakte Cache-Key-Lockpfad im Binding-Receipt festgehalten.
 4. Nach dem Kindprozess wird ein begrenztes Receipt mit Hashes, Pfaden, Rückgabecode und Vorher-/Nachher-Größe geschrieben. Die vollständige Kommandozeile wird nicht gespeichert.
 
 ## Cargo-Lifecycle und Garbage Collection
@@ -71,16 +72,17 @@ Node- und Python-Projektionsverzeichnisse werden nicht blind umgebogen, weil der
 Der separate Einstieg `scripts/managed_cargo_gc.py` ergänzt den Buildpfad um einen kontrollierten Lebenszyklus. Er ist absichtlich nicht in `automatic_cleanup_authorized` aufgegangen.
 
 1. `inventory` betrachtet ausschließlich direkte Kinder unter `${HOME}/.cache/heim-pc/managed-builds/cargo`.
-2. Nur Namen aus exakt 64 hexadezimalen Zeichen gelten als verwaltete Identitätskandidaten. Benannte Alt-, Review- oder Sondertargets, Symlinks und nicht normale Verzeichnisse bleiben `unclassified` und werden nie inferiert gelöscht.
+2. Nur direkte, reale Verzeichnisse mit Namen aus exakt 64 hexadezimalen Zeichen gelten als verwaltete Identitätskandidaten. Benannte Alt-, Review- oder Sondertargets sowie direkte Symlink-/Nicht-Verzeichnis-Identitäten bleiben `unclassified` und werden nie inferiert gelöscht. Symlinks innerhalb eines echten Identity-Trees werden als Blätter inventarisiert und niemals verfolgt.
 3. Lokale Managed-Build-, Binding- und Usage-Receipts liefern Repository-Provenienz und letzte Nutzung, soweit sie vorhanden sind. Fehlende historische Cargo-Provenienz wird nicht durch Dateialter ersetzt.
 4. Eine externe Task-Autorität darf versionierte Schutz- und Nutzungsevidenz liefern. Für Operatorläufe ist das Grabowski. Unvollständige, intern hashinkonsistente oder fehlerhafte Evidenz blockiert die Kandidatenauswahl global; Grabowski bleibt alleinige Task-Wahrheit. `snapshot-evidence` kann eine vollständige Evidenz explizit als kleine lokale Usage-Receipts konservieren, damit die letzte Nutzungszeit älterer Caches auch nach späterer Task-Archivierung erhalten bleibt. Der Snapshot erteilt keine Löschberechtigung.
 5. Ein unexpired Pin schützt jede Identität, deren Repository-Provenienz sicher demselben Repository zugeordnet ist. Ist die Repository-Provenienz historisch unbekannt und existiert irgendein aktiver Cargo-Pin, bleibt die Identität konservativ geschützt.
 6. Ein lokaler `/proc`-Readback schützt zusätzlich exakte Managed-Cargo-Identitäten, auf die ein laufender Prozess über `CARGO_TARGET_DIR` zeigt. Nicht vollständig beobachtbare mögliche Cargo-/Rust-Buildprozesse blockieren Cleanup fail-closed; eindeutig fachfremde Prozesse tun das nicht.
-7. Erst oberhalb des Cargo-Gesamtbudgets werden ausreichend alte, ungeschützte Identitäten nach belegten Bytes priorisiert. Es gibt keinen Glob- oder Root-Wipe.
-8. `plan` bindet Policy, lokale Usage-Receipts, den internen und externen Hash der Task-Evidenz, exakten Cache-Key, Pfad und rekursiven Metadaten-Fingerprint in `plan_sha256`.
-9. `apply` verlangt den exakten Plan-SHA und die wörtliche Bestätigung `apply-managed-cargo-gc`. Unmittelbar vor jeder Wirkung werden Evidenz, Receipt-Stand, Pfadgrenze, Verzeichnistyp, Symlinkfreiheit und Tree-Fingerprint erneut geprüft; direkt vor jedem `rmtree` wird der lokale Prozessschutz nochmals gelesen.
-10. Gelöscht wird höchstens ein explizit geplanter 64-hex-Identity-Root pro Kandidat. Danach beweist ein Readback das Verschwinden der exakten Keys und ein bounded GC-Receipt hält Vorher-/Nachher-Bytes fest.
-11. Vor einem manuellen Apply muss die Grabowski-Evidenz unmittelbar neu projiziert und daraus ein neuer Plan erzeugt werden; ein älterer Evidenz- oder Plan-Hash ist keine Löschfreigabe.
+7. Verwaltete Grabowski-Cargo-Läufe halten für ihre gesamte Prozesslaufzeit einen Shared-`flock` auf `${state_root}/cache-locks/cargo/<cache-key>.lock`. `apply` benötigt für dieselbe Identität einen exklusiven, nicht blockierenden Lock. Dadurch kann ein neu startender verwalteter Task nicht gleichzeitig mit der Löschung in denselben Cache schreiben; der `/proc`-Readback bleibt als zusätzliche Schranke für nicht kooperierende Prozesse bestehen.
+8. Erst oberhalb des Cargo-Gesamtbudgets werden ausreichend alte, ungeschützte Identitäten nach belegten Bytes priorisiert. Pro Apply werden höchstens acht Kandidaten ausgewählt, damit die unmittelbar vor Wirkung wiederholten Prozessprüfungen bounded bleiben. Es gibt keinen Glob- oder Root-Wipe.
+9. `plan` bindet Policy, lokale Usage-Receipts, den internen und externen Hash der Task-Evidenz, exakten Cache-Key, Pfad und einen strikten rekursiven Metadaten-Fingerprint in `plan_sha256`. Zusätzlich wird ein mtime-unabhängiger stabiler Tree-Fingerprint für Diagnose und Driftvergleich ausgegeben; er erteilt keine Löschfreigabe.
+10. `apply` verlangt den exakten Plan-SHA und die wörtliche Bestätigung `apply-managed-cargo-gc`. Vor der ersten Wirkung werden Evidenz, Receipt-Stand, Kandidatenzahl und -bytes, eindeutige Cache-Keys, aufgelöste Pfadgrenze, Verzeichnistyp, Filesystem-/Mountgrenze und die strikten Tree-Fingerprints aller Kandidaten geprüft. Die exklusiven Cache-Key-Locks aller Kandidaten werden in deterministischer Reihenfolge vorab erworben und bis zum finalen Readback und Receipt gehalten.
+11. Unmittelbar vor jedem symlink-sicheren `rmtree` werden Tree-Drift und `/proc` erneut geprüft. Gelöscht wird höchstens ein explizit geplanter 64-hex-Identity-Root pro Kandidat. Das Verschwinden wird unter Lock bestätigt. Tritt nach Beginn der Wirkung bei einem späteren Kandidaten ein Fehler auf, wird die bereits eingetretene Teilwirkung als `partial_failure` receipted, bevor `apply` fehlschlägt; eine teilweise Löschung darf nicht receiptlos bleiben.
+12. Der abschließende Inventory-Readback und das GC-Receipt entstehen noch unter allen Kandidaten-Locks. Erst danach dürfen wartende verwaltete Builds die Identitäten wieder nutzen oder neu anlegen. Vor einem manuellen Apply muss die Grabowski-Evidenz unmittelbar neu projiziert und daraus ein neuer Plan erzeugt werden; ein älterer Evidenz- oder Plan-Hash ist keine Löschfreigabe.
 
 Die reale Altlast von vor Einführung vollständiger Cargo-Nutzungsprovenienz ist damit bewusst fail-closed: Sie kann erst nach autoritativer Backfill-/Task-Evidenz oder expliziter gesonderter Klassifikation zu einem Löschkandidaten werden.
 
@@ -88,10 +90,10 @@ Die reale Altlast von vor Einführung vollständiger Cargo-Nutzungsprovenienz is
 
 Der Managed-Build-Einstieg und der Cargo-Lifecycle:
 
-* folgen bei Identitätsdateien und GC-Kandidaten keinen Symlinks;
+* folgen bei Identitätsdateien und GC-Kandidaten keinen Symlinks; verschachtelte Symlinks im Payload werden als nicht verfolgte Blätter behandelt;
 * akzeptieren nur bekannte Executables und Werkzeugzuordnungen;
 * halten Cache und State unter `${HOME}` und außerhalb des Repositorys;
-* lehnen Symlinks in neu zu erzeugenden Cachepfaden und innerhalb eines zu löschenden Identity-Trees ab;
+* lehnen Symlinks in neu zu erzeugenden Cache-/Lockpfaden sowie verschachtelte Mount- oder Filesystem-Grenzen innerhalb eines zu löschenden Identity-Trees ab;
 * löschen keine Named-Legacy-, Worktree- oder unklassifizierten Daten;
 * behandeln fehlende Task-Evidenz, unbekannte Provenienz und Drift als Schutzgrund;
 * verleiht dem Kindprozess keine zusätzliche Ausführungsberechtigung;

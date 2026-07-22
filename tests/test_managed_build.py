@@ -247,6 +247,10 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(binding["tool"], "cargo")
             self.assertEqual(binding["cache_key"], prepared["cache_key"])
             self.assertEqual(binding["cache_path"], prepared["cache_path"])
+            lifecycle_lock = Path(prepared["lifecycle_lock_path"])
+            self.assertEqual(binding["lifecycle_lock_path"], str(lifecycle_lock))
+            self.assertEqual(lifecycle_lock.name, f"{prepared['cache_key']}.lock")
+            self.assertIn(str(lifecycle_lock.parent), prepared["prepared_paths"])
             self.assertEqual(
                 binding["repository_identity_sha256"],
                 prepared["repository_identity_sha256"],
