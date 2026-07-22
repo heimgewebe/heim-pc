@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import fcntl
 import os
 from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -190,6 +192,65 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         self.assertFalse(receipt["source_files_removed"])
         self.assertFalse(receipt["worktrees_removed"])
 
+    def test_apply_rejects_cross_device_quarantine_before_move(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        original_stat = maintenance.Path.stat
+
+        def stat_with_foreign_target_device(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if path == self.target and kwargs.get("follow_symlinks", True):
+                class ForeignDeviceStat:
+                    st_dev = result.st_dev + 1
+                return ForeignDeviceStat()
+            return result
+
+        with patch.object(maintenance.Path, "stat", new=stat_with_foreign_target_device):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "different filesystem"):
+                maintenance.apply_plan(
+                    plan_path,
+                    expected_sha256=plan["plan_sha256"],
+                    confirmation=f"APPLY:{plan['plan_id']}",
+                    policy_path=self.policy_path,
+                    state_root=self.state_root,
+                    inventory_provider=self.inventory(),
+                    observer=self.observation,
+                )
+        self.assertTrue(self.target.exists())
+
+    def test_apply_fails_fast_when_another_apply_holds_lock(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        lock_path = self.state_root / "apply.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(
+                maintenance.MaintenanceError, "another maintenance instance"
+            ):
+                maintenance.apply_plan(
+                    plan_path,
+                    expected_sha256=plan["plan_sha256"],
+                    confirmation=f"APPLY:{plan['plan_id']}",
+                    policy_path=self.policy_path,
+                    state_root=self.state_root,
+                    inventory_provider=self.inventory(),
+                    observer=self.observation,
+                )
+        self.assertTrue(self.target.exists())
+
     def test_post_move_process_reference_restores_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(
@@ -334,6 +395,65 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
                 observer=self.observation,
             )
         self.assertTrue(self.target.exists())
+
+    def test_remove_failure_records_recovery_required(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        with patch.object(maintenance.shutil, "rmtree", side_effect=OSError("blocked")):
+            with self.assertRaisesRegex(OSError, "blocked"):
+                maintenance.apply_plan(
+                    plan_path,
+                    expected_sha256=plan["plan_sha256"],
+                    confirmation=f"APPLY:{plan['plan_id']}",
+                    policy_path=self.policy_path,
+                    state_root=self.state_root,
+                    inventory_provider=self.inventory(),
+                    observer=self.observation,
+                )
+        receipt = json.loads(
+            (self.state_root / "receipts" / f"{plan['plan_id']}.json").read_text()
+        )
+        self.assertEqual(receipt["state"], "recovery-required")
+        self.assertFalse(self.target.exists())
+        self.assertTrue(Path(receipt["pending"]["destination"]).exists())
+
+    def test_post_move_mutation_during_observation_restores_target(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        calls = 0
+
+        def mutating_observer(roots, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                destination = Path(roots[0])
+                (destination / "mutation").write_text("changed", encoding="utf-8")
+            return self.observation(roots, **kwargs)
+
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "post-move verification"):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=self.inventory(),
+                observer=mutating_observer,
+            )
+        self.assertTrue(self.target.exists())
+        self.assertTrue((self.target / "mutation").exists())
 
     def test_observer_exception_after_move_restores_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)

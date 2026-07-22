@@ -61,7 +61,30 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             self.assertNotIn("@RELEASE_ROOT@", service)
             self.assertIn("ProtectHome=read-only", service)
             self.assertIn("NoNewPrivileges=true", service)
+            self.assertNotIn("@HOME@", service)
+            self.assertNotIn("@READ_WRITE_PATHS@", service)
+            self.assertIn(
+                f"ConditionPathIsExecutable={home}/.local/share/grabowski-mcp/.venv/bin/python",
+                service,
+            )
+            self.assertIn(
+                f"ReadWritePaths=-{home}/.local/state/heim-pc/worktree-target-maintenance",
+                service,
+            )
+            self.assertIn(
+                f"ReadWritePaths=-{home}/repos/.worktree-target-quarantine",
+                service,
+            )
+            for repository in policy["repositories"]:
+                for root in repository["worktree_roots"]:
+                    self.assertIn(f"ReadWritePaths=-{root}", service)
             self.assertTrue((home / ".local/state/heim-pc/worktree-target-maintenance").is_dir())
+
+    def test_systemd_path_rejects_unsafe_unit_syntax(self) -> None:
+        for path in (Path("/home/alex/bad path"), Path("/home/%u/runtime"), Path('/home/alex/"bad"')):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(installer.InstallError, "safe absolute systemd path"):
+                    installer.systemd_path(path, label="test")
 
     def test_dirty_repository_is_rejected_before_install(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
