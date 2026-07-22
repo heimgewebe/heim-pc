@@ -749,7 +749,22 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
                         "process_observation_sha256": fresh_observation["observation_sha256"],
                     })
                     raise
-                shutil.rmtree(destination)
+                try:
+                    shutil.rmtree(destination)
+                except Exception:
+                    atomic_json(receipt_path, {
+                        "schema_version": 1,
+                        "kind": RECEIPT_KIND,
+                        "success": False,
+                        "state": "recovery-required",
+                        "plan_id": plan["plan_id"],
+                        "plan_sha256": expected_sha256,
+                        "policy_sha256": policy["policy_sha256"],
+                        "outcomes": outcomes,
+                        "pending": pending,
+                        "process_observation_sha256": fresh_observation["observation_sha256"],
+                    })
+                    raise
                 outcomes.append({
                     "candidate_id": item["candidate_id"],
                     "target": str(target),

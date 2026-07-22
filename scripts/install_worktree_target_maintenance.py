@@ -64,7 +64,12 @@ def repository_identity(root: Path) -> tuple[str, bool]:
 
 def systemd_path(path: Path, *, label: str) -> str:
     raw = str(path)
-    if not path.is_absolute() or any(character.isspace() for character in raw):
+    unsafe_characters = {"%", "\\", "\"", "'"}
+    if (
+        not path.is_absolute()
+        or any(character.isspace() for character in raw)
+        or any(character in unsafe_characters for character in raw)
+    ):
         raise InstallError(f"{label} is not a safe absolute systemd path: {path}")
     return raw
 

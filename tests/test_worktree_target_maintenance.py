@@ -396,6 +396,33 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
             )
         self.assertTrue(self.target.exists())
 
+    def test_remove_failure_records_recovery_required(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        with patch.object(maintenance.shutil, "rmtree", side_effect=OSError("blocked")):
+            with self.assertRaisesRegex(OSError, "blocked"):
+                maintenance.apply_plan(
+                    plan_path,
+                    expected_sha256=plan["plan_sha256"],
+                    confirmation=f"APPLY:{plan['plan_id']}",
+                    policy_path=self.policy_path,
+                    state_root=self.state_root,
+                    inventory_provider=self.inventory(),
+                    observer=self.observation,
+                )
+        receipt = json.loads(
+            (self.state_root / "receipts" / f"{plan['plan_id']}.json").read_text()
+        )
+        self.assertEqual(receipt["state"], "recovery-required")
+        self.assertFalse(self.target.exists())
+        self.assertTrue(Path(receipt["pending"]["destination"]).exists())
+
     def test_post_move_mutation_during_observation_restores_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(
