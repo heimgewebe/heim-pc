@@ -599,7 +599,7 @@ def prepare_environment(
         path = Path(value)
         _ensure_secure_directory(path, home)
         prepared.append(str(path))
-    return {
+    result = {
         **resolved,
         "kind": "heim_pc.managed_build_environment_prepared",
         "prepared_paths": sorted(set(prepared)),
@@ -611,6 +611,36 @@ def prepare_environment(
             "that the caller will consume the returned environment",
         ],
     }
+    if resolved["tool"] == "cargo":
+        state_root = Path(resolved["state_root"])
+        bindings = state_root / "binding-receipts"
+        _ensure_secure_directory(bindings, home)
+        observed_at = _utc_now()
+        binding = {
+            "schema_version": 1,
+            "kind": "heim_pc.managed_build_binding_receipt",
+            "observed_at": observed_at,
+            "repository_identity_sha256": resolved["repository_identity_sha256"],
+            "tool": "cargo",
+            "profile": resolved["profile"],
+            "cache_key": resolved["cache_key"],
+            "cache_path": resolved["cache_path"],
+            "environment_sha256": _sha256_json(resolved["environment"]),
+            "automatic_cleanup_authorized": False,
+        }
+        receipt_name = (
+            f"{int(time.time() * 1_000_000)}-"
+            f"{resolved['repository_identity_sha256'][:12]}-cargo-"
+            f"{resolved['cache_key'][:12]}.json"
+        )
+        binding_path = bindings / receipt_name
+        _atomic_write_json(binding_path, binding)
+        _trim_receipts(bindings, int(policy["max_receipts"]))
+        result["binding_receipt"] = {
+            "path": str(binding_path),
+            "sha256": _sha256_file(binding_path),
+        }
+    return result
 
 
 def build_plan(
