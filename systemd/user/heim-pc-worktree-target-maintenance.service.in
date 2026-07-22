@@ -14,9 +14,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 @READ_WRITE_PATHS@
-PrivateDevices=true
+# Capability-bounding sandbox directives proven incompatible with this user manager are omitted.
 ProtectKernelTunables=true
-ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true

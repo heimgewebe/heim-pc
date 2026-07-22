@@ -70,6 +70,18 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             self.assertNotIn("@RELEASE_ROOT@", service)
             self.assertIn("ProtectHome=read-only", service)
             self.assertIn("NoNewPrivileges=true", service)
+            self.assertNotIn("PrivateDevices=true", service)
+            self.assertNotIn("ProtectKernelModules=true", service)
+            for directive in (
+                "PrivateTmp=true",
+                "ProtectSystem=strict",
+                "ProtectKernelTunables=true",
+                "ProtectControlGroups=true",
+                "RestrictRealtime=true",
+                "RestrictSUIDSGID=true",
+                "LockPersonality=true",
+            ):
+                self.assertIn(directive, service)
             self.assertNotIn("@HOME@", service)
             self.assertNotIn("@READ_WRITE_PATHS@", service)
             self.assertIn(
