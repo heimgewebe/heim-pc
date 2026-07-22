@@ -62,6 +62,18 @@ def repository_identity(root: Path) -> tuple[str, bool]:
     return head, bool(status.strip())
 
 
+def systemd_path(path: Path, *, label: str) -> str:
+    raw = str(path)
+    unsafe_characters = {"%", "\\", "\"", "'"}
+    if (
+        not path.is_absolute()
+        or any(character.isspace() for character in raw)
+        or any(character in unsafe_characters for character in raw)
+    ):
+        raise InstallError(f"{label} is not a safe absolute systemd path: {path}")
+    return raw
+
+
 def atomic_install(target: Path, data: bytes, mode: int) -> dict[str, Any]:
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if target.is_symlink():
@@ -126,11 +138,34 @@ def install(
         release / "scripts/worktree_target_maintenance.py": (script_data, 0o755),
         release / "config/worktree-target-policy.v1.json": (policy_data, 0o600),
     }
-    rendered_service = service_template_data.decode("utf-8").replace(
-        "@RELEASE_ROOT@", str(release)
-    ).encode("utf-8")
-    if b"@RELEASE_ROOT@" in rendered_service:
+    policy_value = json.loads(policy_data.decode("utf-8"))
+    worktree_roots = sorted({
+        root
+        for repository in policy_value["repositories"]
+        for root in repository["worktree_roots"]
+    })
+    writable_paths = [
+        home / ".local/state/heim-pc/worktree-target-maintenance",
+        Path(policy_value["quarantine_root"]),
+        *(Path(root) for root in worktree_roots),
+    ]
+    read_write_paths = "\n".join(
+        f"ReadWritePaths=-{systemd_path(path, label='writable path')}"
+        for path in writable_paths
+    )
+    release_path = systemd_path(release, label="release root")
+    home_path = systemd_path(home, label="home")
+    rendered_service_text = (
+        service_template_data.decode("utf-8")
+        .replace("@RELEASE_ROOT@", release_path)
+        .replace("@HOME@", home_path)
+        .replace("@READ_WRITE_PATHS@", read_write_paths)
+    )
+    if any(placeholder in rendered_service_text for placeholder in (
+        "@RELEASE_ROOT@", "@HOME@", "@READ_WRITE_PATHS@"
+    )):
         raise InstallError("service template rendering is incomplete")
+    rendered_service = rendered_service_text.encode("utf-8")
     planned = [
         {"path": str(path), "mode": format(mode, "04o"), "sha256": sha256(data)}
         for path, (data, mode) in release_files.items()
@@ -143,7 +178,7 @@ def install(
     if apply:
         runtime_directories = [
             home / ".local/state/heim-pc/worktree-target-maintenance",
-            Path(json.loads(policy_data.decode("utf-8"))["quarantine_root"]),
+            Path(policy_value["quarantine_root"]),
         ]
         for directory in runtime_directories:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -164,7 +199,13 @@ def install(
             systemd = "installed"
         if start:
             run(["systemctl", "--user", "start", f"{UNIT_NAME}.service"])
-            run(["systemctl", "--user", "is-active", "--quiet", f"{UNIT_NAME}.timer"] if enable else ["systemctl", "--user", "show", f"{UNIT_NAME}.service", "--property=Result", "--value"])
+            if enable:
+                run(["systemctl", "--user", "is-active", "--quiet", f"{UNIT_NAME}.timer"])
+            else:
+                run([
+                    "systemctl", "--user", "show", f"{UNIT_NAME}.service",
+                    "--property=Result", "--value",
+                ])
             systemd += "+service-started"
     receipt = {
         "schema_version": 1,
