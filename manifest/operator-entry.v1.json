@@ -113,7 +113,26 @@
       "build_correctness",
       "permission_to_delete_worktree_or_cache_payloads",
       "global_shell_environment_changes"
-    ]
+    ],
+    "installedPolicy": "${HOME}/.local/lib/heim-pc/managed-build/config/managed-build.v1.json",
+    "installedEntryArgv": [
+      "python3",
+      "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py"
+    ],
+    "environmentResolver": {
+      "entryArgv": [
+        "python3",
+        "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+        "resolve-environment"
+      ],
+      "identityAuthority": "same_managed_build_identity_algorithm",
+      "interactiveShellBehavior": "unchanged",
+      "prepareArgv": [
+        "python3",
+        "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+        "prepare-environment"
+      ]
+    }
   },
   "costPolicy": {
     "objective": "zero_incremental_cost",

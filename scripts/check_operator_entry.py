@@ -160,12 +160,28 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
 
     managed_builds = _require_object(contract.get("managedBuilds"), "managedBuilds", errors)
     _require_host_path(managed_builds.get("policy"), "managedBuilds.policy", errors)
+    _require_host_path(managed_builds.get("installedPolicy"), "managedBuilds.installedPolicy", errors)
     expected_managed_build_argv = [
         "python3",
         "${HOME}/repos/heim-pc/scripts/managed_build.py",
     ]
     if managed_builds.get("entryArgv") != expected_managed_build_argv:
         errors.append("managedBuilds.entryArgv must name the canonical managed build entry")
+    expected_installed_managed_build_argv = [
+        "python3",
+        "${HOME}/.local/lib/heim-pc/managed-build/scripts/managed_build.py",
+    ]
+    if managed_builds.get("installedEntryArgv") != expected_installed_managed_build_argv:
+        errors.append("managedBuilds.installedEntryArgv must name the stable installed managed build entry")
+    resolver = _require_object(managed_builds.get("environmentResolver"), "managedBuilds.environmentResolver", errors)
+    if resolver.get("entryArgv") != [*expected_installed_managed_build_argv, "resolve-environment"]:
+        errors.append("managedBuilds.environmentResolver.entryArgv must use the installed managed build entry")
+    if resolver.get("prepareArgv") != [*expected_installed_managed_build_argv, "prepare-environment"]:
+        errors.append("managedBuilds.environmentResolver.prepareArgv must use the installed managed build entry")
+    if resolver.get("identityAuthority") != "same_managed_build_identity_algorithm":
+        errors.append("managedBuilds.environmentResolver.identityAuthority must preserve the T002 identity algorithm")
+    if resolver.get("interactiveShellBehavior") != "unchanged":
+        errors.append("managedBuilds.environmentResolver.interactiveShellBehavior must remain unchanged")
     if managed_builds.get("automationRule") != "operator_managed_builds_use_entry":
         errors.append("managedBuilds.automationRule must require the canonical entry")
     if managed_builds.get("interactiveShellBehavior") != "unchanged":

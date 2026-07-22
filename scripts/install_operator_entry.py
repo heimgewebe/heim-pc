@@ -20,6 +20,10 @@ SOURCE_CONTRACT = ROOT / "manifest/operator-entry.v1.json"
 SOURCE_AGENT_POINTER = ROOT / "config/agents/home-AGENTS.md"
 SOURCE_REPOS_AGENT_POINTER = ROOT / "config/agents/repos-root-AGENTS.md"
 SOURCE_README_POINTER = ROOT / "config/agents/home-README.md"
+SOURCE_MANAGED_BUILD = ROOT / "scripts/managed_build.py"
+SOURCE_STORAGE_INVENTORY = ROOT / "scripts/storage_inventory.py"
+SOURCE_MANAGED_BUILD_POLICY = ROOT / "config/managed-build.v1.json"
+INSTALLED_MANAGED_BUILD_ROOT = Path(".local/lib/heim-pc/managed-build")
 RECEIPT_RELATIVE_PATH = Path(".local/state/heim-pc/operator-entry-install-receipt.v1.json")
 LOCK_RELATIVE_PATH = Path(".local/state/heim-pc/operator-entry-install.lock")
 BACKUP_RELATIVE_PATH = Path(".local/state/heim-pc/operator-entry-backups")
@@ -138,6 +142,21 @@ def _plan(home: Path) -> list[dict[str, Any]]:
         (SOURCE_AGENT_POINTER, home / "AGENTS.md", 0o644),
         (SOURCE_REPOS_AGENT_POINTER, home / "repos/AGENTS.md", 0o644),
         (SOURCE_README_POINTER, home / "README.md", 0o644),
+        (
+            SOURCE_MANAGED_BUILD,
+            home / INSTALLED_MANAGED_BUILD_ROOT / "scripts/managed_build.py",
+            0o755,
+        ),
+        (
+            SOURCE_STORAGE_INVENTORY,
+            home / INSTALLED_MANAGED_BUILD_ROOT / "scripts/storage_inventory.py",
+            0o755,
+        ),
+        (
+            SOURCE_MANAGED_BUILD_POLICY,
+            home / INSTALLED_MANAGED_BUILD_ROOT / "config/managed-build.v1.json",
+            0o644,
+        ),
     ]
     plan: list[dict[str, Any]] = []
     for source, target, mode in mappings:
