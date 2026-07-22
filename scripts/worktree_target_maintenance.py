@@ -641,17 +641,23 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
         )
         if current_threshold == "ok":
             raise MaintenanceError("current target budget no longer authorizes cleanup")
+        plan_total_bytes = plan.get("total_target_bytes")
+        plan_projected_bytes = plan.get("projected_target_bytes")
         if (
-            plan.get("threshold") != current_threshold
-            or plan.get("total_target_bytes") != current_total_bytes
+            isinstance(plan_total_bytes, bool)
+            or not isinstance(plan_total_bytes, int)
+            or plan_total_bytes < 0
+            or plan.get("threshold") != current_threshold
+            or plan_total_bytes > current_total_bytes
             or plan.get("automatic_apply_authorized") != policy["automatic_apply"]
         ):
             raise MaintenanceError("target budget state changed after plan")
         if (
             len(validated_candidates) > policy["max_candidates_per_run"]
             or plan["selected_bytes"] > policy["max_remove_bytes_per_run"]
-            or plan.get("projected_target_bytes")
-            != current_total_bytes - plan["selected_bytes"]
+            or isinstance(plan_projected_bytes, bool)
+            or not isinstance(plan_projected_bytes, int)
+            or plan_projected_bytes != plan_total_bytes - plan["selected_bytes"]
         ):
             raise MaintenanceError("plan exceeds target cleanup budget")
         generated_at = plan.get("generated_at_unix")

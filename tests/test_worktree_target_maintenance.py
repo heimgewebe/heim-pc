@@ -347,6 +347,128 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
             )
         self.assertTrue(self.target.exists())
 
+    def test_apply_allows_unselected_target_growth_with_same_threshold(self) -> None:
+        active_worktree = self.worktree_root / "active"
+        active_target = active_worktree / "target"
+        active_target.mkdir(parents=True)
+        active_artifact = active_target / "artifact"
+        active_artifact.write_bytes(b"y" * 4096)
+        active_record = self.record(blocking=True)
+        active_record["path"] = str(active_worktree)
+        active_record["head"] = "b" * 40
+        active_record["branch"] = "work/active"
+        inventory = lambda _repository: {
+            "worktrees": [self.record(), active_record]
+        }
+
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=inventory,
+            observer=self.observation,
+        )
+        self.assertEqual([item["target"] for item in plan["selected"]], [str(self.target)])
+        plan_path = maintenance.write_plan(plan, self.state_root)
+
+        active_artifact.write_bytes(b"y" * 8192)
+
+        receipt = maintenance.apply_plan(
+            plan_path,
+            expected_sha256=plan["plan_sha256"],
+            confirmation=f"APPLY:{plan['plan_id']}",
+            policy_path=self.policy_path,
+            state_root=self.state_root,
+            inventory_provider=inventory,
+            observer=self.observation,
+        )
+        self.assertTrue(receipt["success"])
+        self.assertFalse(self.target.exists())
+        self.assertTrue(active_target.exists())
+
+    def test_apply_rejects_unselected_growth_that_changes_threshold(self) -> None:
+        self.policy_value["hard_bytes"] = 1_000_000
+        self.policy_path.write_text(json.dumps(self.policy_value), encoding="utf-8")
+        active_worktree = self.worktree_root / "active"
+        active_target = active_worktree / "target"
+        active_target.mkdir(parents=True)
+        active_artifact = active_target / "artifact"
+        active_artifact.write_bytes(b"y" * 4096)
+        active_record = self.record(blocking=True)
+        active_record["path"] = str(active_worktree)
+        active_record["head"] = "b" * 40
+        active_record["branch"] = "work/active"
+        inventory = lambda _repository: {
+            "worktrees": [self.record(), active_record]
+        }
+
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=inventory,
+            observer=self.observation,
+        )
+        self.assertEqual(plan["threshold"], "warning")
+        plan_path = maintenance.write_plan(plan, self.state_root)
+
+        active_artifact.write_bytes(b"y" * 2_000_000)
+
+        with self.assertRaisesRegex(
+            maintenance.MaintenanceError, "target budget state changed after plan"
+        ):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=inventory,
+                observer=self.observation,
+            )
+        self.assertTrue(self.target.exists())
+        self.assertTrue(active_target.exists())
+
+    def test_apply_rejects_unselected_target_shrink(self) -> None:
+        active_worktree = self.worktree_root / "active"
+        active_target = active_worktree / "target"
+        active_target.mkdir(parents=True)
+        active_artifact = active_target / "artifact"
+        active_artifact.write_bytes(b"y" * 8192)
+        active_record = self.record(blocking=True)
+        active_record["path"] = str(active_worktree)
+        active_record["head"] = "b" * 40
+        active_record["branch"] = "work/active"
+        inventory = lambda _repository: {
+            "worktrees": [self.record(), active_record]
+        }
+
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=inventory,
+            observer=self.observation,
+        )
+        plan_path = maintenance.write_plan(plan, self.state_root)
+
+        active_artifact.write_bytes(b"y" * 4096)
+
+        with self.assertRaisesRegex(
+            maintenance.MaintenanceError, "target budget state changed after plan"
+        ):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=inventory,
+                observer=self.observation,
+            )
+        self.assertTrue(self.target.exists())
+        self.assertTrue(active_target.exists())
+
     def test_apply_rejects_forged_snapshot_size(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(
