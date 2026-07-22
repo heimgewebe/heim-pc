@@ -91,7 +91,12 @@ Dirty, retinierte, archivierte, aktive oder unklassifizierbare Checkouts sowie
 unvollständige Prozesssicht blockieren fail-closed. Bei 80 GiB gilt Warnbetrieb,
 bei 120 GiB Hard-Limit-Betrieb. Im Warnbetrieb müssen Targets sieben Tage, im
 Hard-Limit-Betrieb mindestens einen Tag unverändert sein. Pro Lauf gelten
-zusätzliche Kandidaten- und Byte-Grenzen.
+zusätzliche Kandidaten- und Byte-Grenzen. Zwischen Plan und Apply darf der
+globale Target-Bestand nur wachsen, solange die Schwellenklasse unverändert
+bleibt; eine globale Schrumpfung oder ein Schwellenwechsel blockiert weiterhin
+fail-closed. Ausgewählte Targets werden unabhängig davon über ihren vollständigen
+Snapshot exakt revalidiert, sodass Wachstum eines unbeteiligten Builds keinen
+falschen TOCTOU-Abbruch auslöst.
 
 Der Rootbroker besitzt dabei keine Löschfunktion. Seine Aktion
 `observe_process_references` liest nur `cwd`, `exe`, Prozesswurzel und offene
