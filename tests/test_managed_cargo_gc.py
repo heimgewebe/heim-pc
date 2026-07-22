@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -29,6 +31,7 @@ class ManagedCargoGcTests(unittest.TestCase):
             "target_total_bytes": 0,
             "max_total_bytes": 1,
             "max_cleanup_per_run_bytes": 1024 * 1024,
+            "max_cleanup_candidates_per_run": 8,
         }
         cache_root = root / "cache" / "cargo"
         state_root = root / "state"
@@ -226,6 +229,148 @@ class ManagedCargoGcTests(unittest.TestCase):
                 plan["candidates"][0]["allocated_bytes"],
                 plan["candidates"][-1]["allocated_bytes"],
             )
+
+    def test_oversized_identity_is_reported_as_policy_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            policy["cargo_cache_retention"]["max_cleanup_per_run_bytes"] = 1
+            key = "0" * 64
+            self.make_cache(cache_root, key)
+            self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home, cache_root, [self.evidence_entry(cache_root, key)]
+            )
+
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+
+            self.assertEqual(plan["candidates"], [])
+            self.assertFalse(plan["safe_to_apply"])
+            self.assertEqual(plan["oversized_eligible"][0]["cache_key"], key)
+            self.assertEqual(
+                plan["convergence_blockers"][0]["kind"],
+                "oversized_identity_requires_policy_override",
+            )
+            self.assertGreater(
+                plan["convergence_blockers"][0][
+                    "minimum_required_max_cleanup_per_run_bytes"
+                ],
+                1,
+            )
+
+    def test_candidate_count_limit_bounds_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            policy["cargo_cache_retention"]["max_cleanup_per_run_bytes"] = 10 * 1024 * 1024
+            policy["cargo_cache_retention"]["max_cleanup_candidates_per_run"] = 2
+            keys = [character * 64 for character in ("1", "2", "3")]
+            for key in keys:
+                self.make_cache(cache_root, key, 4096)
+                self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home,
+                cache_root,
+                [self.evidence_entry(cache_root, key) for key in keys],
+            )
+
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+
+            self.assertEqual(len(plan["candidates"]), 2)
+            self.assertTrue(
+                any(
+                    blocker["kind"] == "candidate_count_limit_reached"
+                    for blocker in plan["convergence_blockers"]
+                )
+            )
+
+    def test_touch_changes_strict_but_not_stable_tree_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ("4" * 64)
+            root.mkdir()
+            artifact = root / "artifact.bin"
+            artifact.write_bytes(b"payload")
+            before = managed_cargo_gc._tree_observation(root)
+            current = artifact.stat().st_mtime_ns
+            os.utime(artifact, ns=(current + 1_000_000, current + 1_000_000))
+            after = managed_cargo_gc._tree_observation(root)
+            self.assertNotEqual(
+                before["strict_tree_fingerprint_sha256"],
+                after["strict_tree_fingerprint_sha256"],
+            )
+            self.assertEqual(
+                before["stable_tree_fingerprint_sha256"],
+                after["stable_tree_fingerprint_sha256"],
+            )
+
+    def test_nested_symlink_is_not_followed_during_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            key = "5" * 64
+            cache = self.make_cache(cache_root, key)
+            outside = home / "outside"
+            outside.mkdir()
+            sentinel = outside / "keep.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+            (cache / "outside-link").symlink_to(outside, target_is_directory=True)
+            self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home, cache_root, [self.evidence_entry(cache_root, key)]
+            )
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+            plan_path = home / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            managed_cargo_gc.apply_plan(
+                policy,
+                home=home,
+                plan_path=plan_path,
+                evidence_path=evidence,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=managed_cargo_gc.CONFIRMATION,
+            )
+
+            self.assertFalse(cache.exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_shared_lifecycle_lock_blocks_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            key = "6" * 64
+            cache = self.make_cache(cache_root, key)
+            self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home, cache_root, [self.evidence_entry(cache_root, key)]
+            )
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+            plan_path = home / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            lock_path = managed_cargo_gc._cache_lock_path(state_root, key)
+            lock_path.parent.mkdir(parents=True)
+            with lock_path.open("w+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    managed_cargo_gc.CargoGcError, "lifecycle lock is held"
+                ):
+                    managed_cargo_gc.apply_plan(
+                        policy,
+                        home=home,
+                        plan_path=plan_path,
+                        evidence_path=evidence,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=managed_cargo_gc.CONFIRMATION,
+                    )
+            self.assertTrue(cache.exists())
 
     def test_unexpired_pin_protects_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -497,7 +642,7 @@ class ManagedCargoGcTests(unittest.TestCase):
                 side_effect=[({}, []), ({key: [4242]}, [])],
             ):
                 with self.assertRaisesRegex(
-                    managed_cargo_gc.CargoGcError, "acquired a live process reference"
+                    managed_cargo_gc.CargoGcError, "acquired live process reference"
                 ):
                     managed_cargo_gc.apply_plan(
                         policy,
@@ -508,6 +653,105 @@ class ManagedCargoGcTests(unittest.TestCase):
                         confirmation=managed_cargo_gc.CONFIRMATION,
                     )
             self.assertTrue(cache.exists())
+
+    def test_all_candidate_locks_are_acquired_before_first_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            policy["cargo_cache_retention"]["max_cleanup_per_run_bytes"] = 10 * 1024 * 1024
+            first = "7" * 64
+            second = "8" * 64
+            first_cache = self.make_cache(cache_root, first, 4096)
+            second_cache = self.make_cache(cache_root, second, 4096)
+            for key in (first, second):
+                self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home,
+                cache_root,
+                [self.evidence_entry(cache_root, first), self.evidence_entry(cache_root, second)],
+            )
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+            self.assertEqual(len(plan["candidates"]), 2)
+            plan_path = home / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            second_lock = managed_cargo_gc._cache_lock_path(state_root, second)
+            second_lock.parent.mkdir(parents=True)
+            with second_lock.open("w+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    managed_cargo_gc.CargoGcError, "lifecycle lock is held"
+                ):
+                    managed_cargo_gc.apply_plan(
+                        policy,
+                        home=home,
+                        plan_path=plan_path,
+                        evidence_path=evidence,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=managed_cargo_gc.CONFIRMATION,
+                    )
+            self.assertTrue(first_cache.exists())
+            self.assertTrue(second_cache.exists())
+            self.assertEqual(list((state_root / "gc-receipts").glob("*.json")), [])
+
+    def test_partial_delete_failure_writes_receipt_before_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            policy, cache_root, state_root = self.fixture(home)
+            policy["cargo_cache_retention"]["max_cleanup_per_run_bytes"] = 10 * 1024 * 1024
+            first = "9" * 64
+            second = "a" * 64
+            first_cache = self.make_cache(cache_root, first, 4096)
+            second_cache = self.make_cache(cache_root, second, 4096)
+            for key in (first, second):
+                self.make_receipt(state_root, cache_root, key)
+            evidence = self.make_evidence(
+                home,
+                cache_root,
+                [self.evidence_entry(cache_root, first), self.evidence_entry(cache_root, second)],
+            )
+            plan = managed_cargo_gc.build_plan(
+                policy, home=home, evidence_path=evidence, now_unix=1000
+            )
+            self.assertEqual([item["cache_key"] for item in plan["candidates"]], [first, second])
+            plan_path = home / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            real_rmtree = managed_cargo_gc.shutil.rmtree
+            calls = 0
+
+            def failing_second(path: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated delete failure")
+                real_rmtree(path)
+
+            with (
+                mock.patch.object(managed_cargo_gc.shutil, "rmtree", side_effect=failing_second),
+                self.assertRaisesRegex(
+                    managed_cargo_gc.CargoGcError, "partial or unverified effect"
+                ),
+            ):
+                managed_cargo_gc.apply_plan(
+                    policy,
+                    home=home,
+                    plan_path=plan_path,
+                    evidence_path=evidence,
+                    expected_plan_sha256=plan["plan_sha256"],
+                    confirmation=managed_cargo_gc.CONFIRMATION,
+                )
+
+            self.assertFalse(first_cache.exists())
+            self.assertTrue(second_cache.exists())
+            receipts = list((state_root / "gc-receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "partial_failure")
+            self.assertEqual([item["cache_key"] for item in receipt["removed"]], [first])
+            self.assertIn("simulated delete failure", receipt["failure"])
+            self.assertEqual(receipt["failed_candidate_cache_key"], second)
+            self.assertGreater(receipt["applied_at_unix_ns"], 0)
 
     def test_snapshot_preserves_historical_usage_after_task_evidence_disappears(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

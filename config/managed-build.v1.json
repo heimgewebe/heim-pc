@@ -24,7 +24,8 @@
     "minimum_unused_seconds": 604800,
     "target_total_bytes": 32212254720,
     "max_total_bytes": 53687091200,
-    "max_cleanup_per_run_bytes": 21474836480
+    "max_cleanup_per_run_bytes": 21474836480,
+    "max_cleanup_candidates_per_run": 8
   },
   "max_receipts": 100,
   "tools": {

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -67,12 +69,17 @@ def _retention_policy(policy: dict[str, Any]) -> dict[str, int]:
         "target_total_bytes",
         "max_total_bytes",
         "max_cleanup_per_run_bytes",
+        "max_cleanup_candidates_per_run",
     )
     result: dict[str, int] = {}
     for name in names:
         item = value.get(name)
-        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
-            raise CargoGcError(f"cargo_cache_retention.{name} must be non-negative integer")
+        minimum = 1 if name == "max_cleanup_candidates_per_run" else 0
+        if not isinstance(item, int) or isinstance(item, bool) or item < minimum:
+            requirement = "positive" if minimum else "non-negative"
+            raise CargoGcError(
+                f"cargo_cache_retention.{name} must be {requirement} integer"
+            )
         result[name] = item
     if result["target_total_bytes"] > result["max_total_bytes"]:
         raise CargoGcError("cargo cache target_total_bytes must not exceed max_total_bytes")
@@ -80,17 +87,31 @@ def _retention_policy(policy: dict[str, Any]) -> dict[str, int]:
 
 
 def _tree_observation(path: Path) -> dict[str, Any]:
-    """Return allocated bytes plus a metadata fingerprint without following symlinks."""
-    rows: list[list[Any]] = []
+    """Return allocated bytes plus strict and touch-stable tree fingerprints.
+
+    Symlinks are recorded as leaf entries and are never traversed. Cross-device or
+    nested mount points are rejected because recursive deletion must not cross a
+    managed identity filesystem boundary.
+    """
+    strict_rows: list[list[Any]] = []
+    stable_rows: list[list[Any]] = []
     allocated = 0
+    root_info = path.lstat()
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise CargoGcError(f"managed cache root is not a real directory: {path}")
+    root_device = root_info.st_dev
     stack = [path]
     while stack:
         current = stack.pop()
         info = current.lstat()
         relative = "." if current == path else current.relative_to(path).as_posix()
+        mode_type = stat.S_IFMT(info.st_mode)
+        strict_rows.append([relative, mode_type, info.st_size, info.st_mtime_ns])
+        stable_rows.append([relative, mode_type, info.st_size])
         if stat.S_ISLNK(info.st_mode):
-            raise CargoGcError(f"managed cache contains symlink: {current}")
-        rows.append([relative, stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns])
+            continue
+        if current != path and (info.st_dev != root_device or os.path.ismount(current)):
+            raise CargoGcError(f"managed cache crosses a filesystem or mount boundary: {current}")
         if stat.S_ISREG(info.st_mode):
             allocated += info.st_blocks * 512
             continue
@@ -99,11 +120,56 @@ def _tree_observation(path: Path) -> dict[str, Any]:
         with os.scandir(current) as entries:
             children = sorted((Path(entry.path) for entry in entries), reverse=True)
         stack.extend(children)
+    strict_fingerprint = _sha256_json(strict_rows)
     return {
         "allocated_bytes": allocated,
-        "entry_count": len(rows),
-        "tree_fingerprint_sha256": _sha256_json(rows),
+        "entry_count": len(strict_rows),
+        "tree_fingerprint_sha256": strict_fingerprint,
+        "strict_tree_fingerprint_sha256": strict_fingerprint,
+        "stable_tree_fingerprint_sha256": _sha256_json(stable_rows),
     }
+
+
+def _cache_lock_path(state_root: Path, cache_key: str) -> Path:
+    if CACHE_KEY_RE.fullmatch(cache_key) is None:
+        raise CargoGcError("managed Cargo cache key is invalid for lifecycle lock")
+    return state_root / "cache-locks" / "cargo" / f"{cache_key}.lock"
+
+
+@contextmanager
+def _exclusive_cache_lock(state_root: Path, cache_key: str, *, home: Path):
+    lock_path = _cache_lock_path(state_root, cache_key)
+    lock_root = lock_path.parent
+    try:
+        mb._ensure_secure_directory(lock_root, home)
+    except mb.ManagedBuildError as exc:
+        raise CargoGcError("managed Cargo lifecycle lock root is unsafe") from exc
+    try:
+        resolved_root = lock_root.resolve(strict=True)
+        resolved_root.relative_to(home.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise CargoGcError("managed Cargo lifecycle lock root is unsafe") from exc
+    if resolved_root != lock_root or lock_root.is_symlink() or not lock_root.is_dir():
+        raise CargoGcError("managed Cargo lifecycle lock root is unsafe")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise CargoGcError(f"cannot open managed Cargo lifecycle lock: {cache_key}") from exc
+    handle = os.fdopen(fd, "r+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CargoGcError(f"managed Cargo lifecycle lock is held: {cache_key}") from exc
+        yield lock_path
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def _parse_iso_epoch(value: Any) -> int | None:
@@ -549,6 +615,8 @@ def build_plan(
     over_limit = total > retention["max_total_bytes"]
     selected: list[dict[str, Any]] = []
     selected_bytes = 0
+    oversized_eligible: list[dict[str, Any]] = []
+    candidate_limit_reached = False
     if (
         over_limit
         and current["external_evidence"]["complete"]
@@ -560,13 +628,44 @@ def build_plan(
         ):
             if selected_bytes >= required_reclaim:
                 break
-            proposed = selected_bytes + entry["allocated_bytes"]
-            if proposed > retention["max_cleanup_per_run_bytes"] and selected:
+            if entry["allocated_bytes"] > retention["max_cleanup_per_run_bytes"]:
+                oversized_eligible.append(
+                    {
+                        **entry,
+                        "selection_blocker": "identity_exceeds_max_cleanup_per_run_bytes",
+                        "required_max_cleanup_per_run_bytes": entry["allocated_bytes"],
+                    }
+                )
                 continue
-            if proposed > retention["max_cleanup_per_run_bytes"] and not selected:
+            if len(selected) >= retention["max_cleanup_candidates_per_run"]:
+                candidate_limit_reached = True
+                break
+            proposed = selected_bytes + entry["allocated_bytes"]
+            if proposed > retention["max_cleanup_per_run_bytes"]:
                 continue
             selected.append(entry)
             selected_bytes = proposed
+    oversized_keys = {entry["cache_key"] for entry in oversized_eligible}
+    convergence_blockers: list[dict[str, Any]] = []
+    if oversized_eligible and selected_bytes < required_reclaim:
+        convergence_blockers.append(
+            {
+                "kind": "oversized_identity_requires_policy_override",
+                "cache_keys": [entry["cache_key"] for entry in oversized_eligible],
+                "minimum_required_max_cleanup_per_run_bytes": min(
+                    entry["allocated_bytes"] for entry in oversized_eligible
+                ),
+            }
+        )
+    if candidate_limit_reached and selected_bytes < required_reclaim:
+        convergence_blockers.append(
+            {
+                "kind": "candidate_count_limit_reached",
+                "max_cleanup_candidates_per_run": retention[
+                    "max_cleanup_candidates_per_run"
+                ],
+            }
+        )
     core = {
         "schema_version": 1,
         "kind": PLAN_KIND,
@@ -580,7 +679,13 @@ def build_plan(
         "required_reclaim_bytes": required_reclaim,
         "expected_reclaim_bytes": selected_bytes,
         "candidates": selected,
-        "eligible_not_selected": [entry for entry in candidates_pool if entry not in selected],
+        "eligible_not_selected": [
+            entry
+            for entry in candidates_pool
+            if entry not in selected and entry["cache_key"] not in oversized_keys
+        ],
+        "oversized_eligible": oversized_eligible,
+        "convergence_blockers": convergence_blockers,
         "protected": protected,
         "unclassified": current["unclassified"],
         "local_usage_sha256": current["local_usage_sha256"],
@@ -595,6 +700,7 @@ def build_plan(
         "does_not_establish": current["does_not_establish"] + [
             "automatic cleanup authorization",
             "permission to delete named legacy cache directories",
+            "permission to exceed max_cleanup_per_run_bytes without an explicit policy change",
         ],
     }
     return {**core, "plan_sha256": _sha256_json(core)}
@@ -731,6 +837,31 @@ def apply_plan(
         raise CargoGcError("Cargo GC plan has no safe cleanup candidates")
     if plan.get("policy_sha256") != _sha256_json(policy):
         raise CargoGcError("Cargo GC policy changed after planning")
+    retention = _retention_policy(policy)
+    candidates = plan.get("candidates")
+    if not isinstance(candidates, list):
+        raise CargoGcError("Cargo GC plan candidates are invalid")
+    if len(candidates) > retention["max_cleanup_candidates_per_run"]:
+        raise CargoGcError("Cargo GC plan exceeds max_cleanup_candidates_per_run")
+    planned_bytes = 0
+    candidate_keys: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise CargoGcError("Cargo GC plan candidate is invalid")
+        key = candidate.get("cache_key")
+        if not isinstance(key, str) or CACHE_KEY_RE.fullmatch(key) is None:
+            raise CargoGcError("Cargo GC plan candidate cache_key is invalid")
+        if key in candidate_keys:
+            raise CargoGcError(f"Cargo GC plan duplicates candidate cache_key: {key}")
+        candidate_keys.add(key)
+        value = candidate.get("allocated_bytes")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CargoGcError("Cargo GC plan candidate allocated_bytes is invalid")
+        planned_bytes += value
+    if planned_bytes > retention["max_cleanup_per_run_bytes"]:
+        raise CargoGcError("Cargo GC plan exceeds max_cleanup_per_run_bytes")
+    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        raise CargoGcError("platform rmtree is not symlink-attack resistant")
     current = inventory(
         policy,
         home=home,
@@ -745,55 +876,224 @@ def apply_plan(
         raise CargoGcError("external task evidence is incomplete at apply time")
     by_key = {entry["cache_key"]: entry for entry in current["managed"]}
     before_bytes = current["total_managed_allocated_bytes"]
-    removed: list[dict[str, Any]] = []
-    for candidate in plan["candidates"]:
+    root = Path(current["cache_root"])
+    state_root = Path(current["state_root"])
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise CargoGcError("managed Cargo cache root is unavailable at apply time") from exc
+    if resolved_root != root or root.is_symlink():
+        raise CargoGcError("managed Cargo cache root contains a symlink boundary")
+
+    prepared_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
         key = candidate["cache_key"]
         observed = by_key.get(key)
         if observed is None:
             raise CargoGcError(f"candidate disappeared before apply: {key}")
         if observed["protected"] or observed["protection_reasons"]:
             raise CargoGcError(f"candidate became protected before apply: {key}")
-        if observed["tree_fingerprint_sha256"] != candidate["tree_fingerprint_sha256"]:
-            raise CargoGcError(f"candidate tree changed after planning: {key}")
         path = Path(observed["cache_path"])
-        root = Path(current["cache_root"])
-        if path.parent != root or path.name != key or CACHE_KEY_RE.fullmatch(key) is None:
+        if path.parent != root or path.name != key:
             raise CargoGcError(f"candidate path is not one exact managed identity: {key}")
+        try:
+            resolved_path = path.resolve(strict=True)
+        except OSError as exc:
+            raise CargoGcError(f"candidate path is unavailable before apply: {key}") from exc
+        if resolved_path.parent != resolved_root:
+            raise CargoGcError(f"candidate path escapes managed Cargo root: {key}")
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise CargoGcError(f"candidate path type changed before apply: {key}")
-        latest_process_refs, latest_process_errors = _live_process_references(root)
-        if latest_process_errors:
+        expected_strict = candidate.get(
+            "strict_tree_fingerprint_sha256",
+            candidate.get("tree_fingerprint_sha256"),
+        )
+        if not isinstance(expected_strict, str) or CACHE_KEY_RE.fullmatch(expected_strict) is None:
+            raise CargoGcError(f"candidate strict tree fingerprint is invalid: {key}")
+        prepared_candidates.append(
+            {
+                "candidate": candidate,
+                "key": key,
+                "path": path,
+                "expected_strict": expected_strict,
+            }
+        )
+
+    removed: list[dict[str, Any]] = []
+    effect_started = False
+    failure: str | None = None
+    failed_candidate_cache_key: str | None = None
+    post_observation_error: str | None = None
+    after: dict[str, Any] | None = None
+    receipt_path: Path | None = None
+    receipt: dict[str, Any] | None = None
+
+    with ExitStack() as stack:
+        lock_paths: dict[str, Path] = {}
+        for item in sorted(prepared_candidates, key=lambda value: value["key"]):
+            lock_paths[item["key"]] = stack.enter_context(
+                _exclusive_cache_lock(state_root, item["key"], home=home)
+            )
+
+        # Validate every candidate while all managed producers are fenced, before
+        # the first destructive effect.
+        for item in prepared_candidates:
+            latest_observation = _tree_observation(item["path"])
+            if (
+                latest_observation["strict_tree_fingerprint_sha256"]
+                != item["expected_strict"]
+            ):
+                raise CargoGcError(
+                    f"candidate tree changed after planning: {item['key']}"
+                )
+
+        initial_process_refs, initial_process_errors = _live_process_references(root)
+        if initial_process_errors:
             raise CargoGcError("process observation became incomplete before apply")
-        if latest_process_refs.get(key):
-            raise CargoGcError(f"candidate acquired a live process reference before apply: {key}")
-        # _tree_observation rejects any nested symlink immediately before rmtree.
-        _tree_observation(path)
-        shutil.rmtree(path)
-        removed.append({"cache_key": key, "cache_path": str(path), "planned_bytes": candidate["allocated_bytes"]})
-    after = inventory(policy, home=home, evidence_path=evidence_path, now_unix=int(time.time()))
-    remaining_keys = {entry["cache_key"] for entry in after["managed"]}
-    if any(item["cache_key"] in remaining_keys for item in removed):
-        raise CargoGcError("post-cleanup readback still contains a removed cache identity")
-    receipt = {
-        "schema_version": 1,
-        "kind": RECEIPT_KIND,
-        "applied_at_unix": int(time.time()),
-        "plan_sha256": actual_sha,
-        "policy_sha256": _sha256_json(policy),
-        "external_evidence_sha256": current["external_evidence"]["sha256"],
-        "before_allocated_bytes": before_bytes,
-        "after_allocated_bytes": after["total_managed_allocated_bytes"],
-        "reclaimed_bytes": max(0, before_bytes - after["total_managed_allocated_bytes"]),
-        "removed": removed,
-        "remaining_managed_count": len(after["managed"]),
-        "remaining_unclassified_count": len(after["unclassified"]),
+        initially_referenced = sorted(
+            item["key"]
+            for item in prepared_candidates
+            if initial_process_refs.get(item["key"])
+        )
+        if initially_referenced:
+            raise CargoGcError(
+                "candidates acquired live process references before apply: "
+                + ",".join(initially_referenced)
+            )
+
+        for item in prepared_candidates:
+            key = item["key"]
+            path = item["path"]
+            # Recheck drift and non-cooperating processes immediately before each
+            # rmtree. Managed Grabowski producers cannot enter because all candidate
+            # locks remain exclusively held until the final receipt is written.
+            try:
+                latest_observation = _tree_observation(path)
+                if (
+                    latest_observation["strict_tree_fingerprint_sha256"]
+                    != item["expected_strict"]
+                ):
+                    raise CargoGcError(f"candidate tree changed before deletion: {key}")
+                latest_process_refs, latest_process_errors = _live_process_references(root)
+                if latest_process_errors:
+                    raise CargoGcError(
+                        "process observation became incomplete before deletion"
+                    )
+                if latest_process_refs.get(key):
+                    raise CargoGcError(
+                        f"candidate acquired a live process reference before deletion: {key}"
+                    )
+            except (CargoGcError, OSError) as exc:
+                if not effect_started:
+                    raise
+                failure = str(exc)
+                failed_candidate_cache_key = key
+                break
+
+            effect_started = True
+            try:
+                shutil.rmtree(path)
+                if path.exists() or path.is_symlink():
+                    raise CargoGcError(
+                        f"candidate still exists after locked deletion: {key}"
+                    )
+            except (CargoGcError, OSError) as exc:
+                failure = f"candidate deletion failed for {key}: {exc}"
+                failed_candidate_cache_key = key
+                break
+            removed.append(
+                {
+                    "cache_key": key,
+                    "cache_path": str(path),
+                    "planned_bytes": item["candidate"]["allocated_bytes"],
+                    "lifecycle_lock_path": str(lock_paths[key]),
+                }
+            )
+
+        if effect_started:
+            try:
+                after = inventory(
+                    policy,
+                    home=home,
+                    evidence_path=evidence_path,
+                    now_unix=int(time.time()),
+                )
+            except (CargoGcError, OSError) as exc:
+                post_observation_error = f"{type(exc).__name__}: {exc}"
+
+            reappeared_while_locked: list[str] = []
+            if after is not None:
+                remaining_keys = {entry["cache_key"] for entry in after["managed"]}
+                reappeared_while_locked = sorted(
+                    item["cache_key"]
+                    for item in removed
+                    if item["cache_key"] in remaining_keys
+                )
+                if reappeared_while_locked and failure is None:
+                    failure = (
+                        "removed cache identities reappeared while lifecycle locks were held: "
+                        + ",".join(reappeared_while_locked)
+                    )
+
+            applied_at_unix_ns = time.time_ns()
+            applied_at = applied_at_unix_ns // 1_000_000_000
+            status = "success"
+            if failure is not None:
+                status = "partial_failure"
+            elif post_observation_error is not None:
+                status = "post_observation_incomplete"
+            receipt = {
+                "schema_version": 1,
+                "kind": RECEIPT_KIND,
+                "status": status,
+                "applied_at_unix": applied_at,
+                "applied_at_unix_ns": applied_at_unix_ns,
+                "plan_sha256": actual_sha,
+                "policy_sha256": _sha256_json(policy),
+                "external_evidence_sha256": current["external_evidence"]["sha256"],
+                "before_allocated_bytes": before_bytes,
+                "after_allocated_bytes": (
+                    after["total_managed_allocated_bytes"] if after is not None else None
+                ),
+                "reclaimed_bytes": (
+                    max(0, before_bytes - after["total_managed_allocated_bytes"])
+                    if after is not None
+                    else None
+                ),
+                "removed": removed,
+                "reappeared_while_locked": reappeared_while_locked,
+                "failure": failure,
+                "failed_candidate_cache_key": failed_candidate_cache_key,
+                "post_observation_error": post_observation_error,
+                "remaining_managed_count": (len(after["managed"]) if after is not None else None),
+                "remaining_unclassified_count": (
+                    len(after["unclassified"]) if after is not None else None
+                ),
+            }
+            receipt_path = (
+                state_root
+                / "gc-receipts"
+                / f"{applied_at_unix_ns}-{actual_sha[:16]}.json"
+            )
+            _atomic_json(receipt_path, receipt)
+            mb._trim_receipts(receipt_path.parent, int(policy["max_receipts"]))
+
+    if not effect_started:
+        raise CargoGcError("Cargo GC apply produced no effect")
+    if receipt_path is None or receipt is None:
+        raise CargoGcError("Cargo GC apply effect was not receipted")
+    result = {
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": _sha256_file(receipt_path),
+        "receipt": receipt,
     }
-    state_root = Path(current["state_root"])
-    receipt_path = state_root / "gc-receipts" / f"{receipt['applied_at_unix']}-{actual_sha[:16]}.json"
-    _atomic_json(receipt_path, receipt)
-    mb._trim_receipts(receipt_path.parent, int(policy["max_receipts"]))
-    return {"receipt_path": str(receipt_path), "receipt_sha256": _sha256_file(receipt_path), "receipt": receipt}
+    if failure is not None or post_observation_error is not None:
+        detail = failure or post_observation_error or "unknown post-effect failure"
+        raise CargoGcError(
+            f"Cargo GC apply had a partial or unverified effect; receipt={receipt_path}; error={detail}"
+        )
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:

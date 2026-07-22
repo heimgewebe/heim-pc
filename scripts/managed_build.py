@@ -614,7 +614,13 @@ def prepare_environment(
     if resolved["tool"] == "cargo":
         state_root = Path(resolved["state_root"])
         bindings = state_root / "binding-receipts"
+        lock_root = state_root / "cache-locks" / "cargo"
         _ensure_secure_directory(bindings, home)
+        _ensure_secure_directory(lock_root, home)
+        lifecycle_lock_path = lock_root / f"{resolved['cache_key']}.lock"
+        result["lifecycle_lock_path"] = str(lifecycle_lock_path)
+        result["prepared_paths"] = sorted(set([*result["prepared_paths"], str(lock_root)]))
+        result["prepared_paths_sha256"] = _sha256_json(result["prepared_paths"])
         observed_at = _utc_now()
         binding = {
             "schema_version": 1,
@@ -625,6 +631,7 @@ def prepare_environment(
             "profile": resolved["profile"],
             "cache_key": resolved["cache_key"],
             "cache_path": resolved["cache_path"],
+            "lifecycle_lock_path": str(lifecycle_lock_path),
             "environment_sha256": _sha256_json(resolved["environment"]),
             "automatic_cleanup_authorized": False,
         }
