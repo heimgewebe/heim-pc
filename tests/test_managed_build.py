@@ -240,6 +240,18 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertTrue(target.is_relative_to(home / ".cache/heim-pc/managed-builds/cargo"))
             self.assertFalse(target.is_relative_to(repo))
             self.assertIn(str(target), prepared["prepared_paths"])
+            binding_path = Path(prepared["binding_receipt"]["path"])
+            self.assertTrue(binding_path.is_file())
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            self.assertEqual(binding["kind"], "heim_pc.managed_build_binding_receipt")
+            self.assertEqual(binding["tool"], "cargo")
+            self.assertEqual(binding["cache_key"], prepared["cache_key"])
+            self.assertEqual(binding["cache_path"], prepared["cache_path"])
+            self.assertEqual(
+                binding["repository_identity_sha256"],
+                prepared["repository_identity_sha256"],
+            )
+            self.assertNotIn("command", binding)
 
     def test_prepare_environment_rejects_symlinked_cache_ancestor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
