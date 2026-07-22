@@ -1,8 +1,8 @@
 [Unit]
 Description=Bounded lifecycle maintenance for regenerable Rust worktree targets
 After=default.target
-ConditionPathIsExecutable=@HOME@/.local/share/grabowski-mcp/.venv/bin/python
-ConditionPathIsExecutable=/usr/local/bin/grabowski-privileged-request
+ConditionFileIsExecutable=@HOME@/.local/share/grabowski-mcp/.venv/bin/python
+ConditionFileIsExecutable=/usr/local/bin/grabowski-privileged-request
 ConditionPathExists=/run/grabowski/privileged-broker.sock
 
 [Service]
