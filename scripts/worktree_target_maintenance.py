@@ -25,6 +25,7 @@ DEFAULT_POLICY = Path(__file__).resolve().parents[1] / "config" / "worktree-targ
 DEFAULT_STATE_ROOT = Path.home() / ".local/state/heim-pc/worktree-target-maintenance"
 DEFAULT_BROKER_CLIENT = Path("/usr/local/bin/grabowski-privileged-request")
 MAX_OBSERVER_ROOTS = 256
+BROKER_TIMEOUT_SECONDS = 45
 
 
 class MaintenanceError(RuntimeError):
@@ -300,7 +301,7 @@ def observe_processes(roots: list[Path], *, owner_uid: int, state_root: Path, cl
     path = reference_root / f"{reference['request_id']}.json"
     atomic_json(path, reference)
     try:
-        completed = subprocess.run([str(client), str(path)], cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45, check=False, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
+        completed = subprocess.run([str(client), str(path)], cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=BROKER_TIMEOUT_SECONDS, check=False, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"})
     finally:
         path.unlink(missing_ok=True)
     if completed.returncode != 0:
@@ -622,7 +623,10 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise MaintenanceError("another maintenance instance is currently applying a plan") from exc
         receipt_path = state_root / "receipts" / f"{plan['plan_id']}.json"
         if receipt_path.exists():
             existing = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -676,6 +680,7 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
             prepared.append((item, snapshot))
         quarantine_root = Path(policy["quarantine_root"]) / plan["plan_id"]
         ensure_quarantine(quarantine_root, owner_uid=policy["owner_uid"])
+        quarantine_device = quarantine_root.stat().st_dev
         outcomes = []
         success = False
         try:
@@ -684,6 +689,10 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
                 destination = quarantine_root / item["candidate_id"]
                 if destination.exists():
                     raise MaintenanceError(f"quarantine destination exists: {destination}")
+                if target.stat().st_dev != quarantine_device:
+                    raise MaintenanceError(
+                        f"quarantine root is on a different filesystem than target: {target}"
+                    )
                 pending = {
                     "candidate_id": item["candidate_id"],
                     "target": str(target),
@@ -712,6 +721,18 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
                     )
                     if not post_move_observation["complete"] or post_move_observation["path_references"]:
                         raise MaintenanceError(f"post-move process observation blocks removal: {target}")
+                    final_snapshot = tree_snapshot(
+                        destination,
+                        owner_uid=policy["owner_uid"],
+                        max_entries=policy["max_tree_entries"],
+                    )
+                    if (
+                        final_snapshot["tree_sha256"] != snapshot["tree_sha256"]
+                        or final_snapshot["identity"] != snapshot["identity"]
+                    ):
+                        raise MaintenanceError(
+                            f"target changed during post-move verification: {target}"
+                        )
                 except Exception:
                     if destination.exists() and not target.exists():
                         os.rename(destination, target)
@@ -734,6 +755,7 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
                     "target": str(target),
                     "removed_bytes": snapshot["size_bytes"],
                     "result": "removed",
+                    "post_move_tree_sha256": final_snapshot["tree_sha256"],
                     "post_move_observation_sha256": post_move_observation["observation_sha256"],
                 })
                 atomic_json(receipt_path, {"schema_version": 1, "kind": RECEIPT_KIND, "success": False, "plan_id": plan["plan_id"], "plan_sha256": expected_sha256, "policy_sha256": policy["policy_sha256"], "outcomes": outcomes, "current_candidate": item["candidate_id"], "process_observation_sha256": fresh_observation["observation_sha256"]})

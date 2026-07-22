@@ -1,26 +1,19 @@
 [Unit]
 Description=Bounded lifecycle maintenance for regenerable Rust worktree targets
 After=default.target
-ConditionPathIsExecutable=/home/alex/.local/share/grabowski-mcp/.venv/bin/python
+ConditionPathIsExecutable=@HOME@/.local/share/grabowski-mcp/.venv/bin/python
 ConditionPathIsExecutable=/usr/local/bin/grabowski-privileged-request
 ConditionPathExists=/run/grabowski/privileged-broker.sock
 
 [Service]
 Type=oneshot
 WorkingDirectory=@RELEASE_ROOT@
-ExecStart=/home/alex/.local/share/grabowski-mcp/.venv/bin/python @RELEASE_ROOT@/scripts/worktree_target_maintenance.py --policy @RELEASE_ROOT@/config/worktree-target-policy.v1.json --state-root /home/alex/.local/state/heim-pc/worktree-target-maintenance reconcile
+ExecStart=@HOME@/.local/share/grabowski-mcp/.venv/bin/python @RELEASE_ROOT@/scripts/worktree_target_maintenance.py --policy @RELEASE_ROOT@/config/worktree-target-policy.v1.json --state-root @HOME@/.local/state/heim-pc/worktree-target-maintenance reconcile
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=-/home/alex/.local/state/heim-pc/worktree-target-maintenance
-ReadWritePaths=-/home/alex/repos/.worktree-target-quarantine
-ReadWritePaths=-/home/alex/repos/.weltgewebe-worktrees
-ReadWritePaths=-/home/alex/worktrees
-ReadWritePaths=-/home/alex/repos/.semantah-worktrees
-ReadWritePaths=-/home/alex/repos/.heimlern-worktrees
-ReadWritePaths=-/home/alex/repos/.operator-redundancy-worktrees
-ReadWritePaths=-/home/alex/repos/.hauski-worktrees
+@READ_WRITE_PATHS@
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
