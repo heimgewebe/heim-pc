@@ -110,6 +110,15 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         }
         return {**material, "observation_sha256": maintenance.canonical_sha256(material)}
 
+    def rehash_plan(self, plan: dict[str, object]) -> None:
+        material = dict(plan)
+        material.pop("plan_sha256", None)
+        material.pop("plan_id", None)
+        plan["plan_id"] = maintenance.canonical_sha256(material)
+        with_id = dict(plan)
+        with_id.pop("plan_sha256", None)
+        plan["plan_sha256"] = maintenance.canonical_sha256(with_id)
+
     def test_selects_only_old_clean_unreferenced_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(
@@ -253,6 +262,79 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
             )
         self.assertTrue((foreign / "keep").exists())
 
+    def test_apply_rejects_forged_budget_state(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan["total_target_bytes"] += 4096
+        plan["projected_target_bytes"] += 4096
+        self.rehash_plan(plan)
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "budget state changed"):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=self.inventory(),
+                observer=self.observation,
+            )
+        self.assertTrue(self.target.exists())
+
+    def test_apply_rejects_forged_snapshot_size(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        actual_size = plan["selected"][0]["snapshot"]["size_bytes"]
+        plan["selected"][0]["snapshot"]["size_bytes"] = 1
+        plan["selected_bytes"] = 1
+        plan["projected_target_bytes"] += actual_size - 1
+        self.rehash_plan(plan)
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "target changed after plan"):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=self.inventory(),
+                observer=self.observation,
+            )
+        self.assertTrue(self.target.exists())
+
+    def test_apply_rejects_forged_candidate_age(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        plan["selected"][0]["age_seconds"] += 999999
+        self.rehash_plan(plan)
+        plan_path = maintenance.write_plan(plan, self.state_root)
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "target age"):
+            maintenance.apply_plan(
+                plan_path,
+                expected_sha256=plan["plan_sha256"],
+                confirmation=f"APPLY:{plan['plan_id']}",
+                policy_path=self.policy_path,
+                state_root=self.state_root,
+                inventory_provider=self.inventory(),
+                observer=self.observation,
+            )
+        self.assertTrue(self.target.exists())
+
     def test_observer_exception_after_move_restores_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(
@@ -295,7 +377,10 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         )
         plan_path = maintenance.write_plan(plan, self.state_root)
         (self.target / "late").write_text("changed", encoding="utf-8")
-        with self.assertRaisesRegex(maintenance.MaintenanceError, "target changed after plan"):
+        with self.assertRaisesRegex(
+            maintenance.MaintenanceError,
+            "target budget state changed after plan|target changed after plan",
+        ):
             maintenance.apply_plan(
                 plan_path,
                 expected_sha256=plan["plan_sha256"],

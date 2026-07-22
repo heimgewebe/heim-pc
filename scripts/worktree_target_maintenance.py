@@ -383,13 +383,7 @@ def collect_plan(policy: dict[str, Any], *, state_root: Path, inventory_provider
             eligible_by_path[str(target)] = item
             observer_roots.append(target)
     total = sum(item["snapshot"]["size_bytes"] for item in all_targets)
-    threshold = "ok"
-    min_age = policy["warning_min_age_seconds"]
-    if total >= policy["hard_bytes"]:
-        threshold = "hard"
-        min_age = policy["hard_min_age_seconds"]
-    elif total >= policy["warning_bytes"]:
-        threshold = "warning"
+    threshold, min_age = threshold_for_total(policy, total)
     observation: dict[str, Any] | None = None
     eligible: list[dict[str, Any]] = []
     if observer_roots:
@@ -495,6 +489,51 @@ def current_record_map(policy: dict[str, Any], inventory_provider: Callable[[str
     return result
 
 
+def threshold_for_total(policy: dict[str, Any], total_bytes: int) -> tuple[str, int]:
+    if total_bytes >= policy["hard_bytes"]:
+        return "hard", policy["hard_min_age_seconds"]
+    if total_bytes >= policy["warning_bytes"]:
+        return "warning", policy["warning_min_age_seconds"]
+    return "ok", policy["warning_min_age_seconds"]
+
+
+def current_budget_state(
+    policy: dict[str, Any],
+    inventory_provider: Callable[[str], dict[str, Any]],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[tuple[str, str], dict[str, Any]], int]:
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+    total_bytes = 0
+    for repo_policy in policy["repositories"]:
+        repository = repo_policy["repository"]
+        roots = [Path(item) for item in repo_policy["worktree_roots"]]
+        inventory = inventory_provider(repository)
+        raw_records = inventory.get("worktrees") if isinstance(inventory, dict) else None
+        if not isinstance(raw_records, list):
+            raise MaintenanceError(f"checkout inventory is invalid: {repository}")
+        for record in raw_records:
+            if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+                continue
+            worktree = Path(record["path"])
+            records[(repository, str(worktree))] = record
+            if not worktree_allowed(worktree, roots):
+                continue
+            target = worktree / "target"
+            if not target.exists():
+                continue
+            try:
+                snapshot = tree_snapshot(
+                    target,
+                    owner_uid=policy["owner_uid"],
+                    max_entries=policy["max_tree_entries"],
+                )
+            except (MaintenanceError, OSError):
+                continue
+            snapshots[(repository, str(worktree))] = snapshot
+            total_bytes += snapshot["size_bytes"]
+    return records, snapshots, total_bytes
+
+
 def validate_plan_candidate(item: Any, policy: dict[str, Any]) -> tuple[Path, Path]:
     required = {
         "repository", "worktree", "head", "branch", "target", "snapshot",
@@ -590,7 +629,34 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
             if existing.get("success") is True and existing.get("plan_sha256") == expected_sha256:
                 return existing
             raise MaintenanceError("an incomplete receipt already exists")
-        records = current_record_map(policy, inventory_provider)
+        records, current_snapshots, current_total_bytes = current_budget_state(
+            policy, inventory_provider
+        )
+        current_threshold, current_min_age = threshold_for_total(
+            policy, current_total_bytes
+        )
+        if current_threshold == "ok":
+            raise MaintenanceError("current target budget no longer authorizes cleanup")
+        if (
+            plan.get("threshold") != current_threshold
+            or plan.get("total_target_bytes") != current_total_bytes
+            or plan.get("automatic_apply_authorized") != policy["automatic_apply"]
+        ):
+            raise MaintenanceError("target budget state changed after plan")
+        if (
+            len(validated_candidates) > policy["max_candidates_per_run"]
+            or plan["selected_bytes"] > policy["max_remove_bytes_per_run"]
+            or plan.get("projected_target_bytes")
+            != current_total_bytes - plan["selected_bytes"]
+        ):
+            raise MaintenanceError("plan exceeds target cleanup budget")
+        generated_at = plan.get("generated_at_unix")
+        if (
+            isinstance(generated_at, bool)
+            or not isinstance(generated_at, int)
+            or generated_at > int(time.time())
+        ):
+            raise MaintenanceError("plan generation time is invalid")
         targets = [target for _, _, target in validated_candidates]
         fresh_observation = observer(targets, owner_uid=policy["owner_uid"], state_root=state_root)
         if not fresh_observation["complete"] or fresh_observation["path_references"]:
@@ -600,9 +666,13 @@ def apply_plan(plan_path: Path, *, expected_sha256: str, confirmation: str, poli
             record = records.get((item["repository"], str(worktree)))
             if record is None or lifecycle_reason(record) is not None or record.get("head") != item["head"] or record.get("branch") != item["branch"]:
                 raise MaintenanceError(f"worktree lifecycle changed: {item['worktree']}")
-            snapshot = tree_snapshot(target, owner_uid=policy["owner_uid"], max_entries=policy["max_tree_entries"])
-            if snapshot["tree_sha256"] != item["snapshot"]["tree_sha256"] or snapshot["identity"] != item["snapshot"]["identity"]:
+            snapshot = current_snapshots.get((item["repository"], str(worktree)))
+            if snapshot is None or snapshot != item["snapshot"]:
                 raise MaintenanceError(f"target changed after plan: {target}")
+            current_age = int(time.time()) - snapshot["newest_mtime_ns"] // 1_000_000_000
+            planned_age = generated_at - snapshot["newest_mtime_ns"] // 1_000_000_000
+            if item["age_seconds"] != planned_age or current_age < current_min_age:
+                raise MaintenanceError(f"target age no longer satisfies policy: {target}")
             prepared.append((item, snapshot))
         quarantine_root = Path(policy["quarantine_root"]) / plan["plan_id"]
         ensure_quarantine(quarantine_root, owner_uid=policy["owner_uid"])
