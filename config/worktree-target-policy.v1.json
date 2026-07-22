@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.worktree_target_policy",
+  "owner_uid": 1000,
+  "automatic_apply": true,
+  "warning_bytes": 85899345920,
+  "hard_bytes": 128849018880,
+  "warning_min_age_seconds": 604800,
+  "hard_min_age_seconds": 86400,
+  "max_candidates_per_run": 8,
+  "max_remove_bytes_per_run": 68719476736,
+  "max_tree_entries": 2000000,
+  "repositories": [
+    {
+      "repository": "/home/alex/repos/weltgewebe",
+      "worktree_roots": [
+        "/home/alex/repos/.weltgewebe-worktrees",
+        "/home/alex/worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/semantAH",
+      "worktree_roots": [
+        "/home/alex/repos/.semantah-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/heimlern",
+      "worktree_roots": [
+        "/home/alex/repos/.heimlern-worktrees",
+        "/home/alex/repos/.operator-redundancy-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/hausKI",
+      "worktree_roots": [
+        "/home/alex/repos/.hauski-worktrees"
+      ]
+    }
+  ],
+  "quarantine_root": "/home/alex/repos/.worktree-target-quarantine"
+}

@@ -2,12 +2,15 @@
 id: storage-lifecycle
 role: norm
 status: canonical
-last_reviewed: 2026-07-14
+last_reviewed: 2026-07-18
 depends_on:
   - security
 verifies_with:
   - scripts/storage_inventory.py
   - tests/test_storage_inventory.py
+  - scripts/worktree_target_maintenance.py
+  - tests/test_worktree_target_maintenance.py
+  - tests/test_install_worktree_target_maintenance.py
 ---
 
 # Speicher-Lifecycle
@@ -67,3 +70,36 @@ zeitgestempelter Snapshots.
 Das Inventar belegt Größen, Pfade und Budgetzustände zum Messzeitpunkt. Es
 belegt nicht, dass ein Worktree entbehrlich, ein Backup ausreichend oder ein
 Docker-Volume löschbar ist.
+
+
+## Automatischer Rust-Target-Lebenszyklus
+
+`config/worktree-target-policy.v1.json` verwaltet ausschließlich das Unterverzeichnis
+`target` in ausdrücklich eingetragenen Rust-Worktrees. Quellcode, Git-Metadaten,
+Branches und Worktrees sind keine Cleanup-Ziele.
+
+Der Ablauf ist zweistufig:
+
+1. Ein Plan bindet Policy-Hash, Checkout-Lifecycle, Tree-Identität, Alter, Budget
+   und einen privilegierten, datensparsamen Prozessreferenz-Snapshot.
+2. Apply wiederholt unmittelbar vor der Mutation Checkout-Lifecycle,
+   Head/Branch, Prozessreferenzen und vollständigen Tree-Hash. Erst danach wird
+   `target` atomar innerhalb desselben Dateisystems in eine private Quarantäne
+   verschoben, nochmals identitätsgeprüft und entfernt.
+
+Dirty, retinierte, archivierte, aktive oder unklassifizierbare Checkouts sowie
+unvollständige Prozesssicht blockieren fail-closed. Bei 80 GiB gilt Warnbetrieb,
+bei 120 GiB Hard-Limit-Betrieb. Im Warnbetrieb müssen Targets sieben Tage, im
+Hard-Limit-Betrieb mindestens einen Tag unverändert sein. Pro Lauf gelten
+zusätzliche Kandidaten- und Byte-Grenzen.
+
+Der Rootbroker besitzt dabei keine Löschfunktion. Seine Aktion
+`observe_process_references` liest nur `cwd`, `exe`, Prozesswurzel und offene
+Dateideskriptoren und gibt ausschließlich Treffer innerhalb der angefragten
+Target-Wurzeln zurück. Fremde Prozesspfade und Kommandozeilen werden nicht
+projiziert.
+
+Die installierte Runtime ist an einen exakten Git-Commit gebunden. Der User-Timer
+läuft spätestens alle sechs Stunden. Jeder Plan, Zwischenstand und Abschluss
+wird als hashgebundener Receipt unter
+`~/.local/state/heim-pc/worktree-target-maintenance` gespeichert.
