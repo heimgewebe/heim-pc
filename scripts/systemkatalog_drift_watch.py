@@ -362,11 +362,32 @@ def _ensure_bureau_candidate(
             }
         raise RuntimeError(f"bureau live-register failed: {_command_error(registered)}")
 
-    receipt = _result_payload(json.loads(registered.stdout))
+    try:
+        receipt = _result_payload(json.loads(registered.stdout))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("bureau live-register returned invalid JSON") from exc
+    registered_event_id = receipt.get("event_id")
+    if not isinstance(registered_event_id, int):
+        raise RuntimeError("bureau live-register receipt is not event-bound")
+
+    readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
+    if readback is None or readback[1] not in ACTIVE_STATUSES:
+        raise RuntimeError("bureau candidate post-readback is not active")
+    if readback[0] != registered_event_id:
+        return {
+            "action": "deduplicated",
+            "candidateId": CANDIDATE_ID,
+            "eventId": readback[0],
+            "status": readback[1],
+            "registeredEventId": registered_event_id,
+            "concurrentUpdateAfterRegistration": True,
+        }
+
     result = {
         "action": "reactivated" if latest_event_id is not None else "registered",
         "candidateId": CANDIDATE_ID,
-        "eventId": receipt.get("event_id"),
+        "eventId": registered_event_id,
+        "status": readback[1],
     }
     if latest_event_id is not None:
         result["supersedesEventId"] = latest_event_id

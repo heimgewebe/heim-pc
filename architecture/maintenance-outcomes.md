@@ -80,7 +80,7 @@ Der stabile `escalation_key` kann von Leitstand oder einem späteren expliziten 
 
 Vorhandene Kandidaten werden ausschließlich über `bureau operator-candidate-assess --candidate-id ...` gelesen. Eine Taskbindung kann demselben exakten Assessment hinzugefügt werden. Breite Live-Register-Listen sind keine Kandidatenwahrheit und werden nicht zur Supersession verwendet.
 
-Die Reparatur des Systemkatalog-Watchdogs folgt derselben Regel: exakte Kandidatenbewertung, unmittelbare Revalidierung vor `live-register`, danach entweder Deduplizierung oder an die gerade gelesene Event-ID gebundene Supersession. Eine konkurrierende Änderung blockiert oder wird erneut read-only bewertet; sie wird nicht überschrieben.
+Die Reparatur des Systemkatalog-Watchdogs folgt derselben Regel: exakte Kandidatenbewertung, unmittelbare Revalidierung vor `live-register`, danach entweder Deduplizierung oder an die gerade gelesene Event-ID gebundene Supersession. Jede erfolgreiche Registrierung wird anschließend erneut exakt auf aktive Kandidatenidentität und aktuelle Event-ID gelesen; ein konkurrierender neuerer aktiver Event wird sichtbar als solcher ausgewiesen. Eine konkurrierende Änderung blockiert oder wird erneut read-only bewertet; sie wird nicht überschrieben.
 
 ## Datenschutz und Begrenzung
 

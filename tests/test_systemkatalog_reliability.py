@@ -295,6 +295,13 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                             "event_id": 41,
                         }
                     },
+                    {
+                        "result": {
+                            "candidate_id": watchdog.CANDIDATE_ID,
+                            "candidate_status": "active",
+                            "event_id": 42,
+                        }
+                    },
                 ]
             )
 
@@ -329,7 +336,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertEqual(register[supersedes_index + 1], "41")
             self.assertEqual(
                 len([argv for argv in calls if "operator-candidate-assess" in argv]),
-                2,
+                3,
             )
 
 
@@ -349,11 +356,30 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     "effect_started": False,
                 }
             }
+            active = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "active",
+                    "event_id": 42,
+                }
+            }
+            assessments = iter(
+                [
+                    (2, unknown),
+                    (2, unknown),
+                    (0, active),
+                ]
+            )
 
             def fake_run(argv, *, cwd=None):
                 calls.append(argv)
                 if "operator-candidate-assess" in argv:
-                    return mock.Mock(returncode=2, stdout=json.dumps(unknown), stderr="")
+                    returncode, payload = next(assessments)
+                    return mock.Mock(
+                        returncode=returncode,
+                        stdout=json.dumps(payload),
+                        stderr="",
+                    )
                 if "live-register" in argv:
                     return mock.Mock(
                         returncode=0,
@@ -374,12 +400,74 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     "action": "registered",
                     "candidateId": watchdog.CANDIDATE_ID,
                     "eventId": 42,
+                    "status": "active",
                 },
             )
             register_argv = next(argv for argv in calls if "live-register" in argv)
             self.assertIn("--promotion-required", register_argv)
             self.assertIn("repo.systemkatalog", register_argv)
             self.assertNotIn("--supersedes-event-id", register_argv)
+
+    def test_watchdog_reports_concurrent_active_update_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
+                encoding="utf-8",
+            )
+            assessments = iter(
+                [
+                    {
+                        "result": {
+                            "candidate_id": watchdog.CANDIDATE_ID,
+                            "candidate_status": "closed",
+                            "event_id": 41,
+                        }
+                    },
+                    {
+                        "result": {
+                            "candidate_id": watchdog.CANDIDATE_ID,
+                            "candidate_status": "closed",
+                            "event_id": 41,
+                        }
+                    },
+                    {
+                        "result": {
+                            "candidate_id": watchdog.CANDIDATE_ID,
+                            "candidate_status": "active",
+                            "event_id": 43,
+                        }
+                    },
+                ]
+            )
+
+            def fake_run(argv, *, cwd=None):
+                if "operator-candidate-assess" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps(next(assessments)),
+                        stderr="",
+                    )
+                if "live-register" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps({"result": {"event_id": 42}}),
+                        stderr="",
+                    )
+                raise AssertionError(argv)
+
+            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+                result = watchdog._ensure_bureau_candidate(
+                    base,
+                    report_path,
+                    json.loads(report_path.read_text()),
+                )
+
+            self.assertEqual(result["action"], "deduplicated")
+            self.assertEqual(result["eventId"], 43)
+            self.assertEqual(result["registeredEventId"], 42)
+            self.assertTrue(result["concurrentUpdateAfterRegistration"])
 
     def test_watchdog_accepts_concurrent_active_registration_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

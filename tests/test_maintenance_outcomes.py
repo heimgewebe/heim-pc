@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -359,6 +360,26 @@ class MaintenanceOutcomeTests(unittest.TestCase):
             self.assertTrue(producer["slo"]["breached"])
             self.assertEqual(producer["evidence"][0]["state"], "observed")
             self.assertEqual(producer["evidence"][1]["state"], "unsafe-or-non-regular")
+
+    def test_evidence_rejects_foreign_owned_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / ".local/state/heim-pc/test/evidence.json"
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text('{"ok":true}\n', encoding="utf-8")
+            metadata = list(evidence.stat())
+            metadata[4] = os.getuid() + 1
+            foreign = os.stat_result(metadata)
+
+            with mock.patch.object(outcomes.os, "fstat", return_value=foreign):
+                result = outcomes._evidence_status(
+                    ["$HOME/.local/state/heim-pc/test/evidence.json"],
+                    home=root,
+                )
+
+            self.assertEqual(result[0]["state"], "foreign-owner")
+            self.assertEqual(result[0]["owner_uid"], os.getuid() + 1)
+            self.assertNotIn("sha256", result[0])
 
     def test_bureau_binding_uses_exact_candidate_assessment(self) -> None:
         payload = {
