@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -362,34 +363,56 @@ def _expand_path(value: str, *, home: Path) -> Path:
 
 def _evidence_status(values: list[str], *, home: Path) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     for raw in values:
         path = _expand_path(raw, home=home)
         display = str(path).replace(str(home), "$HOME", 1)
         item: dict[str, Any] = {"path": display}
         try:
-            metadata = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | nofollow)
         except FileNotFoundError:
             item["state"] = "missing"
             result.append(item)
             continue
-        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-            item["state"] = "unsafe-or-non-regular"
+        except OSError as exc:
+            item["state"] = (
+                "unsafe-or-non-regular"
+                if exc.errno == errno.ELOOP
+                else "unsafe-or-unreadable"
+            )
             result.append(item)
             continue
-        if metadata.st_size > MAX_EVIDENCE_BYTES:
-            item.update({"state": "too-large", "size_bytes": metadata.st_size})
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                item["state"] = "unsafe-or-non-regular"
+                result.append(item)
+                continue
+            if metadata.st_uid != os.getuid():
+                item.update({"state": "foreign-owner", "owner_uid": metadata.st_uid})
+                result.append(item)
+                continue
+            if metadata.st_size > MAX_EVIDENCE_BYTES:
+                item.update({"state": "too-large", "size_bytes": metadata.st_size})
+                result.append(item)
+                continue
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                data = handle.read(MAX_EVIDENCE_BYTES + 1)
+            if len(data) > MAX_EVIDENCE_BYTES:
+                item.update({"state": "too-large", "size_bytes": len(data)})
+                result.append(item)
+                continue
+            item.update(
+                {
+                    "state": "observed",
+                    "size_bytes": len(data),
+                    "mtime_ns": metadata.st_mtime_ns,
+                    "sha256": _sha256_bytes(data),
+                }
+            )
             result.append(item)
-            continue
-        data = path.read_bytes()
-        item.update(
-            {
-                "state": "observed",
-                "size_bytes": len(data),
-                "mtime_ns": metadata.st_mtime_ns,
-                "sha256": _sha256_bytes(data),
-            }
-        )
-        result.append(item)
+        finally:
+            os.close(descriptor)
     return result
 
 
