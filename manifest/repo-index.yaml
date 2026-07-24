@@ -15,6 +15,7 @@ zones:
       - storage-lifecycle.md
       - managed-builds.md
       - cache-maintenance.md
+      - maintenance-outcomes.md
   reality:
     path: runtime/
     canonical_docs:

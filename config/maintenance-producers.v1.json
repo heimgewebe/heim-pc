@@ -1,0 +1,108 @@
+{
+  "kind": "heim_pc_maintenance_producers_policy",
+  "producers": [
+    {
+      "evidence_paths": [],
+      "id": "grabowski-runtime-retention",
+      "max_age_seconds": 1200,
+      "owner_component": "grabowski",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "grabowski-runtime-retention.timer",
+      "unit": "grabowski-runtime-retention.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "grabowski-task-reconcile",
+      "max_age_seconds": 600,
+      "owner_component": "grabowski",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "grabowski-reconcile-tasks.timer",
+      "unit": "grabowski-reconcile-tasks.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "heim-pc-worktree-audit",
+      "max_age_seconds": 93600,
+      "owner_component": "heim-pc",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-pc-worktree-audit.timer",
+      "unit": "heim-pc-worktree-audit.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "heim-pc-worktree-target-maintenance",
+      "max_age_seconds": 28800,
+      "owner_component": "heim-pc",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-pc-worktree-target-maintenance.timer",
+      "unit": "heim-pc-worktree-target-maintenance.service"
+    },
+    {
+      "evidence_paths": [
+        "$HOME/repos/leitstand/artifacts/storage-health.json"
+      ],
+      "id": "leitstand-storage-health",
+      "max_age_seconds": 10800,
+      "owner_component": "leitstand",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "leitstand-storage-health.timer",
+      "unit": "leitstand-storage-health.service"
+    },
+    {
+      "bureau_binding": {
+        "candidate_id": "SYSTEMKATALOG-DRIFT-CLOSED-LOOP-V1"
+      },
+      "evidence_paths": [
+        "$HOME/.local/state/heim-pc/systemkatalog-drift-watch/last-run.json"
+      ],
+      "id": "systemkatalog-drift-watch",
+      "max_age_seconds": 10800,
+      "owner_component": "systemkatalog",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "systemkatalog-drift-watch.timer",
+      "unit": "systemkatalog-drift-watch.service"
+    },
+    {
+      "bureau_binding": {
+        "candidate_id": "candidate-0127daa2b9ee7044a4194f3f",
+        "task_id": "REPOGROUND-AGENT-UTILITY-V1-T009"
+      },
+      "evidence_paths": [],
+      "id": "repoground-publish-fleet",
+      "max_age_seconds": 10800,
+      "owner_component": "repoground",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "repoground-publish-fleet-watch.timer",
+      "unit": "repoground-publish-fleet-watch.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "heim-pc-hardware-error-watch",
+      "max_age_seconds": 10800,
+      "owner_component": "heim-pc",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-pc-hardware-error-watch.timer",
+      "unit": "heim-pc-hardware-error-watch.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "restic-backup-evening",
+      "max_age_seconds": 129600,
+      "owner_component": "heim-pc-backup",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "restic-backup-1930.timer",
+      "unit": "restic-backup-1930.service"
+    },
+    {
+      "evidence_paths": [],
+      "id": "restic-backup-local",
+      "max_age_seconds": 129600,
+      "owner_component": "heim-pc-backup",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-restic-backup-local.timer",
+      "unit": "heim-restic-backup-local.service"
+    }
+  ],
+  "schema_version": 1,
+  "task_id": "OPERATOR-ECOSYSTEM-REDUNDANCY-V1-T052"
+}

@@ -26,6 +26,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | storage-lifecycle | [architecture/storage-lifecycle.md](architecture/storage-lifecycle.md) | canonical | 2026-07-18 | security |
 | managed-builds | [architecture/managed-builds.md](architecture/managed-builds.md) | canonical | 2026-07-22 | storage-lifecycle, operatorium-entry, security |
 | cache-maintenance | [architecture/cache-maintenance.md](architecture/cache-maintenance.md) | canonical | 2026-07-15 | storage-lifecycle, managed-builds, security |
+| maintenance-outcomes | [architecture/maintenance-outcomes.md](architecture/maintenance-outcomes.md) | canonical | 2026-07-24 | storage-lifecycle, security, drift-policy |
 
 ## Zone: reality
 

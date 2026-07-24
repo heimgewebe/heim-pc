@@ -230,78 +230,138 @@ def _fresh_source_snapshot(
         )
 
 
-def _latest_candidate(payload: dict[str, Any], candidate_id: str) -> tuple[int, str | None] | None:
-    records = _result_payload(payload).get("records")
-    if not isinstance(records, list):
-        return None
-    matching: list[tuple[int, str | None]] = []
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        record = item.get("record")
-        event_id = item.get("event_id")
+def _candidate_assessment(
+    bureau_root: Path,
+    candidate_id: str,
+) -> tuple[int, str | None] | None:
+    """Read one exact candidate from Bureau instead of relying on a bounded broad list."""
+    assessed = _run(
+        [
+            "bureau",
+            "--root",
+            str(bureau_root),
+            "--json",
+            "operator-candidate-assess",
+            "--candidate-id",
+            candidate_id,
+        ]
+    )
+    try:
+        payload = json.loads(assessed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"bureau candidate assessment returned invalid JSON: {_command_error(assessed)}"
+        ) from exc
+    result = _result_payload(payload)
+    if assessed.returncode != 0:
+        message = result.get("message")
+        effect_started = result.get("effect_started")
         if (
-            isinstance(record, dict)
-            and record.get("candidate_id") == candidate_id
-            and isinstance(event_id, int)
+            isinstance(message, str)
+            and f"candidate {candidate_id} is unknown" in message
+            and effect_started is False
         ):
-            status = record.get("status")
-            matching.append((event_id, status if isinstance(status, str) else None))
-    if not matching:
-        return None
-    return max(matching, key=lambda item: item[0])
+            return None
+        raise RuntimeError(
+            f"bureau candidate assessment failed: {_command_error(assessed)}"
+        )
+    event_id = result.get("event_id")
+    observed_candidate_id = result.get("candidate_id")
+    status = result.get("candidate_status")
+    if observed_candidate_id != candidate_id or not isinstance(event_id, int):
+        raise RuntimeError("bureau candidate assessment is not identity-bound")
+    return event_id, status if isinstance(status, str) else None
 
 
-def _latest_candidate_status(payload: dict[str, Any], candidate_id: str) -> str | None:
-    latest = _latest_candidate(payload, candidate_id)
-    return latest[1] if latest is not None else None
-
-
-def _ensure_bureau_candidate(bureau_root: Path, report_path: Path, report: dict[str, Any]) -> dict[str, Any]:
-    listed = _run([
-        "bureau", "--root", str(bureau_root), "--json", "live-list",
-        "--kind", "candidate_task", "--repo", "repo.systemkatalog", "--limit", "500",
-    ])
-    if listed.returncode != 0:
-        raise RuntimeError(f"bureau live-list failed: {_command_error(listed)}")
-    payload = json.loads(listed.stdout)
-    latest = _latest_candidate(payload, CANDIDATE_ID)
-    latest_event_id = latest[0] if latest is not None else None
-    latest_status = latest[1] if latest is not None else None
-    if latest_status in ACTIVE_STATUSES:
+def _ensure_bureau_candidate(
+    bureau_root: Path,
+    report_path: Path,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    initial = _candidate_assessment(bureau_root, CANDIDATE_ID)
+    if initial is not None and initial[1] in ACTIVE_STATUSES:
         return {
             "action": "deduplicated",
             "candidateId": CANDIDATE_ID,
-            "eventId": latest_event_id,
-            "status": latest_status,
+            "eventId": initial[0],
+            "status": initial[1],
         }
+
     digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
-    kinds = sorted({str(item.get("kind")) for item in report.get("changes", []) if isinstance(item, dict)})
+    kinds = sorted(
+        {
+            str(item.get("kind"))
+            for item in report.get("changes", [])
+            if isinstance(item, dict)
+        }
+    )
     note = (
         f"Unabhängiger Heim-PC-Watchdog erkannte {report.get('changeCount')} Systemkatalog-Abweichungen. "
         f"Driftarten: {', '.join(kinds) or 'unknown'}. Lokaler Bericht: {report_path}; sha256={digest}. "
         "Nur proposal-only prüfen; keine Katalogsemantik automatisch mergen."
     )
+
+    # Re-read immediately before the effect. The first observation may have
+    # changed while the drift report was generated or while another operator
+    # updated the append-only Live Register.
+    current = _candidate_assessment(bureau_root, CANDIDATE_ID)
+    if current is not None and current[1] in ACTIVE_STATUSES:
+        return {
+            "action": "deduplicated",
+            "candidateId": CANDIDATE_ID,
+            "eventId": current[0],
+            "status": current[1],
+        }
+    latest_event_id = current[0] if current is not None else None
+
     register_argv = [
-        "bureau", "--root", str(bureau_root), "--json", "live-register",
-        "--kind", "candidate_task",
-        "--title", "Systemkatalog-Drift prüfen und proposal-only aktualisieren",
-        "--source", "heim-pc-systemkatalog-drift-watch-v1",
-        "--worker-id", "heim-pc-systemkatalog-drift-watch",
-        "--repo", "repo.systemkatalog",
-        "--candidate-id", CANDIDATE_ID,
-        "--status", "active",
+        "bureau",
+        "--root",
+        str(bureau_root),
+        "--json",
+        "live-register",
+        "--kind",
+        "candidate_task",
+        "--title",
+        "Systemkatalog-Drift prüfen und proposal-only aktualisieren",
+        "--source",
+        "heim-pc-systemkatalog-drift-watch-v1",
+        "--worker-id",
+        "heim-pc-systemkatalog-drift-watch",
+        "--repo",
+        "repo.systemkatalog",
+        "--candidate-id",
+        CANDIDATE_ID,
+        "--status",
+        "active",
         "--promotion-required",
     ]
     if latest_event_id is not None:
         register_argv.extend(["--supersedes-event-id", str(latest_event_id)])
-    register_argv.extend([
-        "--catalog-validation", "strict",
-        "--note", note,
-    ])
+    register_argv.extend(
+        [
+            "--catalog-validation",
+            "strict",
+            "--note",
+            note,
+        ]
+    )
     registered = _run(register_argv)
     if registered.returncode != 0:
+        # No unchanged retry after a possible concurrent append. One exact
+        # readback may prove that another writer already established the
+        # desired active state; every other outcome remains fail-closed.
+        readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
+        if readback is not None and readback[1] in ACTIVE_STATUSES:
+            return {
+                "action": "deduplicated",
+                "candidateId": CANDIDATE_ID,
+                "eventId": readback[0],
+                "status": readback[1],
+                "recoveredFromConcurrentRegistration": True,
+            }
         raise RuntimeError(f"bureau live-register failed: {_command_error(registered)}")
+
     receipt = _result_payload(json.loads(registered.stdout))
     result = {
         "action": "reactivated" if latest_event_id is not None else "registered",

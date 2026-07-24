@@ -1,0 +1,25 @@
+[Unit]
+Description=Collect read-only Heim-PC maintenance outcomes
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@RELEASE_ROOT@
+ExecStart=/usr/bin/python3 @RELEASE_ROOT@/scripts/maintenance_outcomes.py --policy @RELEASE_ROOT@/config/maintenance-producers.v1.json --output @HOME@/.local/state/heim-pc/maintenance-outcomes/maintenance-outcomes.v1.json --bureau-root @HOME@/repos/bureau --home @HOME@
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/.local/state/heim-pc/maintenance-outcomes
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+TimeoutStartSec=120s
+MemoryMax=512M
+TasksMax=64
