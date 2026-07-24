@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh read-only Heim-PC maintenance outcomes every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+AccuracySec=1min
+Persistent=true
+Unit=heim-pc-maintenance-outcomes.service
+
+[Install]
+WantedBy=timers.target
