@@ -1,0 +1,26 @@
+[Unit]
+Description=Apply bounded Heim-PC core dump retention
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@RELEASE_ROOT@
+ExecStart=/usr/bin/python3 @RELEASE_ROOT@/scripts/home_hygiene.py --policy @RELEASE_ROOT@/config/home-hygiene.v1.json --home @HOME@ prune-coredumps --confirmation apply-core-retention
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/.local/state/heim-pc/home-hygiene @HOME@/.local/state/heim-pc/coredumps
+InaccessiblePaths=-@HOME@/.ssh -@HOME@/.gnupg -@HOME@/.kube -@HOME@/.password-store -@HOME@/.local/share/keyrings
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+TimeoutStartSec=180s
+MemoryMax=512M
+TasksMax=64
