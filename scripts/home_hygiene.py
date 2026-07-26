@@ -449,6 +449,7 @@ def inventory(
 
     core_directory: Path = policy["_resolved"]["core_directory"]
     core_entries: list[dict[str, Any]] = []
+    core_observation_warnings: list[str] = []
     if core_directory.exists():
         _ensure_owned_directory(core_directory, home=home, create=False)
         for path in sorted(core_directory.iterdir(), key=lambda item: item.name):
@@ -456,6 +457,11 @@ def inventory(
                 continue
             try:
                 observation = _file_observation(path, hash_limit=0)
+            except FileNotFoundError:
+                core_observation_warnings.append(
+                    f"core dump disappeared during inventory observation: {path}"
+                )
+                continue
             except HygieneError:
                 continue
             core_entries.append(
@@ -482,6 +488,7 @@ def inventory(
             "count": len(core_entries),
             "total_bytes": sum(item["size_bytes"] for item in core_entries),
             "entries": core_entries,
+            "observation_warnings": core_observation_warnings,
         },
         "summary": {
             "visible_top_level_count": len(entries),
@@ -872,10 +879,17 @@ def prune_coredumps(
     directory: Path = policy["_resolved"]["core_directory"]
     _ensure_owned_directory(directory, home=home, create=True)
     files: list[dict[str, Any]] = []
+    initial_observation_warnings: list[str] = []
     for path in sorted(directory.iterdir(), key=lambda item: item.name):
         if not path.name.startswith("core."):
             continue
-        observation = _file_observation(path, hash_limit=0)
+        try:
+            observation = _file_observation(path, hash_limit=0)
+        except FileNotFoundError:
+            initial_observation_warnings.append(
+                f"core dump disappeared during initial retention observation: {path}"
+            )
+            continue
         files.append(
             {
                 "path": str(path),
@@ -968,6 +982,7 @@ def prune_coredumps(
             for item in deferred_unsettled
         ],
         "process_observation_warnings": errors,
+        "initial_observation_warnings": initial_observation_warnings,
         "post_observation_warnings": post_observation_warnings,
         "max_total_bytes": coredumps["max_total_bytes"],
         "minimum_settled_seconds": coredumps["minimum_settled_seconds"],

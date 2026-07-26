@@ -50,6 +50,30 @@ class HomeHygieneTests(unittest.TestCase):
         self.assertEqual(result["summary"]["loose_candidate_count"], 1)
         self.assertFalse(result["summary"]["automatic_home_root_mutation"])
 
+    def test_inventory_receipts_core_disappearance_during_initial_scan(self) -> None:
+        directory = self.home / ".local/state/heim-pc/coredumps"
+        directory.mkdir(parents=True)
+        disappearing = directory / "core.inventory.1.1"
+        disappearing.write_bytes(b"x")
+        original_observation = home_hygiene._file_observation
+
+        def observe(path: Path, *, hash_limit: int):
+            if path == disappearing:
+                raise FileNotFoundError(path)
+            return original_observation(path, hash_limit=hash_limit)
+
+        with mock.patch.object(
+            home_hygiene, "_file_observation", side_effect=observe
+        ):
+            result = home_hygiene.inventory(
+                self.policy, home=self.home, now_unix=100
+            )
+
+        self.assertEqual(result["coredumps"]["count"], 0)
+        warnings = result["coredumps"]["observation_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("disappeared during inventory observation", warnings[0])
+
     def test_quarantine_plan_and_apply_are_plan_hash_bound(self) -> None:
         candidate = self.home / "diff.txt"
         candidate.write_text("patch", encoding="utf-8")
@@ -345,6 +369,35 @@ class HomeHygieneTests(unittest.TestCase):
         receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
         self.assertEqual(receipt["status"], "partial_failure")
         self.assertIn("immediately before migration", receipt["failure"])
+
+    def test_core_retention_receipts_disappearance_during_initial_scan(self) -> None:
+        directory = self.home / ".local/state/heim-pc/coredumps"
+        directory.mkdir(parents=True)
+        disappearing = directory / "core.initial.5.5"
+        disappearing.write_bytes(b"x")
+        original_observation = home_hygiene._file_observation
+
+        def observe(path: Path, *, hash_limit: int):
+            if path == disappearing:
+                raise FileNotFoundError(path)
+            return original_observation(path, hash_limit=hash_limit)
+
+        with mock.patch.object(
+            home_hygiene, "_file_observation", side_effect=observe
+        ):
+            with mock.patch.object(
+                home_hygiene, "_process_references", return_value=({}, [])
+            ):
+                result = home_hygiene.prune_coredumps(
+                    self.policy,
+                    home=self.home,
+                    confirmation=self.policy["coredumps"]["cleanup_confirmation"],
+                    now_unix=1000,
+                )
+
+        warnings = result["receipt"]["initial_observation_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("disappeared during initial retention observation", warnings[0])
 
     def test_core_retention_receipts_concurrent_disappearance(self) -> None:
         directory = self.home / ".local/state/heim-pc/coredumps"

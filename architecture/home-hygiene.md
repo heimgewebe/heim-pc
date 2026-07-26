@@ -172,7 +172,7 @@ Die tägliche Unit `heim-pc-coredump-retention.timer` wirkt ausschließlich in d
 
 Jede Datei bleibt nach ihrer letzten Änderung mindestens fünf Minuten unangetastet. Damit kann der Retentionslauf einen noch geschriebenen Core-Dump weder wegen seiner Größe noch wegen des Gesamtbudgets entfernen. Reichen ausschließlich solche jungen Dateien über das Budget hinaus, meldet das Receipt `deferred_unsettled_over_budget` statt einen falschen Erfolg.
 
-Offen referenzierte Dateien bleiben erhalten und werden im Receipt ausgewiesen. Verschwindet eine Datei während der abschließenden Bestandsmessung durch einen konkurrierenden Vorgang, bleibt der Lauf receiptiert und weist dies unter `post_observation_warnings` aus. Andere Dateien oder Verzeichnisse kann dieser Pfad nicht entfernen.
+Offen referenzierte Dateien bleiben erhalten und werden im Receipt ausgewiesen. Verschwindet eine Datei während der initialen oder abschließenden Bestandsmessung durch einen konkurrierenden Vorgang, bleibt Inventar oder Retentionslauf erfolgreich receiptiert und weist dies unter `observation_warnings`, `initial_observation_warnings` beziehungsweise `post_observation_warnings` aus. Andere Dateien oder Verzeichnisse kann dieser Pfad nicht entfernen.
 
 ## Installation
 
