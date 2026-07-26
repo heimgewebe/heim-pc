@@ -120,7 +120,7 @@ Vor der ersten Wirkung werden für alle Kandidaten erneut geprüft:
 - freier, Home-gebundener Zielpfad;
 - gleiches Dateisystem.
 
-Gehärtete Prozesse können einzelne `/proc`-Details verbergen. Solche Lesefehler bleiben als `process_observation_warnings` im Plan und Receipt sichtbar, blockieren die atomare, reversible Umbenennung aber nicht pauschal. Jede tatsächlich beobachtete Referenz auf einen Kandidaten blockiert weiterhin.
+Die Prozessbeobachtung erfasst Arbeitsverzeichnis, Prozesswurzel, ausführbare Datei, offene Dateideskriptoren und dateigebundene Memory-Mappings. Gehärtete Prozesse können einzelne `/proc`-Details verbergen. Solche Lesefehler bleiben als `process_observation_warnings` im Plan und Receipt sichtbar, blockieren die atomare, reversible Umbenennung aber nicht pauschal. Jede tatsächlich beobachtete Referenz auf einen Kandidaten blockiert weiterhin.
 
 Die Dateien werden nicht gelöscht, sondern nach
 
@@ -128,7 +128,7 @@ Die Dateien werden nicht gelöscht, sondern nach
 $HOME/artifacts/legacy-home-root/YYYY-MM-DD/
 ```
 
-verschoben. Jede Welle erhält ein Receipt mit Quell- und Zielpfaden sowie Restaurationshinweis. Ein Fehler nach begonnener Wirkung wird als `partial_failure` receiptiert und nicht als Erfolg geglättet.
+verschoben. Unmittelbar vor jeder einzelnen Umbenennung werden Quellfingerabdruck und Zielfreiheit erneut geprüft. Jede Welle erhält ein Receipt mit Quell- und Zielpfaden sowie Restaurationshinweis. Ein Fehler nach begonnener Wirkung wird als `partial_failure` receiptiert und nicht als Erfolg geglättet.
 
 ## Legacy-Artefaktwurzeln
 
@@ -172,7 +172,7 @@ Die tägliche Unit `heim-pc-coredump-retention.timer` wirkt ausschließlich in d
 
 Jede Datei bleibt nach ihrer letzten Änderung mindestens fünf Minuten unangetastet. Damit kann der Retentionslauf einen noch geschriebenen Core-Dump weder wegen seiner Größe noch wegen des Gesamtbudgets entfernen. Reichen ausschließlich solche jungen Dateien über das Budget hinaus, meldet das Receipt `deferred_unsettled_over_budget` statt einen falschen Erfolg.
 
-Offen referenzierte Dateien bleiben erhalten und werden im Receipt ausgewiesen. Andere Dateien oder Verzeichnisse kann dieser Pfad nicht entfernen.
+Offen referenzierte Dateien bleiben erhalten und werden im Receipt ausgewiesen. Verschwindet eine Datei während der abschließenden Bestandsmessung durch einen konkurrierenden Vorgang, bleibt der Lauf receiptiert und weist dies unter `post_observation_warnings` aus. Andere Dateien oder Verzeichnisse kann dieser Pfad nicht entfernen.
 
 ## Installation
 

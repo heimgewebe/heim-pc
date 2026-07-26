@@ -308,6 +308,20 @@ def _tree_observation(path: Path) -> dict[str, Any]:
     }
 
 
+def _mapped_file_targets(lines: Iterable[str]) -> list[Path]:
+    targets: list[Path] = []
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6:
+            continue
+        target_text = fields[5]
+        if target_text.endswith(" (deleted)"):
+            target_text = target_text[: -len(" (deleted)")]
+        if target_text.startswith("/"):
+            targets.append(Path(target_text))
+    return targets
+
+
 def _process_references(paths: Iterable[Path]) -> tuple[dict[str, list[int]], list[str]]:
     roots = {str(path): path for path in paths}
     references: dict[str, set[int]] = {key: set() for key in roots}
@@ -353,9 +367,9 @@ def _process_references(paths: Iterable[Path]) -> tuple[dict[str, list[int]], li
             continue
         except PermissionError:
             errors.append(f"cannot inspect file descriptors for same-user process {pid}")
-            continue
+            descriptors = []
         except OSError:
-            continue
+            descriptors = []
         for descriptor in descriptors:
             try:
                 target_text = os.readlink(descriptor)
@@ -365,6 +379,19 @@ def _process_references(paths: Iterable[Path]) -> tuple[dict[str, list[int]], li
                 target_text = target_text[: -len(" (deleted)")]
             if target_text.startswith("/"):
                 record_target(pid, Path(target_text))
+        try:
+            map_lines = (process / "maps").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            errors.append(f"cannot inspect memory maps for same-user process {pid}")
+        except OSError:
+            pass
+        else:
+            for target in _mapped_file_targets(map_lines):
+                record_target(pid, target)
     return (
         {key: sorted(pids) for key, pids in references.items() if pids},
         sorted(set(errors)),
@@ -617,6 +644,11 @@ def apply_quarantine(
         source = Path(item["source"])
         target = Path(item["target"])
         try:
+            _validate_file_observation(
+                source, item["observation"], hash_limit=hash_limit
+            )
+            if target.exists() or target.is_symlink():
+                raise HygieneError(f"quarantine target appeared before move: {target}")
             os.replace(source, target)
             if source.exists() or source.is_symlink() or not target.is_file():
                 raise HygieneError(f"quarantine readback failed for {source}")
@@ -780,7 +812,13 @@ def apply_alias_plan(
         source = Path(item["source"])
         target = Path(item["target"])
         try:
+            if _tree_observation(source) != item["observation"]:
+                raise HygieneError(
+                    f"legacy artifact tree changed immediately before migration: {source}"
+                )
             if target.exists():
+                if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+                    raise HygieneError(f"alias target changed before migration: {target}")
                 target.rmdir()
             os.replace(source, target)
             symlink_target: str | None = None
@@ -890,11 +928,21 @@ def prune_coredumps(
             raise HygieneError(f"core dump still exists after removal: {path}")
         removed.append(item)
     applied_at_ns = time.time_ns()
-    after_total = sum(
-        path.stat().st_size
-        for path in directory.iterdir()
-        if path.name.startswith("core.") and path.is_file() and not path.is_symlink()
-    )
+    after_total = 0
+    post_observation_warnings: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        if not path.name.startswith("core."):
+            continue
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            post_observation_warnings.append(
+                f"core dump disappeared during post-retention observation: {path}"
+            )
+            continue
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            continue
+        after_total += metadata.st_size
     status = "success"
     if blocked:
         status = "blocked_references_remaining"
@@ -920,6 +968,7 @@ def prune_coredumps(
             for item in deferred_unsettled
         ],
         "process_observation_warnings": errors,
+        "post_observation_warnings": post_observation_warnings,
         "max_total_bytes": coredumps["max_total_bytes"],
         "minimum_settled_seconds": coredumps["minimum_settled_seconds"],
         "retention_seconds": coredumps["retention_seconds"],

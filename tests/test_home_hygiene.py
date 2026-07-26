@@ -239,6 +239,155 @@ class HomeHygieneTests(unittest.TestCase):
         )
 
 
+    def test_mapped_file_targets_include_absolute_and_deleted_paths(self) -> None:
+        targets = home_hygiene._mapped_file_targets(
+            [
+                "7f00-7f10 r--p 00000000 08:01 1 /tmp/file with spaces",
+                "7f10-7f20 rw-p 00000000 08:01 2 /tmp/deleted.db (deleted)",
+                "7f20-7f30 rw-p 00000000 00:00 0 [heap]",
+            ]
+        )
+
+        self.assertEqual(
+            targets, [Path("/tmp/file with spaces"), Path("/tmp/deleted.db")]
+        )
+
+    def test_quarantine_revalidates_immediately_before_each_move(self) -> None:
+        first = self.home / "diff-a.txt"
+        second = self.home / "diff-b.txt"
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        os.utime(first, (10, 10))
+        os.utime(second, (11, 11))
+        plan_path = self.root / "quarantine-plan.json"
+        original_validate = home_hygiene._validate_file_observation
+        calls = 0
+
+        def validate(path: Path, expected: dict[str, object], *, hash_limit: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                second.write_text("drift", encoding="utf-8")
+            original_validate(path, expected, hash_limit=hash_limit)
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_quarantine_plan(
+                self.policy, home=self.home, now_unix=100
+            )
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with mock.patch.object(
+                home_hygiene, "_validate_file_observation", side_effect=validate
+            ):
+                with self.assertRaisesRegex(
+                    home_hygiene.HygieneError, "quarantine had a partial effect"
+                ):
+                    home_hygiene.apply_quarantine(
+                        self.policy,
+                        home=self.home,
+                        plan_path=plan_path,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=home_hygiene.QUARANTINE_CONFIRMATION,
+                    )
+
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        receipts = list(
+            (self.home / ".local/state/heim-pc/home-hygiene/quarantine-receipts").glob(
+                "*.json"
+            )
+        )
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "partial_failure")
+        self.assertEqual(receipt["remaining_count"], 1)
+
+    def test_alias_migration_revalidates_immediately_before_move(self) -> None:
+        source = self.home / "audits"
+        source.mkdir()
+        (source / "record.json").write_text("{}", encoding="utf-8")
+        plan_path = self.root / "alias-plan.json"
+        original_observation = home_hygiene._tree_observation
+        calls = 0
+
+        def observe(path: Path) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (source / "late.json").write_text("{}", encoding="utf-8")
+            return original_observation(path)
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(
+                self.policy, home=self.home, now_unix=100
+            )
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with mock.patch.object(
+                home_hygiene, "_tree_observation", side_effect=observe
+            ):
+                with self.assertRaisesRegex(
+                    home_hygiene.HygieneError, "alias migration had a partial effect"
+                ):
+                    home_hygiene.apply_alias_plan(
+                        self.policy,
+                        home=self.home,
+                        plan_path=plan_path,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=home_hygiene.ALIAS_CONFIRMATION,
+                    )
+
+        self.assertTrue(source.exists())
+        receipts = list(
+            (self.home / ".local/state/heim-pc/home-hygiene/alias-receipts").glob(
+                "*.json"
+            )
+        )
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "partial_failure")
+        self.assertIn("immediately before migration", receipt["failure"])
+
+    def test_core_retention_receipts_concurrent_disappearance(self) -> None:
+        directory = self.home / ".local/state/heim-pc/coredumps"
+        directory.mkdir(parents=True)
+        recent = directory / "core.concurrent.4.4"
+        recent.write_bytes(b"x" * 50)
+        os.utime(recent, (995, 995))
+        self.policy["coredumps"]["minimum_settled_seconds"] = 100
+        self.policy["coredumps"]["retention_seconds"] = 1000
+        self.policy["coredumps"]["max_total_bytes"] = 1000
+        original_iterdir = Path.iterdir
+        calls = 0
+
+        def iterdir(path: Path):
+            nonlocal calls
+            if path == directory:
+                calls += 1
+                if calls == 2:
+                    items = list(original_iterdir(path))
+
+                    def disappearing():
+                        for item in items:
+                            yield item
+                            if item == recent:
+                                item.unlink()
+
+                    return disappearing()
+            return original_iterdir(path)
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            with mock.patch.object(Path, "iterdir", new=iterdir):
+                result = home_hygiene.prune_coredumps(
+                    self.policy,
+                    home=self.home,
+                    confirmation=self.policy["coredumps"]["cleanup_confirmation"],
+                    now_unix=1000,
+                )
+
+        warnings = result["receipt"]["post_observation_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("disappeared during post-retention observation", warnings[0])
+
+
     def test_process_reference_blocks_quarantine_candidate(self) -> None:
         candidate = self.home / "diff.txt"
         candidate.write_text("patch", encoding="utf-8")
