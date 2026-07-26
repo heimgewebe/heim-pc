@@ -399,6 +399,41 @@ class HomeHygieneTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("disappeared during initial retention observation", warnings[0])
 
+    def test_core_retention_receipts_disappearance_before_unlink(self) -> None:
+        directory = self.home / ".local/state/heim-pc/coredumps"
+        directory.mkdir(parents=True)
+        disappearing = directory / "core.before-unlink.6.6"
+        disappearing.write_bytes(b"x" * 200)
+        os.utime(disappearing, (1, 1))
+        self.policy["coredumps"]["minimum_settled_seconds"] = 10
+        self.policy["coredumps"]["retention_seconds"] = 100
+        original_validate = home_hygiene._validate_file_observation
+
+        def validate(path: Path, expected: dict[str, object], *, hash_limit: int):
+            if path == disappearing:
+                path.unlink()
+                raise FileNotFoundError(path)
+            return original_validate(path, expected, hash_limit=hash_limit)
+
+        with mock.patch.object(
+            home_hygiene, "_process_references", return_value=({}, [])
+        ):
+            with mock.patch.object(
+                home_hygiene, "_validate_file_observation", side_effect=validate
+            ):
+                result = home_hygiene.prune_coredumps(
+                    self.policy,
+                    home=self.home,
+                    confirmation=self.policy["coredumps"]["cleanup_confirmation"],
+                    now_unix=1000,
+                )
+
+        self.assertFalse(disappearing.exists())
+        self.assertEqual(result["receipt"]["removed"], [])
+        warnings = result["receipt"]["concurrent_removal_warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("disappeared immediately before retention removal", warnings[0])
+
     def test_core_retention_receipts_concurrent_disappearance(self) -> None:
         directory = self.home / ".local/state/heim-pc/coredumps"
         directory.mkdir(parents=True)

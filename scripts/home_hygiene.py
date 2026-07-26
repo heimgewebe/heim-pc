@@ -934,10 +934,17 @@ def prune_coredumps(
         if path in selected
     ]
     removed: list[dict[str, Any]] = []
+    concurrent_removal_warnings: list[str] = []
     for item in sorted(removable, key=lambda value: (value["mtime_ns"], value["path"])):
         path = Path(item["path"])
-        _validate_file_observation(path, item["observation"], hash_limit=0)
-        path.unlink()
+        try:
+            _validate_file_observation(path, item["observation"], hash_limit=0)
+            path.unlink()
+        except FileNotFoundError:
+            concurrent_removal_warnings.append(
+                f"core dump disappeared immediately before retention removal: {path}"
+            )
+            continue
         if path.exists() or path.is_symlink():
             raise HygieneError(f"core dump still exists after removal: {path}")
         removed.append(item)
@@ -983,6 +990,7 @@ def prune_coredumps(
         ],
         "process_observation_warnings": errors,
         "initial_observation_warnings": initial_observation_warnings,
+        "concurrent_removal_warnings": concurrent_removal_warnings,
         "post_observation_warnings": post_observation_warnings,
         "max_total_bytes": coredumps["max_total_bytes"],
         "minimum_settled_seconds": coredumps["minimum_settled_seconds"],
