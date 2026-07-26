@@ -311,7 +311,7 @@
       "contractsRoot": "${HOME}/repos/metarepo/contracts"
     },
     "repositoryReadiness": {
-      "repository": "${HOME}/repos/steuerboard",
+      "repository": "${HOME}/repos/reposkop",
       "authority": "read_only_observation"
     },
     "generalObservability": {
