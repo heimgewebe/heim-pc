@@ -16,6 +16,7 @@ zones:
       - managed-builds.md
       - cache-maintenance.md
       - maintenance-outcomes.md
+      - home-hygiene.md
   reality:
     path: runtime/
     canonical_docs:

@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.home_hygiene_policy",
+  "policy_id": "home-hygiene.v1",
+  "home_root": "${HOME}",
+  "state_root": "${HOME}/.local/state/heim-pc/home-hygiene",
+  "artifact_root": "${HOME}/artifacts",
+  "allowed_visible_top_level": [
+    "Apps",
+    "Bilder",
+    "Dokumente",
+    "Downloads",
+    "Incoming",
+    "Musik",
+    "Schreibtisch",
+    "Templates",
+    "Videos",
+    "Vorlagen",
+    "artifacts",
+    "models",
+    "repos",
+    "vm",
+    "Öffentlich"
+  ],
+  "artifact_categories": {
+    "audits": "audits",
+    "cleanup_backups": "cleanup-backups",
+    "diffs": "diffs",
+    "exports": "exports",
+    "logs": "logs",
+    "merges": "merges",
+    "patches": "patches",
+    "probes": "probes",
+    "receipts": "receipts",
+    "reviews": "reviews",
+    "legacy_home_root": "legacy-home-root"
+  },
+  "legacy_artifact_roots": [
+    {
+      "source": "audits",
+      "category": "audits",
+      "compatibility_symlink": false
+    },
+    {
+      "source": "cleanup-backups",
+      "category": "cleanup_backups",
+      "compatibility_symlink": false
+    },
+    {
+      "source": "diffs",
+      "category": "diffs",
+      "compatibility_symlink": false
+    },
+    {
+      "source": "logs",
+      "category": "logs",
+      "compatibility_symlink": true
+    },
+    {
+      "source": "merges",
+      "category": "merges",
+      "compatibility_symlink": false
+    },
+    {
+      "source": "patches",
+      "category": "patches",
+      "compatibility_symlink": false
+    },
+    {
+      "source": "review-artifacts",
+      "category": "reviews",
+      "compatibility_symlink": false
+    }
+  ],
+  "loose_file_rules": {
+    "minimum_age_seconds": 0,
+    "max_candidates_per_plan": 250,
+    "max_bytes_per_plan": 10737418240,
+    "full_hash_max_bytes": 67108864,
+    "patterns": [
+      "^core\\.[0-9]+$",
+      "^brave_.*\\.(png|tsv)$",
+      "^fritz_.*\\.(png|tsv|html|js)$",
+      "^pr[0-9].*\\.(diff|patch|txt|md|json)$",
+      "^pr[-_].*\\.(diff|patch|txt|md|json)$",
+      "^weltgewebe-.*\\.(diff|patch|txt|json)$",
+      "^grabowski-.*\\.(diff|patch|txt|md|json)$",
+      "^commonworld-.*\\.(diff|patch|txt|md|json|gz)$",
+      "^diff.*\\.(diff|patch|txt)$",
+      "^tmp-.*$",
+      "^cw-hardening-chunk-[0-9]+$",
+      "^.*-review-.*\\.(diff|patch|txt|md|json)$",
+      "^.*-probe.*\\.(json|txt|log)$",
+      "^rollout_.*\\.log$",
+      "^wget-log$"
+    ],
+    "never_quarantine": [
+      "AGENTS.md",
+      "Justfile",
+      "Makefile",
+      "README.md",
+      "RSB550FG.CAP",
+      "pyproject.toml",
+      "uv.lock"
+    ]
+  },
+  "coredumps": {
+    "directory": "${HOME}/.local/state/heim-pc/coredumps",
+    "kernel_pattern": "${HOME}/.local/state/heim-pc/coredumps/core.%e.%p.%t",
+    "per_file_limit_bytes": 2147483648,
+    "max_total_bytes": 5368709120,
+    "minimum_settled_seconds": 300,
+    "retention_seconds": 1209600,
+    "cleanup_confirmation": "apply-core-retention",
+    "automatic_retention_authorized": true
+  },
+  "safety": {
+    "automatic_home_root_mutation": false,
+    "automatic_quarantine": false,
+    "automatic_alias_migration": false,
+    "weekly_inventory_read_only": true,
+    "require_same_filesystem_moves": true,
+    "reject_symlinks": true,
+    "reject_open_process_references": true
+  }
+}

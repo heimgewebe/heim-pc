@@ -1,0 +1,12 @@
+[Unit]
+Description=Run read-only Heim-PC home hygiene inventory weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+AccuracySec=5m
+Unit=heim-pc-home-hygiene.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply bounded Heim-PC core dump retention daily
+
+[Timer]
+OnCalendar=*-*-* 05:15:00
+RandomizedDelaySec=20m
+Persistent=true
+AccuracySec=5m
+Unit=heim-pc-coredump-retention.service
+
+[Install]
+WantedBy=timers.target
