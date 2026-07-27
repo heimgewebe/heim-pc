@@ -17,6 +17,7 @@ zones:
       - cache-maintenance.md
       - maintenance-outcomes.md
       - home-hygiene.md
+      - runaway-guard.md
   reality:
     path: runtime/
     canonical_docs:
