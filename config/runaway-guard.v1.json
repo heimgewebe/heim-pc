@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc_minimal_runaway_guard",
+  "bounded_background": {
+    "unit_prefix": "heim-pc-bounded",
+    "runtime_max_seconds": 7200,
+    "memory_max_bytes": 8589934592,
+    "tasks_max": 256,
+    "file_size_max_bytes": 1073741824,
+    "cpu_weight": 50,
+    "io_weight": 50,
+    "log_rate_limit_interval_seconds": 30,
+    "log_rate_limit_burst": 1000
+  },
+  "docker": {
+    "log-driver": "local",
+    "log-opts": {
+      "max-size": "50m",
+      "max-file": "3"
+    }
+  },
+  "does_not_establish": [
+    "automatic_detection_of_every_runaway_process",
+    "limits_for_commands_not_started_through_the_bounded_runner",
+    "migration_of_existing_docker_containers"
+  ]
+}
