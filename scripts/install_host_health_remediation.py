@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import stat
 import subprocess
@@ -21,8 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET_ROOT = Path("/")
 LOCK_RELATIVE = "var/lib/heim-pc/host-health/install.lock"
 BACKUP_ROOT_RELATIVE = "var/lib/heim-pc/host-health/install-backups"
-RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v2.json"
+RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v3.json"
 STRICT_PROFILE = "/usr/local/libexec/heim-pc/ensure-performance-profile"
+COMMIT_POINT = (
+    "all_target_operations_fsynced_exactly_read_back_and_"
+    "effective_systemd_composition_verified"
+)
+RESIDUE_TOKEN = re.compile(r"^[0-9a-f]{16}$")
 
 FILES = (
     ("config/host-health-remediation.v1.json", "etc/heim-pc/host-health-remediation.v1.json", 0o644),
@@ -171,7 +177,11 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "receipt": f"/{RECEIPT_RELATIVE}",
         "target_regular_file_owner": "root:root",
         "target_operations": "descriptor_relative_nofollow",
-        "transaction": "preflight_stage_fsync_commit_verify_or_rollback",
+        "transaction": "preflight_stage_fsync_commit_verify_commit_point",
+        "commit_point": COMMIT_POINT,
+        "post_commit_cleanup": "bounded_best_effort_receipted_and_recoverable",
+        "receipt_publication": "post_commit_atomic_replace_fsync_exact_readback",
+        "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
         "activation_performed": False,
     }
     if not isinstance(deployment, dict) or any(
@@ -340,7 +350,10 @@ def _snapshot(root_fd: int, relative: str) -> dict[str, Any]:
         return _snapshot_at(parent_fd, name)
     finally:
         if parent_fd is not None:
-            os.close(parent_fd)
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
 
 
 def _same_snapshot(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -525,7 +538,10 @@ def verify_effective_composition(target_root: Path) -> dict[str, Any]:
     try:
         return _verify_effective_composition(root_fd)
     finally:
-        os.close(root_fd)
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 def _build_plan(
@@ -535,6 +551,7 @@ def _build_plan(
     target_root: Path,
     uid: int,
     gid: int,
+    inspect_apply_state: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, bytes | None], dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     overlay: dict[str, bytes | None] = {}
@@ -545,14 +562,26 @@ def _build_plan(
             _backup_relative(target_relative, before["data"]) if before["exists"] else None
         )
         if backup_relative is not None:
-            backup_before = _snapshot(root_fd, backup_relative)
-            if backup_before["exists"] and (
-                backup_before["data"] != before["data"]
-                or backup_before["mode"] != 0o600
-                or backup_before["uid"] != uid
-                or backup_before["gid"] != gid
-            ):
-                raise InstallError(f"backup collision: {backup_relative}")
+            if inspect_apply_state:
+                backup_before = _snapshot(root_fd, backup_relative)
+                if backup_before["exists"] and (
+                    backup_before["data"] != before["data"]
+                    or backup_before["mode"] != 0o600
+                    or backup_before["uid"] != uid
+                    or backup_before["gid"] != gid
+                ):
+                    raise InstallError(f"backup collision: {backup_relative}")
+                backup_metadata = {
+                    "available": True,
+                    "exists": backup_before["exists"],
+                }
+            else:
+                backup_metadata = {
+                    "available": False,
+                    "reason": "apply_only_privileged_metadata_not_read_in_plan_mode",
+                }
+        else:
+            backup_metadata = {"available": True, "exists": False}
         entries.append(
             {
                 "operation": "remove_obsolete",
@@ -569,6 +598,7 @@ def _build_plan(
                     if backup_relative is not None
                     else None
                 ),
+                "backup_metadata": backup_metadata,
             }
         )
         overlay[target_relative] = None
@@ -584,16 +614,27 @@ def _build_plan(
             or before["gid"] != gid
         )
         backup_relative = None
+        backup_metadata = {"available": True, "exists": False}
         if before["exists"] and before["data"] != data:
             backup_relative = _backup_relative(target_relative, before["data"])
-            backup_before = _snapshot(root_fd, backup_relative)
-            if backup_before["exists"] and (
-                backup_before["data"] != before["data"]
-                or backup_before["mode"] != 0o600
-                or backup_before["uid"] != uid
-                or backup_before["gid"] != gid
-            ):
-                raise InstallError(f"backup collision: {backup_relative}")
+            if inspect_apply_state:
+                backup_before = _snapshot(root_fd, backup_relative)
+                if backup_before["exists"] and (
+                    backup_before["data"] != before["data"]
+                    or backup_before["mode"] != 0o600
+                    or backup_before["uid"] != uid
+                    or backup_before["gid"] != gid
+                ):
+                    raise InstallError(f"backup collision: {backup_relative}")
+                backup_metadata = {
+                    "available": True,
+                    "exists": backup_before["exists"],
+                }
+            else:
+                backup_metadata = {
+                    "available": False,
+                    "reason": "apply_only_privileged_metadata_not_read_in_plan_mode",
+                }
         entries.append(
             {
                 "operation": "install",
@@ -615,6 +656,7 @@ def _build_plan(
                     if backup_relative is not None
                     else None
                 ),
+                "backup_metadata": backup_metadata,
             }
         )
         overlay[target_relative] = data
@@ -642,6 +684,7 @@ def _public_entry(item: dict[str, Any], *, applied: bool) -> dict[str, Any]:
         "action": action,
         "sha256": item.get("sha256"),
         "backup": item.get("backup"),
+        "backup_metadata": item.get("backup_metadata"),
         "before": (
             {
                 "sha256": before["sha256"],
@@ -708,7 +751,8 @@ def _write_temp(
     return name
 
 
-def _remove_created_directories(root_fd: int, created: list[str]) -> None:
+def _remove_created_directories(root_fd: int, created: list[str]) -> list[str]:
+    errors: list[str] = []
     for relative in reversed(created):
         parts = _relative_parts(relative)
         parent = _open_directory(root_fd, parts[:-1], create=False)
@@ -719,10 +763,14 @@ def _remove_created_directories(root_fd: int, created: list[str]) -> None:
                 os.rmdir(parts[-1], dir_fd=parent)
             except OSError as exc:
                 if exc.errno not in {errno.ENOTEMPTY, errno.ENOENT}:
-                    raise
-            os.fsync(parent)
+                    errors.append(f"{relative}: {exc}")
+            try:
+                os.fsync(parent)
+            except OSError as exc:
+                errors.append(f"{relative}: parent fsync failed: {exc}")
         finally:
             os.close(parent)
+    return errors
 
 
 def _preimage_matches(parent_fd: int, name: str, expected: dict[str, Any]) -> bool:
@@ -799,21 +847,89 @@ def _stage_operation(
         raise
 
 
-def _cleanup_staged(staged: list[dict[str, Any]]) -> None:
+def _residue_entry(
+    target_root: Path,
+    operation: dict[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    role = "stage" if key == "staged_name" else "rollback"
+    snapshot_key = "staged_snapshot" if key == "staged_name" else "rollback_snapshot"
+    snapshot = operation.get(snapshot_key)
+    parent = str(PurePosixPath(operation["relative"]).parent)
+    relative = (
+        operation[key]
+        if parent == "."
+        else f"{parent}/{operation[key]}"
+    )
+    result = {
+        "relative": relative,
+        "path": _target_display(target_root, relative),
+        "role": role,
+    }
+    if snapshot is not None:
+        result["snapshot"] = {
+            "sha256": snapshot["sha256"],
+            "mode": oct(snapshot["mode"]),
+            "uid": snapshot["uid"],
+            "gid": snapshot["gid"],
+            "device": snapshot["device"],
+            "inode": snapshot["inode"],
+        }
+    return result
+
+
+def _cleanup_staged(
+    staged: list[dict[str, Any]],
+    *,
+    target_root: Path,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    attempted = 0
     for operation in staged:
         parent_fd = operation["parent_fd"]
         for key in ("staged_name", "rollback_name"):
             name = operation.get(key)
             if name is not None:
+                if key == "rollback_name" and operation.get("rollback_failed"):
+                    continue
+                attempted += 1
                 try:
                     os.unlink(name, dir_fd=parent_fd)
                 except FileNotFoundError:
-                    pass
+                    operation[key] = None
+                except OSError as exc:
+                    residue = _residue_entry(target_root, operation, key)
+                    warnings.append(f"{residue['path']}: cleanup failed: {exc}")
+                else:
+                    operation[key] = None
         try:
             os.fsync(parent_fd)
-        except OSError:
-            pass
-        os.close(parent_fd)
+        except OSError as exc:
+            warnings.append(
+                f"{_target_display(target_root, str(PurePosixPath(operation['relative']).parent))}: "
+                f"cleanup fsync failed: {exc}"
+            )
+        try:
+            os.close(parent_fd)
+        except OSError as exc:
+            warnings.append(
+                f"{_target_display(target_root, operation['relative'])}: "
+                f"cleanup descriptor close failed: {exc}"
+            )
+    residue = [
+        _residue_entry(target_root, operation, key)
+        for operation in staged
+        for key in ("staged_name", "rollback_name")
+        if operation.get(key) is not None
+    ]
+    return {
+        "complete": not warnings and not residue,
+        "bounded": True,
+        "maximum_attempts": len(staged) * 2,
+        "attempted": attempted,
+        "residue": residue,
+        "warnings": warnings,
+    }
 
 
 def _rollback(committed: list[dict[str, Any]]) -> list[str]:
@@ -858,16 +974,20 @@ def _rollback(committed: list[dict[str, Any]]) -> list[str]:
                 os.unlink(operation["name"], dir_fd=parent_fd)
             os.fsync(parent_fd)
         except Exception as exc:  # rollback must attempt every committed target
+            operation["rollback_failed"] = True
             errors.append(f"{operation['relative']}: {exc}")
     return errors
 
 
-def _verify_operation(root_fd: int, operation: dict[str, Any]) -> None:
+def _verify_operation(root_fd: int, operation: dict[str, Any]) -> dict[str, Any]:
     final = _snapshot(root_fd, operation["relative"])
     if operation["kind"] == "remove":
         if final["exists"]:
             raise InstallError(f"obsolete target removal readback failed: {operation['relative']}")
-        return
+        return {
+            "relative": operation["relative"],
+            "exists": False,
+        }
     if (
         not final["exists"]
         or final["data"] != operation["data"]
@@ -876,18 +996,74 @@ def _verify_operation(root_fd: int, operation: dict[str, Any]) -> None:
         or final["gid"] != operation["gid"]
     ):
         raise InstallError(f"installed target readback failed: {operation['relative']}")
+    return {
+        "relative": operation["relative"],
+        "exists": True,
+        "sha256": final["sha256"],
+        "mode": oct(final["mode"]),
+        "uid": final["uid"],
+        "gid": final["gid"],
+    }
+
+
+def _verify_entries(
+    root_fd: int,
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    readback: list[dict[str, Any]] = []
+    for item in entries:
+        final = _snapshot(root_fd, item["target_relative"])
+        if item["operation"] == "remove_obsolete":
+            if final["exists"]:
+                raise InstallError(
+                    f"obsolete target removal readback failed: {item['target_relative']}"
+                )
+            readback.append(
+                {
+                    "target": item["target"],
+                    "target_relative": item["target_relative"],
+                    "exists": False,
+                }
+            )
+            continue
+        if (
+            not final["exists"]
+            or final["data"] != item["data"]
+            or final["mode"] != item["mode_int"]
+            or final["uid"] != item["uid"]
+            or final["gid"] != item["gid"]
+        ):
+            raise InstallError(
+                f"installed target readback failed: {item['target_relative']}"
+            )
+        readback.append(
+            {
+                "target": item["target"],
+                "target_relative": item["target_relative"],
+                "exists": True,
+                "sha256": final["sha256"],
+                "mode": oct(final["mode"]),
+                "uid": final["uid"],
+                "gid": final["gid"],
+            }
+        )
+    return readback
 
 
 def _apply_operations(
     root_fd: int,
     operations: list[dict[str, Any]],
     *,
+    entries: list[dict[str, Any]],
+    target_root: Path,
     created: list[str],
-) -> None:
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     staged: list[dict[str, Any]] = []
     committed: list[dict[str, Any]] = []
     failure: Exception | None = None
     rollback_errors: list[str] = []
+    target_readback: list[dict[str, Any]] = []
+    composition: dict[str, Any] = {}
     try:
         for operation in operations:
             staged.append(_stage_operation(root_fd, operation, created=created))
@@ -920,18 +1096,48 @@ def _apply_operations(
                 TRANSACTION_FAULT_HOOK(index, operation["relative"])
         for operation in operations:
             _verify_operation(root_fd, operation)
-        _verify_effective_composition(root_fd)
+        target_readback = _verify_entries(root_fd, entries)
+        composition = _verify_effective_composition(root_fd)
+        # This assignment is the explicit transaction commit point. No failure
+        # after it may be described as a target-transaction failure or trigger
+        # rollback of the now verified target state.
+        commit_point_reached = True
     except Exception as exc:
         failure = exc
         rollback_errors = _rollback(committed)
-    _cleanup_staged(staged)
+        commit_point_reached = False
+    cleanup = _cleanup_staged(staged, target_root=target_root)
     if failure is not None:
-        if not rollback_errors:
+        directory_errors = (
             _remove_created_directories(root_fd, created)
-        detail = f"; rollback failures: {', '.join(rollback_errors)}" if rollback_errors else ""
+            if not rollback_errors
+            else []
+        )
+        cleanup_errors = [
+            *cleanup["warnings"],
+            *[
+                f"{item['path']}: residue remains"
+                for item in cleanup["residue"]
+            ],
+            *directory_errors,
+        ]
+        rollback_detail = (
+            f"; rollback failures: {', '.join(rollback_errors)}"
+            if rollback_errors
+            else ""
+        )
+        cleanup_detail = (
+            f"; pre-commit cleanup failures: {', '.join(cleanup_errors)}"
+            if cleanup_errors
+            else ""
+        )
         raise InstallError(
-            f"transaction failed and was rolled back: {failure}{detail}"
+            "transaction failed before commit point"
+            f" ({COMMIT_POINT}) and rollback was attempted: {failure}"
+            f"{rollback_detail}{cleanup_detail}"
         ) from failure
+    assert commit_point_reached
+    return target_readback, composition, cleanup
 
 
 def _open_lock(root_fd: int, uid: int, gid: int):
@@ -972,11 +1178,225 @@ def _open_lock(root_fd: int, uid: int, gid: int):
         os.close(parent_fd)
 
 
+def _allowed_residue_parents() -> set[str]:
+    return {
+        str(PurePosixPath(relative).parent)
+        for _source, relative, _mode in FILES
+    } | {
+        str(PurePosixPath(relative).parent)
+        for relative in REMOVALS
+    } | {
+        BACKUP_ROOT_RELATIVE,
+    }
+
+
+def _validate_residue_relative(relative: str) -> None:
+    parts = _relative_parts(relative)
+    parent = str(PurePosixPath(relative).parent)
+    name = parts[-1]
+    name_parts = name.rsplit(".", 2)
+    if (
+        parent not in _allowed_residue_parents()
+        or len(name_parts) != 3
+        or name_parts[1] not in {"stage", "rollback"}
+        or not RESIDUE_TOKEN.fullmatch(name_parts[2])
+        or not name.startswith(".")
+    ):
+        raise InstallError(f"unsafe receipted cleanup residue: {relative}")
+
+
+def _recover_receipted_residue(
+    root_fd: int,
+    *,
+    target_root: Path,
+) -> dict[str, Any]:
+    receipt_snapshot = _snapshot(root_fd, RECEIPT_RELATIVE)
+    if not receipt_snapshot["exists"]:
+        return {"attempted": 0, "recovered": [], "warnings": []}
+    try:
+        previous = json.loads(receipt_snapshot["data"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {
+            "attempted": 0,
+            "recovered": [],
+            "warnings": [
+                f"{_target_display(target_root, RECEIPT_RELATIVE)}: "
+                "previous receipt is unreadable; no residue paths were inferred"
+            ],
+        }
+    transaction = previous.get("transaction")
+    if (
+        previous.get("schema_version") != 3
+        or previous.get("kind")
+        != "heim_pc_host_health_remediation_install_receipt"
+        or not isinstance(transaction, dict)
+        or not transaction.get("committed")
+    ):
+        return {"attempted": 0, "recovered": [], "warnings": []}
+    residue = transaction.get("residue", [])
+    if not isinstance(residue, list):
+        raise InstallError("previous receipt cleanup residue is invalid")
+
+    recovered: list[str] = []
+    errors: list[str] = []
+    for item in residue:
+        if not isinstance(item, dict) or not isinstance(item.get("relative"), str):
+            raise InstallError("previous receipt cleanup residue is invalid")
+        relative = item["relative"]
+        expected_snapshot = item.get("snapshot")
+        if not isinstance(expected_snapshot, dict):
+            raise InstallError("previous receipt cleanup residue lacks exact identity")
+        _validate_residue_relative(relative)
+        parent_fd, name = _open_parent(root_fd, relative, create=False)
+        if parent_fd is None:
+            recovered.append(_target_display(target_root, relative))
+            continue
+        try:
+            current = _snapshot_at(parent_fd, name)
+            if not current["exists"]:
+                recovered.append(_target_display(target_root, relative))
+                continue
+            if any(
+                expected_snapshot.get(key) != value
+                for key, value in {
+                    "sha256": current["sha256"],
+                    "mode": oct(current["mode"]),
+                    "uid": current["uid"],
+                    "gid": current["gid"],
+                    "device": current["device"],
+                    "inode": current["inode"],
+                }.items()
+            ):
+                errors.append(
+                    f"{_target_display(target_root, relative)}: "
+                    "residue identity differs from receipt"
+                )
+                continue
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                errors.append(
+                    f"{_target_display(target_root, relative)}: recovery cleanup failed: {exc}"
+                )
+            else:
+                recovered.append(_target_display(target_root, relative))
+        finally:
+            os.close(parent_fd)
+    if errors:
+        raise InstallError(
+            "pre-commit receipted residue recovery failed: " + ", ".join(errors)
+        )
+    return {
+        "attempted": len(residue),
+        "recovered": recovered,
+        "warnings": [],
+    }
+
+
+def _publish_receipt(
+    root_fd: int,
+    *,
+    target_root: Path,
+    receipt: dict[str, Any],
+    uid: int,
+    gid: int,
+    created: list[str],
+) -> dict[str, Any]:
+    parent_fd: int | None = None
+    name = PurePosixPath(RECEIPT_RELATIVE).name
+    staged_name: str | None = None
+    try:
+        parent_fd, name = _open_parent(
+            root_fd,
+            RECEIPT_RELATIVE,
+            create=True,
+            created=created,
+            parent_mode=0o700,
+        )
+        if parent_fd is None:
+            raise InstallError("receipt parent is unavailable")
+        receipt_bytes = (
+            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        before = _snapshot_at(parent_fd, name)
+        staged_name = _write_temp(
+            parent_fd,
+            name,
+            receipt_bytes,
+            mode=0o600,
+            uid=uid,
+            gid=gid,
+            role="stage",
+        )
+        if not _preimage_matches(parent_fd, name, before):
+            raise InstallError("receipt changed before publication")
+        os.replace(
+            staged_name,
+            name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        staged_name = None
+        os.fsync(parent_fd)
+        final = _snapshot_at(parent_fd, name)
+        if (
+            not final["exists"]
+            or final["data"] != receipt_bytes
+            or final["mode"] != 0o600
+            or final["uid"] != uid
+            or final["gid"] != gid
+        ):
+            raise InstallError("receipt publication exact readback failed")
+        return receipt
+    except Exception as exc:
+        cleanup_warnings: list[str] = []
+        residue: list[dict[str, str]] = []
+        if staged_name is not None and parent_fd is not None:
+            relative = (
+                f"{PurePosixPath(RECEIPT_RELATIVE).parent}/{staged_name}"
+            )
+            try:
+                os.unlink(staged_name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except OSError as cleanup_exc:
+                path = _target_display(target_root, relative)
+                cleanup_warnings.append(
+                    f"{path}: failed receipt-stage cleanup: {cleanup_exc}"
+                )
+                residue.append(
+                    {"relative": relative, "path": path, "role": "receipt_stage"}
+                )
+        failed = json.loads(json.dumps(receipt))
+        failed["kind"] = "heim_pc_host_health_remediation_committed_outcome"
+        failed["receipt_publication"] = {
+            **failed["receipt_publication"],
+            "intended_receipt_kind": receipt["kind"],
+            "complete": False,
+            "fsynced": False,
+            "exact_readback": False,
+            "error": str(exc),
+            "residue": residue,
+            "warnings": cleanup_warnings,
+        }
+        failed["warnings"] = [
+            *failed.get("warnings", []),
+            f"target transaction committed but receipt publication failed: {exc}",
+            *cleanup_warnings,
+        ]
+        return failed
+    finally:
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
 def _transaction_operations(
     *,
     root_fd: int,
     entries: list[dict[str, Any]],
-    receipt_bytes: bytes,
     uid: int,
     gid: int,
 ) -> list[dict[str, Any]]:
@@ -1021,19 +1441,6 @@ def _transaction_operations(
                     "before": item["before"],
                 }
             )
-    receipt_before = _snapshot(root_fd, RECEIPT_RELATIVE)
-    operations.append(
-        {
-            "kind": "install",
-            "relative": RECEIPT_RELATIVE,
-            "data": receipt_bytes,
-            "mode": 0o600,
-            "uid": uid,
-            "gid": gid,
-            "before": receipt_before,
-            "parent_mode": 0o700,
-        }
-    )
     return operations
 
 
@@ -1046,15 +1453,29 @@ def _base_receipt(
     entries: list[dict[str, Any]],
     composition: dict[str, Any],
     installed_at: str | None = None,
+    target_readback: list[dict[str, Any]] | None = None,
+    cleanup: dict[str, Any] | None = None,
+    residue_recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if apply:
+        assert cleanup is not None
+        assert target_readback is not None
+    transaction_cleanup = cleanup or {
+        "complete": None,
+        "bounded": True,
+        "maximum_attempts": 0,
+        "attempted": 0,
+        "residue": [],
+        "warnings": [],
+    }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": (
             "heim_pc_host_health_remediation_install_receipt"
             if apply
             else "heim_pc_host_health_remediation_install_plan"
         ),
-        "valid": apply,
+        "valid": True,
         "apply": apply,
         "repository_head": head,
         "repository_dirty": dirty,
@@ -1076,13 +1497,45 @@ def _base_receipt(
             "exclusive_lock": (
                 _target_display(target_root, LOCK_RELATIVE) if apply else None
             ),
+            "commit_point": COMMIT_POINT,
+            "commit_point_reached": apply,
+            "committed": apply,
+            "target_state_verified": apply,
+            "target_readback": target_readback or [],
             "preflight_complete_before_staging": True,
             "descriptor_relative_nofollow": True,
             "staged_and_fsynced": apply,
             "rollback_images_staged": apply,
-            "partial_failure_rollback": apply,
+            "rollback_fail_closed_before_commit_point": True,
+            "post_commit_rollback_performed": False,
+            "cleanup_complete": transaction_cleanup["complete"],
+            "cleanup_bounded": transaction_cleanup["bounded"],
+            "cleanup_maximum_attempts": transaction_cleanup["maximum_attempts"],
+            "cleanup_attempted": transaction_cleanup["attempted"],
+            "residue": transaction_cleanup["residue"],
+            "warnings": transaction_cleanup["warnings"],
+            "previous_residue_recovery": residue_recovery or {
+                "attempted": 0,
+                "recovered": [],
+                "warnings": [],
+            },
             "receipt_relative": RECEIPT_RELATIVE if apply else None,
         },
+        "receipt_publication": {
+            "required": apply,
+            "post_commit": apply,
+            "path": (
+                _target_display(target_root, RECEIPT_RELATIVE) if apply else None
+            ),
+            "atomic_replace": apply,
+            "fsynced": apply,
+            "exact_readback": apply,
+            "complete": apply,
+        },
+        "warnings": [
+            *transaction_cleanup["warnings"],
+            *(residue_recovery or {}).get("warnings", []),
+        ],
         "activation_performed": False,
         "activation_required": [
             "systemctl daemon-reload",
@@ -1128,36 +1581,53 @@ def install(
                 if dirty:
                     raise InstallError("repository must be clean for a commit-bound install")
                 source_data = _committed_sources(source_root, expected_head)
+                residue_recovery = _recover_receipted_residue(
+                    root_fd,
+                    target_root=target_root,
+                )
                 entries, _overlay, composition = _build_plan(
                     root_fd=root_fd,
                     source_data=source_data,
                     target_root=target_root,
                     uid=uid,
                     gid=gid,
+                    inspect_apply_state=True,
                 )
                 installed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                operations = _transaction_operations(
+                    root_fd=root_fd,
+                    entries=entries,
+                    uid=uid,
+                    gid=gid,
+                )
+                created: list[str] = []
+                target_readback, committed_composition, cleanup = _apply_operations(
+                    root_fd,
+                    operations,
+                    entries=entries,
+                    target_root=target_root,
+                    created=created,
+                )
                 receipt = _base_receipt(
                     apply=True,
                     head=head,
                     dirty=dirty,
                     target_root=target_root,
                     entries=entries,
-                    composition=composition,
+                    composition=committed_composition,
                     installed_at=installed_at,
+                    target_readback=target_readback,
+                    cleanup=cleanup,
+                    residue_recovery=residue_recovery,
                 )
-                receipt_bytes = (
-                    json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-                ).encode("utf-8")
-                operations = _transaction_operations(
-                    root_fd=root_fd,
-                    entries=entries,
-                    receipt_bytes=receipt_bytes,
+                return _publish_receipt(
+                    root_fd,
+                    target_root=target_root,
+                    receipt=receipt,
                     uid=uid,
                     gid=gid,
+                    created=created,
                 )
-                created: list[str] = []
-                _apply_operations(root_fd, operations, created=created)
-                return receipt
 
         head, dirty = repository_identity(source_root)
         if expected_head is not None and head != expected_head:
@@ -1169,6 +1639,7 @@ def install(
             target_root=target_root,
             uid=uid,
             gid=gid,
+            inspect_apply_state=False,
         )
         return _base_receipt(
             apply=False,
@@ -1179,7 +1650,10 @@ def install(
             composition=composition,
         )
     finally:
-        os.close(root_fd)
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 def install_files(
@@ -1214,7 +1688,7 @@ def main() -> int:
         print(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "kind": "heim_pc_host_health_remediation_install_error",
                     "error": str(exc),
                 },
@@ -1224,6 +1698,8 @@ def main() -> int:
         )
         return 1
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    if receipt["apply"] and not receipt["receipt_publication"]["complete"]:
+        return 2
     return 0
 
 

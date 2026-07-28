@@ -38,10 +38,14 @@
   "deployment": {
     "source_binding": "expected_git_commit_tree",
     "exclusive_lock": "/var/lib/heim-pc/host-health/install.lock",
-    "receipt": "/var/lib/heim-pc/host-health/install-receipt.v2.json",
+    "receipt": "/var/lib/heim-pc/host-health/install-receipt.v3.json",
     "target_regular_file_owner": "root:root",
     "target_operations": "descriptor_relative_nofollow",
-    "transaction": "preflight_stage_fsync_commit_verify_or_rollback",
+    "transaction": "preflight_stage_fsync_commit_verify_commit_point",
+    "commit_point": "all_target_operations_fsynced_exactly_read_back_and_effective_systemd_composition_verified",
+    "post_commit_cleanup": "bounded_best_effort_receipted_and_recoverable",
+    "receipt_publication": "post_commit_atomic_replace_fsync_exact_readback",
+    "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
     "legacy_removals": [
       "/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
       "/usr/local/sbin/heim-pc-set-performance-profile",

@@ -87,12 +87,34 @@ Quelldaten mehr aus veränderlichen Worktree-Pfaden gelesen. Der Apply-Lauf häl
 exklusiv `/var/lib/heim-pc/host-health/install.lock`, prüft alle Ziele und
 inhaltsadressierten Backups vorab, öffnet Zielkomponenten descriptor-relativ mit
 `O_NOFOLLOW`, staged und `fsync`-t Writes sowie Rollback-Abbilder und committet erst
-danach. Jeder Fehler bis einschließlich Readback und systemd-Kompositionsprüfung
-löst den Rückbau aller bereits ausgeführten Zieloperationen aus. Der verifizierte
-Beleg liegt mit Modus `0600` unter
-`/var/lib/heim-pc/host-health/install-receipt.v2.json`; alle installierten regulären
-Dateien sind `root:root` und haben exakt die im Vertrag angegebenen Modi. Der
-Planlauf legt weder Lock noch Verzeichnisse, Backups, Stagingdateien oder Beleg an.
+danach. Der explizite Commit-Punkt ist erst erreicht, wenn alle Zieloperationen
+`fsync`-t, exakt zurückgelesen und die effektive systemd-Komposition verifiziert
+sind. Jeder Fehler davor löst den fail-closed Rückbau aller bereits ausgeführten
+Zieloperationen aus; Rückbaufehler und verbleibende Recovery-Abbilder werden exakt
+benannt.
+
+Nach dem Commit-Punkt werden nicht mehr benötigte Staging- und Rollbackdateien
+begrenzt und best-effort entfernt. Ein Cleanup-Fehler rollt den bereits
+verifizierten Zielzustand nicht zurück und wird niemals als fehlgeschlagene
+Zieltransaktion ausgegeben. Der Beleg hält stattdessen
+`transaction.cleanup_complete=false`, die exakten Restpfade und Warnungen fest.
+Ein späterer, erneut commitgebundener und gesperrter Apply-Lauf entfernt nur diese
+zuvor receiptierten Restpfade idempotent, bevor er neue Zieloperationen beginnt.
+
+Der v3-Beleg wird erst nach dem Commit-Punkt atomar publiziert, `fsync`-t und exakt
+zurückgelesen. Scheitert seine Publikation, bleibt der Zielzustand ausdrücklich als
+`apply=true`, `transaction.committed=true` und verifiziert ausgewiesen; der
+CLI-Lauf endet dann mit einem eigenen Nichtnullstatus für die unvollständige
+Belegpublikation, nicht mit einer behaupteten Transaktionsfehlermeldung. Der
+verifizierte Beleg liegt mit Modus `0600` unter
+`/var/lib/heim-pc/host-health/install-receipt.v3.json`; alle installierten regulären
+Dateien sind `root:root` und haben exakt die im Vertrag angegebenen Modi.
+
+Der Planlauf ist commitgebunden, gültig und vollständig read-only. Auch beim Plan
+für `/` öffnet oder erzeugt er weder den privilegierten Lock noch den Receipt zum
+Schreiben und traversiert `/var/lib/heim-pc` nicht für Apply-only
+Backupmetadaten. Solche Metadaten werden sichtbar als nicht verfügbar markiert.
+Der Planlauf legt weder Lock noch Verzeichnisse, Backups, Stagingdateien oder Beleg an.
 Keine Unit wird aktiviert, gestartet, neu geladen oder neu gestartet. Dieser PR
 selbst deployt nichts und ändert weder `/etc` noch Root-Zustand.
 
