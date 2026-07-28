@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc_network_identity_policy",
+  "hostname": "heim-pc",
+  "hosts_address": "127.0.1.1",
+  "expected_default_interface": "enp6s0",
+  "minimum_link_speed_mbps": 1000
+}
