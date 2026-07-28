@@ -114,6 +114,14 @@ def _mce_config(config: dict[str, Any]) -> dict[str, int]:
         raise DiagnosticError(
             "mce_edac.retained_occurrence_ids must cover max_journal_entries"
         )
+    if (
+        value.get("state_schema_version") != 2
+        or value.get("deduplication")
+        != "bounded_constituent_overlap_and_boundary_span"
+        or value.get("constituent_evidence_limit")
+        != result["max_journal_entries"]
+    ):
+        raise DiagnosticError("mce_edac evidence contract is inconsistent")
     return result
 
 
@@ -168,14 +176,38 @@ def _event_rows(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         boot_id = record.get("_BOOT_ID")
+        normalized_boot_id = boot_id if isinstance(boot_id, str) else "unknown"
+        cursor = record.get("__CURSOR")
+        if isinstance(cursor, str) and cursor:
+            constituent_identity = f"cursor\0{cursor}".encode("utf-8")
+        else:
+            monotonic = record.get("__MONOTONIC_TIMESTAMP")
+            constituent_identity = json.dumps(
+                [
+                    normalized_boot_id,
+                    timestamp_us,
+                    monotonic if isinstance(monotonic, str) else None,
+                    message,
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
         rows.append(
             {
-                "boot_id": boot_id if isinstance(boot_id, str) else "unknown",
+                "boot_id": normalized_boot_id,
                 "timestamp_us": timestamp_us,
                 "message": message,
+                "constituent_id": hashlib.sha256(constituent_identity).hexdigest(),
             }
         )
-    return sorted(rows, key=lambda item: (item["boot_id"], item["timestamp_us"]))
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["boot_id"],
+            item["timestamp_us"],
+            item["constituent_id"],
+        ),
+    )
 
 
 def group_occurrences(
@@ -195,7 +227,7 @@ def group_occurrences(
             groups[-1].append(row)
     occurrences: list[dict[str, Any]] = []
     for group in groups:
-        identity = f"{group[0]['boot_id']}:{group[0]['timestamp_us']}".encode("utf-8")
+        identity = f"constituent\0{group[0]['constituent_id']}".encode("utf-8")
         occurrences.append(
             {
                 "id": hashlib.sha256(identity).hexdigest(),
@@ -203,35 +235,142 @@ def group_occurrences(
                 "first_timestamp_us": group[0]["timestamp_us"],
                 "last_timestamp_us": group[-1]["timestamp_us"],
                 "messages": [item["message"] for item in group],
+                "constituents": [
+                    {
+                        "id": item["constituent_id"],
+                        "timestamp_us": item["timestamp_us"],
+                    }
+                    for item in group
+                ],
             }
         )
-    return occurrences
+    return sorted(
+        occurrences,
+        key=lambda item: (
+            item["first_timestamp_us"],
+            item["boot_id"],
+            item["id"],
+        ),
+    )
+
+
+def _empty_mce_state() -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "kind": "heim_pc_mce_edac_state",
+        "total_occurrences": 0,
+        "occurrence_evidence": [],
+        "legacy_seen_occurrence_ids": [],
+    }
+
+
+def _legacy_occurrence_id(occurrence: dict[str, Any]) -> str:
+    identity = (
+        f"{occurrence['boot_id']}:{occurrence['first_timestamp_us']}".encode("utf-8")
+    )
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _normalize_mce_state(state: dict[str, Any]) -> dict[str, Any]:
+    if (
+        isinstance(state, dict)
+        and state.get("schema_version") == 1
+        and state.get("kind") == "heim_pc_mce_edac_state"
+        and isinstance(state.get("total_occurrences"), int)
+        and state["total_occurrences"] >= 0
+        and isinstance(state.get("seen_occurrence_ids"), list)
+        and all(isinstance(item, str) for item in state["seen_occurrence_ids"])
+    ):
+        return {
+            "schema_version": 2,
+            "kind": "heim_pc_mce_edac_state",
+            "total_occurrences": state["total_occurrences"],
+            "occurrence_evidence": [],
+            "legacy_seen_occurrence_ids": list(
+                dict.fromkeys(state["seen_occurrence_ids"])
+            ),
+            "last_observed_event_utc": state.get("last_observed_event_utc"),
+            "migrated_from_schema_version": 1,
+        }
+    if (
+        not isinstance(state, dict)
+        or state.get("schema_version") != 2
+        or state.get("kind") != "heim_pc_mce_edac_state"
+        or not isinstance(state.get("total_occurrences"), int)
+        or state["total_occurrences"] < 0
+        or not isinstance(state.get("occurrence_evidence"), list)
+        or not isinstance(state.get("legacy_seen_occurrence_ids"), list)
+        or not all(
+            isinstance(item, str) for item in state["legacy_seen_occurrence_ids"]
+        )
+    ):
+        raise DiagnosticError("invalid MCE/EDAC state")
+
+    normalized_evidence: list[dict[str, Any]] = []
+    evidence_ids: set[str] = set()
+    constituent_ids: set[str] = set()
+    for evidence in state["occurrence_evidence"]:
+        if (
+            not isinstance(evidence, dict)
+            or not isinstance(evidence.get("id"), str)
+            or not isinstance(evidence.get("boot_id"), str)
+            or not isinstance(evidence.get("first_timestamp_us"), int)
+            or not isinstance(evidence.get("last_timestamp_us"), int)
+            or evidence["first_timestamp_us"] > evidence["last_timestamp_us"]
+            or not isinstance(evidence.get("constituents"), list)
+        ):
+            raise DiagnosticError("invalid MCE/EDAC occurrence evidence")
+        if evidence["id"] in evidence_ids:
+            raise DiagnosticError("duplicate MCE/EDAC occurrence evidence")
+        evidence_ids.add(evidence["id"])
+        constituents: list[dict[str, Any]] = []
+        for constituent in evidence["constituents"]:
+            if (
+                not isinstance(constituent, dict)
+                or not isinstance(constituent.get("id"), str)
+                or not isinstance(constituent.get("timestamp_us"), int)
+            ):
+                raise DiagnosticError("invalid MCE/EDAC constituent evidence")
+            if constituent["id"] in constituent_ids:
+                raise DiagnosticError("duplicate MCE/EDAC constituent evidence")
+            constituent_ids.add(constituent["id"])
+            constituents.append(
+                {
+                    "id": constituent["id"],
+                    "timestamp_us": constituent["timestamp_us"],
+                }
+            )
+        normalized_evidence.append(
+            {
+                "id": evidence["id"],
+                "boot_id": evidence["boot_id"],
+                "first_timestamp_us": evidence["first_timestamp_us"],
+                "last_timestamp_us": evidence["last_timestamp_us"],
+                "constituents": constituents,
+            }
+        )
+    return {
+        "schema_version": 2,
+        "kind": "heim_pc_mce_edac_state",
+        "total_occurrences": state["total_occurrences"],
+        "occurrence_evidence": normalized_evidence,
+        "legacy_seen_occurrence_ids": list(
+            dict.fromkeys(state["legacy_seen_occurrence_ids"])
+        ),
+        "last_observed_event_utc": state.get("last_observed_event_utc"),
+    }
 
 
 def _load_mce_state(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {
-            "schema_version": 1,
-            "kind": "heim_pc_mce_edac_state",
-            "total_occurrences": 0,
-            "seen_occurrence_ids": [],
-        }
+        return _empty_mce_state()
     if path.is_symlink() or not path.is_file():
         raise DiagnosticError(f"unsafe MCE/EDAC state path: {path}")
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DiagnosticError(f"cannot load MCE/EDAC state: {exc}") from exc
-    if (
-        not isinstance(state, dict)
-        or state.get("schema_version") != 1
-        or state.get("kind") != "heim_pc_mce_edac_state"
-        or not isinstance(state.get("total_occurrences"), int)
-        or not isinstance(state.get("seen_occurrence_ids"), list)
-        or not all(isinstance(item, str) for item in state["seen_occurrence_ids"])
-    ):
-        raise DiagnosticError("invalid MCE/EDAC state")
-    return state
+    return _normalize_mce_state(state)
 
 
 def _utc(timestamp_us: int | None) -> str | None:
@@ -246,13 +385,134 @@ def analyze_mce_edac(
     policy: dict[str, int],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     occurrences = group_occurrences(records, gap_seconds=policy["occurrence_gap_seconds"])
-    seen = list(dict.fromkeys(state["seen_occurrence_ids"]))
-    seen_set = set(seen)
-    new = [item for item in occurrences if item["id"] not in seen_set]
-    updated_seen = (seen + [item["id"] for item in new])[
-        -policy["retained_occurrence_ids"] :
-    ]
-    total = state["total_occurrences"] + len(new)
+    normalized_state = _normalize_mce_state(state)
+    evidence_by_id = {
+        item["id"]: {
+            **item,
+            "constituents": list(item["constituents"]),
+        }
+        for item in normalized_state["occurrence_evidence"]
+    }
+    constituent_owners: dict[str, set[str]] = {}
+    for evidence in evidence_by_id.values():
+        for constituent in evidence["constituents"]:
+            constituent_owners.setdefault(constituent["id"], set()).add(evidence["id"])
+
+    legacy_seen = set(normalized_state["legacy_seen_occurrence_ids"])
+    assigned_ids: set[str] = set()
+    new_count = 0
+    gap_us = policy["occurrence_gap_seconds"] * 1_000_000
+    for occurrence in occurrences:
+        constituent_ids = {
+            constituent["id"] for constituent in occurrence["constituents"]
+        }
+        overlap_counts: dict[str, int] = {}
+        for constituent_id in constituent_ids:
+            for evidence_id in constituent_owners.get(constituent_id, set()):
+                if evidence_id not in assigned_ids:
+                    overlap_counts[evidence_id] = overlap_counts.get(evidence_id, 0) + 1
+
+        matched_id: str | None = None
+        if overlap_counts:
+            matched_id = min(
+                overlap_counts,
+                key=lambda evidence_id: (
+                    -overlap_counts[evidence_id],
+                    abs(
+                        evidence_by_id[evidence_id]["last_timestamp_us"]
+                        - occurrence["last_timestamp_us"]
+                    ),
+                    evidence_id,
+                ),
+            )
+        else:
+            boundary_candidates: list[tuple[int, str]] = []
+            for evidence_id, evidence in evidence_by_id.items():
+                if evidence_id in assigned_ids or evidence["boot_id"] != occurrence["boot_id"]:
+                    continue
+                if occurrence["first_timestamp_us"] > evidence["last_timestamp_us"]:
+                    distance = (
+                        occurrence["first_timestamp_us"] - evidence["last_timestamp_us"]
+                    )
+                elif evidence["first_timestamp_us"] > occurrence["last_timestamp_us"]:
+                    distance = (
+                        evidence["first_timestamp_us"] - occurrence["last_timestamp_us"]
+                    )
+                else:
+                    distance = 0
+                if distance <= gap_us:
+                    boundary_candidates.append((distance, evidence_id))
+            if boundary_candidates:
+                matched_id = min(boundary_candidates)[1]
+
+        legacy_id = _legacy_occurrence_id(occurrence)
+        if matched_id is None and legacy_id in legacy_seen:
+            matched_id = legacy_id
+        if matched_id is None:
+            matched_id = occurrence["id"]
+            new_count += 1
+
+        assigned_ids.add(matched_id)
+        previous = evidence_by_id.get(matched_id)
+        merged_constituents: dict[str, dict[str, Any]] = {}
+        if previous is not None:
+            for constituent in previous["constituents"]:
+                merged_constituents[constituent["id"]] = constituent
+        for constituent in occurrence["constituents"]:
+            merged_constituents[constituent["id"]] = constituent
+        evidence = {
+            "id": matched_id,
+            "boot_id": occurrence["boot_id"],
+            "first_timestamp_us": min(
+                occurrence["first_timestamp_us"],
+                (
+                    previous["first_timestamp_us"]
+                    if previous is not None
+                    else occurrence["first_timestamp_us"]
+                ),
+            ),
+            "last_timestamp_us": max(
+                occurrence["last_timestamp_us"],
+                (
+                    previous["last_timestamp_us"]
+                    if previous is not None
+                    else occurrence["last_timestamp_us"]
+                ),
+            ),
+            "constituents": sorted(
+                merged_constituents.values(),
+                key=lambda item: (item["timestamp_us"], item["id"]),
+            ),
+        }
+        evidence_by_id[matched_id] = evidence
+
+    retained_evidence = sorted(
+        evidence_by_id.values(),
+        key=lambda item: (item["last_timestamp_us"], item["id"]),
+        reverse=True,
+    )[: policy["retained_occurrence_ids"]]
+    newest_constituents = sorted(
+        (
+            (constituent["timestamp_us"], constituent["id"])
+            for evidence in retained_evidence
+            for constituent in evidence["constituents"]
+        ),
+        reverse=True,
+    )[: policy["max_journal_entries"]]
+    retained_constituent_ids = {
+        constituent_id for _timestamp, constituent_id in newest_constituents
+    }
+    for evidence in retained_evidence:
+        evidence["constituents"] = [
+            constituent
+            for constituent in evidence["constituents"]
+            if constituent["id"] in retained_constituent_ids
+        ]
+    retained_evidence.sort(
+        key=lambda item: (item["last_timestamp_us"], item["id"])
+    )
+
+    total = normalized_state["total_occurrences"] + new_count
     if total == 0:
         status = "no_events"
     elif total == 1:
@@ -277,10 +537,21 @@ def analyze_mce_edac(
         (item["last_timestamp_us"] for item in occurrences), default=None
     )
     updated_state = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "heim_pc_mce_edac_state",
         "total_occurrences": total,
-        "seen_occurrence_ids": updated_seen,
+        "occurrence_evidence": retained_evidence,
+        "legacy_seen_occurrence_ids": list(
+            dict.fromkeys(
+                [
+                    *normalized_state["legacy_seen_occurrence_ids"],
+                    *(
+                        _legacy_occurrence_id(occurrence)
+                        for occurrence in occurrences
+                    ),
+                ]
+            )
+        )[-policy["retained_occurrence_ids"] :],
         "last_observed_event_utc": _utc(last_timestamp),
     }
     report = {
@@ -288,7 +559,7 @@ def analyze_mce_edac(
         "kind": "heim_pc_mce_edac_report",
         "status": status,
         "recurrent": total > 1,
-        "new_occurrences": len(new),
+        "new_occurrences": new_count,
         "total_occurrences": total,
         "occurrences_in_bounded_window": len(occurrences),
         "matching_messages_in_bounded_window": sum(

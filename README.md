@@ -80,23 +80,46 @@ Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 `config/host-health-remediation.v1.json` bindet die schmale persistente
 Hostkonfiguration an überprüfbare Grenzwerte und Firmware-Identitäten.
 `scripts/install_host_health_remediation.py` zeigt standardmäßig nur den Plan. Ein
-späterer, eigens autorisierter Lauf mit `--apply --expected-head <commit>` installiert
-die Dateien commitgebunden, erstellt vor dem Ersetzen abweichender Dateien ein
-inhaltsadressiertes Backup und aktiviert oder startet keine Unit. Dieser PR selbst
-deployt nichts und ändert weder `/etc` noch Root-Zustand.
+späterer, eigens autorisierter Lauf mit einem vollständigen
+`--apply --expected-head <commit>` liest alle Quelldaten ausschließlich aus dem
+erwarteten Git-Commitbaum. Nach der einmaligen HEAD- und Clean-Prüfung werden keine
+Quelldaten mehr aus veränderlichen Worktree-Pfaden gelesen. Der Apply-Lauf hält
+exklusiv `/var/lib/heim-pc/host-health/install.lock`, prüft alle Ziele und
+inhaltsadressierten Backups vorab, öffnet Zielkomponenten descriptor-relativ mit
+`O_NOFOLLOW`, staged und `fsync`-t Writes sowie Rollback-Abbilder und committet erst
+danach. Jeder Fehler bis einschließlich Readback und systemd-Kompositionsprüfung
+löst den Rückbau aller bereits ausgeführten Zieloperationen aus. Der verifizierte
+Beleg liegt mit Modus `0600` unter
+`/var/lib/heim-pc/host-health/install-receipt.v2.json`; alle installierten regulären
+Dateien sind `root:root` und haben exakt die im Vertrag angegebenen Modi. Der
+Planlauf legt weder Lock noch Verzeichnisse, Backups, Stagingdateien oder Beleg an.
+Keine Unit wird aktiviert, gestartet, neu geladen oder neu gestartet. Dieser PR
+selbst deployt nichts und ändert weder `/etc` noch Root-Zustand.
 
 Die installierbaren Teile haben folgende Grenzen:
 
-* Der systemweite User-Unit-Drop-in setzt `ConditionUser=!gdm` für die
-  Distribution-Unit `fluidsynth.service`. Die globale Aktivierung bleibt bestehen,
-  die Bedingung ist für `alex` wahr, und nur GDM wird übersprungen. Eine Prüfung des
-  GDM-Ergebnisses ist erst nach Neustart seines User-Managers oder nach einem Reboot
-  aussagekräftig.
+* Der spät sortierende systemweite User-Unit-Drop-in setzt die zuvor komponierte
+  `ConditionUser`-Liste zuerst leer und danach ausschließlich auf
+  `ConditionUser=!gdm`. Die Migration sichert und entfernt sowohl das alte
+  `10-interactive-user.conf` mit `ConditionUser=alex` als auch den früheren
+  `50-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
+  relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `!gdm` sein;
+  spätere widersprechende Drop-ins blockieren den Apply-Lauf. Die globale
+  Aktivierung bleibt bestehen, jeder interaktive Benutzer bleibt zulässig, und nur
+  GDM wird übersprungen. Eine Laufzeitprüfung des GDM-Ergebnisses ist erst nach
+  Neustart seines User-Managers oder nach einem Reboot aussagekräftig.
 * `cpu-governor.service` nutzt einen Wrapper, der
   `system76-power profile performance` ausführt. Nur ein Fehler mit allen Merkmalen
   „SCSI host profiles“, fehlendes Power-Policy-Ziel und `ENOENT` wird als harmlos
   eingeordnet. Auch dann muss die unabhängige Abschlussabfrage exakt
-  `Power Profile: Performance` melden; andere Fehler bleiben Fehler.
+  `Power Profile: Performance` melden; andere Fehler bleiben Fehler. Die Migration
+  sichert und entfernt
+  `/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf` sowie das
+  unsichere Legacy-Skript
+  `/usr/local/sbin/heim-pc-set-performance-profile`. Ein spät sortierendes
+  committed Drop-in leert zusätzlich alle früheren `ExecStart`-Werte und setzt
+  exakt den strikten Wrapper. Die effektive Komposition muss vor und nach dem
+  Transaktionscommit genau diesen einen `ExecStart` ergeben.
 * `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
   aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
   Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
@@ -116,8 +139,17 @@ Die installierbaren Teile haben folgende Grenzen:
   Rekurrenzbericht unter
   `/var/lib/heim-pc/host-health/mce-edac-report.v1.json`. Er führt keinen
   Belastungstest durch und diagnostiziert keine Hardwareursache automatisch.
-  Die ID-Retention deckt die vollständige maximale Journalabfrage ab, damit
-  unveränderte Einträge innerhalb des Fensters nicht erneut gezählt werden.
+  Der Zustandsvertrag v2 persistiert begrenzte Journal-Konstituenten-IDs sowie
+  Boot-, Anfangs- und Endzeit-Evidenz je Vorkommnis. Überlappende gleitende Fenster
+  verwenden dadurch dieselbe kanonische Vorkommnis-ID weiter, auch wenn die erste
+  oder letzte Zeile einer Ereignisgruppe an der 2.000-Zeilen-Grenze fehlt. Eine
+  anschließende, vollständig abgeschnittene Fortsetzung kann innerhalb des
+  Fünf-Sekunden-Gruppierungsabstands über die persistierte Randzeit zugeordnet
+  werden. Andere Boots und echte Zeitabstände oberhalb dieses Grenzwerts bleiben
+  getrennte Vorkommnisse, auch bei identischen Meldungen. Alte v1-Zustände werden
+  beim nächsten Lauf übernommen und ohne erneute Zählung sichtbar identischer
+  Gruppen in v2-Evidenz überführt. Die gesamte persistierte
+  Konstituenten-Evidenz bleibt auf die maximale Journalabfrage begrenzt.
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
   deaktivierte oder anderweitig verborgene Virtualisierung. Ist `svm` vorhanden,

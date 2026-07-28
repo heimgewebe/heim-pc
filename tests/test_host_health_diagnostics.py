@@ -153,6 +153,12 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
         self.assertIn("_TRANSPORT=kernel", calls[0])
         self.assertNotIn("--dmesg", calls[0])
 
+    def test_mce_evidence_contract_must_match_query_bound(self) -> None:
+        invalid = copy.deepcopy(self.config)
+        invalid["mce_edac"]["constituent_evidence_limit"] = 1999
+        with self.assertRaisesRegex(diagnostics.DiagnosticError, "evidence contract"):
+            diagnostics._mce_config(invalid)
+
     def test_mce_retention_cannot_forget_entries_still_in_bounded_query(self) -> None:
         initial_state = {
             "schema_version": 1,
@@ -176,6 +182,146 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(first["new_occurrences"], 200)
         self.assertEqual(replay["new_occurrences"], 0)
         self.assertEqual(replay_state["total_occurrences"], 200)
+
+    def test_mce_sliding_windows_keep_one_occurrence_when_first_or_last_rows_trim(
+        self,
+    ) -> None:
+        initial_state = diagnostics._empty_mce_state()
+        one_event = [
+            self.record(
+                1_000_000 + index * 1_000_000,
+                f"[Hardware Error]: corrected constituent {index}",
+            )
+            for index in range(8)
+        ]
+
+        state, first = diagnostics.analyze_mce_edac(
+            one_event[:5], initial_state, self.mce_policy
+        )
+        state, overlapping_tail = diagnostics.analyze_mce_edac(
+            one_event[2:7], state, self.mce_policy
+        )
+        state, trimmed_prefix = diagnostics.analyze_mce_edac(
+            one_event[5:], state, self.mce_policy
+        )
+
+        self.assertEqual(first["new_occurrences"], 1)
+        self.assertEqual(overlapping_tail["new_occurrences"], 0)
+        self.assertEqual(trimmed_prefix["new_occurrences"], 0)
+        self.assertEqual(state["total_occurrences"], 1)
+
+    def test_mce_boundary_continuation_without_overlap_uses_persisted_span(
+        self,
+    ) -> None:
+        first_half = [
+            self.record(
+                1_000_000 + index * 1_000_000,
+                f"EDAC MC0: corrected error constituent {index}",
+            )
+            for index in range(3)
+        ]
+        second_half = [
+            self.record(
+                4_000_000 + index * 1_000_000,
+                f"EDAC MC0: corrected error constituent {index + 3}",
+            )
+            for index in range(3)
+        ]
+        state, first = diagnostics.analyze_mce_edac(
+            first_half, diagnostics._empty_mce_state(), self.mce_policy
+        )
+        state, continuation = diagnostics.analyze_mce_edac(
+            second_half, state, self.mce_policy
+        )
+        self.assertEqual(first["new_occurrences"], 1)
+        self.assertEqual(continuation["new_occurrences"], 0)
+        self.assertEqual(state["total_occurrences"], 1)
+
+    def test_mce_2000_line_sliding_boundary_is_stable_and_state_is_bounded(
+        self,
+    ) -> None:
+        records = [
+            self.record(
+                1_000_000 + index * 1_000,
+                f"[Hardware Error]: bounded constituent {index}",
+            )
+            for index in range(2001)
+        ]
+        state, first = diagnostics.analyze_mce_edac(
+            records[:2000], diagnostics._empty_mce_state(), self.mce_policy
+        )
+        state, shifted = diagnostics.analyze_mce_edac(
+            records[1:], state, self.mce_policy
+        )
+        constituent_count = sum(
+            len(item["constituents"]) for item in state["occurrence_evidence"]
+        )
+        self.assertEqual(first["new_occurrences"], 1)
+        self.assertEqual(shifted["new_occurrences"], 0)
+        self.assertEqual(state["total_occurrences"], 1)
+        self.assertLessEqual(
+            constituent_count,
+            self.mce_policy["max_journal_entries"],
+        )
+
+    def test_mce_same_message_remains_distinct_across_boots_and_real_gaps(
+        self,
+    ) -> None:
+        message = "[Hardware Error]: corrected identical message"
+        records = [
+            self.record(1_000_000, message, boot="boot-a"),
+            self.record(1_000_000, message, boot="boot-b"),
+            self.record(20_000_000, message, boot="boot-b"),
+        ]
+        state, report = diagnostics.analyze_mce_edac(
+            records, diagnostics._empty_mce_state(), self.mce_policy
+        )
+        replay_state, replay = diagnostics.analyze_mce_edac(
+            records[1:], state, self.mce_policy
+        )
+        self.assertEqual(report["new_occurrences"], 3)
+        self.assertEqual(report["total_occurrences"], 3)
+        self.assertEqual(replay["new_occurrences"], 0)
+        self.assertEqual(replay_state["total_occurrences"], 3)
+
+    def test_mce_boot_grouping_survives_interleaved_realtime_clocks(self) -> None:
+        records = [
+            self.record(1_000_000, "[Hardware Error]: boot a first", boot="boot-a"),
+            self.record(3_000_000, "[Hardware Error]: boot a second", boot="boot-a"),
+            self.record(2_000_000, "[Hardware Error]: boot b first", boot="boot-b"),
+            self.record(4_000_000, "[Hardware Error]: boot b second", boot="boot-b"),
+        ]
+        occurrences = diagnostics.group_occurrences(
+            records,
+            gap_seconds=self.mce_policy["occurrence_gap_seconds"],
+        )
+        self.assertEqual(len(occurrences), 2)
+        self.assertEqual({item["boot_id"] for item in occurrences}, {"boot-a", "boot-b"})
+
+    def test_mce_v1_state_migrates_without_recounting_visible_occurrence(self) -> None:
+        records = [
+            self.record(1_000_000, "mce: [Hardware Error]: Machine check events logged"),
+            self.record(2_000_000, "[Hardware Error]: Corrected error"),
+        ]
+        occurrence = diagnostics.group_occurrences(
+            records,
+            gap_seconds=self.mce_policy["occurrence_gap_seconds"],
+        )[0]
+        legacy_state = {
+            "schema_version": 1,
+            "kind": "heim_pc_mce_edac_state",
+            "total_occurrences": 1,
+            "seen_occurrence_ids": [
+                diagnostics._legacy_occurrence_id(occurrence)
+            ],
+        }
+        state, report = diagnostics.analyze_mce_edac(
+            records, legacy_state, self.mce_policy
+        )
+        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(report["new_occurrences"], 0)
+        self.assertEqual(state["total_occurrences"], 1)
+        self.assertTrue(state["occurrence_evidence"])
 
     def test_kvm_truth_distinguishes_bios_flag_from_module_failure(self) -> None:
         bios_disabled = diagnostics.evaluate_kvm_svm(
