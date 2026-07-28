@@ -1,0 +1,24 @@
+[Unit]
+Description=Bounded MCE/EDAC recurrence monitor
+Documentation=https://github.com/heimgewebe/heim-pc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/heim-pc-host-health --config /etc/heim-pc/host-health-remediation.v1.json mce-edac
+StateDirectory=heim-pc/host-health
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=30s
+CPUQuota=10%
+MemoryMax=64M
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/heim-pc/host-health
+
+[Install]
+WantedBy=multi-user.target

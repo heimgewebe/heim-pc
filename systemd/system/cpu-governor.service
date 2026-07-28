@@ -1,0 +1,16 @@
+[Unit]
+Description=Set and verify CPU Performance profile at boot
+Wants=com.system76.PowerDaemon.service
+After=com.system76.PowerDaemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/heim-pc/ensure-performance-profile
+RemainAfterExit=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

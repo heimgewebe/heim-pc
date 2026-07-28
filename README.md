@@ -75,6 +75,89 @@ Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 6. Klassifikation als Einzelrepo-, systemweiter, Host-, Task- oder Historienfall;
 7. gezieltes Lesen der referenzierten Primärquellen und abschließender zielbezogener Live-Read vor Mutation.
 
+## Host-Health- und Log-Remediation
+
+`config/host-health-remediation.v1.json` bindet die schmale persistente
+Hostkonfiguration an überprüfbare Grenzwerte und Firmware-Identitäten.
+`scripts/install_host_health_remediation.py` zeigt standardmäßig nur den Plan. Ein
+späterer, eigens autorisierter Lauf mit `--apply --expected-head <commit>` installiert
+die Dateien commitgebunden, erstellt vor dem Ersetzen abweichender Dateien ein
+inhaltsadressiertes Backup und aktiviert oder startet keine Unit. Dieser PR selbst
+deployt nichts und ändert weder `/etc` noch Root-Zustand.
+
+Die installierbaren Teile haben folgende Grenzen:
+
+* Der systemweite User-Unit-Drop-in setzt `ConditionUser=!gdm` für die
+  Distribution-Unit `fluidsynth.service`. Die globale Aktivierung bleibt bestehen,
+  die Bedingung ist für `alex` wahr, und nur GDM wird übersprungen. Eine Prüfung des
+  GDM-Ergebnisses ist erst nach Neustart seines User-Managers oder nach einem Reboot
+  aussagekräftig.
+* `cpu-governor.service` nutzt einen Wrapper, der
+  `system76-power profile performance` ausführt. Nur ein Fehler mit allen Merkmalen
+  „SCSI host profiles“, fehlendes Power-Policy-Ziel und `ENOENT` wird als harmlos
+  eingeordnet. Auch dann muss die unabhängige Abschlussabfrage exakt
+  `Power Profile: Performance` melden; andere Fehler bleiben Fehler.
+* `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
+  aus 24 Stunden, läuft höchstens 30 Sekunden alle sechs Stunden und ist auf
+  10 Prozent CPU sowie 64 MiB RAM begrenzt. Er erzeugt nur einen deduplizierten,
+  knappen Rekurrenzbericht unter
+  `/var/lib/heim-pc/host-health/mce-edac-report.v1.json`. Er führt keinen
+  Belastungstest durch und diagnostiziert keine Hardwareursache automatisch.
+* `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
+  `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
+  deaktivierte oder anderweitig verborgene Virtualisierung. Ist `svm` vorhanden,
+  aber `kvm_amd`, das generische `kvm`-Modul oder `/dev/kvm` fehlt, wird dies
+  stattdessen als Kernel-/Modul-/Device-Problem berichtet. Das Werkzeug ändert
+  keine BIOS-Einstellung.
+
+### Offline-sicherer FAT-Check
+
+Die laufende EFI- oder Recovery-Partition darf nicht repariert werden. Der Operator
+bootet dafür ein separates Recovery-/Live-System, löst das exakte Blockgerät über
+`lsblk` und `findmnt` auf und stellt sicher, dass es nicht gemountet ist. Das
+Werkzeug prüft diese Bedingung direkt vor `fsck.fat` zweimal, unmountet nie
+automatisch und verweigert andere Dateisystemtypen:
+
+```bash
+heim-pc-host-health fat /dev/<exakte-fat-partition>
+heim-pc-host-health fat /dev/<exakte-fat-partition> --repair --confirm-offline-repair
+```
+
+Der erste Aufruf verwendet ausschließlich `fsck.fat -n`. Der zweite verwendet
+`fsck.fat -a` nur nach der expliziten Offline-Bestätigung. Ein gleichzeitig durch
+einen anderen privilegierten Prozess ausgeführter Mount kann nicht rennfrei
+ausgeschlossen werden; deshalb bleibt das separate Recovery-System Teil der
+Sicherheitsgrenze. Eine online unter `/boot/efi` eingehängte Partition ist
+ausdrücklich kein zulässiges Reparaturziel.
+
+### BIOS-Vorbereitung ohne Flash
+
+Der Verifier akzeptiert ausschließlich das Board `ROG STRIX B550-F GAMING` und
+bindet die Vorbereitung an die beobachtete Ausgangsversion `3202`. Der
+Standardkanal ist das stabile Ziel `3636` mit SHA-256
+`BCB430187AD366238908C6EC6E7715C9EB056E77A620333CCBCCEDA42FB25082`.
+Das Beta-Ziel `3641` muss ausdrücklich gewählt werden und hat SHA-256
+`FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B`.
+
+```bash
+heim-pc-host-health bios --target stable --image /pfad/zur/BIOS-Datei
+heim-pc-host-health bios --target beta --image /pfad/zur/BIOS-Datei
+```
+
+Das Werkzeug liest Board und laufende BIOS-Version und vergleicht den Hash der
+lokalen Datei. Es lädt nichts herunter, schreibt keine EFI-Variable und flasht
+nicht. Ein Hash-Treffer belegt nur die Bindung an den festgelegten Digest, nicht
+den Erfolg oder die Freigabe eines Firmware-Updates.
+
+Firmware-Flash und SVM-Aktivierung bleiben absichtlich Reboot-/UEFI-Operationen:
+Die Firmware muss das Board außerhalb des laufenden Betriebssystems neu
+initialisieren, und das CPU-Flag `svm` wird erst beim nächsten Boot exponiert.
+Ein laufender Kernel kann eine im UEFI deaktivierte SVM-Funktion weder verlässlich
+noch portabel einschalten. Automatisches Flashen oder ein behaupteter
+„BIOS-Fix“ aus dem Betriebssystem würde deshalb die Recovery-, Stromversorgungs-
+und physische Bestätigungsgrenze umgehen und ist nicht Bestandteil dieser
+Remediation.
+
 ## Direkter Systemkatalog-Pointer
 
 Die systemweite stabile Semantik liegt nicht in diesem Repository, sondern im Systemkatalog:

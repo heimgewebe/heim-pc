@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the bounded MCE/EDAC recurrence monitor
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=yes
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
