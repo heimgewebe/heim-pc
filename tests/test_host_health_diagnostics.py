@@ -210,6 +210,34 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(trimmed_prefix["new_occurrences"], 0)
         self.assertEqual(state["total_occurrences"], 1)
 
+    def test_mce_exact_first_line_shift_does_not_create_false_recurrence(
+        self,
+    ) -> None:
+        records = [
+            self.record(
+                1_000_000,
+                "mce: [Hardware Error]: Machine check events logged",
+            ),
+            self.record(
+                2_000_000,
+                "[Hardware Error]: Corrected error, no action required.",
+            ),
+        ]
+        state, first = diagnostics.analyze_mce_edac(
+            records,
+            diagnostics._empty_mce_state(),
+            self.mce_policy,
+        )
+        state, shifted = diagnostics.analyze_mce_edac(
+            records[1:],
+            state,
+            self.mce_policy,
+        )
+        self.assertEqual(first["new_occurrences"], 1)
+        self.assertEqual(shifted["new_occurrences"], 0)
+        self.assertFalse(shifted["recurrent"])
+        self.assertEqual(state["total_occurrences"], 1)
+
     def test_mce_boundary_continuation_without_overlap_uses_persisted_span(
         self,
     ) -> None:
@@ -283,6 +311,68 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["total_occurrences"], 3)
         self.assertEqual(replay["new_occurrences"], 0)
         self.assertEqual(replay_state["total_occurrences"], 3)
+
+    def test_mce_adjacent_distinct_events_beyond_gap_remain_separate(self) -> None:
+        gap_us = self.mce_policy["occurrence_gap_seconds"] * 1_000_000
+        records = [
+            self.record(
+                1_000_000,
+                "[Hardware Error]: first adjacent corrected event",
+            ),
+            self.record(
+                1_000_000 + gap_us + 1,
+                "[Hardware Error]: second adjacent corrected event",
+            ),
+        ]
+        state, report = diagnostics.analyze_mce_edac(
+            records,
+            diagnostics._empty_mce_state(),
+            self.mce_policy,
+        )
+        replay_state, replay = diagnostics.analyze_mce_edac(
+            records[1:],
+            state,
+            self.mce_policy,
+        )
+        self.assertEqual(report["new_occurrences"], 2)
+        self.assertEqual(state["total_occurrences"], 2)
+        self.assertEqual(replay["new_occurrences"], 0)
+        self.assertEqual(replay_state["total_occurrences"], 2)
+
+    def test_mce_ambiguous_boundary_match_fails_without_guessing(self) -> None:
+        state = {
+            "schema_version": 2,
+            "kind": "heim_pc_mce_edac_state",
+            "total_occurrences": 2,
+            "occurrence_evidence": [
+                {
+                    "id": "first",
+                    "boot_id": "boot-a",
+                    "first_timestamp_us": 1_000_000,
+                    "last_timestamp_us": 1_000_000,
+                    "constituents": [],
+                },
+                {
+                    "id": "second",
+                    "boot_id": "boot-a",
+                    "first_timestamp_us": 9_000_000,
+                    "last_timestamp_us": 9_000_000,
+                    "constituents": [],
+                },
+            ],
+            "legacy_seen_occurrence_ids": [],
+        }
+        records = [
+            self.record(
+                5_000_000,
+                "[Hardware Error]: ambiguous truncated boundary",
+            )
+        ]
+        with self.assertRaisesRegex(
+            diagnostics.DiagnosticError,
+            "ambiguous MCE/EDAC boundary continuation",
+        ):
+            diagnostics.analyze_mce_edac(records, state, self.mce_policy)
 
     def test_mce_boot_grouping_survives_interleaved_realtime_clocks(self) -> None:
         records = [

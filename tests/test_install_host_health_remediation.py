@@ -116,6 +116,18 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertFalse(
                 receipt["source_binding"]["mutable_worktree_source_bytes_used"]
             )
+            self.assertTrue(receipt["source_binding"]["blob_objects_reverified"])
+            self.assertEqual(receipt["source_binding"]["object_format"], "sha1")
+            self.assertEqual(
+                receipt["source_binding"]["files"][
+                    "scripts/ensure_performance_profile.py"
+                ]["git_object_id"],
+                run_git(
+                    source,
+                    "rev-parse",
+                    f"{head}:scripts/ensure_performance_profile.py",
+                ),
+            )
 
     def test_apply_reads_expected_git_object_after_one_time_identity_check(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
@@ -135,6 +147,116 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertEqual(installed.read_bytes(), committed)
             self.assertNotEqual(installed.read_bytes(), b"substituted\n")
             self.assertEqual(receipt["repository_head"], head)
+
+    def test_concurrent_worktree_source_mutation_cannot_change_committed_bytes(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            source_path = source / "scripts/host_health_diagnostics.py"
+            committed = source_path.read_bytes()
+            started = threading.Event()
+            stop = threading.Event()
+            worker: threading.Thread | None = None
+
+            def mutate_source() -> None:
+                started.set()
+                generation = 0
+                while not stop.is_set():
+                    source_path.write_bytes(
+                        f"mutable generation {generation}\n".encode()
+                    )
+                    generation += 1
+
+            def identity_then_race(_root: Path):
+                nonlocal worker
+                worker = threading.Thread(target=mutate_source)
+                worker.start()
+                self.assertTrue(started.wait(1))
+                return head, False
+
+            try:
+                with mock.patch.object(
+                    installer,
+                    "repository_identity",
+                    side_effect=identity_then_race,
+                ):
+                    receipt = install_fixture(source, head, target, apply=True)
+            finally:
+                stop.set()
+                if worker is not None:
+                    worker.join(timeout=5)
+
+            self.assertEqual(
+                (target / "usr/local/sbin/heim-pc-host-health").read_bytes(),
+                committed,
+            )
+            self.assertEqual(receipt["source_binding"]["commit"], head)
+
+    def test_checkout_race_cannot_redirect_exact_commit_source(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            source_path = source / "scripts/host_health_diagnostics.py"
+            committed = source_path.read_bytes()
+            source_path.write_bytes(b"new checkout bytes\n")
+            run_git(source, "add", "scripts/host_health_diagnostics.py")
+            run_git(source, "commit", "-q", "-m", "other tree")
+            other_head = run_git(source, "rev-parse", "HEAD")
+            run_git(source, "checkout", "-q", head)
+
+            def identity_then_checkout(_root: Path):
+                run_git(source, "checkout", "-q", other_head)
+                return head, False
+
+            with mock.patch.object(
+                installer,
+                "repository_identity",
+                side_effect=identity_then_checkout,
+            ):
+                receipt = install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(run_git(source, "rev-parse", "HEAD"), other_head)
+            self.assertEqual(
+                (target / "usr/local/sbin/heim-pc-host-health").read_bytes(),
+                committed,
+            )
+            self.assertEqual(receipt["repository_head"], head)
+
+    def test_mixed_or_corrupt_blob_source_is_rejected_before_target_mutation(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            original_git = installer._git
+            blob_reads = 0
+
+            def corrupt_second_blob(root: Path, argv: list[str], *, text: bool):
+                nonlocal blob_reads
+                result = original_git(root, argv, text=text)
+                if argv[:2] == ["cat-file", "blob"]:
+                    blob_reads += 1
+                    if blob_reads == 2:
+                        return subprocess.CompletedProcess(
+                            result.args,
+                            0,
+                            stdout=b"bytes from a different source\n",
+                            stderr=b"",
+                        )
+                return result
+
+            with mock.patch.object(
+                installer,
+                "_git",
+                side_effect=corrupt_second_blob,
+            ):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "blob identity mismatch",
+                ):
+                    install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(list(target.rglob("*.service")), [])
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
 
     def test_apply_requires_full_expected_head(self) -> None:
         with committed_source() as (source, _head), tempfile.TemporaryDirectory() as directory:
@@ -225,23 +347,39 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
             legacy: dict[str, bytes] = {
-                "etc/systemd/journald.conf.d/50-heim-pc-retention.conf": b"[Journal]\nSystemMaxUse=512M\n",
-                "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": b"[Journal]\nSystemMaxUse=1G\n",
+                "etc/systemd/journald.conf.d/50-heim-pc-retention.conf": (
+                    installer.KNOWN_JOURNALD_512M
+                ),
+                "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": (
+                    installer.KNOWN_JOURNALD_2G
+                ),
                 "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf": (
                     b"[Service]\nExecStart=\nExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n"
                 ),
-                "usr/local/sbin/heim-pc-set-performance-profile": b"#!/bin/sh\nexit 0\n",
+                "usr/local/sbin/heim-pc-set-performance-profile": (
+                    installer.KNOWN_LEGACY_PROFILE_SCRIPT
+                ),
                 "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf": (
                     b"[Unit]\nConditionUser=alex\n"
                 ),
                 "etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf": (
-                    b"[Unit]\nConditionUser=!gdm\n"
+                    installer.KNOWN_OBSOLETE_ASSETS[
+                        "etc/systemd/user/fluidsynth.service.d/"
+                        "50-heim-pc-gdm-guard.conf"
+                    ]["contents"][0]
+                ),
+                "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf": (
+                    installer.KNOWN_OBSOLETE_ASSETS[
+                        "etc/systemd/user/fluidsynth.service.d/"
+                        "zz-heim-pc-gdm-guard.conf"
+                    ]["contents"][0]
                 ),
             }
             for relative, data in legacy.items():
                 path = target / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
+                path.chmod(installer.KNOWN_OBSOLETE_ASSETS[relative]["mode"])
 
             plan = install_fixture(source, head, target, apply=False)
             self.assertEqual(
@@ -269,30 +407,100 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             for item in removal_results:
                 relative = str(Path(item["target"]).relative_to(target))
                 self.assertFalse(Path(item["target"]).exists())
+                self.assertTrue(item["managed_preimage"]["verified"])
                 self.assertEqual(Path(item["backup"]).read_bytes(), legacy[relative])
                 backup_stat = Path(item["backup"]).stat()
                 self.assertEqual(stat.S_IMODE(backup_stat.st_mode), 0o600)
                 self.assertEqual(backup_stat.st_uid, os.geteuid())
                 self.assertEqual(backup_stat.st_gid, os.getegid())
 
+    def test_unknown_legacy_script_preimage_blocks_without_removal(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            legacy = target / "usr/local/sbin/heim-pc-set-performance-profile"
+            legacy.parent.mkdir(parents=True)
+            foreign = b"#!/bin/sh\nprintf 'foreign managed command\\n'\n"
+            legacy.write_bytes(foreign)
+            legacy.chmod(0o755)
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "not the exact known managed preimage",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(legacy.read_bytes(), foreign)
+            self.assertEqual(stat.S_IMODE(legacy.stat().st_mode), 0o755)
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (target / "usr/local/libexec/heim-pc/ensure-performance-profile").exists()
+            )
+
+    def test_live_shaped_nobody_legacy_script_identity_is_exact(self) -> None:
+        nobody_uid = installer.pwd.getpwnam("nobody").pw_uid
+        nogroup_gid = installer.grp.getgrnam("nogroup").gr_gid
+        self.assertEqual(len(installer.KNOWN_LEGACY_PROFILE_SCRIPT), 958)
+        self.assertEqual(
+            installer._sha256(installer.KNOWN_LEGACY_PROFILE_SCRIPT),
+            "f9a2effc9cb815a632c80f2cb17c3089c0ff5ce0d694895fb3792d87ab3b2000",
+        )
+        known = {
+            "exists": True,
+            "data": installer.KNOWN_LEGACY_PROFILE_SCRIPT,
+            "sha256": installer._sha256(installer.KNOWN_LEGACY_PROFILE_SCRIPT),
+            "mode": 0o755,
+            "uid": nobody_uid,
+            "gid": nogroup_gid,
+        }
+        identity = installer._validate_obsolete_preimage(
+            "usr/local/sbin/heim-pc-set-performance-profile",
+            known,
+            target_root=Path("/"),
+        )
+        self.assertTrue(identity["verified"])
+        self.assertTrue(identity["live_owner_required"])
+
+        wrong_owner = {**known, "uid": 0, "gid": 0}
+        with self.assertRaisesRegex(installer.InstallError, "owner mismatch"):
+            installer._validate_obsolete_preimage(
+                "usr/local/sbin/heim-pc-set-performance-profile",
+                wrong_owner,
+                target_root=Path("/"),
+            )
+
     def test_effective_systemd_composition_resets_legacy_values(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
+            distro_cpu = target / "usr/lib/systemd/system/cpu-governor.service"
+            distro_cpu.parent.mkdir(parents=True)
+            distro_cpu.write_text(
+                "[Service]\nExecStart=/usr/bin/distribution-default\n",
+                encoding="utf-8",
+            )
+            distro_fluid = target / "usr/lib/systemd/user/fluidsynth.service"
+            distro_fluid.parent.mkdir(parents=True)
+            distro_fluid.write_text(
+                "[Unit]\nConditionUser=!root\n",
+                encoding="utf-8",
+            )
             cpu_legacy = (
                 target
                 / "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf"
             )
             cpu_legacy.parent.mkdir(parents=True)
             cpu_legacy.write_text(
-                "[Service]\nExecStart=\nExecStart=/unsafe/profile\n",
+                "[Service]\nExecStart=\n"
+                "ExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n",
                 encoding="utf-8",
             )
+            cpu_legacy.chmod(0o644)
             fluid_legacy = (
                 target
                 / "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf"
             )
             fluid_legacy.parent.mkdir(parents=True)
             fluid_legacy.write_text("[Unit]\nConditionUser=alex\n", encoding="utf-8")
+            fluid_legacy.chmod(0o644)
 
             receipt = install_fixture(source, head, target, apply=True)
             composition = installer.verify_effective_composition(target)
@@ -302,7 +510,11 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             )
             self.assertEqual(
                 composition["fluidsynth"]["condition_user"],
-                ["!gdm"],
+                ["alex"],
+            )
+            self.assertIn(
+                "usr/lib/systemd/user/fluidsynth.service",
+                composition["fluidsynth"]["directive_sources"],
             )
             self.assertEqual(receipt["effective_systemd_composition"], composition)
             cpu_reset = (
@@ -311,11 +523,13 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             fluid_reset = (
                 target
-                / "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf"
+                / "etc/systemd/user/fluidsynth.service.d/"
+                "zz-heim-pc-interactive-user.conf"
             ).read_text(encoding="utf-8")
             self.assertIn("ExecStart=\n", cpu_reset)
             self.assertIn("ConditionUser=\n", fluid_reset)
-            self.assertNotIn("alex", fluid_reset)
+            self.assertIn("ConditionUser=alex", fluid_reset)
+            self.assertNotIn("!gdm", fluid_reset)
 
     def test_later_conflicting_drop_in_fails_preflight_without_target_mutation(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
@@ -331,16 +545,49 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             legacy.parent.mkdir(parents=True)
             conflict.parent.mkdir(parents=True)
             legacy.write_text("[Unit]\nConditionUser=alex\n", encoding="utf-8")
-            conflict.write_text("[Unit]\nConditionUser=alex\n", encoding="utf-8")
+            legacy.chmod(0o644)
+            conflict.write_text(
+                "[Unit]\nConditionUser=\nConditionUser=alex\n",
+                encoding="utf-8",
+            )
 
-            with self.assertRaisesRegex(installer.InstallError, "ConditionUser"):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "unmanaged fluidsynth.service ConditionUser",
+            ):
                 install_fixture(source, head, target, apply=True)
 
             self.assertTrue(legacy.exists())
             self.assertEqual(
                 conflict.read_text(encoding="utf-8"),
-                "[Unit]\nConditionUser=alex\n",
+                "[Unit]\nConditionUser=\nConditionUser=alex\n",
             )
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (target / "usr/local/sbin/heim-pc-host-health").exists()
+            )
+
+    def test_unmanaged_cpu_drop_in_blocks_even_if_final_command_matches(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            conflict = (
+                target
+                / "run/systemd/system/cpu-governor.service.d/zzz-foreign.conf"
+            )
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text(
+                "[Service]\nExecStart=\n"
+                f"ExecStart={installer.STRICT_PROFILE}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "unmanaged cpu-governor.service ExecStart",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertTrue(conflict.exists())
             self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
             self.assertFalse(
                 (target / "usr/local/sbin/heim-pc-host-health").exists()
@@ -358,8 +605,12 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 / "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf"
             )
             legacy.parent.mkdir(parents=True)
-            original_legacy = b"[Service]\nExecStart=/legacy\n"
+            original_legacy = (
+                b"[Service]\nExecStart=\n"
+                b"ExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n"
+            )
             legacy.write_bytes(original_legacy)
+            legacy.chmod(0o644)
 
             def fail_after_third(index: int, _relative: str) -> None:
                 if index == 3:
@@ -440,6 +691,81 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertFalse(
                 (target / "usr/local/sbin/heim-pc-host-health").exists()
             )
+
+    def test_target_parent_substitution_fails_closed_without_following_replacement(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            relative = "etc/heim-pc/host-health-remediation.v1.json"
+            configured = target / relative
+            configured.parent.mkdir(parents=True)
+            original = b'{"preimage": true}\n'
+            configured.write_bytes(original)
+            detached_parent = target / "etc/heim-pc-detached"
+            substitute = b'{"foreign": true}\n'
+            substituted = False
+
+            def substitute_parent(_index: int, committed_relative: str) -> None:
+                nonlocal substituted
+                if committed_relative != relative or substituted:
+                    return
+                configured.parent.rename(detached_parent)
+                configured.parent.mkdir()
+                configured.write_bytes(substitute)
+                substituted = True
+
+            installer.TRANSACTION_FAULT_HOOK = substitute_parent
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "before commit point",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertTrue(substituted)
+            self.assertEqual(configured.read_bytes(), substitute)
+            self.assertEqual(
+                (detached_parent / configured.name).read_bytes(),
+                original,
+            )
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+
+    def test_ownership_mismatch_readback_rolls_back_before_commit(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            relative = "usr/local/sbin/heim-pc-host-health"
+            original_snapshot = installer._snapshot
+            inject_mismatch = False
+
+            def enable_mismatch(_index: int, committed_relative: str) -> None:
+                nonlocal inject_mismatch
+                if committed_relative == relative:
+                    inject_mismatch = True
+
+            def mismatched_snapshot(root_fd: int, observed_relative: str):
+                snapshot = original_snapshot(root_fd, observed_relative)
+                if (
+                    inject_mismatch
+                    and observed_relative == relative
+                    and snapshot["exists"]
+                ):
+                    return {**snapshot, "uid": snapshot["uid"] + 1}
+                return snapshot
+
+            installer.TRANSACTION_FAULT_HOOK = enable_mismatch
+            with mock.patch.object(
+                installer,
+                "_snapshot",
+                side_effect=mismatched_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "readback failed",
+                ):
+                    install_fixture(source, head, target, apply=True)
+
+            self.assertFalse((target / relative).exists())
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
 
     def test_cleanup_failure_before_commit_is_reported_after_fail_closed_rollback(
         self,
@@ -649,6 +975,74 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 outcome["receipt_publication"]["error"],
             )
 
+    def test_receipt_parent_substitution_reports_incomplete_committed_outcome(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            original_replace = installer.os.replace
+            receipt_parent = (target / installer.RECEIPT_RELATIVE).parent
+            detached_parent = receipt_parent.with_name("host-health-detached")
+            foreign_receipt = b'{"foreign": true}\n'
+            substituted = False
+
+            def substitute_after_receipt_replace(
+                source_name,
+                destination_name,
+                *args,
+                **kwargs,
+            ):
+                nonlocal substituted
+                result = original_replace(
+                    source_name,
+                    destination_name,
+                    *args,
+                    **kwargs,
+                )
+                if (
+                    os.fspath(destination_name)
+                    == Path(installer.RECEIPT_RELATIVE).name
+                    and ".stage." in os.fspath(source_name)
+                    and not substituted
+                ):
+                    receipt_parent.rename(detached_parent)
+                    receipt_parent.mkdir()
+                    (receipt_parent / Path(installer.RECEIPT_RELATIVE).name).write_bytes(
+                        foreign_receipt
+                    )
+                    substituted = True
+                return result
+
+            with mock.patch.object(
+                installer.os,
+                "replace",
+                side_effect=substitute_after_receipt_replace,
+            ):
+                outcome = install_fixture(source, head, target, apply=True)
+
+            self.assertTrue(substituted)
+            self.assertTrue(outcome["transaction"]["committed"])
+            self.assertTrue(outcome["transaction"]["target_state_verified"])
+            self.assertEqual(
+                outcome["kind"],
+                "heim_pc_host_health_remediation_committed_outcome",
+            )
+            self.assertFalse(outcome["receipt_publication"]["complete"])
+            self.assertIn(
+                "exact readback failed",
+                outcome["receipt_publication"]["error"],
+            )
+            self.assertEqual(
+                (target / installer.RECEIPT_RELATIVE).read_bytes(),
+                foreign_receipt,
+            )
+            self.assertTrue(
+                (detached_parent / Path(installer.RECEIPT_RELATIVE).name).exists()
+            )
+            self.assertTrue(
+                (target / "usr/local/sbin/heim-pc-host-health").exists()
+            )
+
     def test_next_run_idempotently_recovers_exact_receipted_residue(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
@@ -759,8 +1153,9 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             legacy_relative = installer.REMOVALS[0]
             legacy = target / legacy_relative
             legacy.parent.mkdir(parents=True)
-            legacy_data = b"legacy\n"
+            legacy_data = installer.KNOWN_JOURNALD_512M
             legacy.write_bytes(legacy_data)
+            legacy.chmod(0o644)
             (target / "usr/lib/systemd/system").mkdir(parents=True)
             (target / "usr/lib/systemd/user").mkdir(parents=True)
             (target / "lib").symlink_to("usr/lib", target_is_directory=True)
@@ -847,8 +1242,12 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             )
             legacy = target / legacy_relative
             legacy.parent.mkdir(parents=True)
-            legacy_data = b"legacy\n"
+            legacy_data = (
+                b"[Service]\nExecStart=\n"
+                b"ExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n"
+            )
             legacy.write_bytes(legacy_data)
+            legacy.chmod(0o644)
             collision = target / installer._backup_relative(legacy_relative, legacy_data)
             collision.parent.mkdir(parents=True)
             collision.write_bytes(b"different\n")

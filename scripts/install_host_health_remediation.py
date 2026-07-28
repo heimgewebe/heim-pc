@@ -7,10 +7,12 @@ import argparse
 from datetime import datetime, timezone
 import errno
 import fcntl
+import grp
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import pwd
 import re
 import secrets
 import stat
@@ -24,6 +26,7 @@ LOCK_RELATIVE = "var/lib/heim-pc/host-health/install.lock"
 BACKUP_ROOT_RELATIVE = "var/lib/heim-pc/host-health/install-backups"
 RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v3.json"
 STRICT_PROFILE = "/usr/local/libexec/heim-pc/ensure-performance-profile"
+FLUIDSYNTH_USER = "alex"
 COMMIT_POINT = (
     "all_target_operations_fsynced_exactly_read_back_and_"
     "effective_systemd_composition_verified"
@@ -56,8 +59,8 @@ FILES = (
         0o644,
     ),
     (
-        "systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
-        "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
+        "systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
+        "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
         0o644,
     ),
 )
@@ -69,7 +72,94 @@ REMOVALS = (
     "usr/local/sbin/heim-pc-set-performance-profile",
     "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
     "etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
+    "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
 )
+
+KNOWN_LEGACY_PROFILE_SCRIPT = b"""#!/usr/bin/python3
+import subprocess
+import sys
+setter = subprocess.run(
+    ["/usr/bin/system76-power", "profile", "performance"],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+probe = subprocess.run(
+    ["/usr/bin/system76-power", "profile"],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if probe.returncode == 0 and probe.stdout.strip() == "Power Profile: Performance":
+    if setter.returncode != 0:
+        detail = " ".join((setter.stderr or setter.stdout).split())
+        print(
+            f"system76-power setter returned {setter.returncode}, but verified final profile is Performance: {detail}",
+            file=sys.stderr,
+        )
+    raise SystemExit(0)
+for label, result in (("setter", setter), ("probe", probe)):
+    detail = " ".join((result.stderr or result.stdout).split())
+    print(f"{label} rc={result.returncode}: {detail}", file=sys.stderr)
+raise SystemExit(setter.returncode or probe.returncode or 1)
+
+
+"""
+KNOWN_JOURNALD_512M = b"""# Persist enough bounded journal history for cross-boot host-health diagnosis.
+[Journal]
+Storage=persistent
+SystemMaxUse=512M
+MaxRetentionSec=14day
+"""
+KNOWN_JOURNALD_2G = b"""# Persist enough bounded journal history for cross-boot host-health diagnosis.
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+SystemKeepFree=20G
+MaxRetentionSec=14day
+"""
+KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
+    "etc/systemd/journald.conf.d/50-heim-pc-retention.conf": {
+        "contents": (KNOWN_JOURNALD_512M, KNOWN_JOURNALD_2G),
+        "mode": 0o644,
+    },
+    "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": {
+        "contents": (KNOWN_JOURNALD_512M, KNOWN_JOURNALD_2G),
+        "mode": 0o644,
+    },
+    "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf": {
+        "contents": (
+            b"[Service]\nExecStart=\n"
+            b"ExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n",
+        ),
+        "mode": 0o644,
+    },
+    "usr/local/sbin/heim-pc-set-performance-profile": {
+        "contents": (KNOWN_LEGACY_PROFILE_SCRIPT,),
+        "mode": 0o755,
+        "live_owner": ("nobody", "nogroup"),
+    },
+    "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf": {
+        "contents": (b"[Unit]\nConditionUser=alex\n",),
+        "mode": 0o644,
+    },
+    "etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf": {
+        "contents": (
+            b"# The distribution unit remains enabled. "
+            b"This condition skips only GDM's user manager.\n"
+            b"[Unit]\nConditionUser=!gdm\n",
+        ),
+        "mode": 0o644,
+    },
+    "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf": {
+        "contents": (
+            b"# Reset legacy user pinning. The distribution unit remains enabled "
+            b"for every user except GDM.\n"
+            b"[Unit]\nConditionUser=\nConditionUser=!gdm\n",
+        ),
+        "mode": 0o644,
+    },
+}
 
 SYSTEM_UNIT_DIRS = (
     "etc/systemd/system",
@@ -135,11 +225,23 @@ def repository_identity(root: Path) -> tuple[str, bool]:
     return commit, bool(status_result.stdout.strip())
 
 
-def _committed_sources(root: Path, commit: str) -> dict[str, bytes]:
+def _committed_sources(
+    root: Path,
+    commit: str,
+) -> tuple[dict[str, bytes], dict[str, str], str]:
     verified = _git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"], text=True)
     if verified.returncode != 0 or verified.stdout.strip() != commit:
         raise InstallError("expected Git commit object is unavailable")
+    object_format_result = _git(
+        root,
+        ["rev-parse", "--show-object-format"],
+        text=True,
+    )
+    object_format = object_format_result.stdout.strip()
+    if object_format_result.returncode != 0 or object_format not in {"sha1", "sha256"}:
+        raise InstallError("cannot determine Git object format")
     result: dict[str, bytes] = {}
+    object_ids: dict[str, str] = {}
     for source_relative, _target_relative, _mode in FILES:
         tree = _git(root, ["ls-tree", "-z", commit, "--", source_relative], text=False)
         if tree.returncode != 0 or not tree.stdout:
@@ -149,17 +251,34 @@ def _committed_sources(root: Path, commit: str) -> dict[str, bytes]:
         if (
             separator != b"\t"
             or tree_path.rstrip(b"\0").decode("utf-8", "strict") != source_relative
+            or tree.stdout.count(b"\0") != 1
+            or not tree.stdout.endswith(b"\0")
             or len(fields) != 3
             or fields[1] != b"blob"
             or fields[0] not in {b"100644", b"100755"}
         ):
             raise InstallError(f"committed source is not a regular blob: {source_relative}")
-        blob = _git(root, ["cat-file", "blob", f"{commit}:{source_relative}"], text=False)
+        object_id = fields[2].decode("ascii", "strict")
+        expected_object_id_length = 40 if object_format == "sha1" else 64
+        if (
+            len(object_id) != expected_object_id_length
+            or any(character not in "0123456789abcdef" for character in object_id)
+        ):
+            raise InstallError(f"committed source blob identity is invalid: {source_relative}")
+        blob = _git(root, ["cat-file", "blob", object_id], text=False)
         if blob.returncode != 0:
             raise InstallError(f"cannot read committed source blob: {source_relative}")
+        digest = hashlib.new(object_format)
+        digest.update(f"blob {len(blob.stdout)}\0".encode("ascii"))
+        digest.update(blob.stdout)
+        if digest.hexdigest() != object_id:
+            raise InstallError(
+                f"committed source blob identity mismatch: {source_relative}"
+            )
         result[source_relative] = blob.stdout
+        object_ids[source_relative] = object_id
     _validate_committed_contract(result)
-    return result
+    return result, object_ids, object_format
 
 
 def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
@@ -172,7 +291,7 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
     deployment = config.get("deployment")
     mce = config.get("mce_edac")
     expected_deployment = {
-        "source_binding": "expected_git_commit_tree",
+        "source_binding": "expected_git_commit_tree_verified_blob_objects",
         "exclusive_lock": f"/{LOCK_RELATIVE}",
         "receipt": f"/{RECEIPT_RELATIVE}",
         "target_regular_file_owner": "root:root",
@@ -182,6 +301,8 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "post_commit_cleanup": "bounded_best_effort_receipted_and_recoverable",
         "receipt_publication": "post_commit_atomic_replace_fsync_exact_readback",
         "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
+        "legacy_removal_policy": "exact_known_preimages_only",
+        "fluidsynth_condition_user": FLUIDSYNTH_USER,
         "activation_performed": False,
     }
     if not isinstance(deployment, dict) or any(
@@ -193,6 +314,14 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         f"/{relative}" for relative in REMOVALS
     }:
         raise InstallError("committed legacy removal contract differs from installer targets")
+    legacy_script = deployment.get("known_legacy_profile_script")
+    if legacy_script != {
+        "path": "/usr/local/sbin/heim-pc-set-performance-profile",
+        "sha256": _sha256(KNOWN_LEGACY_PROFILE_SCRIPT),
+        "mode": "0755",
+        "owner": "nobody:nogroup",
+    }:
+        raise InstallError("committed legacy script identity differs from installer")
     if (
         not isinstance(mce, dict)
         or mce.get("state_schema_version") != 2
@@ -382,6 +511,54 @@ def _expected_owner(target_root: Path) -> tuple[int, int]:
     return os.geteuid(), os.getegid()
 
 
+def _validate_obsolete_preimage(
+    target_relative: str,
+    before: dict[str, Any],
+    *,
+    target_root: Path,
+) -> dict[str, Any] | None:
+    if not before["exists"]:
+        return None
+    contract = KNOWN_OBSOLETE_ASSETS[target_relative]
+    mismatch: list[str] = []
+    if before["data"] not in contract["contents"]:
+        mismatch.append("content")
+    if before["mode"] != contract["mode"]:
+        mismatch.append("mode")
+    expected_live_owner: tuple[int, int] | None = None
+    if (
+        Path(os.path.abspath(os.fspath(target_root))) == DEFAULT_TARGET_ROOT
+        and "live_owner" in contract
+    ):
+        owner_name, group_name = contract["live_owner"]
+        try:
+            expected_live_owner = (
+                pwd.getpwnam(owner_name).pw_uid,
+                grp.getgrnam(group_name).gr_gid,
+            )
+        except KeyError as exc:
+            raise InstallError(
+                f"cannot resolve known obsolete owner for {target_relative}"
+            ) from exc
+        if (before["uid"], before["gid"]) != expected_live_owner:
+            mismatch.append("owner")
+    if mismatch:
+        raise InstallError(
+            f"obsolete target is not the exact known managed preimage: "
+            f"{target_relative} ({', '.join(mismatch)} mismatch; "
+            f"sha256={before['sha256']}, mode={oct(before['mode'])}, "
+            f"uid={before['uid']}, gid={before['gid']})"
+        )
+    return {
+        "verified": True,
+        "accepted_sha256": before["sha256"],
+        "accepted_mode": oct(before["mode"]),
+        "accepted_uid": before["uid"],
+        "accepted_gid": before["gid"],
+        "live_owner_required": expected_live_owner is not None,
+    }
+
+
 def _overlay_bytes(
     root_fd: int,
     relative: str,
@@ -459,18 +636,22 @@ def _effective_list_directive(
     section: str,
     key: str,
     overlay: dict[str, bytes | None],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     values: list[str] = []
     sources: list[str] = []
+    directive_sources: list[str] = []
     for directory in unit_dirs:
         if _is_merged_usr_lib_alias(root_fd, directory):
             continue
         relative = f"{directory}/{unit_name}"
         data = _overlay_bytes(root_fd, relative, overlay)
         if data is not None:
-            for value in _assignments(data, section, key):
+            assignments = _assignments(data, section, key)
+            for value in assignments:
                 values = [] if value == "" else [*values, value]
             sources.append(relative)
+            if assignments:
+                directive_sources.append(relative)
             break
 
     stem, separator, suffix = unit_name.rpartition(".")
@@ -498,10 +679,13 @@ def _effective_list_directive(
         data = _overlay_bytes(root_fd, relative, overlay)
         if data is None:
             continue
-        for value in _assignments(data, section, key):
+        assignments = _assignments(data, section, key)
+        for value in assignments:
             values = [] if value == "" else [*values, value]
         sources.append(relative)
-    return values, sources
+        if assignments:
+            directive_sources.append(relative)
+    return values, sources, directive_sources
 
 
 def _verify_effective_composition(
@@ -509,7 +693,7 @@ def _verify_effective_composition(
     overlay: dict[str, bytes | None] | None = None,
 ) -> dict[str, Any]:
     effective_overlay = {} if overlay is None else overlay
-    exec_start, cpu_sources = _effective_list_directive(
+    exec_start, cpu_sources, cpu_directive_sources = _effective_list_directive(
         root_fd,
         unit_dirs=SYSTEM_UNIT_DIRS,
         unit_name="cpu-governor.service",
@@ -517,7 +701,7 @@ def _verify_effective_composition(
         key="ExecStart",
         overlay=effective_overlay,
     )
-    condition_user, fluid_sources = _effective_list_directive(
+    condition_user, fluid_sources, fluid_directive_sources = _effective_list_directive(
         root_fd,
         unit_dirs=USER_UNIT_DIRS,
         unit_name="fluidsynth.service",
@@ -529,19 +713,48 @@ def _verify_effective_composition(
         raise InstallError(
             "effective cpu-governor.service ExecStart is not the strict committed wrapper"
         )
-    if condition_user != ["!gdm"]:
+    unexpected_cpu_drop_ins = [
+        source
+        for source in cpu_directive_sources
+        if ".d/" in source
+        and source
+        != "etc/systemd/system/cpu-governor.service.d/"
+        "zz-heim-pc-strict-profile.conf"
+    ]
+    if unexpected_cpu_drop_ins:
         raise InstallError(
-            "effective fluidsynth.service ConditionUser must contain only !gdm"
+            "unmanaged cpu-governor.service ExecStart drop-in(s) are present: "
+            + ", ".join(unexpected_cpu_drop_ins)
+        )
+    if condition_user != [FLUIDSYNTH_USER]:
+        raise InstallError(
+            f"effective fluidsynth.service ConditionUser must contain only "
+            f"{FLUIDSYNTH_USER}"
+        )
+    unexpected_fluid_drop_ins = [
+        source
+        for source in fluid_directive_sources
+        if ".d/" in source
+        and source
+        != "etc/systemd/user/fluidsynth.service.d/"
+        "zz-heim-pc-interactive-user.conf"
+    ]
+    if unexpected_fluid_drop_ins:
+        raise InstallError(
+            "unmanaged fluidsynth.service ConditionUser drop-in(s) are present: "
+            + ", ".join(unexpected_fluid_drop_ins)
         )
     return {
         "cpu_governor": {
             "exec_start": exec_start,
             "sources": cpu_sources,
+            "directive_sources": cpu_directive_sources,
             "verified": True,
         },
         "fluidsynth": {
             "condition_user": condition_user,
             "sources": fluid_sources,
+            "directive_sources": fluid_directive_sources,
             "verified": True,
         },
     }
@@ -572,6 +785,11 @@ def _build_plan(
 
     for target_relative in REMOVALS:
         before = _snapshot(root_fd, target_relative)
+        managed_preimage = _validate_obsolete_preimage(
+            target_relative,
+            before,
+            target_root=target_root,
+        )
         backup_relative = (
             _backup_relative(target_relative, before["data"]) if before["exists"] else None
         )
@@ -606,6 +824,7 @@ def _build_plan(
                 "before": before,
                 "action": "planned_removal" if before["exists"] else "absent",
                 "sha256": before.get("sha256"),
+                "managed_preimage": managed_preimage,
                 "backup_relative": backup_relative,
                 "backup": (
                     _target_display(target_root, backup_relative)
@@ -697,6 +916,7 @@ def _public_entry(item: dict[str, Any], *, applied: bool) -> dict[str, Any]:
         "gid": item.get("gid"),
         "action": action,
         "sha256": item.get("sha256"),
+        "managed_preimage": item.get("managed_preimage"),
         "backup": item.get("backup"),
         "backup_metadata": item.get("backup_metadata"),
         "before": (
@@ -1353,7 +1573,10 @@ def _publish_receipt(
         )
         staged_name = None
         os.fsync(parent_fd)
-        final = _snapshot_at(parent_fd, name)
+        # Re-open through the pinned target root instead of trusting only the
+        # still-open parent descriptor. A parent rename/substitution during
+        # publication must become an incomplete receipt outcome.
+        final = _snapshot(root_fd, RECEIPT_RELATIVE)
         if (
             not final["exists"]
             or final["data"] != receipt_bytes
@@ -1466,6 +1689,8 @@ def _base_receipt(
     target_root: Path,
     entries: list[dict[str, Any]],
     composition: dict[str, Any],
+    source_object_ids: dict[str, str],
+    source_object_format: str,
     installed_at: str | None = None,
     target_readback: list[dict[str, Any]] | None = None,
     cleanup: dict[str, Any] | None = None,
@@ -1496,9 +1721,14 @@ def _base_receipt(
         "source_binding": {
             "kind": "git_commit_tree",
             "commit": head,
+            "object_format": source_object_format,
+            "blob_objects_reverified": True,
             "mutable_worktree_source_bytes_used": False,
             "files": {
-                item["source"]: item["source_sha256"]
+                item["source"]: {
+                    "git_object_id": source_object_ids[item["source"]],
+                    "sha256": item["source_sha256"],
+                }
                 for item in entries
                 if item.get("source") is not None
             },
@@ -1560,7 +1790,7 @@ def _base_receipt(
             ),
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
-            "restart GDM user manager or reboot before evaluating its FluidSynth condition",
+            "restart alex's user manager or reboot before evaluating the FluidSynth condition",
         ],
         "does_not_establish": [
             "systemd_activation",
@@ -1594,7 +1824,9 @@ def install(
                     raise InstallError("repository HEAD differs from --expected-head")
                 if dirty:
                     raise InstallError("repository must be clean for a commit-bound install")
-                source_data = _committed_sources(source_root, expected_head)
+                source_data, source_object_ids, source_object_format = (
+                    _committed_sources(source_root, expected_head)
+                )
                 residue_recovery = _recover_receipted_residue(
                     root_fd,
                     target_root=target_root,
@@ -1629,6 +1861,8 @@ def install(
                     target_root=target_root,
                     entries=entries,
                     composition=committed_composition,
+                    source_object_ids=source_object_ids,
+                    source_object_format=source_object_format,
                     installed_at=installed_at,
                     target_readback=target_readback,
                     cleanup=cleanup,
@@ -1646,7 +1880,10 @@ def install(
         head, dirty = repository_identity(source_root)
         if expected_head is not None and head != expected_head:
             raise InstallError("repository HEAD differs from --expected-head")
-        source_data = _committed_sources(source_root, head)
+        source_data, source_object_ids, source_object_format = _committed_sources(
+            source_root,
+            head,
+        )
         entries, _overlay, composition = _build_plan(
             root_fd=root_fd,
             source_data=source_data,
@@ -1662,6 +1899,8 @@ def install(
             target_root=target_root,
             entries=entries,
             composition=composition,
+            source_object_ids=source_object_ids,
+            source_object_format=source_object_format,
         )
     finally:
         try:

@@ -414,17 +414,11 @@ def analyze_mce_edac(
 
         matched_id: str | None = None
         if overlap_counts:
-            matched_id = min(
-                overlap_counts,
-                key=lambda evidence_id: (
-                    -overlap_counts[evidence_id],
-                    abs(
-                        evidence_by_id[evidence_id]["last_timestamp_us"]
-                        - occurrence["last_timestamp_us"]
-                    ),
-                    evidence_id,
-                ),
-            )
+            if len(overlap_counts) != 1:
+                raise DiagnosticError(
+                    "ambiguous MCE/EDAC occurrence overlap; state was not advanced"
+                )
+            matched_id = next(iter(overlap_counts))
         else:
             boundary_candidates: list[tuple[int, str]] = []
             for evidence_id, evidence in evidence_by_id.items():
@@ -443,7 +437,12 @@ def analyze_mce_edac(
                 if distance <= gap_us:
                     boundary_candidates.append((distance, evidence_id))
             if boundary_candidates:
-                matched_id = min(boundary_candidates)[1]
+                if len(boundary_candidates) != 1:
+                    raise DiagnosticError(
+                        "ambiguous MCE/EDAC boundary continuation; "
+                        "state was not advanced"
+                    )
+                matched_id = boundary_candidates[0][1]
 
         legacy_id = _legacy_occurrence_id(occurrence)
         if matched_id is None and legacy_id in legacy_seen:

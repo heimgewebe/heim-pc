@@ -36,7 +36,7 @@
     "constituent_evidence_limit": 2000
   },
   "deployment": {
-    "source_binding": "expected_git_commit_tree",
+    "source_binding": "expected_git_commit_tree_verified_blob_objects",
     "exclusive_lock": "/var/lib/heim-pc/host-health/install.lock",
     "receipt": "/var/lib/heim-pc/host-health/install-receipt.v3.json",
     "target_regular_file_owner": "root:root",
@@ -46,11 +46,20 @@
     "post_commit_cleanup": "bounded_best_effort_receipted_and_recoverable",
     "receipt_publication": "post_commit_atomic_replace_fsync_exact_readback",
     "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
+    "legacy_removal_policy": "exact_known_preimages_only",
+    "fluidsynth_condition_user": "alex",
+    "known_legacy_profile_script": {
+      "path": "/usr/local/sbin/heim-pc-set-performance-profile",
+      "sha256": "f9a2effc9cb815a632c80f2cb17c3089c0ff5ce0d694895fb3792d87ab3b2000",
+      "mode": "0755",
+      "owner": "nobody:nogroup"
+    },
     "legacy_removals": [
       "/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
       "/usr/local/sbin/heim-pc-set-performance-profile",
       "/etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
       "/etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
+      "/etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
       "/etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
       "/etc/systemd/journald.conf.d/99-heim-pc-retention.conf"
     ],

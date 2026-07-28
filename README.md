@@ -82,8 +82,10 @@ Hostkonfiguration an überprüfbare Grenzwerte und Firmware-Identitäten.
 `scripts/install_host_health_remediation.py` zeigt standardmäßig nur den Plan. Ein
 späterer, eigens autorisierter Lauf mit einem vollständigen
 `--apply --expected-head <commit>` liest alle Quelldaten ausschließlich aus dem
-erwarteten Git-Commitbaum. Nach der einmaligen HEAD- und Clean-Prüfung werden keine
-Quelldaten mehr aus veränderlichen Worktree-Pfaden gelesen. Der Apply-Lauf hält
+erwarteten Git-Commitbaum. Jeder gelesene Blob wird zusätzlich gegen seine exakte
+Git-Objekt-ID aus diesem Baum verifiziert. Nach der einmaligen HEAD- und
+Clean-Prüfung werden keine Quelldaten mehr aus veränderlichen Worktree-Pfaden
+gelesen. Der Apply-Lauf hält
 exklusiv `/var/lib/heim-pc/host-health/install.lock`, prüft alle Ziele und
 inhaltsadressierten Backups vorab, öffnet Zielkomponenten descriptor-relativ mit
 `O_NOFOLLOW`, staged und `fsync`-t Writes sowie Rollback-Abbilder und committet erst
@@ -122,14 +124,16 @@ Die installierbaren Teile haben folgende Grenzen:
 
 * Der spät sortierende systemweite User-Unit-Drop-in setzt die zuvor komponierte
   `ConditionUser`-Liste zuerst leer und danach ausschließlich auf
-  `ConditionUser=!gdm`. Die Migration sichert und entfernt sowohl das alte
-  `10-interactive-user.conf` mit `ConditionUser=alex` als auch den früheren
-  `50-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
-  relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `!gdm` sein;
-  spätere widersprechende Drop-ins blockieren den Apply-Lauf. Die globale
-  Aktivierung bleibt bestehen, jeder interaktive Benutzer bleibt zulässig, und nur
-  GDM wird übersprungen. Eine Laufzeitprüfung des GDM-Ergebnisses ist erst nach
-  Neustart seines User-Managers oder nach einem Reboot aussagekräftig.
+  `ConditionUser=alex`. Das bewahrt bewusst den kleinsten beobachteten
+  Hostvertrag: Die globale Distribution-Unit bleibt vorhanden, ausgeführt wird sie
+  aber nur für den primären interaktiven Benutzer `alex`; GDM und andere Benutzer
+  bleiben ausgeschlossen. Die Migration sichert und entfernt die bekannten alten
+  `10-interactive-user.conf`, `50-heim-pc-gdm-guard.conf` und
+  `zz-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
+  relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `alex` sein;
+  andere Drop-ins mit `ConditionUser` blockieren den Apply-Lauf, auch wenn sie
+  zufällig denselben Endwert erzeugen. Eine Laufzeitprüfung ist erst nach Neustart
+  des betroffenen User-Managers oder nach einem Reboot aussagekräftig.
 * `cpu-governor.service` nutzt einen Wrapper, der
   `system76-power profile performance` ausführt. Nur ein Fehler mit allen Merkmalen
   „SCSI host profiles“, fehlendes Power-Policy-Ziel und `ENOENT` wird als harmlos
@@ -141,7 +145,17 @@ Die installierbaren Teile haben folgende Grenzen:
   `/usr/local/sbin/heim-pc-set-performance-profile`. Ein spät sortierendes
   committed Drop-in leert zusätzlich alle früheren `ExecStart`-Werte und setzt
   exakt den strikten Wrapper. Die effektive Komposition muss vor und nach dem
-  Transaktionscommit genau diesen einen `ExecStart` ergeben.
+  Transaktionscommit genau diesen einen `ExecStart` ergeben; fremde Drop-ins mit
+  `ExecStart` blockieren auch bei zufällig gleichem Endwert.
+* Migrationen entfernen ausschließlich vollständig bekannte obsolete Preimages.
+  Inhalt und Modus müssen dem versionierten Vertrag entsprechen. Beim beobachteten
+  Legacy-Profilskript werden zusätzlich Eigentümer `nobody:nogroup`, Modus `0755`
+  und SHA-256
+  `f9a2effc9cb815a632c80f2cb17c3089c0ff5ce0d694895fb3792d87ab3b2000`
+  verlangt. Jede Abweichung blockiert vor dem Staging, statt eine möglicherweise
+  fremde Datei unter einem bekannten Pfad zu löschen. Akzeptierte Preimages werden
+  mit Inhalt, Modus und Eigentümer exakt gesichert und durch denselben
+  Transaktionsrollback geschützt.
 * `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
   aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
   Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
@@ -170,7 +184,9 @@ Die installierbaren Teile haben folgende Grenzen:
   werden. Andere Boots und echte Zeitabstände oberhalb dieses Grenzwerts bleiben
   getrennte Vorkommnisse, auch bei identischen Meldungen. Alte v1-Zustände werden
   beim nächsten Lauf übernommen und ohne erneute Zählung sichtbar identischer
-  Gruppen in v2-Evidenz überführt. Die gesamte persistierte
+  Gruppen in v2-Evidenz überführt. Passen mehrere persistierte Vorkommnisse zu
+  derselben abgeschnittenen Gruppe, wird der Zustand konservativ nicht
+  fortgeschrieben und der Lauf meldet die Mehrdeutigkeit. Die gesamte persistierte
   Konstituenten-Evidenz bleibt auf die maximale Journalabfrage begrenzt.
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
