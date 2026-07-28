@@ -122,6 +122,26 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _mkdir_with_durable_parents(path: Path, *, mode: int) -> None:
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        if cursor.is_symlink():
+            raise InstallError(f"directory path must not be a symlink: {cursor}")
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            raise InstallError(f"cannot find an existing parent for directory: {path}")
+        cursor = cursor.parent
+    if cursor.is_symlink() or not cursor.is_dir():
+        raise InstallError(f"existing directory ancestor is unsafe: {cursor}")
+
+    path.mkdir(parents=True, exist_ok=True, mode=mode)
+    for created in reversed(missing):
+        if created.is_symlink() or not created.is_dir():
+            raise InstallError(f"created directory is unsafe: {created}")
+        _fsync_directory(created.parent)
+
+
 def _active_fields(line: str) -> list[str]:
     active = line.split("#", 1)[0].strip()
     return active.split() if active else []
@@ -238,7 +258,7 @@ def apply_policy(
     changed = before != after
     backup: dict[str, Any] | None = None
     if apply and changed:
-        backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _mkdir_with_durable_parents(backup_root, mode=0o700)
         if backup_root.is_symlink() or not backup_root.is_dir():
             raise InstallError(f"backup root is unsafe: {backup_root}")
         before_sha = sha256(before)

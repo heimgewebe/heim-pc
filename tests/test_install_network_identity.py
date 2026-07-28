@@ -103,12 +103,14 @@ class InstallNetworkIdentityTests(unittest.TestCase):
             self.assertEqual(replay["action"], "unchanged")
             self.assertIsNone(replay["backup"])
 
-    def test_backup_directory_is_fsynced_before_target_replacement(self) -> None:
+    def test_backup_directory_chain_is_durable_before_target_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "hosts"
             target.write_text("127.0.0.1 localhost\n", encoding="utf-8")
-            backup_root = root / "backups"
+            level_one = root / "state"
+            level_two = level_one / "network-identity"
+            backup_root = level_two / "backups"
             events: list[tuple[str, Path]] = []
             original_atomic_install = installer.atomic_install
 
@@ -130,8 +132,16 @@ class InstallNetworkIdentityTests(unittest.TestCase):
                     apply=True,
                 )
 
-            self.assertEqual(events[0], ("fsync", backup_root))
-            self.assertEqual(events[1], ("install", target))
+            install_index = events.index(("install", target))
+            self.assertEqual(
+                events[:install_index],
+                [
+                    ("fsync", root),
+                    ("fsync", level_one),
+                    ("fsync", level_two),
+                    ("fsync", backup_root),
+                ],
+            )
 
     def test_plan_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
