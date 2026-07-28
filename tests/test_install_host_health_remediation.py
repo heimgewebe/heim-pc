@@ -16,6 +16,22 @@ installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
 
 
+def merged_journald_values(cat_config: str) -> dict[str, str]:
+    section: str | None = None
+    values: dict[str, str] = {}
+    for raw_line in cat_config.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if section == "Journal" and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
 class InstallHostHealthRemediationTests(unittest.TestCase):
     def test_plan_has_no_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -25,7 +41,18 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 target_root=target,
                 apply=False,
             )
-            self.assertTrue(all(item["action"] == "planned" for item in files))
+            install_results = [
+                item for item in files if item["operation"] == "install"
+            ]
+            removal_results = [
+                item for item in files if item["operation"] == "remove_obsolete"
+            ]
+            self.assertTrue(
+                all(item["action"] == "planned" for item in install_results)
+            )
+            self.assertTrue(
+                all(item["action"] == "absent" for item in removal_results)
+            )
             self.assertEqual(list(target.iterdir()), [])
 
     def test_apply_is_idempotent_and_preserves_modes(self) -> None:
@@ -41,8 +68,20 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 target_root=target,
                 apply=True,
             )
-            self.assertTrue(all(item["action"] == "installed" for item in first))
-            self.assertTrue(all(item["action"] == "unchanged" for item in second))
+            self.assertTrue(
+                all(
+                    item["action"] == "installed"
+                    for item in first
+                    if item["operation"] == "install"
+                )
+            )
+            self.assertTrue(
+                all(
+                    item["action"] == "unchanged"
+                    for item in second
+                    if item["operation"] == "install"
+                )
+            )
             executable = target / "usr/local/sbin/heim-pc-host-health"
             drop_in = (
                 target
@@ -54,7 +93,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertNotIn("alex", drop_in.read_text(encoding="utf-8"))
             journald = (
                 target
-                / "etc/systemd/journald.conf.d/50-heim-pc-retention.conf"
+                / "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf"
             )
             self.assertEqual(stat.S_IMODE(journald.stat().st_mode), 0o644)
             self.assertIn(
@@ -66,6 +105,101 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn(
                 "MaxRetentionSec=14day", journald.read_text(encoding="utf-8")
             )
+
+    def test_apply_removes_obsolete_journald_drop_ins_before_installing_zz(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            drop_in_directory = target / "etc/systemd/journald.conf.d"
+            drop_in_directory.mkdir(parents=True)
+            obsolete_contents = {
+                "50-heim-pc-retention.conf": b"[Journal]\nSystemMaxUse=512M\n",
+                "99-heim-pc-retention.conf": b"[Journal]\nSystemMaxUse=1G\n",
+            }
+            for name, contents in obsolete_contents.items():
+                (drop_in_directory / name).write_bytes(contents)
+
+            plan = installer.install_files(
+                source_root=ROOT,
+                target_root=target,
+                apply=False,
+            )
+            self.assertEqual(
+                [
+                    item["action"]
+                    for item in plan
+                    if item["operation"] == "remove_obsolete"
+                ],
+                ["planned_removal", "planned_removal"],
+            )
+            for name, contents in obsolete_contents.items():
+                self.assertEqual((drop_in_directory / name).read_bytes(), contents)
+
+            results = installer.install_files(
+                source_root=ROOT,
+                target_root=target,
+                apply=True,
+            )
+
+            zz = drop_in_directory / "zz-heim-pc-retention.conf"
+            self.assertTrue(zz.is_file())
+            removal_results = [
+                (index, item)
+                for index, item in enumerate(results)
+                if item["operation"] == "remove_obsolete"
+            ]
+            zz_index = next(
+                index
+                for index, item in enumerate(results)
+                if item["target"] == str(zz)
+            )
+            self.assertEqual(
+                [item["action"] for _index, item in removal_results],
+                ["removed", "removed"],
+            )
+            self.assertTrue(
+                all(index < zz_index for index, _item in removal_results)
+            )
+            for _index, item in removal_results:
+                obsolete = Path(item["target"])
+                self.assertFalse(obsolete.exists())
+                self.assertIsNotNone(item["backup"])
+                self.assertEqual(
+                    Path(item["backup"]).read_bytes(),
+                    obsolete_contents[obsolete.name],
+                )
+
+    def test_journald_drop_in_sorts_after_pop_and_wins_merged_cat_config(
+        self,
+    ) -> None:
+        journald_path = (
+            ROOT / "systemd/journald.conf.d/zz-heim-pc-retention.conf"
+        )
+        pop_name = "pop.conf"
+        self.assertEqual(
+            sorted([pop_name, journald_path.name]),
+            [pop_name, journald_path.name],
+        )
+        cat_config = "\n".join(
+            [
+                "# /usr/lib/systemd/journald.conf.d/pop.conf",
+                "[Journal]",
+                "SystemMaxUse=1000M",
+                "",
+                f"# /etc/systemd/journald.conf.d/{journald_path.name}",
+                journald_path.read_text(encoding="utf-8"),
+            ]
+        )
+        self.assertEqual(
+            merged_journald_values(cat_config),
+            {
+                "Storage": "persistent",
+                "SystemMaxUse": "2G",
+                "SystemKeepFree": "20G",
+                "MaxRetentionSec": "14day",
+            },
+        )
 
     def test_existing_cpu_unit_is_backed_up_before_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -116,7 +250,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             encoding="utf-8"
         )
         journald = (
-            ROOT / "systemd/journald.conf.d/50-heim-pc-retention.conf"
+            ROOT / "systemd/journald.conf.d/zz-heim-pc-retention.conf"
         ).read_text(encoding="utf-8")
         self.assertIn("ConditionUser=!gdm", fluid)
         self.assertNotIn("ConditionUser=!alex", fluid)

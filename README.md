@@ -100,7 +100,11 @@ Die installierbaren Teile haben folgende Grenzen:
 * `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
   aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
   Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
-  liefert dazu ein journald-Drop-in mit `Storage=persistent`,
+  liefert dazu `zz-heim-pc-retention.conf`; der Name sortiert hinter dem
+  Pop!_OS-Drop-in `pop.conf`, damit dessen `SystemMaxUse=1000M` die lokale
+  Retention nicht zurücksetzt. Beim Apply entfernt der Installer zuvor vorhandene
+  `50-heim-pc-retention.conf` und `99-heim-pc-retention.conf` mit Backup und
+  installiert anschließend das neue journald-Drop-in mit `Storage=persistent`,
   `SystemMaxUse=2G`, `SystemKeepFree=20G` und `MaxRetentionSec=14day`. Das zuvor
   vorgesehene 512-MiB-Limit lag unter dem beobachteten Live-Journal-Footprint von
   rund 1019 MiB, der nur drei Boots enthielt, und hätte deshalb das Ziel

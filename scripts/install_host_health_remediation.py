@@ -16,6 +16,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET_ROOT = Path("/")
+JOURNALD_DROP_IN_NAME = "zz-heim-pc-retention.conf"
+OBSOLETE_JOURNALD_DROP_INS = (
+    "50-heim-pc-retention.conf",
+    "99-heim-pc-retention.conf",
+)
 
 FILES = (
     ("config/host-health-remediation.v1.json", "etc/heim-pc/host-health-remediation.v1.json", 0o644),
@@ -33,8 +38,8 @@ FILES = (
         0o644,
     ),
     (
-        "systemd/journald.conf.d/50-heim-pc-retention.conf",
-        "etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
+        f"systemd/journald.conf.d/{JOURNALD_DROP_IN_NAME}",
+        f"etc/systemd/journald.conf.d/{JOURNALD_DROP_IN_NAME}",
         0o644,
     ),
     (
@@ -146,6 +151,51 @@ def _backup_path(backup_root: Path, target_relative: str, before: bytes) -> Path
     return backup_root / f"{safe_name}.{_sha256(before)}"
 
 
+def _backup_existing(
+    *,
+    backup_root: Path,
+    target_relative: str,
+    before: bytes,
+    target_root: Path,
+) -> str:
+    backup_target = _backup_path(backup_root, target_relative, before)
+    _assert_safe_path(backup_target, target_root=target_root, allow_absent=True)
+    backup_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _assert_safe_path(backup_target, target_root=target_root, allow_absent=True)
+    if backup_target.exists():
+        if backup_target.read_bytes() != before:
+            raise InstallError(f"backup collision: {backup_target}")
+    else:
+        _atomic_write(
+            backup_target,
+            before,
+            mode=0o600,
+            target_root=target_root,
+            expected_current=None,
+        )
+    return str(backup_target)
+
+
+def _remove_file(
+    path: Path,
+    *,
+    target_root: Path,
+    expected_current: bytes,
+) -> None:
+    _assert_safe_path(path, target_root=target_root, allow_absent=False)
+    current = path.read_bytes() if path.exists() else None
+    if current != expected_current:
+        raise InstallError(f"target preimage changed before removal: {path}")
+    path.unlink()
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    if path.exists() or path.is_symlink():
+        raise InstallError(f"obsolete target removal readback failed: {path}")
+
+
 def install_files(
     *,
     source_root: Path,
@@ -158,12 +208,50 @@ def install_files(
     if apply and target_root == DEFAULT_TARGET_ROOT and os.geteuid() != 0:
         raise InstallError("installing below / requires root")
     backup_root = target_root / "var/lib/heim-pc/host-health/install-backups"
-    results: list[dict[str, Any]] = []
-    for source_relative, target_relative, mode in FILES:
+    source_data: dict[str, bytes] = {}
+    for source_relative, _target_relative, _mode in FILES:
         source = source_root / source_relative
         if source.is_symlink() or not source.is_file():
             raise InstallError(f"source must be a regular file: {source}")
-        data = source.read_bytes()
+        source_data[source_relative] = source.read_bytes()
+
+    results: list[dict[str, Any]] = []
+    for obsolete_name in OBSOLETE_JOURNALD_DROP_INS:
+        target_relative = f"etc/systemd/journald.conf.d/{obsolete_name}"
+        target = _target_path(target_root, target_relative)
+        _assert_safe_path(target, target_root=target_root, allow_absent=True)
+        before = target.read_bytes() if target.exists() else None
+        backup: str | None = None
+        if apply and before is not None:
+            backup = _backup_existing(
+                backup_root=backup_root,
+                target_relative=target_relative,
+                before=before,
+                target_root=target_root,
+            )
+            _remove_file(
+                target,
+                target_root=target_root,
+                expected_current=before,
+            )
+        results.append(
+            {
+                "operation": "remove_obsolete",
+                "source": None,
+                "target": str(target),
+                "mode": None,
+                "action": (
+                    "absent"
+                    if before is None
+                    else ("removed" if apply else "planned_removal")
+                ),
+                "sha256": _sha256(before) if before is not None else None,
+                "backup": backup,
+            }
+        )
+
+    for source_relative, target_relative, mode in FILES:
+        data = source_data[source_relative]
         target = _target_path(target_root, target_relative)
         _assert_safe_path(target, target_root=target_root, allow_absent=True)
         before = target.read_bytes() if target.exists() else None
@@ -173,26 +261,12 @@ def install_files(
         backup: str | None = None
         if apply and changed:
             if before is not None and before != data:
-                backup_target = _backup_path(backup_root, target_relative, before)
-                _assert_safe_path(
-                    backup_target, target_root=target_root, allow_absent=True
+                backup = _backup_existing(
+                    backup_root=backup_root,
+                    target_relative=target_relative,
+                    before=before,
+                    target_root=target_root,
                 )
-                backup_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                _assert_safe_path(
-                    backup_target, target_root=target_root, allow_absent=True
-                )
-                if backup_target.exists():
-                    if backup_target.read_bytes() != before:
-                        raise InstallError(f"backup collision: {backup_target}")
-                else:
-                    _atomic_write(
-                        backup_target,
-                        before,
-                        mode=0o600,
-                        target_root=target_root,
-                        expected_current=None,
-                    )
-                backup = str(backup_target)
             _atomic_write(
                 target,
                 data,
@@ -202,6 +276,7 @@ def install_files(
             )
         results.append(
             {
+                "operation": "install",
                 "source": source_relative,
                 "target": str(target),
                 "mode": oct(mode),
@@ -242,6 +317,10 @@ def install(
         "activation_required": [
             "systemctl daemon-reload",
             "systemctl restart systemd-journald",
+            (
+                "systemd-analyze cat-config systemd/journald.conf; verify the final "
+                "SystemMaxUse=2G, SystemKeepFree=20G and MaxRetentionSec=14day"
+            ),
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
             "restart GDM user manager or reboot before evaluating its FluidSynth condition",
