@@ -58,7 +58,10 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             )
             self.assertEqual(stat.S_IMODE(journald.stat().st_mode), 0o644)
             self.assertIn(
-                "SystemMaxUse=512M", journald.read_text(encoding="utf-8")
+                "SystemMaxUse=2G", journald.read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "SystemKeepFree=20G", journald.read_text(encoding="utf-8")
             )
             self.assertIn(
                 "MaxRetentionSec=14day", journald.read_text(encoding="utf-8")
@@ -122,7 +125,8 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         self.assertIn("MemoryMax=64M", monitor)
         self.assertIn("ensure-performance-profile", cpu)
         self.assertIn("Storage=persistent", journald)
-        self.assertIn("SystemMaxUse=512M", journald)
+        self.assertIn("SystemMaxUse=2G", journald)
+        self.assertIn("SystemKeepFree=20G", journald)
         self.assertIn("MaxRetentionSec=14day", journald)
 
 

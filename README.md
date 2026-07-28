@@ -101,9 +101,15 @@ Die installierbaren Teile haben folgende Grenzen:
   aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
   Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
   liefert dazu ein journald-Drop-in mit `Storage=persistent`,
-  `SystemMaxUse=512M` und `MaxRetentionSec=14day`: Mehrere Boots können damit
-  erhalten bleiben, während sowohl Platz als auch Alter begrenzt sind. Der
-  Monitor erzeugt nur einen deduplizierten, knappen Rekurrenzbericht unter
+  `SystemMaxUse=2G`, `SystemKeepFree=20G` und `MaxRetentionSec=14day`. Das zuvor
+  vorgesehene 512-MiB-Limit lag unter dem beobachteten Live-Journal-Footprint von
+  rund 1019 MiB, der nur drei Boots enthielt, und hätte deshalb das Ziel
+  brauchbarer Boot-übergreifender Evidenz konterkariert. 2 GiB entsprechen auf
+  dem 2-TB-Systemdatenträger ungefähr 0,1 Prozent und bleiben eine explizite
+  Obergrenze; die Keep-free-Schranke schützt bei weniger als 20 GiB freiem Platz
+  zusätzlich vor Datenträgerdruck. Das 14-Tage-Alterslimit begrenzt die Evidenz
+  außerdem zeitlich. Der Monitor erzeugt nur einen deduplizierten, knappen
+  Rekurrenzbericht unter
   `/var/lib/heim-pc/host-health/mce-edac-report.v1.json`. Er führt keinen
   Belastungstest durch und diagnostiziert keine Hardwareursache automatisch.
   Die ID-Retention deckt die vollständige maximale Journalabfrage ab, damit
