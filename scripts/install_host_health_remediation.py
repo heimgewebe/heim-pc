@@ -78,6 +78,7 @@ REMOVALS = (
 KNOWN_LEGACY_PROFILE_SCRIPT = b"""#!/usr/bin/python3
 import subprocess
 import sys
+
 setter = subprocess.run(
     ["/usr/bin/system76-power", "profile", "performance"],
     text=True,
@@ -98,12 +99,11 @@ if probe.returncode == 0 and probe.stdout.strip() == "Power Profile: Performance
             file=sys.stderr,
         )
     raise SystemExit(0)
+
 for label, result in (("setter", setter), ("probe", probe)):
     detail = " ".join((result.stderr or result.stdout).split())
     print(f"{label} rc={result.returncode}: {detail}", file=sys.stderr)
 raise SystemExit(setter.returncode or probe.returncode or 1)
-
-
 """
 KNOWN_JOURNALD_512M = b"""# Persist enough bounded journal history for cross-boot host-health diagnosis.
 [Journal]
@@ -137,7 +137,7 @@ KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
     "usr/local/sbin/heim-pc-set-performance-profile": {
         "contents": (KNOWN_LEGACY_PROFILE_SCRIPT,),
         "mode": 0o755,
-        "live_owner": ("nobody", "nogroup"),
+        "live_owner": ("root", "root"),
     },
     "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf": {
         "contents": (b"[Unit]\nConditionUser=alex\n",),
@@ -319,7 +319,7 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "path": "/usr/local/sbin/heim-pc-set-performance-profile",
         "sha256": _sha256(KNOWN_LEGACY_PROFILE_SCRIPT),
         "mode": "0755",
-        "owner": "nobody:nogroup",
+        "owner": "root:root",
     }:
         raise InstallError("committed legacy script identity differs from installer")
     if (

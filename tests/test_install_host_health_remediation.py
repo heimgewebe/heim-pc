@@ -436,21 +436,21 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 (target / "usr/local/libexec/heim-pc/ensure-performance-profile").exists()
             )
 
-    def test_live_shaped_nobody_legacy_script_identity_is_exact(self) -> None:
-        nobody_uid = installer.pwd.getpwnam("nobody").pw_uid
-        nogroup_gid = installer.grp.getgrnam("nogroup").gr_gid
+    def test_live_shaped_root_legacy_script_identity_is_exact(self) -> None:
+        root_uid = installer.pwd.getpwnam("root").pw_uid
+        root_gid = installer.grp.getgrnam("root").gr_gid
         self.assertEqual(len(installer.KNOWN_LEGACY_PROFILE_SCRIPT), 958)
         self.assertEqual(
             installer._sha256(installer.KNOWN_LEGACY_PROFILE_SCRIPT),
-            "f9a2effc9cb815a632c80f2cb17c3089c0ff5ce0d694895fb3792d87ab3b2000",
+            "d23c8794153b45e402b979727bf6d544dd2fbc889946062a35a69edbbb5ed6cd",
         )
         known = {
             "exists": True,
             "data": installer.KNOWN_LEGACY_PROFILE_SCRIPT,
             "sha256": installer._sha256(installer.KNOWN_LEGACY_PROFILE_SCRIPT),
             "mode": 0o755,
-            "uid": nobody_uid,
-            "gid": nogroup_gid,
+            "uid": root_uid,
+            "gid": root_gid,
         }
         identity = installer._validate_obsolete_preimage(
             "usr/local/sbin/heim-pc-set-performance-profile",
@@ -460,7 +460,11 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         self.assertTrue(identity["verified"])
         self.assertTrue(identity["live_owner_required"])
 
-        wrong_owner = {**known, "uid": 0, "gid": 0}
+        wrong_owner = {
+            **known,
+            "uid": installer.pwd.getpwnam("nobody").pw_uid,
+            "gid": installer.grp.getgrnam("nogroup").gr_gid,
+        }
         with self.assertRaisesRegex(installer.InstallError, "owner mismatch"):
             installer._validate_obsolete_preimage(
                 "usr/local/sbin/heim-pc-set-performance-profile",

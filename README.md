@@ -149,9 +149,9 @@ Die installierbaren Teile haben folgende Grenzen:
   `ExecStart` blockieren auch bei zufällig gleichem Endwert.
 * Migrationen entfernen ausschließlich vollständig bekannte obsolete Preimages.
   Inhalt und Modus müssen dem versionierten Vertrag entsprechen. Beim beobachteten
-  Legacy-Profilskript werden zusätzlich Eigentümer `nobody:nogroup`, Modus `0755`
+  Legacy-Profilskript werden zusätzlich Eigentümer `root:root`, Modus `0755`
   und SHA-256
-  `f9a2effc9cb815a632c80f2cb17c3089c0ff5ce0d694895fb3792d87ab3b2000`
+  `d23c8794153b45e402b979727bf6d544dd2fbc889946062a35a69edbbb5ed6cd`
   verlangt. Jede Abweichung blockiert vor dem Staging, statt eine möglicherweise
   fremde Datei unter einem bekannten Pfad zu löschen. Akzeptierte Preimages werden
   mit Inhalt, Modus und Eigentümer exakt gesichert und durch denselben
