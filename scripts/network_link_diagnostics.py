@@ -186,6 +186,7 @@ def classify(
         likely_fault_domain = None
     elif (
         "negotiated_speed_below_policy" in issues
+        and interface == expected_interface
         and autoneg == "on"
         and isinstance(advertised, int)
         and advertised >= minimum_mbps

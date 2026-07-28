@@ -114,6 +114,14 @@ def _assert_safe_regular(path: Path, *, allow_absent: bool) -> None:
         raise InstallError(f"path must be a regular file: {path}")
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _active_fields(line: str) -> list[str]:
     active = line.split("#", 1)[0].strip()
     return active.split() if active else []
@@ -184,11 +192,7 @@ def atomic_install(
             if path.read_bytes() != expected_current:
                 raise InstallError(f"target preimage changed before replacement: {path}")
         os.replace(temporary, path)
-        directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_directory(parent)
     finally:
         temporary.unlink(missing_ok=True)
     _assert_safe_regular(path, allow_absent=False)
@@ -255,6 +259,7 @@ def apply_policy(
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+        _fsync_directory(backup_root)
         backup = {"path": str(backup_path), "sha256": before_sha}
         atomic_install(target, after, mode=0o644, expected_current=before)
     readback = target.read_bytes() if apply else after

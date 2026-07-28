@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -101,6 +102,36 @@ class InstallNetworkIdentityTests(unittest.TestCase):
             )
             self.assertEqual(replay["action"], "unchanged")
             self.assertIsNone(replay["backup"])
+
+    def test_backup_directory_is_fsynced_before_target_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "hosts"
+            target.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+            backup_root = root / "backups"
+            events: list[tuple[str, Path]] = []
+            original_atomic_install = installer.atomic_install
+
+            def record_fsync(path: Path) -> None:
+                events.append(("fsync", path))
+
+            def record_atomic_install(path: Path, data: bytes, **kwargs: object) -> None:
+                events.append(("install", path))
+                original_atomic_install(path, data, **kwargs)
+
+            with (
+                mock.patch.object(installer, "_fsync_directory", side_effect=record_fsync),
+                mock.patch.object(installer, "atomic_install", side_effect=record_atomic_install),
+            ):
+                installer.apply_policy(
+                    target=target,
+                    backup_root=backup_root,
+                    policy_data=self.policy_data,
+                    apply=True,
+                )
+
+            self.assertEqual(events[0], ("fsync", backup_root))
+            self.assertEqual(events[1], ("install", target))
 
     def test_plan_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

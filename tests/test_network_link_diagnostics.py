@@ -70,6 +70,18 @@ enp6s0 00000000 00000000 0001 0 0 100 00000000 0 0 0
             "physical_medium_or_link_partner",
         )
 
+    def test_unexpected_interface_keeps_fault_local_or_unresolved(self) -> None:
+        evidence = diagnostics.parse_ethtool(ETHTOOL_100)
+        assessment = diagnostics.classify(
+            interface="enp7s0",
+            expected_interface="enp6s0",
+            minimum_mbps=1000,
+            evidence=evidence,
+        )
+        self.assertIn("unexpected_default_interface", assessment["issues"])
+        self.assertIn("negotiated_speed_below_policy", assessment["issues"])
+        self.assertEqual(assessment["likely_fault_domain"], "local_configuration_or_unresolved")
+
     def test_healthy_link_passes_without_fault_domain(self) -> None:
         evidence = diagnostics.parse_ethtool(ETHTOOL_100.replace("100Mb/s", "2500Mb/s"))
         assessment = diagnostics.classify(
