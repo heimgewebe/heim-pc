@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc_host_health_log_remediation",
+  "performance_profile": {
+    "set_command": [
+      "/usr/bin/system76-power",
+      "profile",
+      "performance"
+    ],
+    "query_command": [
+      "/usr/bin/system76-power",
+      "profile"
+    ],
+    "expected_query_line": "Power Profile: Performance",
+    "allowed_missing_scsi_failure": {
+      "required_all": [
+        "failed to set scsi host profiles",
+        "no such file or directory"
+      ],
+      "required_any": [
+        "link_power_management_policy",
+        "link time power management policy"
+      ]
+    },
+    "command_timeout_seconds": 20
+  },
+  "mce_edac": {
+    "lookback_hours": 24,
+    "max_journal_entries": 2000,
+    "occurrence_gap_seconds": 5,
+    "retained_occurrence_ids": 2000,
+    "sample_message_limit": 5,
+    "sample_message_bytes": 240,
+    "state_schema_version": 2,
+    "deduplication": "bounded_constituent_overlap_and_boundary_span",
+    "constituent_evidence_limit": 2000
+  },
+  "deployment": {
+    "source_binding": "expected_git_commit_tree_verified_blob_objects",
+    "exclusive_lock": "/var/lib/heim-pc/host-health/install.lock",
+    "receipt": "/var/lib/heim-pc/host-health/install-receipt.v3.json",
+    "target_regular_file_owner": "root:root",
+    "target_operations": "descriptor_relative_nofollow",
+    "transaction": "preflight_stage_fsync_commit_verify_commit_point",
+    "commit_point": "all_target_operations_fsynced_exactly_read_back_and_effective_systemd_composition_verified",
+    "post_commit_cleanup": "bounded_best_effort_receipted_and_recoverable",
+    "receipt_publication": "post_commit_atomic_replace_fsync_exact_readback",
+    "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
+    "legacy_removal_policy": "exact_known_preimages_only",
+    "fluidsynth_condition_user": "alex",
+    "known_legacy_profile_script": {
+      "path": "/usr/local/sbin/heim-pc-set-performance-profile",
+      "sha256": "d23c8794153b45e402b979727bf6d544dd2fbc889946062a35a69edbbb5ed6cd",
+      "mode": "0755",
+      "owner": "root:root"
+    },
+    "legacy_removals": [
+      "/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
+      "/usr/local/sbin/heim-pc-set-performance-profile",
+      "/etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
+      "/etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
+      "/etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
+      "/etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
+      "/etc/systemd/journald.conf.d/99-heim-pc-retention.conf"
+    ],
+    "activation_performed": false
+  },
+  "bios": {
+    "board_name": "ROG STRIX B550-F GAMING",
+    "observed_source_version": "3202",
+    "targets": {
+      "stable": {
+        "version": "3636",
+        "package_sha256": "BCB430187AD366238908C6EC6E7715C9EB056E77A620333CCBCCEDA42FB25082",
+        "package_members": [
+          "ROG-STRIX-B550-F-GAMING-ASUS-3636.CAP",
+          "BIOSRenamer.exe"
+        ],
+        "cap_member": "ROG-STRIX-B550-F-GAMING-ASUS-3636.CAP",
+        "cap_size_bytes": 33558528
+      },
+      "beta": {
+        "version": "3641",
+        "package_sha256": "FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B",
+        "package_members": [
+          "ROG-STRIX-B550-F-GAMING-ASUS-3641.CAP",
+          "BIOSRenamer.exe"
+        ],
+        "cap_member": "ROG-STRIX-B550-F-GAMING-ASUS-3641.CAP",
+        "cap_size_bytes": 33558528
+      }
+    }
+  }
+}

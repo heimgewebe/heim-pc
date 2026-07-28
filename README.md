@@ -75,6 +75,187 @@ Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 6. Klassifikation als Einzelrepo-, systemweiter, Host-, Task- oder Historienfall;
 7. gezieltes Lesen der referenzierten Primärquellen und abschließender zielbezogener Live-Read vor Mutation.
 
+## Host-Health- und Log-Remediation
+
+`config/host-health-remediation.v1.json` bindet die schmale persistente
+Hostkonfiguration an überprüfbare Grenzwerte und Firmware-Identitäten.
+`scripts/install_host_health_remediation.py` zeigt standardmäßig nur den Plan. Ein
+späterer, eigens autorisierter Lauf mit einem vollständigen
+`--apply --expected-head <commit>` liest alle Quelldaten ausschließlich aus dem
+erwarteten Git-Commitbaum. Jeder gelesene Blob wird zusätzlich gegen seine exakte
+Git-Objekt-ID aus diesem Baum verifiziert. Nach der einmaligen HEAD- und
+Clean-Prüfung werden keine Quelldaten mehr aus veränderlichen Worktree-Pfaden
+gelesen. Der Apply-Lauf hält
+exklusiv `/var/lib/heim-pc/host-health/install.lock`, prüft alle Ziele und
+inhaltsadressierten Backups vorab, öffnet Zielkomponenten descriptor-relativ mit
+`O_NOFOLLOW`, staged und `fsync`-t Writes sowie Rollback-Abbilder und committet erst
+danach. Der explizite Commit-Punkt ist erst erreicht, wenn alle Zieloperationen
+`fsync`-t, exakt zurückgelesen und die effektive systemd-Komposition verifiziert
+sind. Jeder Fehler davor löst den fail-closed Rückbau aller bereits ausgeführten
+Zieloperationen aus; Rückbaufehler und verbleibende Recovery-Abbilder werden exakt
+benannt.
+
+Nach dem Commit-Punkt werden nicht mehr benötigte Staging- und Rollbackdateien
+begrenzt und best-effort entfernt. Ein Cleanup-Fehler rollt den bereits
+verifizierten Zielzustand nicht zurück und wird niemals als fehlgeschlagene
+Zieltransaktion ausgegeben. Der Beleg hält stattdessen
+`transaction.cleanup_complete=false`, die exakten Restpfade und Warnungen fest.
+Ein späterer, erneut commitgebundener und gesperrter Apply-Lauf entfernt nur diese
+zuvor receiptierten Restpfade idempotent, bevor er neue Zieloperationen beginnt.
+
+Der v3-Beleg wird erst nach dem Commit-Punkt atomar publiziert, `fsync`-t und exakt
+zurückgelesen. Scheitert seine Publikation, bleibt der Zielzustand ausdrücklich als
+`apply=true`, `transaction.committed=true` und verifiziert ausgewiesen; der
+CLI-Lauf endet dann mit einem eigenen Nichtnullstatus für die unvollständige
+Belegpublikation, nicht mit einer behaupteten Transaktionsfehlermeldung. Der
+verifizierte Beleg liegt mit Modus `0600` unter
+`/var/lib/heim-pc/host-health/install-receipt.v3.json`; alle installierten regulären
+Dateien sind `root:root` und haben exakt die im Vertrag angegebenen Modi.
+
+Der Planlauf ist commitgebunden, gültig und vollständig read-only. Auch beim Plan
+für `/` öffnet oder erzeugt er weder den privilegierten Lock noch den Receipt zum
+Schreiben und traversiert `/var/lib/heim-pc` nicht für Apply-only
+Backupmetadaten. Solche Metadaten werden sichtbar als nicht verfügbar markiert.
+Der Planlauf legt weder Lock noch Verzeichnisse, Backups, Stagingdateien oder Beleg an.
+Keine Unit wird aktiviert, gestartet, neu geladen oder neu gestartet. Dieser PR
+selbst deployt nichts und ändert weder `/etc` noch Root-Zustand.
+
+Die installierbaren Teile haben folgende Grenzen:
+
+* Der spät sortierende systemweite User-Unit-Drop-in setzt die zuvor komponierte
+  `ConditionUser`-Liste zuerst leer und danach ausschließlich auf
+  `ConditionUser=alex`. Das bewahrt bewusst den kleinsten beobachteten
+  Hostvertrag: Die globale Distribution-Unit bleibt vorhanden, ausgeführt wird sie
+  aber nur für den primären interaktiven Benutzer `alex`; GDM und andere Benutzer
+  bleiben ausgeschlossen. Die Migration sichert und entfernt die bekannten alten
+  `10-interactive-user.conf`, `50-heim-pc-gdm-guard.conf` und
+  `zz-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
+  relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `alex` sein;
+  andere Drop-ins mit `ConditionUser` blockieren den Apply-Lauf, auch wenn sie
+  zufällig denselben Endwert erzeugen. Eine Laufzeitprüfung ist erst nach Neustart
+  des betroffenen User-Managers oder nach einem Reboot aussagekräftig.
+* `cpu-governor.service` nutzt einen Wrapper, der
+  `system76-power profile performance` ausführt. Nur ein Fehler mit allen Merkmalen
+  „SCSI host profiles“, fehlendes Power-Policy-Ziel und `ENOENT` wird als harmlos
+  eingeordnet. Auch dann muss die unabhängige Abschlussabfrage exakt
+  `Power Profile: Performance` melden; andere Fehler bleiben Fehler. Die Migration
+  sichert und entfernt
+  `/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf` sowie das
+  unsichere Legacy-Skript
+  `/usr/local/sbin/heim-pc-set-performance-profile`. Ein spät sortierendes
+  committed Drop-in leert zusätzlich alle früheren `ExecStart`-Werte und setzt
+  exakt den strikten Wrapper. Die effektive Komposition muss vor und nach dem
+  Transaktionscommit genau diesen einen `ExecStart` ergeben; fremde Drop-ins mit
+  `ExecStart` blockieren auch bei zufällig gleichem Endwert.
+* Migrationen entfernen ausschließlich vollständig bekannte obsolete Preimages.
+  Inhalt und Modus müssen dem versionierten Vertrag entsprechen. Beim beobachteten
+  Legacy-Profilskript werden zusätzlich Eigentümer `root:root`, Modus `0755`
+  und SHA-256
+  `d23c8794153b45e402b979727bf6d544dd2fbc889946062a35a69edbbb5ed6cd`
+  verlangt. Jede Abweichung blockiert vor dem Staging, statt eine möglicherweise
+  fremde Datei unter einem bekannten Pfad zu löschen. Akzeptierte Preimages werden
+  mit Inhalt, Modus und Eigentümer exakt gesichert und durch denselben
+  Transaktionsrollback geschützt.
+* `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
+  aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
+  Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
+  liefert dazu `zz-heim-pc-retention.conf`; der Name sortiert hinter dem
+  Pop!_OS-Drop-in `pop.conf`, damit dessen `SystemMaxUse=1000M` die lokale
+  Retention nicht zurücksetzt. Beim Apply entfernt der Installer zuvor vorhandene
+  `50-heim-pc-retention.conf` und `99-heim-pc-retention.conf` mit Backup und
+  installiert anschließend das neue journald-Drop-in mit `Storage=persistent`,
+  `SystemMaxUse=2G`, `SystemKeepFree=20G` und `MaxRetentionSec=14day`. Das zuvor
+  vorgesehene 512-MiB-Limit lag unter dem beobachteten Live-Journal-Footprint von
+  rund 1019 MiB, der nur drei Boots enthielt, und hätte deshalb das Ziel
+  brauchbarer Boot-übergreifender Evidenz konterkariert. 2 GiB entsprechen auf
+  dem 2-TB-Systemdatenträger ungefähr 0,1 Prozent und bleiben eine explizite
+  Obergrenze; die Keep-free-Schranke schützt bei weniger als 20 GiB freiem Platz
+  zusätzlich vor Datenträgerdruck. Das 14-Tage-Alterslimit begrenzt die Evidenz
+  außerdem zeitlich. Der Monitor erzeugt nur einen deduplizierten, knappen
+  Rekurrenzbericht unter
+  `/var/lib/heim-pc/host-health/mce-edac-report.v1.json`. Er führt keinen
+  Belastungstest durch und diagnostiziert keine Hardwareursache automatisch.
+  Der Zustandsvertrag v2 persistiert begrenzte Journal-Konstituenten-IDs sowie
+  Boot-, Anfangs- und Endzeit-Evidenz je Vorkommnis. Überlappende gleitende Fenster
+  verwenden dadurch dieselbe kanonische Vorkommnis-ID weiter, auch wenn die erste
+  oder letzte Zeile einer Ereignisgruppe an der 2.000-Zeilen-Grenze fehlt. Eine
+  anschließende, vollständig abgeschnittene Fortsetzung kann innerhalb des
+  Fünf-Sekunden-Gruppierungsabstands über die persistierte Randzeit zugeordnet
+  werden. Andere Boots und echte Zeitabstände oberhalb dieses Grenzwerts bleiben
+  getrennte Vorkommnisse, auch bei identischen Meldungen. Alte v1-Zustände werden
+  beim nächsten Lauf übernommen und ohne erneute Zählung sichtbar identischer
+  Gruppen in v2-Evidenz überführt. Passen mehrere persistierte Vorkommnisse zu
+  derselben abgeschnittenen Gruppe, wird der Zustand konservativ nicht
+  fortgeschrieben und der Lauf meldet die Mehrdeutigkeit. Die gesamte persistierte
+  Konstituenten-Evidenz bleibt auf die maximale Journalabfrage begrenzt.
+* `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
+  `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
+  deaktivierte oder anderweitig verborgene Virtualisierung. Ist `svm` vorhanden,
+  aber `kvm_amd`, das generische `kvm`-Modul oder `/dev/kvm` fehlt, wird dies
+  stattdessen als Kernel-/Modul-/Device-Problem berichtet. Das Werkzeug ändert
+  keine BIOS-Einstellung.
+
+### Offline-sicherer FAT-Check
+
+Die laufende EFI- oder Recovery-Partition darf nicht repariert werden. Der Operator
+bootet dafür ein separates Recovery-/Live-System, löst das exakte Blockgerät über
+`lsblk` und `findmnt` auf und stellt sicher, dass es nicht gemountet ist. Das
+Werkzeug prüft diese Bedingung direkt vor `fsck.fat` zweimal, unmountet nie
+automatisch und verweigert andere Dateisystemtypen:
+
+```bash
+heim-pc-host-health fat /dev/<exakte-fat-partition>
+heim-pc-host-health fat /dev/<exakte-fat-partition> --repair --confirm-offline-repair
+```
+
+Der erste Aufruf verwendet ausschließlich `fsck.fat -n`: Returncode 0 bedeutet
+sauber, Returncode 1 meldet gefundene Inkonsistenzen und ist kein Erfolg,
+Returncodes ab 2 bleiben Fehler. Der zweite verwendet `fsck.fat -a` nur nach der
+expliziten Offline-Bestätigung. Liefert der Reparaturpass 0 oder 1, folgt zwingend
+ein zweiter, read-only `fsck.fat -n`-Pass; nur dessen Returncode 0 gilt als
+verifizierter Erfolg. Der JSON-Bericht bewahrt beide Returncodes sowie pro Pass
+auf 4.096 Byte je stdout/stderr begrenzte Ausgabe. Ein gleichzeitig durch einen
+anderen privilegierten Prozess ausgeführter Mount kann nicht rennfrei
+ausgeschlossen werden; deshalb bleibt das separate Recovery-System Teil der
+Sicherheitsgrenze. Eine online unter `/boot/efi` eingehängte Partition ist
+ausdrücklich kein zulässiges Reparaturziel.
+
+### BIOS-Vorbereitung ohne Flash
+
+Der Verifier akzeptiert ausschließlich das Board `ROG STRIX B550-F GAMING` und
+bindet die Vorbereitung an die beobachtete Ausgangsversion `3202`. Der
+Standardkanal ist das stabile Ziel `3636` mit SHA-256
+`BCB430187AD366238908C6EC6E7715C9EB056E77A620333CCBCCEDA42FB25082`.
+Das Beta-Ziel `3641` muss ausdrücklich gewählt werden und hat SHA-256
+`FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B`.
+
+```bash
+heim-pc-host-health bios --target stable --package /pfad/zum/ASUS-3636.zip
+heim-pc-host-health bios --target beta --package /pfad/zum/ASUS-3641.zip
+```
+
+Die von ASUS veröffentlichten SHA-256-Werte binden die vollständigen ZIP-Pakete,
+nicht die darin enthaltenen CAP-Dateien. Das Werkzeug liest Board und laufende
+BIOS-Version, verlangt das lokale ZIP-Paket und prüft zuerst dessen Paketdigest.
+Danach inspiziert es das Archiv ohne Extraktion: Für das gewählte Ziel müssen
+exakt die erwartete versionsgebundene CAP-Datei und `BIOSRenamer.exe` enthalten
+sein. Traversal-Namen, Symlinks, Duplikate, verschlüsselte oder unerwartete
+Mitglieder werden abgelehnt. Der CAP-SHA-256 wird beim Lesen aus dem verifizierten
+Paket lokal abgeleitet und als solcher berichtet; er ist kein separat von ASUS
+veröffentlichter Digest. Das Werkzeug lädt nichts herunter, extrahiert nichts,
+schreibt keine EFI-Variable und flasht nicht. Ein Paket-Hash-Treffer belegt nur
+die Bindung an den festgelegten Digest, nicht den Erfolg oder die Freigabe eines
+Firmware-Updates.
+
+Firmware-Flash und SVM-Aktivierung bleiben absichtlich Reboot-/UEFI-Operationen:
+Die Firmware muss das Board außerhalb des laufenden Betriebssystems neu
+initialisieren, und das CPU-Flag `svm` wird erst beim nächsten Boot exponiert.
+Ein laufender Kernel kann eine im UEFI deaktivierte SVM-Funktion weder verlässlich
+noch portabel einschalten. Automatisches Flashen oder ein behaupteter
+„BIOS-Fix“ aus dem Betriebssystem würde deshalb die Recovery-, Stromversorgungs-
+und physische Bestätigungsgrenze umgehen und ist nicht Bestandteil dieser
+Remediation.
+
 ## Direkter Systemkatalog-Pointer
 
 Die systemweite stabile Semantik liegt nicht in diesem Repository, sondern im Systemkatalog:
