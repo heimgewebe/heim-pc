@@ -761,6 +761,9 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             legacy.parent.mkdir(parents=True)
             legacy_data = b"legacy\n"
             legacy.write_bytes(legacy_data)
+            (target / "usr/lib/systemd/system").mkdir(parents=True)
+            (target / "usr/lib/systemd/user").mkdir(parents=True)
+            (target / "lib").symlink_to("usr/lib", target_is_directory=True)
             privileged = target / "var/lib/heim-pc"
             privileged.mkdir(parents=True)
             privileged.chmod(0)

@@ -420,6 +420,16 @@ def _virtual_names(
     return names
 
 
+def _is_merged_usr_lib_alias(root_fd: int, directory: str) -> bool:
+    if not directory.startswith("lib/systemd/"):
+        return False
+    try:
+        target = os.readlink("lib", dir_fd=root_fd)
+    except OSError:
+        return False
+    return target in {"usr/lib", "/usr/lib"}
+
+
 def _assignments(data: bytes, section_name: str, key_name: str) -> list[str]:
     try:
         text = data.decode("utf-8")
@@ -453,6 +463,8 @@ def _effective_list_directive(
     values: list[str] = []
     sources: list[str] = []
     for directory in unit_dirs:
+        if _is_merged_usr_lib_alias(root_fd, directory):
+            continue
         relative = f"{directory}/{unit_name}"
         data = _overlay_bytes(root_fd, relative, overlay)
         if data is not None:
@@ -474,6 +486,8 @@ def _effective_list_directive(
 
     selected_drop_ins: dict[str, str] = {}
     for directory in unit_dirs:
+        if _is_merged_usr_lib_alias(root_fd, directory):
+            continue
         for drop_in_name in drop_in_names:
             drop_in_dir = f"{directory}/{drop_in_name}"
             for name in _virtual_names(root_fd, drop_in_dir, overlay):
