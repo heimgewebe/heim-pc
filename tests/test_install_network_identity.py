@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -84,6 +85,7 @@ class InstallNetworkIdentityTests(unittest.TestCase):
             receipt = installer.apply_policy(
                 target=target,
                 backup_root=backup_root,
+                backup_anchor=root,
                 policy_data=self.policy_data,
                 apply=True,
             )
@@ -94,9 +96,21 @@ class InstallNetworkIdentityTests(unittest.TestCase):
             self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
             self.assertIn(b"127.0.1.1\theim-pc", target.read_bytes())
 
+            target.write_bytes(before)
+            retry = installer.apply_policy(
+                target=target,
+                backup_root=backup_root,
+                backup_anchor=root,
+                policy_data=self.policy_data,
+                apply=True,
+            )
+            self.assertEqual(retry["action"], "installed")
+            self.assertEqual(retry["backup"]["path"], str(backup))
+
             replay = installer.apply_policy(
                 target=target,
                 backup_root=backup_root,
+                backup_anchor=root,
                 policy_data=self.policy_data,
                 apply=True,
             )
@@ -107,15 +121,21 @@ class InstallNetworkIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "hosts"
-            target.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+            before = b"127.0.0.1 localhost\n"
+            target.write_bytes(before)
             level_one = root / "state"
             level_two = level_one / "network-identity"
             backup_root = level_two / "backups"
             events: list[tuple[str, Path]] = []
             original_atomic_install = installer.atomic_install
+            original_ensure_backup = installer._ensure_preimage_backup
 
             def record_fsync(path: Path) -> None:
                 events.append(("fsync", path))
+
+            def record_ensure_backup(path: Path, data: bytes) -> None:
+                events.append(("backup", path))
+                original_ensure_backup(path, data)
 
             def record_atomic_install(path: Path, data: bytes, **kwargs: object) -> None:
                 events.append(("install", path))
@@ -123,15 +143,22 @@ class InstallNetworkIdentityTests(unittest.TestCase):
 
             with (
                 mock.patch.object(installer, "_fsync_directory", side_effect=record_fsync),
+                mock.patch.object(
+                    installer,
+                    "_ensure_preimage_backup",
+                    side_effect=record_ensure_backup,
+                ),
                 mock.patch.object(installer, "atomic_install", side_effect=record_atomic_install),
             ):
                 installer.apply_policy(
                     target=target,
                     backup_root=backup_root,
+                    backup_anchor=root,
                     policy_data=self.policy_data,
                     apply=True,
                 )
 
+            expected_backup = backup_root / f"hosts-{installer.sha256(before)}.txt"
             install_index = events.index(("install", target))
             self.assertEqual(
                 events[:install_index],
@@ -139,9 +166,137 @@ class InstallNetworkIdentityTests(unittest.TestCase):
                     ("fsync", root),
                     ("fsync", level_one),
                     ("fsync", level_two),
+                    ("backup", expected_backup),
                     ("fsync", backup_root),
                 ],
             )
+
+    def test_retry_fsyncs_existing_backup_ancestry_at_every_interruption_depth(self) -> None:
+        for existing_depth in (1, 2, 3):
+            with self.subTest(existing_depth=existing_depth), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                target = root / "hosts"
+                target.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+                ancestry = [
+                    root / "state",
+                    root / "state" / "network-identity",
+                    root / "state" / "network-identity" / "backups",
+                ]
+                for directory in ancestry[:existing_depth]:
+                    directory.mkdir(mode=0o700)
+                backup_root = ancestry[-1]
+                events: list[tuple[str, Path]] = []
+                original_ensure_backup = installer._ensure_preimage_backup
+                original_atomic_install = installer.atomic_install
+
+                def record_fsync(path: Path) -> None:
+                    events.append(("fsync", path))
+
+                def record_ensure_backup(path: Path, data: bytes) -> None:
+                    events.append(("backup", path))
+                    original_ensure_backup(path, data)
+
+                def record_atomic_install(path: Path, data: bytes, **kwargs: object) -> None:
+                    events.append(("install", path))
+                    original_atomic_install(path, data, **kwargs)
+
+                with (
+                    mock.patch.object(installer, "_fsync_directory", side_effect=record_fsync),
+                    mock.patch.object(
+                        installer,
+                        "_ensure_preimage_backup",
+                        side_effect=record_ensure_backup,
+                    ),
+                    mock.patch.object(
+                        installer,
+                        "atomic_install",
+                        side_effect=record_atomic_install,
+                    ),
+                ):
+                    installer.apply_policy(
+                        target=target,
+                        backup_root=backup_root,
+                        backup_anchor=root,
+                        policy_data=self.policy_data,
+                        apply=True,
+                    )
+
+                backup_index = next(
+                    index for index, event in enumerate(events) if event[0] == "backup"
+                )
+                install_index = events.index(("install", target))
+                self.assertEqual(
+                    events[:backup_index],
+                    [
+                        ("fsync", root),
+                        ("fsync", ancestry[0]),
+                        ("fsync", ancestry[1]),
+                    ],
+                )
+                self.assertEqual(events[backup_index + 1], ("fsync", backup_root))
+                self.assertLess(backup_index, install_index)
+
+    def test_backup_ancestry_rejects_untrusted_owner_mode_and_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "hosts"
+            target.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+            unsafe = root / "unsafe"
+            unsafe.mkdir(mode=0o700)
+            unsafe.chmod(0o777)
+
+            with self.assertRaisesRegex(installer.InstallError, "group- or other-writable"):
+                installer.apply_policy(
+                    target=target,
+                    backup_root=unsafe / "backups",
+                    backup_anchor=root,
+                    policy_data=self.policy_data,
+                    apply=True,
+                )
+
+            with (
+                mock.patch.object(installer.os, "geteuid", return_value=os.geteuid() + 1),
+                self.assertRaisesRegex(installer.InstallError, "unexpected owner"),
+            ):
+                installer.apply_policy(
+                    target=target,
+                    backup_root=root / "owned" / "backups",
+                    backup_anchor=root,
+                    policy_data=self.policy_data,
+                    apply=True,
+                )
+
+            with tempfile.TemporaryDirectory() as outside:
+                with self.assertRaisesRegex(installer.InstallError, "below durable anchor"):
+                    installer.apply_policy(
+                        target=target,
+                        backup_root=Path(outside) / "backups",
+                        backup_anchor=root,
+                        policy_data=self.policy_data,
+                        apply=True,
+                    )
+
+            symlink = root / "symlink"
+            symlink.symlink_to(root / "unsafe")
+            with self.assertRaisesRegex(installer.InstallError, "path is unsafe"):
+                installer.apply_policy(
+                    target=target,
+                    backup_root=symlink / "backups",
+                    backup_anchor=root,
+                    policy_data=self.policy_data,
+                    apply=True,
+                )
+
+            with self.assertRaisesRegex(installer.InstallError, "filesystem root"):
+                installer.apply_policy(
+                    target=target,
+                    backup_root=root / "root-anchored" / "backups",
+                    backup_anchor=Path("/"),
+                    policy_data=self.policy_data,
+                    apply=True,
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "127.0.0.1 localhost\n")
 
     def test_plan_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -152,6 +307,7 @@ class InstallNetworkIdentityTests(unittest.TestCase):
             receipt = installer.apply_policy(
                 target=target,
                 backup_root=root / "backups",
+                backup_anchor=root,
                 policy_data=self.policy_data,
                 apply=False,
             )
@@ -170,6 +326,7 @@ class InstallNetworkIdentityTests(unittest.TestCase):
                 installer.apply_policy(
                     target=target,
                     backup_root=root / "backups",
+                    backup_anchor=root,
                     policy_data=self.policy_data,
                     apply=True,
                 )

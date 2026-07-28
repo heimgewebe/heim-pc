@@ -37,7 +37,7 @@ python3 scripts/install_network_identity.py
 python3 scripts/install_network_identity.py --apply --expected-head <commit>
 ```
 
-Ohne `--apply` entsteht nur ein Plan. Die produktive Installation erfordert Root-Rechte und einen sauberen, exakt commitgebundenen Checkout. Backups liegen unter `/var/lib/heim-pc/network-identity/hosts-backups/`.
+Ohne `--apply` entsteht nur ein Plan. Die produktive Installation erfordert Root-Rechte und einen sauberen, exakt commitgebundenen Checkout. Backups liegen unter `/var/lib/heim-pc/network-identity/hosts-backups/`. `/var/lib` ist der explizite, bereits durable Backup-Anchor. Vor dem Öffnen einer Backup-Datei validiert der Installer jede darunterliegende Verzeichniskomponente fail-closed auf Pfadtyp, Symlinkfreiheit, Root-Eigentum und nicht gruppen-/weltbeschreibbaren Modus. Anschließend synchronisiert er bei jeder Installation die vollständige Verzeichnisahnenkette vom Anchor bis zum direkten Elternverzeichnis des Backup-Roots, auch wenn eine unterbrochene frühere Ausführung die Komponenten bereits angelegt hatte. Erst nach dem Datei-`fsync` und dem `fsync` des Backup-Roots darf `/etc/hosts` atomar ersetzt werden. Ein abweichender `--backup-root` erfordert einen passenden expliziten `--backup-anchor`; der Dateisystem-Root ist als Anchor gesperrt.
 
 Nach der Installation muss die lokale Resolverkette `heim-pc` über `127.0.1.1` beantworten. Die eigentliche Abnahme misst zusätzlich einen lokalen Git-Clone unter Systemaufrufbeobachtung: Er darf für den eigenen Hostnamen keine DNS-Verbindung mehr öffnen. Erst ein Lastlauf unterhalb des Pi-hole-Grenzwerts belegt, dass der ursprüngliche Ausfallpfad geschlossen ist.
 

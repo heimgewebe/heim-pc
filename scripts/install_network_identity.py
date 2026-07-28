@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 POLICY_RELATIVE_PATH = "config/network-identity.v1.json"
 DEFAULT_TARGET = Path("/etc/hosts")
 DEFAULT_BACKUP_ROOT = Path("/var/lib/heim-pc/network-identity/hosts-backups")
+DEFAULT_BACKUP_ANCHOR = Path("/var/lib")
 BEGIN_MARKER = "# BEGIN heim-pc network identity v1"
 END_MARKER = "# END heim-pc network identity v1"
 HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -115,31 +116,100 @@ def _assert_safe_regular(path: Path, *, allow_absent: bool) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
 
-def _mkdir_with_durable_parents(path: Path, *, mode: int) -> None:
-    missing: list[Path] = []
-    cursor = path
-    while not cursor.exists():
-        if cursor.is_symlink():
-            raise InstallError(f"directory path must not be a symlink: {cursor}")
-        missing.append(cursor)
-        if cursor.parent == cursor:
-            raise InstallError(f"cannot find an existing parent for directory: {path}")
-        cursor = cursor.parent
-    if cursor.is_symlink() or not cursor.is_dir():
-        raise InstallError(f"existing directory ancestor is unsafe: {cursor}")
+def _assert_trusted_directory(path: Path, *, owner_uid: int) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise InstallError(f"trusted directory does not exist: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise InstallError(f"trusted directory path is unsafe: {path}")
+    if metadata.st_uid != owner_uid:
+        raise InstallError(f"trusted directory has unexpected owner: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise InstallError(f"trusted directory is group- or other-writable: {path}")
 
-    path.mkdir(parents=True, exist_ok=True, mode=mode)
-    for created in reversed(missing):
-        if created.is_symlink() or not created.is_dir():
-            raise InstallError(f"created directory is unsafe: {created}")
-        _fsync_directory(created.parent)
+
+def _mkdir_with_durable_parents(path: Path, *, anchor: Path, mode: int) -> None:
+    """Create a trusted directory chain and persist it to an existing durable anchor.
+
+    The anchor is an explicit, pre-existing durability boundary. Every invocation
+    validates and fsyncs the complete ancestry below it, including components left
+    behind by an interrupted earlier invocation, before callers create a backup.
+    """
+
+    if anchor.parent == anchor:
+        raise InstallError("backup durability anchor must not be the filesystem root")
+    try:
+        relative = path.relative_to(anchor)
+    except ValueError as exc:
+        raise InstallError(f"backup root must be below durable anchor: {anchor}") from exc
+
+    owner_uid = os.geteuid()
+    _assert_trusted_directory(anchor, owner_uid=owner_uid)
+    components: list[Path] = []
+    cursor = anchor
+    for part in relative.parts:
+        cursor = cursor / part
+        try:
+            cursor.mkdir(mode=mode)
+        except FileExistsError:
+            pass
+        _assert_trusted_directory(cursor, owner_uid=owner_uid)
+        components.append(cursor)
+
+    for parent in [anchor, *components[:-1]]:
+        _assert_trusted_directory(parent, owner_uid=owner_uid)
+        _fsync_directory(parent)
+
+
+def _ensure_preimage_backup(path: Path, data: bytes) -> None:
+    if path.exists():
+        _assert_safe_regular(path, allow_absent=False)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+            ):
+                raise InstallError(f"existing backup metadata is unsafe: {path}")
+            existing = bytearray()
+            while chunk := os.read(descriptor, 64 * 1024):
+                existing.extend(chunk)
+            if bytes(existing) != data:
+                raise InstallError(f"existing backup content mismatch: {path}")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        remaining = data
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise InstallError("backup write made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _active_fields(line: str) -> list[str]:
@@ -240,11 +310,13 @@ def apply_policy(
     *,
     target: Path,
     backup_root: Path,
+    backup_anchor: Path,
     policy_data: bytes,
     apply: bool,
 ) -> dict[str, Any]:
     target = _absolute_without_resolving(target)
     backup_root = _absolute_without_resolving(backup_root)
+    backup_anchor = _absolute_without_resolving(backup_anchor)
     if target == DEFAULT_TARGET and apply and os.geteuid() != 0:
         raise InstallError("installing /etc/hosts requires root")
     _assert_safe_regular(target, allow_absent=False)
@@ -258,27 +330,16 @@ def apply_policy(
     changed = before != after
     backup: dict[str, Any] | None = None
     if apply and changed:
-        _mkdir_with_durable_parents(backup_root, mode=0o700)
+        _mkdir_with_durable_parents(
+            backup_root,
+            anchor=backup_anchor,
+            mode=0o700,
+        )
         if backup_root.is_symlink() or not backup_root.is_dir():
             raise InstallError(f"backup root is unsafe: {backup_root}")
         before_sha = sha256(before)
         backup_path = backup_root / f"hosts-{before_sha}.txt"
-        if backup_path.exists():
-            _assert_safe_regular(backup_path, allow_absent=False)
-            if backup_path.read_bytes() != before:
-                raise InstallError(f"existing backup content mismatch: {backup_path}")
-        else:
-            descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                remaining = before
-                while remaining:
-                    written = os.write(descriptor, remaining)
-                    if written <= 0:
-                        raise InstallError("backup write made no progress")
-                    remaining = remaining[written:]
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        _ensure_preimage_backup(backup_path, before)
         _fsync_directory(backup_root)
         backup = {"path": str(backup_path), "sha256": before_sha}
         atomic_install(target, after, mode=0o644, expected_current=before)
@@ -301,6 +362,7 @@ def install(
     *,
     target: Path,
     backup_root: Path,
+    backup_anchor: Path,
     apply: bool,
     expected_head: str | None,
 ) -> dict[str, Any]:
@@ -313,6 +375,7 @@ def install(
     result = apply_policy(
         target=target,
         backup_root=backup_root,
+        backup_anchor=backup_anchor,
         policy_data=policy_data,
         apply=apply,
     )
@@ -347,6 +410,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, default=DEFAULT_TARGET)
     parser.add_argument("--backup-root", type=Path, default=DEFAULT_BACKUP_ROOT)
+    parser.add_argument("--backup-anchor", type=Path, default=DEFAULT_BACKUP_ANCHOR)
     parser.add_argument("--expected-head")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
@@ -354,6 +418,7 @@ def main() -> int:
         receipt = install(
             target=args.target,
             backup_root=args.backup_root,
+            backup_anchor=args.backup_anchor,
             apply=args.apply,
             expected_head=args.expected_head,
         )
