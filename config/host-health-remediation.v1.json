@@ -28,7 +28,7 @@
     "lookback_hours": 24,
     "max_journal_entries": 2000,
     "occurrence_gap_seconds": 5,
-    "retained_occurrence_ids": 128,
+    "retained_occurrence_ids": 2000,
     "sample_message_limit": 5,
     "sample_message_bytes": 240
   },
@@ -38,11 +38,23 @@
     "targets": {
       "stable": {
         "version": "3636",
-        "sha256": "BCB430187AD366238908C6EC6E7715C9EB056E77A620333CCBCCEDA42FB25082"
+        "package_sha256": "BCB430187AD366238908C6EC6E7715C9EB056E77A620333CCBCCEDA42FB25082",
+        "package_members": [
+          "ROG-STRIX-B550-F-GAMING-ASUS-3636.CAP",
+          "BIOSRenamer.exe"
+        ],
+        "cap_member": "ROG-STRIX-B550-F-GAMING-ASUS-3636.CAP",
+        "cap_size_bytes": 33558528
       },
       "beta": {
         "version": "3641",
-        "sha256": "FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B"
+        "package_sha256": "FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B",
+        "package_members": [
+          "ROG-STRIX-B550-F-GAMING-ASUS-3641.CAP",
+          "BIOSRenamer.exe"
+        ],
+        "cap_member": "ROG-STRIX-B550-F-GAMING-ASUS-3641.CAP",
+        "cap_size_bytes": 33558528
       }
     }
   }

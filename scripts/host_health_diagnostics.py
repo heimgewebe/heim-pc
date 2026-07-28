@@ -14,13 +14,17 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Iterable
+from typing import Any, BinaryIO, Callable, Iterable
+import zipfile
 
 DEFAULT_CONFIG = Path("/etc/heim-pc/host-health-remediation.v1.json")
 DEFAULT_MCE_STATE = Path("/var/lib/heim-pc/host-health/mce-edac-state.v1.json")
 DEFAULT_MCE_REPORT = Path("/var/lib/heim-pc/host-health/mce-edac-report.v1.json")
 DEFAULT_BOARD_NAME = Path("/sys/class/dmi/id/board_name")
 DEFAULT_BIOS_VERSION = Path("/sys/class/dmi/id/bios_version")
+FSCK_OUTPUT_LIMIT_BYTES = 4096
+MAX_BIOS_PACKAGE_BYTES = 64 * 1024 * 1024
+MAX_BIOS_PACKAGE_MEMBERS = 8
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -96,7 +100,7 @@ def _mce_config(config: dict[str, Any]) -> dict[str, int]:
         "lookback_hours": (1, 168),
         "max_journal_entries": (1, 10000),
         "occurrence_gap_seconds": (1, 60),
-        "retained_occurrence_ids": (1, 1024),
+        "retained_occurrence_ids": (1, 10000),
         "sample_message_limit": (1, 20),
         "sample_message_bytes": (32, 1000),
     }
@@ -106,6 +110,10 @@ def _mce_config(config: dict[str, Any]) -> dict[str, int]:
         if not isinstance(candidate, int) or not minimum <= candidate <= maximum:
             raise DiagnosticError(f"mce_edac.{key} must be between {minimum} and {maximum}")
         result[key] = candidate
+    if result["retained_occurrence_ids"] < result["max_journal_entries"]:
+        raise DiagnosticError(
+            "mce_edac.retained_occurrence_ids must cover max_journal_entries"
+        )
     return result
 
 
@@ -114,11 +122,11 @@ def read_bounded_kernel_journal(
 ) -> list[dict[str, Any]]:
     argv = [
         "journalctl",
-        "--dmesg",
         f"--since=-{policy['lookback_hours']}h",
         f"--lines={policy['max_journal_entries']}",
         "--no-pager",
         "--output=json",
+        "_TRANSPORT=kernel",
     ]
     completed = _completed(runner, argv, timeout=25)
     if completed.returncode != 0:
@@ -478,17 +486,59 @@ def fat_check_or_repair(
     if second_mount_check.stdout.strip():
         raise DiagnosticError(f"refusing filesystem mounted during preflight: {resolved}")
 
-    argv = ["fsck.fat", "-a" if repair else "-n", str(resolved)]
-    completed = _completed(runner, argv, timeout=60)
+    passes: list[dict[str, Any]] = []
+
+    def run_fsck(mode: str, option: str) -> subprocess.CompletedProcess[str]:
+        completed = _completed(
+            runner, ["fsck.fat", option, str(resolved)], timeout=60
+        )
+        passes.append(_fsck_pass_report(mode, completed))
+        return completed
+
+    primary = run_fsck("repair" if repair else "check", "-a" if repair else "-n")
+    verification: subprocess.CompletedProcess[str] | None = None
+    if repair and primary.returncode in (0, 1):
+        verification = run_fsck("verification", "-n")
+
+    if not repair:
+        success = primary.returncode == 0
+        if primary.returncode == 0:
+            status = "clean"
+        elif primary.returncode == 1:
+            status = "inconsistencies_detected"
+        else:
+            status = "check_failed"
+    elif primary.returncode not in (0, 1):
+        success = False
+        status = "repair_failed"
+    elif verification is None:
+        raise DiagnosticError("repair verification pass was not executed")
+    elif verification.returncode == 0:
+        success = True
+        status = "repair_verified_clean"
+    elif verification.returncode == 1:
+        success = False
+        status = "repair_verification_inconsistencies_detected"
+    else:
+        success = False
+        status = "repair_verification_failed"
+
     report = {
         "schema_version": 1,
         "kind": "heim_pc_offline_fat_result",
         "device": str(resolved),
         "filesystem": filesystem,
         "mode": "repair" if repair else "check",
+        "status": status,
         "mounted": False,
-        "fsck_returncode": completed.returncode,
-        "success": completed.returncode == 0,
+        "fsck_returncode": primary.returncode,
+        "check_returncode": primary.returncode if not repair else None,
+        "repair_returncode": primary.returncode if repair else None,
+        "verification_returncode": (
+            verification.returncode if verification is not None else None
+        ),
+        "passes": passes,
+        "success": success,
         "automatic_unmount": False,
         "online_modification_allowed": False,
         "does_not_establish": [
@@ -497,18 +547,128 @@ def fat_check_or_repair(
             "successful firmware recovery",
         ],
     }
-    return (0 if completed.returncode == 0 else 1), report
+    return (0 if success else 1), report
 
 
-def _sha256_file(path: Path) -> str:
+def _bounded_process_text(value: str) -> tuple[str, bool, int]:
+    encoded = value.encode("utf-8", errors="replace")
+    bounded = encoded[:FSCK_OUTPUT_LIMIT_BYTES]
+    return (
+        bounded.decode("utf-8", errors="ignore"),
+        len(encoded) > FSCK_OUTPUT_LIMIT_BYTES,
+        len(encoded),
+    )
+
+
+def _fsck_pass_report(
+    mode: str, completed: subprocess.CompletedProcess[str]
+) -> dict[str, Any]:
+    stdout, stdout_truncated, stdout_bytes = _bounded_process_text(
+        completed.stdout or ""
+    )
+    stderr, stderr_truncated, stderr_bytes = _bounded_process_text(
+        completed.stderr or ""
+    )
+    return {
+        "mode": mode,
+        "returncode": completed.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "output_limit_bytes_per_stream": FSCK_OUTPUT_LIMIT_BYTES,
+    }
+
+
+def _sha256_stream(handle: BinaryIO) -> str:
     digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-    except OSError as exc:
-        raise DiagnosticError(f"cannot hash BIOS image: {exc}") from exc
+    while chunk := handle.read(1024 * 1024):
+        digest.update(chunk)
     return digest.hexdigest().upper()
+
+
+def _open_bios_package(path: Path) -> BinaryIO:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise DiagnosticError("BIOS package must be a regular file")
+        if metadata.st_size > MAX_BIOS_PACKAGE_BYTES:
+            raise DiagnosticError("BIOS package exceeds the inspection size bound")
+        handle = os.fdopen(descriptor, "rb")
+        descriptor = None
+        return handle
+    except OSError as exc:
+        raise DiagnosticError(f"cannot open BIOS package safely: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _validate_zip_member_name(name: str) -> None:
+    if (
+        not name
+        or name.startswith("/")
+        or "\\" in name
+        or "\x00" in name
+        or any(part in {"", ".", ".."} for part in name.split("/"))
+    ):
+        raise DiagnosticError(f"unsafe BIOS package member name: {name!r}")
+
+
+def _inspect_bios_package(
+    handle: BinaryIO,
+    *,
+    expected_members: list[str],
+    cap_member: str,
+    cap_size_bytes: int,
+) -> tuple[list[str], str]:
+    try:
+        with zipfile.ZipFile(handle) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_BIOS_PACKAGE_MEMBERS:
+                raise DiagnosticError("BIOS package contains too many members")
+            names = [entry.filename for entry in entries]
+            for name in names:
+                _validate_zip_member_name(name)
+            if len(names) != len(set(names)) or len(names) != len(
+                {name.casefold() for name in names}
+            ):
+                raise DiagnosticError("BIOS package contains duplicate member names")
+            if names.count(cap_member) != 1:
+                raise DiagnosticError(
+                    "BIOS package must contain exactly one expected CAP member"
+                )
+            if len(names) != len(expected_members) or set(names) != set(
+                expected_members
+            ):
+                raise DiagnosticError("BIOS package contains unexpected member names")
+            for entry in entries:
+                unix_mode = entry.external_attr >> 16
+                file_type = stat.S_IFMT(unix_mode)
+                if entry.is_dir() or stat.S_ISLNK(unix_mode):
+                    raise DiagnosticError(
+                        f"unsafe BIOS package member type: {entry.filename!r}"
+                    )
+                if file_type not in (0, stat.S_IFREG):
+                    raise DiagnosticError(
+                        f"unsupported BIOS package member type: {entry.filename!r}"
+                    )
+                if entry.flag_bits & 0x1:
+                    raise DiagnosticError("encrypted BIOS package members are unsupported")
+            cap_entry = archive.getinfo(cap_member)
+            if cap_entry.file_size != cap_size_bytes:
+                raise DiagnosticError("BIOS CAP member size differs from metadata")
+            if cap_entry.file_size > MAX_BIOS_PACKAGE_BYTES:
+                raise DiagnosticError("BIOS CAP member exceeds the inspection size bound")
+            with archive.open(cap_entry, "r") as cap_handle:
+                cap_digest = _sha256_stream(cap_handle)
+            return names, cap_digest
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise DiagnosticError(f"cannot inspect BIOS ZIP package: {exc}") from exc
 
 
 def verify_bios_preparation(
@@ -517,7 +677,7 @@ def verify_bios_preparation(
     target_name: str,
     board_name: str,
     live_version: str,
-    image_path: Path | None,
+    package_path: Path,
 ) -> tuple[int, dict[str, Any]]:
     bios = config.get("bios")
     if not isinstance(bios, dict) or not isinstance(bios.get("targets"), dict):
@@ -525,21 +685,45 @@ def verify_bios_preparation(
     target = bios["targets"].get(target_name)
     if not isinstance(target, dict):
         raise DiagnosticError(f"unknown BIOS target: {target_name}")
-    expected_hash = target.get("sha256")
+    expected_package_hash = target.get("package_sha256")
     target_version = target.get("version")
+    expected_members = target.get("package_members")
+    cap_member = target.get("cap_member")
+    cap_size_bytes = target.get("cap_size_bytes")
     if (
-        not isinstance(expected_hash, str)
-        or not re.fullmatch(r"[0-9A-F]{64}", expected_hash)
+        not isinstance(expected_package_hash, str)
+        or not re.fullmatch(r"[0-9A-F]{64}", expected_package_hash)
         or not isinstance(target_version, str)
+        or not isinstance(expected_members, list)
+        or not expected_members
+        or not all(isinstance(item, str) for item in expected_members)
+        or len(expected_members) != len(set(expected_members))
+        or not isinstance(cap_member, str)
+        or expected_members.count(cap_member) != 1
+        or cap_member
+        != f"ROG-STRIX-B550-F-GAMING-ASUS-{target_version}.CAP"
+        or not isinstance(cap_size_bytes, int)
+        or not 1 <= cap_size_bytes <= MAX_BIOS_PACKAGE_BYTES
     ):
         raise DiagnosticError("invalid BIOS target metadata")
     expected_board = bios.get("board_name")
     expected_source = bios.get("observed_source_version")
     board_matches = board_name.strip() == expected_board
     source_matches = live_version.strip() == expected_source
-    actual_hash = _sha256_file(image_path) if image_path is not None else None
-    hash_matches = actual_hash == expected_hash if actual_hash is not None else None
-    ready = board_matches and source_matches and hash_matches is True
+    with _open_bios_package(package_path) as package_handle:
+        package_hash = _sha256_stream(package_handle)
+        package_hash_matches = package_hash == expected_package_hash
+        package_members: list[str] | None = None
+        cap_hash: str | None = None
+        if package_hash_matches:
+            package_handle.seek(0)
+            package_members, cap_hash = _inspect_bios_package(
+                package_handle,
+                expected_members=expected_members,
+                cap_member=cap_member,
+                cap_size_bytes=cap_size_bytes,
+            )
+    ready = board_matches and source_matches and package_hash_matches
     report = {
         "schema_version": 1,
         "kind": "heim_pc_bios_preparation_verification",
@@ -551,22 +735,32 @@ def verify_bios_preparation(
         "source_version_matches": source_matches,
         "target_channel": target_name,
         "target_version": target_version,
-        "expected_sha256": expected_hash,
-        "image_sha256": actual_hash,
-        "image_hash_matches": hash_matches,
+        "expected_package_sha256": expected_package_hash,
+        "package_sha256": package_hash,
+        "package_hash_matches": package_hash_matches,
+        "expected_package_members": expected_members,
+        "package_members": package_members,
+        "expected_cap_member": cap_member,
+        "cap_member": cap_member if package_members is not None else None,
+        "cap_size_bytes": cap_size_bytes if package_members is not None else None,
+        "cap_sha256": cap_hash,
+        "cap_sha256_provenance": (
+            "locally_derived_from_verified_package"
+            if cap_hash is not None
+            else None
+        ),
         "ready_for_manual_uefi_flash": ready,
         "automatic_flash": False,
         "requires_reboot_and_uefi": True,
         "does_not_establish": [
-            "vendor_signature_authenticity_beyond_the_pinned_digest",
+            "vendor_signature_authenticity_beyond_the_pinned_package_digest",
+            "a separately_vendor_pinned_CAP_digest",
             "firmware_flash_success",
             "permission_to_flash",
             "automatic_SVM_enablement",
         ],
     }
-    if not board_matches or not source_matches or hash_matches is False:
-        return 1, report
-    return 0, report
+    return (0 if ready else 1), report
 
 
 def _read_trimmed(path: Path, label: str) -> str:
@@ -595,9 +789,11 @@ def main() -> int:
     fat.add_argument("--repair", action="store_true")
     fat.add_argument("--confirm-offline-repair", action="store_true")
 
-    bios = subparsers.add_parser("bios", help="verify board, live version, and optional image")
+    bios = subparsers.add_parser(
+        "bios", help="verify board, live version, and a pinned ASUS ZIP package"
+    )
     bios.add_argument("--target", choices=("stable", "beta"), default="stable")
-    bios.add_argument("--image", type=Path)
+    bios.add_argument("--package", type=Path, required=True)
     bios.add_argument("--board-name-path", type=Path, default=DEFAULT_BOARD_NAME)
     bios.add_argument("--bios-version-path", type=Path, default=DEFAULT_BIOS_VERSION)
 
@@ -626,7 +822,7 @@ def main() -> int:
                 target_name=args.target,
                 board_name=_read_trimmed(args.board_name_path, "board name"),
                 live_version=_read_trimmed(args.bios_version_path, "BIOS version"),
-                image_path=args.image,
+                package_path=args.package,
             )
     except DiagnosticError as exc:
         print(

@@ -98,11 +98,16 @@ Die installierbaren Teile haben folgende Grenzen:
   eingeordnet. Auch dann muss die unabhängige Abschlussabfrage exakt
   `Power Profile: Performance` melden; andere Fehler bleiben Fehler.
 * `heim-pc-mce-edac-monitor.timer` betrachtet höchstens 2.000 Kernel-Journaleinträge
-  aus 24 Stunden, läuft höchstens 30 Sekunden alle sechs Stunden und ist auf
-  10 Prozent CPU sowie 64 MiB RAM begrenzt. Er erzeugt nur einen deduplizierten,
-  knappen Rekurrenzbericht unter
+  aus 24 Stunden über Boot-Grenzen hinweg, läuft höchstens 30 Sekunden alle sechs
+  Stunden und ist auf 10 Prozent CPU sowie 64 MiB RAM begrenzt. Der Installer
+  liefert dazu ein journald-Drop-in mit `Storage=persistent`,
+  `SystemMaxUse=512M` und `MaxRetentionSec=14day`: Mehrere Boots können damit
+  erhalten bleiben, während sowohl Platz als auch Alter begrenzt sind. Der
+  Monitor erzeugt nur einen deduplizierten, knappen Rekurrenzbericht unter
   `/var/lib/heim-pc/host-health/mce-edac-report.v1.json`. Er führt keinen
   Belastungstest durch und diagnostiziert keine Hardwareursache automatisch.
+  Die ID-Retention deckt die vollständige maximale Journalabfrage ab, damit
+  unveränderte Einträge innerhalb des Fensters nicht erneut gezählt werden.
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
   deaktivierte oder anderweitig verborgene Virtualisierung. Ist `svm` vorhanden,
@@ -123,9 +128,14 @@ heim-pc-host-health fat /dev/<exakte-fat-partition>
 heim-pc-host-health fat /dev/<exakte-fat-partition> --repair --confirm-offline-repair
 ```
 
-Der erste Aufruf verwendet ausschließlich `fsck.fat -n`. Der zweite verwendet
-`fsck.fat -a` nur nach der expliziten Offline-Bestätigung. Ein gleichzeitig durch
-einen anderen privilegierten Prozess ausgeführter Mount kann nicht rennfrei
+Der erste Aufruf verwendet ausschließlich `fsck.fat -n`: Returncode 0 bedeutet
+sauber, Returncode 1 meldet gefundene Inkonsistenzen und ist kein Erfolg,
+Returncodes ab 2 bleiben Fehler. Der zweite verwendet `fsck.fat -a` nur nach der
+expliziten Offline-Bestätigung. Liefert der Reparaturpass 0 oder 1, folgt zwingend
+ein zweiter, read-only `fsck.fat -n`-Pass; nur dessen Returncode 0 gilt als
+verifizierter Erfolg. Der JSON-Bericht bewahrt beide Returncodes sowie pro Pass
+auf 4.096 Byte je stdout/stderr begrenzte Ausgabe. Ein gleichzeitig durch einen
+anderen privilegierten Prozess ausgeführter Mount kann nicht rennfrei
 ausgeschlossen werden; deshalb bleibt das separate Recovery-System Teil der
 Sicherheitsgrenze. Eine online unter `/boot/efi` eingehängte Partition ist
 ausdrücklich kein zulässiges Reparaturziel.
@@ -140,14 +150,22 @@ Das Beta-Ziel `3641` muss ausdrücklich gewählt werden und hat SHA-256
 `FBA248F9F6099E55D4F194376D34C652F2971A44875BDA73ED8FEF34418C317B`.
 
 ```bash
-heim-pc-host-health bios --target stable --image /pfad/zur/BIOS-Datei
-heim-pc-host-health bios --target beta --image /pfad/zur/BIOS-Datei
+heim-pc-host-health bios --target stable --package /pfad/zum/ASUS-3636.zip
+heim-pc-host-health bios --target beta --package /pfad/zum/ASUS-3641.zip
 ```
 
-Das Werkzeug liest Board und laufende BIOS-Version und vergleicht den Hash der
-lokalen Datei. Es lädt nichts herunter, schreibt keine EFI-Variable und flasht
-nicht. Ein Hash-Treffer belegt nur die Bindung an den festgelegten Digest, nicht
-den Erfolg oder die Freigabe eines Firmware-Updates.
+Die von ASUS veröffentlichten SHA-256-Werte binden die vollständigen ZIP-Pakete,
+nicht die darin enthaltenen CAP-Dateien. Das Werkzeug liest Board und laufende
+BIOS-Version, verlangt das lokale ZIP-Paket und prüft zuerst dessen Paketdigest.
+Danach inspiziert es das Archiv ohne Extraktion: Für das gewählte Ziel müssen
+exakt die erwartete versionsgebundene CAP-Datei und `BIOSRenamer.exe` enthalten
+sein. Traversal-Namen, Symlinks, Duplikate, verschlüsselte oder unerwartete
+Mitglieder werden abgelehnt. Der CAP-SHA-256 wird beim Lesen aus dem verifizierten
+Paket lokal abgeleitet und als solcher berichtet; er ist kein separat von ASUS
+veröffentlichter Digest. Das Werkzeug lädt nichts herunter, extrahiert nichts,
+schreibt keine EFI-Variable und flasht nicht. Ein Paket-Hash-Treffer belegt nur
+die Bindung an den festgelegten Digest, nicht den Erfolg oder die Freigabe eines
+Firmware-Updates.
 
 Firmware-Flash und SVM-Aktivierung bleiben absichtlich Reboot-/UEFI-Operationen:
 Die Firmware muss das Board außerhalb des laufenden Betriebssystems neu

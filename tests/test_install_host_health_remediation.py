@@ -52,6 +52,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(drop_in.stat().st_mode), 0o644)
             self.assertIn("ConditionUser=!gdm", drop_in.read_text(encoding="utf-8"))
             self.assertNotIn("alex", drop_in.read_text(encoding="utf-8"))
+            journald = (
+                target
+                / "etc/systemd/journald.conf.d/50-heim-pc-retention.conf"
+            )
+            self.assertEqual(stat.S_IMODE(journald.stat().st_mode), 0o644)
+            self.assertIn(
+                "SystemMaxUse=512M", journald.read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "MaxRetentionSec=14day", journald.read_text(encoding="utf-8")
+            )
 
     def test_existing_cpu_unit_is_backed_up_before_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -101,12 +112,18 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         cpu = (ROOT / "systemd/system/cpu-governor.service").read_text(
             encoding="utf-8"
         )
+        journald = (
+            ROOT / "systemd/journald.conf.d/50-heim-pc-retention.conf"
+        ).read_text(encoding="utf-8")
         self.assertIn("ConditionUser=!gdm", fluid)
         self.assertNotIn("ConditionUser=!alex", fluid)
         self.assertIn("TimeoutStartSec=30s", monitor)
         self.assertIn("CPUQuota=10%", monitor)
         self.assertIn("MemoryMax=64M", monitor)
         self.assertIn("ensure-performance-profile", cpu)
+        self.assertIn("Storage=persistent", journald)
+        self.assertIn("SystemMaxUse=512M", journald)
+        self.assertIn("MaxRetentionSec=14day", journald)
 
 
 if __name__ == "__main__":

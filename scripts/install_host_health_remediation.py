@@ -33,6 +33,11 @@ FILES = (
         0o644,
     ),
     (
+        "systemd/journald.conf.d/50-heim-pc-retention.conf",
+        "etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
+        0o644,
+    ),
+    (
         "systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
         "etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
         0o644,
@@ -236,6 +241,7 @@ def install(
         "activation_performed": False,
         "activation_required": [
             "systemctl daemon-reload",
+            "systemctl restart systemd-journald",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
             "restart GDM user manager or reboot before evaluating its FluidSynth condition",
