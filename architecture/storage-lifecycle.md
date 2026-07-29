@@ -67,11 +67,12 @@ zeitgestempelter Snapshots.
 
 ## Wirksamkeitsprüfung
 
-Die 14-Kalendertage-Prüfung vom 29. Juli 2026 ist in
-`architecture/storage-effectiveness-review-2026-07-29.md` revisionsgebunden
-dokumentiert. Sie belässt alle Schwellen unverändert, weist die aktive globale
-Budgetausnahme ausdrücklich aus und trennt erfolgreiche Rückgewinnung von
-dauerhafter Budgeteinhaltung. Der Bericht erteilt keine Löschfreigabe.
+Der revisionsgebundene Zwischenstand der 14-Tage-Prüfung liegt in
+`architecture/storage-effectiveness-review-2026-07-29.md`. Er belässt alle
+Schwellen unverändert, weist die aktive globale Budgetausnahme ausdrücklich aus
+und trennt erfolgreiche Rückgewinnung von dauerhafter Budgeteinhaltung. Das
+Mindestfenster ist im Bericht als Merge- und Terminalisierungsgate festgehalten.
+Der Bericht erteilt keine Löschfreigabe.
 
 ## Grenzen
 

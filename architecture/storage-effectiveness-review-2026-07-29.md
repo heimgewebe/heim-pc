@@ -1,15 +1,8 @@
----
-id: storage-effectiveness-review-2026-07-29
-role: evidence
-status: canonical
-task: STORAGE-LIFECYCLE-V1-T009
-observed_from: 2026-07-15T21:13:26.256171Z
-observed_to: 2026-07-29T19:28:05.793425Z
-base_commit: 739970a4326c1aae6f6cb451f0a93206dcc30830
----
-# Speicher-Wirksamkeitsprüfung vom 29. Juli 2026
+# Speicher-Wirksamkeitsprüfung: Zwischenstand vom 29. Juli 2026
 
 ## Urteil
+
+> **Fortsetzungsgate:** Das Mindestfenster von 14 vollständigen Tagen endet erst `2026-07-29T21:13:26.256171Z`. Das gebundene Endinventar entstand um `2026-07-29T19:28:05.793425Z` und liegt damit 1 Stunde, 45 Minuten und 20 Sekunden vor dem Gate. Dieser Zwischenstand darf `STORAGE-LIFECYCLE-V1-T009` daher noch nicht terminalisieren und der PR darf auf diesem Stand nicht gemergt werden.
 
 - **Schwellen bleiben unverändert.** Die Messwerte rechtfertigen keine Lockerung; mehrere Produzenten liegen trotz funktionierender Rückgewinnung über ihren Hard-Limits.
 - **Die Bereinigungsmechanik wirkt, begrenzt aber den Zufluss nicht ausreichend.** Im Beobachtungsfenster wurden Worktree-Targets revisionsgebunden entfernt, während der gemessene Worktree-Bestand netto weiter wuchs.
@@ -59,19 +52,19 @@ base_commit: 739970a4326c1aae6f6cb451f0a93206dcc30830
 
 | Abschluss (UTC) | Receipt-SHA-256 | Targets | Entfernt | Ergebnis |
 |---|---|---:|---:|---|
-| `2026-07-29T02:00:13Z` | `c79c4c64000ce01c95412330e2717635ac0f26a0d354494622a2015968657989` | 1 | 12.74 GiB | `removed` |
-| `2026-07-29T14:09:45Z` | `c65af18e7c97fba37faedccbe6eddfd9fdfb48516542c4f36fe754a3f06b8355` | 1 | 4.33 GiB | `removed` |
-| `2026-07-24T12:58:33Z` | `5b656e0b43e7a0640207078496b9894894369f8f7bdb220e2a3d97cd042aa5e6` | 2 | 12.41 GiB | `removed` |
-| `2026-07-23T18:26:47Z` | `bb62fa2853818258df685d955e2e2fe71cf24d789936498ec1c7d69fe92cd752` | 4 | 29.75 GiB | `removed` |
 | `2026-07-22T17:57:17Z` | `575358c8ba92fbf8f96431dd666338b2a246ff8f271144804958f06f5a7d6a37` | 8 | 27.05 GiB | `removed` |
-| `2026-07-27T12:09:29Z` | `8ed532ee14d179e4e2d68e5e426ff8fe161030429cfd7100e33fe8e19ac7ae26` | 1 | 11.39 GiB | `removed` |
 | `2026-07-22T23:58:53Z` | `cab9e5b44f709e53ff175e05d681e73a91c8e3f54809dca549d017a86f1d6861` | 8 | 39.72 GiB | `removed` |
-| `2026-07-23T12:21:13Z` | `ba25c047db0b16197461a1484d5acb5b16d71b2541afd26012ec00d012730e81` | 3 | 49.33 GiB | `removed` |
-| `2026-07-29T08:00:21Z` | `ca3756c48ca01b34c2940191cf88eb13adc30ea6dd672ebf833c14f5dfb11151` | 2 | 9.74 GiB | `removed` |
 | `2026-07-23T06:11:37Z` | `a5d711c759bfda93e5f286058025d81ccd58d5429ac8707db7358221a26a6eb4` | 6 | 61.65 GiB | `removed` |
-| `2026-07-25T19:40:52Z` | `b6cfbc1524c0fd9a6062095adc82edb4461c73a959da0114ab39d3489f4f9a5e` | 1 | 11.50 GiB | `removed` |
-| `2026-07-25T13:31:10Z` | `b2214024d11dd61253a81f68c26be3b7ac8b6bc50762b3ded5d62ab947d86a72` | 2 | 23.06 GiB | `removed` |
+| `2026-07-23T12:21:13Z` | `ba25c047db0b16197461a1484d5acb5b16d71b2541afd26012ec00d012730e81` | 3 | 49.33 GiB | `removed` |
+| `2026-07-23T18:26:47Z` | `bb62fa2853818258df685d955e2e2fe71cf24d789936498ec1c7d69fe92cd752` | 4 | 29.75 GiB | `removed` |
+| `2026-07-24T12:58:33Z` | `5b656e0b43e7a0640207078496b9894894369f8f7bdb220e2a3d97cd042aa5e6` | 2 | 12.41 GiB | `removed` |
 | `2026-07-24T19:13:08Z` | `2d055ba8ccf577d3ae7fe7d4a9a3c004f84e36ee556c5d7deb575da1a6177f64` | 3 | 20.15 GiB | `removed` |
+| `2026-07-25T13:31:10Z` | `b2214024d11dd61253a81f68c26be3b7ac8b6bc50762b3ded5d62ab947d86a72` | 2 | 23.06 GiB | `removed` |
+| `2026-07-25T19:40:52Z` | `b6cfbc1524c0fd9a6062095adc82edb4461c73a959da0114ab39d3489f4f9a5e` | 1 | 11.50 GiB | `removed` |
+| `2026-07-27T12:09:29Z` | `8ed532ee14d179e4e2d68e5e426ff8fe161030429cfd7100e33fe8e19ac7ae26` | 1 | 11.39 GiB | `removed` |
+| `2026-07-29T02:00:13Z` | `c79c4c64000ce01c95412330e2717635ac0f26a0d354494622a2015968657989` | 1 | 12.74 GiB | `removed` |
+| `2026-07-29T08:00:21Z` | `ca3756c48ca01b34c2940191cf88eb13adc30ea6dd672ebf833c14f5dfb11151` | 2 | 9.74 GiB | `removed` |
+| `2026-07-29T14:09:45Z` | `c65af18e7c97fba37faedccbe6eddfd9fdfb48516542c4f36fe754a3f06b8355` | 1 | 4.33 GiB | `removed` |
 
 ### Cache-Receipt am Ausgangspunkt
 
