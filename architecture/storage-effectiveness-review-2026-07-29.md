@@ -7,7 +7,7 @@
 - **Schwellen bleiben unverändert.** Die Messwerte rechtfertigen keine Lockerung; mehrere Produzenten liegen trotz funktionierender Rückgewinnung über ihren Hard-Limits.
 - **Die Bereinigungsmechanik wirkt, begrenzt aber den Zufluss nicht ausreichend.** Im Beobachtungsfenster wurden Worktree-Targets revisionsgebunden entfernt, während der gemessene Worktree-Bestand netto weiter wuchs.
 - **Die globale Ausnahme bleibt ausdrücklich aktiv.** Temporäre plus regenerierbare Daten überschreiten das globale Hard-Budget. Das ist ein Befund, keine Löschfreigabe.
-- **Prävention und Recovery sind belegt, aber nicht gleichbedeutend mit Budgeteinhaltung.** Inventar und Timer erkennen Überschreitungen; hashgebundene Receipts belegen erfolgreiche Rückgewinnung.
+- **Prävention und Recovery sind belegt, aber nicht gleichbedeutend mit Budgeteinhaltung.** Inventar und Timer erkennen Überschreitungen; Worktree-Receipts belegen Rückgewinnung im Fenster, der Cache-Receipt nur den Zustand unmittelbar vor der Baseline.
 
 ## Evidenzbindung
 
@@ -46,7 +46,7 @@
 
 - Worktree-Target-Maintenance: 13 Receipts, 42 entfernte Targets, 312.80 GiB belegte Blöcke entfernt.
 - Daraus folgt für `repo-worktrees` ein Bruttozufluss von mindestens 338.60 GiB: entfernte Bytes plus positives Nettowachstum.
-- Cache-Baseline-Recovery: 1 Receipt, 14 entfernte Einträge, 40.41 GiB freigegeben.
+- Für `user-cache` liegt innerhalb des Beobachtungsfensters kein Cleanup-Receipt vor; eine Cache-Rückgewinnung im Fenster wird daher nicht behauptet.
 
 ### Worktree-Receipts
 
@@ -66,7 +66,9 @@
 | `2026-07-29T08:00:21Z` | `ca3756c48ca01b34c2940191cf88eb13adc30ea6dd672ebf833c14f5dfb11151` | 2 | 9.74 GiB | `removed` |
 | `2026-07-29T14:09:45Z` | `c65af18e7c97fba37faedccbe6eddfd9fdfb48516542c4f36fe754a3f06b8355` | 1 | 4.33 GiB | `removed` |
 
-### Cache-Receipt am Ausgangspunkt
+### Pre-Baseline-Kontext: Cache-Receipt am Ausgangspunkt
+
+Der folgende Receipt endete 8 Minuten und 49 Sekunden vor der Baseline. Er belegt den bereinigten Ausgangszustand, wird aber weder als Rückgewinnung im Beobachtungsfenster noch als Gegenposten zum späteren Cache-Zufluss gezählt.
 
 | Abschluss (UTC) | Receipt-SHA-256 | Einträge | Freigegeben | Ergebnis |
 |---|---|---:|---:|---|
@@ -84,14 +86,14 @@
 ## Schwellenentscheidung
 
 - Keine Schwelle wird geändert.
-- Begründung: Die Überschreitungen sind nicht als harmlose Normalverteilung belegt. Worktree- und Cache-Zufluss übersteigen die nachgewiesene Rückgewinnung; höhere Grenzwerte würden nur den Alarm verzögern.
+- Begründung: Die Überschreitungen sind nicht als harmlose Normalverteilung belegt. Der Worktree-Zufluss übersteigt die im Fenster nachgewiesene Rückgewinnung; für den Cache ist im Fenster keine Rückgewinnung belegt. Höhere Grenzwerte würden nur den Alarm verzögern.
 - Folge: bestehende Warn- und Hard-Limits bleiben als Diagnosegrenzen bestehen. Diese Entscheidung erzeugt keine Cleanup-, Lösch-, Merge- oder Break-glass-Autorität.
 
 ## Präventions- und Recovery-Readback
 
 - Das frisch erzeugte Endinventar klassifiziert `repo-worktrees`, `user-cache` und `grabowski-releases` als `hard_limit` und projiziert große unregistrierte Worktree-Wurzeln. Die Präventionsdiagnose ist damit aktiv und fail-closed.
 - Die Worktree-Receipts binden Kandidaten, Post-Move-Beobachtung und Post-Move-Tree-Hash; alle im Fenster ausgewerteten Outcomes lauten `removed`.
-- Der Cache-Receipt bindet Vorher-/Nachher-Allokation und alle ausgewerteten Outcomes lauten `removed`.
+- Der Cache-Receipt bindet Vorher-/Nachher-Allokation unmittelbar vor der Baseline und alle ausgewerteten Outcomes lauten `removed`; er wird nicht dem Beobachtungsfenster zugerechnet.
 - Timer-Readback zum Prüfzeitpunkt:
 ```text
 NextElapseUSecRealtime=Wed 2026-07-29 22:03:46 CEST
