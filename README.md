@@ -75,6 +75,29 @@ Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:
 6. Klassifikation als Einzelrepo-, systemweiter, Host-, Task- oder Historienfall;
 7. gezieltes Lesen der referenzierten Primärquellen und abschließender zielbezogener Live-Read vor Mutation.
 
+## Tunnel-Client-Profilprüfung
+
+`scripts/tunnel_profile_diagnostics.py` prüft ausschließlich die YAML-Profile im
+angegebenen `tunnel-client`-Profilverzeichnis. Ausgegeben werden nur Profilnamen
+und lokale Health-Listener; API-Schlüssel, Header und MCP-Konfiguration bleiben
+außerhalb der Ausgabe. Die kanonischen lokalen Zuweisungen sind `grabowski` auf
+`127.0.0.1:18080`, `heim-pc-dashboard` auf `127.0.0.1:18081` und
+`grabowski-johannes` auf `127.0.0.1:18083`. Doppelte Listener oder Abweichungen
+führen zu einem Nichtnullstatus.
+
+```bash
+python3 scripts/tunnel_profile_diagnostics.py
+python3 scripts/tunnel_profile_diagnostics.py \
+  --repair-profile grabowski-johannes \
+  --expected-current 127.0.0.1:18081 \
+  --listen-addr 127.0.0.1:18083
+```
+
+Die Reparatur ist vorzustandsgebunden, lehnt Symlinks und bereits belegte Ziele
+ab, ersetzt nur die vorhandene `health.listen_addr`-Zeile atomar und liest den
+Zielwert anschließend zurück. Sie startet keinen Dienst; `tunnel-client doctor`
+und die systemd-Laufzeitprüfung bleiben getrennte Abschlussbelege.
+
 ## Host-Health- und Log-Remediation
 
 `config/host-health-remediation.v1.json` bindet die schmale persistente
