@@ -2,7 +2,7 @@
 id: storage-lifecycle
 role: norm
 status: canonical
-last_reviewed: 2026-07-29
+last_reviewed: 2026-07-30
 depends_on:
   - security
 verifies_with:
@@ -67,12 +67,13 @@ zeitgestempelter Snapshots.
 
 ## Wirksamkeitsprüfung
 
-Der revisionsgebundene Zwischenstand der 14-Tage-Prüfung liegt in
-`architecture/storage-effectiveness-review-2026-07-29.md`. Er belässt alle
-Schwellen unverändert, weist die aktive globale Budgetausnahme ausdrücklich aus
-und trennt erfolgreiche Rückgewinnung von dauerhafter Budgeteinhaltung. Das
-Mindestfenster ist im Bericht als Merge- und Terminalisierungsgate festgehalten.
-Der Bericht erteilt keine Löschfreigabe.
+Der revisionsgebundene Abschluss der 14-Tage-Prüfung liegt in
+`architecture/storage-effectiveness-review-2026-07-29.md`. Das post-gate
+Endinventar erfüllt das Mindestfenster, belässt alle Schwellen unverändert,
+weist die aktive globale Budgetausnahme ausdrücklich aus und trennt erfolgreiche
+Rückgewinnung von dauerhafter Budgeteinhaltung. Der Prüfauftrag kann damit
+revisionsgebunden terminalisiert werden; Budgetkonformität wird ausdrücklich
+nicht behauptet. Der Bericht erteilt keine Löschfreigabe.
 
 ## Grenzen
 
