@@ -17,7 +17,7 @@ from scripts import tunnel_profile_diagnostics as diagnostics
 PROFILE_TEMPLATE = """config_version: 1
 control_plane:
   tunnel_id: \"{profile}-id\"
-  api_key: \"file:/private/{secret}\"
+  opaque_marker: \"{marker}\"
 health:
   listen_addr: \"{listen_addr}\"
 admin_ui:
@@ -42,14 +42,14 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
         profile: str,
         listen_addr: str,
         *,
-        secret: str = "do-not-print",
+        marker: str = "do-not-print",
     ) -> Path:
         path = self.profile_dir / f"{profile}.yaml"
         path.write_text(
             PROFILE_TEMPLATE.format(
                 profile=profile,
                 listen_addr=listen_addr,
-                secret=secret,
+                marker=marker,
             ),
             encoding="utf-8",
         )
@@ -59,13 +59,15 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
         for profile, listen_addr in diagnostics.CANONICAL_LISTENERS.items():
             self.write_profile(profile, listen_addr)
 
-    def test_diagnose_reports_duplicate_and_canonical_mismatch_without_secrets(
+    def test_diagnose_reports_duplicate_and_mismatch_without_other_values(
         self,
     ) -> None:
-        self.write_profile("grabowski", "127.0.0.1:18080", secret="alpha-secret")
-        self.write_profile("heim-pc-dashboard", "127.0.0.1:18081", secret="beta-secret")
+        self.write_profile("grabowski", "127.0.0.1:18080", marker="alpha-sentinel")
         self.write_profile(
-            "grabowski-johannes", "127.0.0.1:18081", secret="gamma-secret"
+            "heim-pc-dashboard", "127.0.0.1:18081", marker="beta-sentinel"
+        )
+        self.write_profile(
+            "grabowski-johannes", "127.0.0.1:18081", marker="gamma-sentinel"
         )
 
         result = diagnostics.diagnose(self.profile_dir)
@@ -91,9 +93,9 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertNotIn("alpha-secret", encoded)
-        self.assertNotIn("beta-secret", encoded)
-        self.assertNotIn("gamma-secret", encoded)
+        self.assertNotIn("alpha-sentinel", encoded)
+        self.assertNotIn("beta-sentinel", encoded)
+        self.assertNotIn("gamma-sentinel", encoded)
 
     def test_diagnose_passes_for_unique_canonical_assignments(self) -> None:
         self.write_canonical_profiles()
@@ -109,7 +111,7 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
         self.write_profile("grabowski", "127.0.0.1:18080")
         self.write_profile("heim-pc-dashboard", "127.0.0.1:18081")
         target = self.write_profile(
-            "grabowski-johannes", "127.0.0.1:18081", secret="retained-secret"
+            "grabowski-johannes", "127.0.0.1:18081", marker="retained-sentinel"
         )
         target.chmod(0o640)
 
@@ -124,7 +126,7 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["status"], "repaired")
         text = target.read_text(encoding="utf-8")
         self.assertIn('listen_addr: "127.0.0.1:18083"', text)
-        self.assertIn("retained-secret", text)
+        self.assertIn("retained-sentinel", text)
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
         self.assertEqual(diagnostics.diagnose(self.profile_dir)["status"], "pass")
 
@@ -173,7 +175,7 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
         real = self.profile_dir / "real.yaml"
         real.write_text(
             PROFILE_TEMPLATE.format(
-                profile="real", listen_addr="127.0.0.1:19000", secret="hidden"
+                profile="real", listen_addr="127.0.0.1:19000", marker="hidden-sentinel"
             ),
             encoding="utf-8",
         )
@@ -183,7 +185,7 @@ class TunnelProfileDiagnosticsTests(unittest.TestCase):
             diagnostics.diagnose(self.profile_dir)
 
     def test_cli_error_output_does_not_echo_profile_contents(self) -> None:
-        self.write_profile("grabowski", "not-an-endpoint", secret="never-echo-this")
+        self.write_profile("grabowski", "not-an-endpoint", marker="never-echo-this")
         output = io.StringIO()
 
         with redirect_stdout(output):
