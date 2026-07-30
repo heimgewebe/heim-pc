@@ -42,9 +42,9 @@ jobs:
       - name: Verify scripts syntax
         run: python3 -m compileall -q heim-pc/scripts
 
-      - name: Run Unit Tests
+      - name: Run test suite
         working-directory: ./heim-pc
-        run: python3 -m unittest discover tests
+        run: python3 -m pytest -q
 
       - name: Validate canonical operator entry
         working-directory: ./heim-pc
