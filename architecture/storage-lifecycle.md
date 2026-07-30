@@ -2,7 +2,7 @@
 id: storage-lifecycle
 role: norm
 status: canonical
-last_reviewed: 2026-07-18
+last_reviewed: 2026-07-30
 depends_on:
   - security
 verifies_with:
@@ -64,6 +64,16 @@ python3 scripts/storage_inventory.py   --state-dir ~/.local/state/heim-pc/storag
 
 Die zweite Form schreibt atomar `latest.json` und eine begrenzte Reihe
 zeitgestempelter Snapshots.
+
+## Wirksamkeitsprüfung
+
+Der revisionsgebundene Abschluss der 14-Tage-Prüfung liegt in
+`architecture/storage-effectiveness-review-2026-07-29.md`. Das post-gate
+Endinventar erfüllt das Mindestfenster, belässt alle Schwellen unverändert,
+weist die aktive globale Budgetausnahme ausdrücklich aus und trennt erfolgreiche
+Rückgewinnung von dauerhafter Budgeteinhaltung. Der Prüfauftrag kann damit
+revisionsgebunden terminalisiert werden; Budgetkonformität wird ausdrücklich
+nicht behauptet. Der Bericht erteilt keine Löschfreigabe.
 
 ## Grenzen
 
