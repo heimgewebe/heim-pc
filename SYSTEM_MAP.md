@@ -23,7 +23,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | zones | [architecture/zones.md](architecture/zones.md) | canonical | 2026-02-28 | - |
 | drift-policy | [architecture/drift-policy.md](architecture/drift-policy.md) | canonical | 2026-02-28 | - |
 | docmeta.schema | [architecture/docmeta.schema.md](architecture/docmeta.schema.md) | canonical | 2026-02-28 | - |
-| storage-lifecycle | [architecture/storage-lifecycle.md](architecture/storage-lifecycle.md) | canonical | 2026-07-29 | security |
+| storage-lifecycle | [architecture/storage-lifecycle.md](architecture/storage-lifecycle.md) | canonical | 2026-07-30 | security |
 | managed-builds | [architecture/managed-builds.md](architecture/managed-builds.md) | canonical | 2026-07-22 | storage-lifecycle, operatorium-entry, security |
 | cache-maintenance | [architecture/cache-maintenance.md](architecture/cache-maintenance.md) | canonical | 2026-07-15 | storage-lifecycle, managed-builds, security |
 | maintenance-outcomes | [architecture/maintenance-outcomes.md](architecture/maintenance-outcomes.md) | canonical | 2026-07-24 | storage-lifecycle, security, drift-policy |
