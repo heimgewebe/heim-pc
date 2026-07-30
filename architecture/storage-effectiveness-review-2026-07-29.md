@@ -1,19 +1,20 @@
-# Speicher-Wirksamkeitsprüfung: Zwischenstand vom 29. Juli 2026
+# Speicher-Wirksamkeitsprüfung: Abschluss vom 30. Juli 2026
 
 ## Urteil
 
-> **Fortsetzungsgate:** Das Mindestfenster von 14 vollständigen Tagen endet erst `2026-07-29T21:13:26.256171Z`. Das gebundene Endinventar entstand um `2026-07-29T19:28:05.793425Z` und liegt damit 1 Stunde, 45 Minuten und 20 Sekunden vor dem Gate. Dieser Zwischenstand darf `STORAGE-LIFECYCLE-V1-T009` daher noch nicht terminalisieren und der PR darf auf diesem Stand nicht gemergt werden.
+> **Abschlussgate erfüllt:** Das Mindestfenster von 14 vollständigen Tagen endete `2026-07-29T21:13:26.256171Z`. Das gebundene Endinventar entstand um `2026-07-30T03:41:06.194320Z`, also 6 Stunden, 27 Minuten und 39,938149 Sekunden nach dem Gate. Das Beobachtungsfenster umfasst damit 14 Tage, 6 Stunden, 27 Minuten und 39,938149 Sekunden. `STORAGE-LIFECYCLE-V1-T009` darf auf dieser Evidenz terminalisiert und der PR nach aktuellen Head-, Review- und CI-Prüfungen gemergt werden.
 
-- **Schwellen bleiben unverändert.** Die Messwerte rechtfertigen keine Lockerung; mehrere Produzenten liegen trotz funktionierender Rückgewinnung über ihren Hard-Limits.
-- **Die Bereinigungsmechanik wirkt, begrenzt aber den Zufluss nicht ausreichend.** Im Beobachtungsfenster wurden Worktree-Targets revisionsgebunden entfernt, während der gemessene Worktree-Bestand netto weiter wuchs.
-- **Die globale Ausnahme bleibt ausdrücklich aktiv.** Temporäre plus regenerierbare Daten überschreiten das globale Hard-Budget. Das ist ein Befund, keine Löschfreigabe.
+- **Schwellen bleiben unverändert.** Die Messwerte rechtfertigen keine Lockerung; drei Produzenten liegen weiterhin über ihren Hard-Limits.
+- **Die Worktree-Bereinigung wirkt, begrenzt den Zufluss aber noch nicht ausreichend.** 361,13 GiB revisionsgebundene Rückgewinnung senkten den gemessenen Worktree-Bestand netto um 20,19 GiB; der Endbestand bleibt dennoch über dem Hard-Limit.
+- **Der Cache ist der dominante offene Befund.** `user-cache` wuchs im Fenster um 181,69 GiB; innerhalb des Fensters liegt kein Cache-Cleanup-Receipt vor.
+- **Die globale Ausnahme bleibt ausdrücklich aktiv.** Temporäre plus regenerierbare Daten überschreiten das globale Hard-Budget um 236,00 GiB. Das ist ein Befund, keine Löschfreigabe.
 - **Prävention und Recovery sind belegt, aber nicht gleichbedeutend mit Budgeteinhaltung.** Inventar und Timer erkennen Überschreitungen; Worktree-Receipts belegen Rückgewinnung im Fenster, der Cache-Receipt nur den Zustand unmittelbar vor der Baseline.
 
 ## Evidenzbindung
 
-- Beobachtungsfenster: `2026-07-15T21:13:26.256171Z` bis `2026-07-29T19:28:05.793425Z` (13 Tage, 22 Stunden; Kalendertage 15.–29. Juli 2026).
+- Beobachtungsfenster: `2026-07-15T21:13:26.256171Z` bis `2026-07-30T03:41:06.194320Z` (14 Tage, 6 Stunden, 27 Minuten und 39,938149 Sekunden).
 - Baseline: `/home/alex/.local/state/heim-pc/storage-remediation/STORAGE-LIFECYCLE-V1-T008/storage-inventory-final.json`, Datei-SHA-256 `10dbc82106e450500b158c8261eded5cbd0f8f9a15ec215e32b06cc31b17afdd`, Inventar-SHA-256 `c3b2a14b0a7108dc3434476e75843cb76c47bb4127923f0988c79c899ef00324`.
-- Endinventar: lokal frisch aus Commit `739970a4326c1aae6f6cb451f0a93206dcc30830` erzeugt, Datei-SHA-256 `36139a9ca7376f35e8838ab7fc2c130a1f174f97b90a66af86ce9f3a9503132e`, Inventar-SHA-256 `479bf1d9dba1ed75918c960eef040e35afd9194d32ee55fe807edefdbc0b88e7`.
+- Endinventar: `/home/alex/.local/state/heim-pc/storage-remediation/STORAGE-LIFECYCLE-V1-T009/storage-inventory-post-gate.json`, frisch mit Skript und Richtlinie aus dem exakten PR-Head `174b782808b3e2fdce30aa6e85b68dacc79bfdff` erzeugt, Datei-SHA-256 `ec1e00b6152075c3b2545547321e384e1a127eed38f489213dc77ba55b087d4b`, Inventar-SHA-256 `0b2e9db1e97cc33133c7a3df1b066f14e1f78b867b41f54300ffe171b7553d55`.
 - Richtlinie: `config/storage-lifecycle.v1.json`, Datei-SHA-256 `5f9ee22e12a771059bac9b9550f54b99fa1f9b3ca9ce9d982f9645890c7816c7`.
 - Zwischenzeitliche Bestandsverläufe werden nicht erfunden: Es liegen zwei vollständige Inventare und dazwischen hashgebundene Cleanup-Receipts vor. Der genaue Tagesverlauf innerhalb des Fensters bleibt unbekannt.
 
@@ -21,9 +22,9 @@
 
 | Produzent | Klasse | Start | Ende | Delta | Startstatus | Endstatus | Hard-Limit |
 |---|---:|---:|---:|---:|---|---|---:|
-| `repo-worktrees` | `temporary_workspace` | 171.11 GiB | 196.90 GiB | +25.80 GiB | `hard_limit` | `hard_limit` | 120.00 GiB |
+| `repo-worktrees` | `temporary_workspace` | 171.11 GiB | 150.91 GiB | -20.19 GiB | `hard_limit` | `hard_limit` | 120.00 GiB |
 | `repobrief-auto` | `temporary_workspace` | 1.13 GiB | 1.13 GiB | +0.00 GiB | `ok` | `ok` | 40.00 GiB |
-| `user-cache` | `regenerable_cache` | 52.17 GiB | 232.30 GiB | +180.13 GiB | `hard_limit` | `hard_limit` | 50.00 GiB |
+| `user-cache` | `regenerable_cache` | 52.17 GiB | 233.86 GiB | +181.69 GiB | `hard_limit` | `hard_limit` | 50.00 GiB |
 | `trash` | `temporary_workspace` | 21.22 GiB | 0.11 GiB | -21.11 GiB | `hard_limit` | `ok` | 20.00 GiB |
 | `grabowski-releases` | `durable_evidence` | 10.12 GiB | 20.29 GiB | +10.17 GiB | `warning` | `hard_limit` | 20.00 GiB |
 | `vm-data` | `canonical` | 15.17 GiB | 15.17 GiB | +0.00 GiB | `ok` | `ok` | 100.00 GiB |
@@ -34,18 +35,18 @@
 |---|---:|---:|---:|
 | `canonical` | 15.17 GiB | 15.17 GiB | +0.00 GiB |
 | `durable_evidence` | 10.12 GiB | 20.29 GiB | +10.17 GiB |
-| `regenerable_cache` | 52.17 GiB | 232.30 GiB | +180.13 GiB |
-| `temporary_workspace` | 193.46 GiB | 198.14 GiB | +4.68 GiB |
+| `regenerable_cache` | 52.17 GiB | 233.86 GiB | +181.69 GiB |
+| `temporary_workspace` | 193.46 GiB | 152.15 GiB | -41.31 GiB |
 
-- Temporär plus regenerierbar: 245.63 GiB → 430.44 GiB.
+- Temporär plus regenerierbar: 245.63 GiB → 386.00 GiB.
 - Globales Warnbudget: 100.00 GiB; globales Hard-Budget: 150.00 GiB.
-- Explizite Ausnahme am Ende: 280.44 GiB über dem Hard-Budget. Sie autorisiert keine Löschung.
-- Dateisystembelegung: 31.46% → 57.64%; der globale Dateisystemstatus bleibt `ok`.
+- Explizite Ausnahme am Ende: 236.00 GiB über dem Hard-Budget. Sie autorisiert keine Löschung.
+- Dateisystembelegung: 31.46% → 56.28%; der globale Dateisystemstatus bleibt `ok`.
 
 ## Rückgewinnung im Fenster
 
-- Worktree-Target-Maintenance: 13 Receipts, 42 entfernte Targets, 312.80 GiB belegte Blöcke entfernt.
-- Daraus folgt für `repo-worktrees` ein Bruttozufluss von mindestens 338.60 GiB: entfernte Bytes plus positives Nettowachstum.
+- Worktree-Target-Maintenance: 15 Receipts, 45 entfernte Targets, 361.13 GiB belegte Blöcke entfernt.
+- Daraus folgt für `repo-worktrees` ein Bruttozufluss von mindestens 340.94 GiB: entfernte Bytes abzüglich des negativen Nettodeltas. Die Rückgewinnung überstieg diesen Mindestzufluss um 20.19 GiB; der Bestand sank, blieb aber über dem Hard-Limit.
 - Für `user-cache` liegt innerhalb des Beobachtungsfensters kein Cleanup-Receipt vor; eine Cache-Rückgewinnung im Fenster wird daher nicht behauptet.
 
 ### Worktree-Receipts
@@ -65,6 +66,8 @@
 | `2026-07-29T02:00:13Z` | `c79c4c64000ce01c95412330e2717635ac0f26a0d354494622a2015968657989` | 1 | 12.74 GiB | `removed` |
 | `2026-07-29T08:00:21Z` | `ca3756c48ca01b34c2940191cf88eb13adc30ea6dd672ebf833c14f5dfb11151` | 2 | 9.74 GiB | `removed` |
 | `2026-07-29T14:09:45Z` | `c65af18e7c97fba37faedccbe6eddfd9fdfb48516542c4f36fe754a3f06b8355` | 1 | 4.33 GiB | `removed` |
+| `2026-07-29T20:10:01Z` | `957cce1f0c51b0bf6c42f2fd857aed962b03855084accd25240ab9339cf64ada` | 1 | 13.18 GiB | `removed` |
+| `2026-07-30T02:12:14Z` | `72b35fbaa3352d1ef5f0e2e7f93c624f82c3428841c04330ed6e01254ac2ee50` | 2 | 35.15 GiB | `removed` |
 
 ### Pre-Baseline-Kontext: Cache-Receipt am Ausgangspunkt
 
@@ -76,38 +79,30 @@ Der folgende Receipt endete 8 Minuten und 49 Sekunden vor der Baseline. Er beleg
 
 ## Explizite Ausnahmen und Grenzen
 
-- `repo-worktrees`: 25.80 GiB Nettowachstum; Endbestand 196.90 GiB über Hard-Limit 120.00 GiB.
-- `user-cache`: Endbestand 232.30 GiB über Hard-Limit 50.00 GiB. Ein einmaliger Baseline-Cleanup begrenzt fortgesetzten Zufluss nicht.
-- `grabowski-releases`: Endbestand 20.29 GiB liegt knapp über Hard-Limit 20.00 GiB; Dauerbeweise dürfen nicht durch eine Budgetanhebung kaschiert werden.
+- `repo-worktrees`: 20.19 GiB Nettorückgang; Endbestand 150.91 GiB bleibt über dem Hard-Limit 120.00 GiB. Der Mindest-Bruttozufluss von 340.94 GiB zeigt weiterhin hohen Erzeugungsdruck.
+- `user-cache`: Endbestand 233.86 GiB liegt über dem Hard-Limit 50.00 GiB und wuchs im Fenster um 181.69 GiB. Ein einmaliger Baseline-Cleanup begrenzt fortgesetzten Zufluss nicht.
+- `grabowski-releases`: Endbestand 20.29 GiB liegt knapp über dem Hard-Limit 20.00 GiB; Dauerbeweise dürfen nicht durch eine Budgetanhebung kaschiert werden.
 - Unregistrierte Kandidaten bleiben sichtbar, aber unklassifiziert und nicht löschbar:
   - `/home/alex/repos/.commonworld-worktrees`: 3.77 GiB.
-  - `/home/alex/repos/.grabowski-worktrees`: 2.78 GiB.
+  - `/home/alex/repos/.grabowski-worktrees`: 2.86 GiB.
 
 ## Schwellenentscheidung
 
 - Keine Schwelle wird geändert.
-- Begründung: Die Überschreitungen sind nicht als harmlose Normalverteilung belegt. Der Worktree-Zufluss übersteigt die im Fenster nachgewiesene Rückgewinnung; für den Cache ist im Fenster keine Rückgewinnung belegt. Höhere Grenzwerte würden nur den Alarm verzögern.
-- Folge: bestehende Warn- und Hard-Limits bleiben als Diagnosegrenzen bestehen. Diese Entscheidung erzeugt keine Cleanup-, Lösch-, Merge- oder Break-glass-Autorität.
+- Begründung: Die Überschreitungen sind nicht als harmlose Normalverteilung belegt. Die Worktree-Rückgewinnung überstieg zwar den Mindestzufluss und senkte den Bestand, dieser bleibt jedoch im Hard-Limit; der Mindestzufluss von 340.94 GiB bleibt hoch. Für den Cache ist im Fenster keine Rückgewinnung belegt, während sein Bestand um 181.69 GiB wuchs. Höhere Grenzwerte würden den Alarm nur verzögern.
+- Folge: bestehende Warn- und Hard-Limits bleiben als Diagnosegrenzen bestehen. Diese Entscheidung erzeugt keine Cleanup-, Lösch- oder Break-glass-Autorität.
 
 ## Präventions- und Recovery-Readback
 
-- Das frisch erzeugte Endinventar klassifiziert `repo-worktrees`, `user-cache` und `grabowski-releases` als `hard_limit` und projiziert große unregistrierte Worktree-Wurzeln. Die Präventionsdiagnose ist damit aktiv und fail-closed.
-- Die Worktree-Receipts binden Kandidaten, Post-Move-Beobachtung und Post-Move-Tree-Hash; alle im Fenster ausgewerteten Outcomes lauten `removed`.
+- Das post-gate erzeugte Endinventar klassifiziert `repo-worktrees`, `user-cache` und `grabowski-releases` als `hard_limit` und projiziert große unregistrierte Worktree-Wurzeln. Die Präventionsdiagnose ist damit aktiv und fail-closed.
+- Die 15 Worktree-Receipts binden Kandidaten, Post-Move-Beobachtung und Post-Move-Tree-Hash; alle 45 ausgewerteten Outcomes lauten `removed`.
 - Der Cache-Receipt bindet Vorher-/Nachher-Allokation unmittelbar vor der Baseline und alle ausgewerteten Outcomes lauten `removed`; er wird nicht dem Beobachtungsfenster zugerechnet.
-- Timer-Readback zum Prüfzeitpunkt:
-```text
-NextElapseUSecRealtime=Wed 2026-07-29 22:03:46 CEST
-LastTriggerUSec=Wed 2026-07-29 21:04:28 CEST
-Id=leitstand-storage-health.timer
-ActiveState=active
-SubState=waiting
+- Nach dem Endinventar waren `leitstand-storage-health.timer` und `heim-pc-worktree-target-maintenance.timer` jeweils geladen, aktiviert und im Zustand `active/waiting`; die zugehörigen letzten Servicezustände meldeten `Result=success` und `ExecMainStatus=0`.
 
-NextElapseUSecRealtime=
-LastTriggerUSec=Wed 2026-07-29 16:09:24 CEST
-Id=heim-pc-worktree-target-maintenance.timer
-ActiveState=active
-SubState=waiting
-```
+## Abschluss und Folgegrenze
+
+- Das zeitliche Wirksamkeitsgate ist erfüllt; `STORAGE-LIFECYCLE-V1-T009` kann revisionsgebunden abgeschlossen werden.
+- Nicht erfüllt ist dauerhafte Budgetkonformität. Der nächste Arbeitsgegenstand muss den Cache-Zufluss, den verbleibenden Worktree-Erzeugungsdruck und die knapp überschrittene Release-Retention getrennt behandeln, statt Schwellen anzuheben.
 
 ## Nichtaussagen
 
