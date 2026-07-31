@@ -23,6 +23,7 @@ SOURCES = {
     "scripts/managed_cargo_maintenance.py": ROOT / "scripts/managed_cargo_maintenance.py",
     "scripts/managed_cargo_gc.py": ROOT / "scripts/managed_cargo_gc.py",
     "scripts/managed_build.py": ROOT / "scripts/managed_build.py",
+    "scripts/storage_inventory.py": ROOT / "scripts/storage_inventory.py",
     "config/managed-build.v1.json": ROOT / "config/managed-build.v1.json",
 }
 UNIT_NAME = "heim-pc-managed-cargo-maintenance"
