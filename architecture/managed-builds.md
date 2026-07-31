@@ -71,6 +71,8 @@ Node- und Python-Projektionsverzeichnisse werden nicht blind umgebogen, weil der
 
 Der separate Einstieg `scripts/managed_cargo_gc.py` ergänzt den Buildpfad um einen kontrollierten Lebenszyklus. Er ist absichtlich nicht in `automatic_cleanup_authorized` aufgegangen.
 
+Der commitgebundene Dienst `heim-pc-managed-cargo-maintenance.service` führt diesen Vertrag stündlich aus und wird vom bestehenden Wartungsmonitor als eigener Producer mit Receipt-Pfad überwacht. Jeder Lauf liest die öffentliche Grabowski-Taskprojektion `managed_cargo_evidence` frisch, schreibt Evidenz und Plan atomar, wendet höchstens eine Policy-Welle von 20 GiB an und protokolliert einen begrenzten Verlauf. Unvollständige Task-Evidenz, Prozessbeobachtungsfehler, Planblocker oder Drift verhindern jede Wirkung. Der Dienst ändert `automatic_cleanup_authorized` nicht: Die Löschautorität bleibt ausschließlich im exakten GC-Plan, dessen Bestätigung und den Cache-Key-Locks gebunden.
+
 1. `inventory` betrachtet ausschließlich direkte Kinder unter `${HOME}/.cache/heim-pc/managed-builds/cargo`.
 2. Nur direkte, reale Verzeichnisse mit Namen aus exakt 64 hexadezimalen Zeichen gelten als verwaltete Identitätskandidaten. Benannte Alt-, Review- oder Sondertargets sowie direkte Symlink-/Nicht-Verzeichnis-Identitäten bleiben `unclassified` und werden nie inferiert gelöscht. Symlinks innerhalb eines echten Identity-Trees werden als Blätter inventarisiert und niemals verfolgt.
 3. Lokale Managed-Build-, Binding- und Usage-Receipts liefern Repository-Provenienz und letzte Nutzung, soweit sie vorhanden sind. Fehlende historische Cargo-Provenienz wird nicht durch Dateialter ersetzt.

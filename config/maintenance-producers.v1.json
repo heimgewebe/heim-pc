@@ -29,9 +29,20 @@
       "unit": "heim-pc-worktree-audit.service"
     },
     {
+      "evidence_paths": [
+        "$HOME/.local/state/heim-pc/managed-builds/maintenance/latest.json"
+      ],
+      "id": "heim-pc-managed-cargo-maintenance",
+      "max_age_seconds": 10800,
+      "owner_component": "heim-pc",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-pc-managed-cargo-maintenance.timer",
+      "unit": "heim-pc-managed-cargo-maintenance.service"
+    },
+    {
       "evidence_paths": [],
       "id": "heim-pc-worktree-target-maintenance",
-      "max_age_seconds": 28800,
+      "max_age_seconds": 10800,
       "owner_component": "heim-pc",
       "success_evidence": "systemd-service-result",
       "timer_unit": "heim-pc-worktree-target-maintenance.timer",

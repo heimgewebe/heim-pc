@@ -1,0 +1,25 @@
+[Unit]
+Description=Bounded evidence-bound managed Cargo cache maintenance
+After=grabowski-operator.service
+ConditionFileIsExecutable=@HOME@/.local/share/grabowski-mcp/.venv/bin/python
+
+[Service]
+Type=oneshot
+WorkingDirectory=@RELEASE_ROOT@
+ExecStart=@HOME@/.local/share/grabowski-mcp/.venv/bin/python @RELEASE_ROOT@/scripts/managed_cargo_maintenance.py --policy @RELEASE_ROOT@/config/managed-build.v1.json --state-root @HOME@/.local/state/heim-pc/managed-builds/maintenance
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/.cache/heim-pc/managed-builds @HOME@/.local/state/heim-pc/managed-builds
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+TimeoutStartSec=30min
+MemoryMax=2G
+CPUWeight=25
+IOWeight=10
+Nice=10
