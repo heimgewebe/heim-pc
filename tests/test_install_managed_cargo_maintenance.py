@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -49,6 +50,13 @@ class InstallManagedCargoMaintenanceTests(unittest.TestCase):
             self.assertNotIn("@RELEASE_ROOT@", service)
             timer = (home / ".config/systemd/user/heim-pc-managed-cargo-maintenance.timer").read_text()
             self.assertIn("OnCalendar=hourly", timer)
+            import_check = subprocess.run(
+                [sys.executable, str(release / "scripts/managed_cargo_maintenance.py"), "--help"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(import_check.returncode, 0, import_check.stderr)
 
     def test_dirty_repository_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
