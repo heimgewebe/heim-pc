@@ -12,10 +12,10 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout WGX Tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: heimgewebe/wgx
           path: .wgx-tooling
