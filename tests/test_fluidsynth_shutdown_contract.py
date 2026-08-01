@@ -134,6 +134,21 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
         self.assertIn("TimeoutStopSec=15s", service)
         self.assertIn("SendSIGKILL=yes", service)
         self.assertIn("FinalKillSignal=SIGKILL", service)
+        self.assertEqual(deployment["fluidsynth_user_uid"], 1000)
+        self.assertEqual(deployment["fluidsynth_user_gid"], 1000)
+        self.assertEqual(deployment["fluidsynth_user_home"], "/home/alex")
+        self.assertEqual(
+            deployment["fluidsynth_user_unit_dirs"][0],
+            "home/alex/.config/systemd/user.control",
+        )
+        self.assertIn(
+            "home/alex/.config/systemd/user",
+            deployment["fluidsynth_user_unit_dirs"],
+        )
+        self.assertIn(
+            "run/user/1000/systemd/user.control",
+            deployment["fluidsynth_user_unit_dirs"],
+        )
         self.assertEqual(deployment["fluidsynth_exec_stop"], [])
         self.assertEqual(deployment["fluidsynth_timeout_stop_sec"], "15s")
         self.assertTrue(deployment["fluidsynth_send_sigkill"])

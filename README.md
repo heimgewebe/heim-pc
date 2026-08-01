@@ -155,7 +155,16 @@ Die installierbaren Teile haben folgende Grenzen:
   `zz-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
   relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `alex` sein;
   andere Drop-ins mit `ConditionUser` blockieren den Apply-Lauf, auch wenn sie
-  zufällig denselben Endwert erzeugen. Der Drop-in erhält außerdem den
+  zufällig denselben Endwert erzeugen. Der Suchpfadvertrag umfasst auch Alex'
+  höher priorisierte `~/.config/systemd/user.control`-,
+  `~/.config/systemd/user`- und `/run/user/1000`-Flächen sowie die aktuellen
+  XDG-, Generator- und Distributionspfade. Gegen das Live-Root muss
+  `systemd-analyze --user unit-paths` vor jeder Zielmutation exakt diesen
+  versionierten Vertrag liefern; nach den Zielwrites wird er vor dem
+  Transaktionscommit erneut geprüft. Abweichungen oder ein nicht ausführbarer
+  Probe blockieren fail-closed. Ein alternatives `--target-root` kann nur gegen
+  den versionierten Hostvertrag geprüft werden und attestiert deshalb ausdrücklich
+  keinen Live-User-Manager-Suchpfad. Der Drop-in erhält außerdem den
   shell-freie argv-Struktur, die Distribution-Argumente, `Type=notify`,
   `NotifyAccess=main` und die Journalrate-Limits, deaktiviert aber mit
   `SDL_NO_SIGNAL_HANDLERS=1` gezielt die SDL-Signalübernahme. Die Variable wird

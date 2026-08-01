@@ -28,6 +28,38 @@ BACKUP_ROOT_RELATIVE = "var/lib/heim-pc/host-health/install-backups"
 RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v3.json"
 STRICT_PROFILE = "/usr/local/libexec/heim-pc/ensure-performance-profile"
 FLUIDSYNTH_USER = "alex"
+FLUIDSYNTH_USER_UID = 1000
+FLUIDSYNTH_USER_GID = 1000
+FLUIDSYNTH_USER_HOME = "/home/alex"
+FLUIDSYNTH_USER_UNIT_DIRS = (
+    "home/alex/.config/systemd/user.control",
+    "run/user/1000/systemd/user.control",
+    "run/user/1000/systemd/transient",
+    "run/user/1000/systemd/generator.early",
+    "home/alex/.config/systemd/user",
+    "etc/xdg/xdg-pop/systemd/user",
+    "etc/xdg/systemd/user",
+    "etc/systemd/user",
+    "run/user/1000/systemd/user",
+    "run/systemd/user",
+    "run/user/1000/systemd/generator",
+    "home/alex/.local/share/systemd/user",
+    "usr/share/pop/systemd/user",
+    "usr/share/gnome/systemd/user",
+    "home/alex/.local/share/flatpak/exports/share/systemd/user",
+    "var/lib/flatpak/exports/share/systemd/user",
+    "usr/local/share/systemd/user",
+    "usr/share/systemd/user",
+    "var/lib/snapd/desktop/systemd/user",
+    "usr/local/lib/systemd/user",
+    "usr/lib/systemd/user",
+    "run/user/1000/systemd/generator.late",
+)
+FLUIDSYNTH_USER_UNIT_PATH_PROBE = (
+    "/usr/bin/systemd-analyze",
+    "--user",
+    "unit-paths",
+)
 FLUIDSYNTH_EXEC_START = (
     "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 "
     "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT"
@@ -186,14 +218,6 @@ SYSTEM_UNIT_DIRS = (
     "usr/lib/systemd/system",
     "lib/systemd/system",
 )
-USER_UNIT_DIRS = (
-    "etc/systemd/user",
-    "run/systemd/user",
-    "usr/local/lib/systemd/user",
-    "usr/lib/systemd/user",
-    "lib/systemd/user",
-)
-
 # Tests may replace this hook. Production leaves it as None.
 TRANSACTION_FAULT_HOOK: Callable[[int, str], None] | None = None
 
@@ -208,6 +232,129 @@ def _sha256(data: bytes) -> str:
 
 def re_full_commit(value: str) -> bool:
     return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
+def _live_user_unit_dirs() -> tuple[str, ...]:
+    try:
+        account = pwd.getpwnam(FLUIDSYNTH_USER)
+    except KeyError as exc:
+        raise InstallError("cannot resolve the FluidSynth user account") from exc
+    if (
+        account.pw_uid != FLUIDSYNTH_USER_UID
+        or account.pw_gid != FLUIDSYNTH_USER_GID
+        or account.pw_dir != FLUIDSYNTH_USER_HOME
+    ):
+        raise InstallError(
+            "FluidSynth user identity differs from the committed unit-path contract"
+        )
+
+    effective_uid = os.geteuid()
+    if effective_uid not in {0, FLUIDSYNTH_USER_UID}:
+        raise InstallError(
+            "cannot inspect FluidSynth user unit paths as the configured user"
+        )
+
+    environment = {
+        "HOME": FLUIDSYNTH_USER_HOME,
+        "USER": FLUIDSYNTH_USER,
+        "LOGNAME": FLUIDSYNTH_USER,
+        "XDG_RUNTIME_DIR": f"/run/user/{FLUIDSYNTH_USER_UID}",
+        "LC_ALL": "C",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+    for name in (
+        "SYSTEMD_UNIT_PATH",
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+    ):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        if "\x00" in value or len(value) > 16_384:
+            raise InstallError(
+                "FluidSynth user unit-path environment is not safely bounded"
+            )
+        environment[name] = value
+
+    run_kwargs: dict[str, Any] = {}
+    if effective_uid == 0:
+        run_kwargs = {
+            "user": account.pw_uid,
+            "group": account.pw_gid,
+            "extra_groups": [],
+        }
+    try:
+        completed = subprocess.run(
+            list(FLUIDSYNTH_USER_UNIT_PATH_PROBE),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+            cwd="/",
+            env=environment,
+            **run_kwargs,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        raise InstallError(
+            "cannot inspect the FluidSynth user's effective systemd unit paths"
+        ) from exc
+    if completed.returncode != 0:
+        raise InstallError(
+            "cannot inspect the FluidSynth user's effective systemd unit paths"
+        )
+    if len(completed.stdout) > 65_536:
+        raise InstallError("FluidSynth user unit-path output is not safely bounded")
+
+    observed: list[str] = []
+    for raw_line in completed.stdout.splitlines():
+        if not raw_line or len(raw_line) > 4_096:
+            raise InstallError("FluidSynth user unit-path output is invalid")
+        absolute = PurePosixPath(raw_line)
+        if (
+            not absolute.is_absolute()
+            or ".." in absolute.parts
+            or str(absolute) != raw_line
+        ):
+            raise InstallError("FluidSynth user unit-path output is invalid")
+        relative = str(absolute.relative_to("/"))
+        if relative == "." or relative in observed:
+            raise InstallError("FluidSynth user unit-path output is invalid")
+        observed.append(relative)
+    if tuple(observed) != FLUIDSYNTH_USER_UNIT_DIRS:
+        raise InstallError(
+            "effective FluidSynth user unit paths differ from the committed contract"
+        )
+    return tuple(observed)
+
+
+def _resolve_user_unit_dirs(
+    target_root: Path,
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    if target_root == DEFAULT_TARGET_ROOT:
+        paths = _live_user_unit_dirs()
+        return paths, {
+            "source": "systemd-analyze --user unit-paths",
+            "live_verified": True,
+            "user": FLUIDSYNTH_USER,
+            "uid": FLUIDSYNTH_USER_UID,
+            "gid": FLUIDSYNTH_USER_GID,
+            "home": FLUIDSYNTH_USER_HOME,
+            "paths": list(paths),
+        }
+    return FLUIDSYNTH_USER_UNIT_DIRS, {
+        "source": "committed_host_contract_for_non_live_target_root",
+        "live_verified": False,
+        "user": FLUIDSYNTH_USER,
+        "uid": FLUIDSYNTH_USER_UID,
+        "gid": FLUIDSYNTH_USER_GID,
+        "home": FLUIDSYNTH_USER_HOME,
+        "paths": list(FLUIDSYNTH_USER_UNIT_DIRS),
+        "does_not_establish": [
+            "live_user_manager_unit_path_environment",
+        ],
+    }
 
 
 def _git(
@@ -321,6 +468,10 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "plan_mode": "commit_bound_read_only_unprivileged_no_apply_state",
         "legacy_removal_policy": "exact_known_preimages_only",
         "fluidsynth_condition_user": FLUIDSYNTH_USER,
+        "fluidsynth_user_uid": FLUIDSYNTH_USER_UID,
+        "fluidsynth_user_gid": FLUIDSYNTH_USER_GID,
+        "fluidsynth_user_home": FLUIDSYNTH_USER_HOME,
+        "fluidsynth_user_unit_dirs": list(FLUIDSYNTH_USER_UNIT_DIRS),
         "activation_performed": False,
         "fluidsynth_exec_start": FLUIDSYNTH_EXEC_START,
         "fluidsynth_service_type": FLUIDSYNTH_SERVICE_TYPE,
@@ -755,6 +906,9 @@ def _effective_scalar(
 
 def _verify_effective_composition(
     root_fd: int,
+    *,
+    user_unit_dirs: tuple[str, ...],
+    user_unit_path_evidence: dict[str, Any],
     overlay: dict[str, bytes | None] | None = None,
 ) -> dict[str, Any]:
     effective_overlay = {} if overlay is None else overlay
@@ -768,7 +922,7 @@ def _verify_effective_composition(
     )
     condition_user, fluid_sources, fluid_directive_sources = _effective_list_directive(
         root_fd,
-        unit_dirs=USER_UNIT_DIRS,
+        unit_dirs=user_unit_dirs,
         unit_name="fluidsynth.service",
         section="Unit",
         key="ConditionUser",
@@ -777,7 +931,7 @@ def _verify_effective_composition(
     fluid_exec_start, fluid_exec_sources, fluid_exec_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStart",
@@ -787,7 +941,7 @@ def _verify_effective_composition(
     fluid_type_values, fluid_type_sources, fluid_type_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="Type",
@@ -797,7 +951,7 @@ def _verify_effective_composition(
     fluid_notify_values, fluid_notify_sources, fluid_notify_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="NotifyAccess",
@@ -807,7 +961,7 @@ def _verify_effective_composition(
     fluid_exec_stop, fluid_exec_stop_sources, fluid_exec_stop_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStop",
@@ -825,7 +979,7 @@ def _verify_effective_composition(
     ):
         shutdown_directives[key] = _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key=key,
@@ -834,7 +988,7 @@ def _verify_effective_composition(
     fluid_rate_interval_values, fluid_rate_interval_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitIntervalSec",
@@ -844,7 +998,7 @@ def _verify_effective_composition(
     fluid_rate_burst_values, fluid_rate_burst_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=USER_UNIT_DIRS,
+            unit_dirs=user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitBurst",
@@ -880,7 +1034,7 @@ def _verify_effective_composition(
     )
     expected_fluid_main_units = {
         f"{directory}/fluidsynth.service"
-        for directory in USER_UNIT_DIRS
+        for directory in user_unit_dirs
         if not _is_merged_usr_lib_alias(root_fd, directory)
     }
     fluid_main_unit_sources = [
@@ -1013,6 +1167,7 @@ def _verify_effective_composition(
             "verified": True,
         },
         "fluidsynth": {
+            "user_unit_path_evidence": user_unit_path_evidence,
             "condition_user": condition_user,
             "exec_start": fluid_exec_start,
             "type": fluid_type,
@@ -1056,9 +1211,15 @@ def _verify_effective_composition(
 
 
 def verify_effective_composition(target_root: Path) -> dict[str, Any]:
+    target_root = Path(os.path.abspath(os.fspath(target_root)))
+    user_unit_dirs, user_unit_path_evidence = _resolve_user_unit_dirs(target_root)
     root_fd = _open_root(target_root)
     try:
-        return _verify_effective_composition(root_fd)
+        return _verify_effective_composition(
+            root_fd,
+            user_unit_dirs=user_unit_dirs,
+            user_unit_path_evidence=user_unit_path_evidence,
+        )
     finally:
         try:
             os.close(root_fd)
@@ -1071,6 +1232,8 @@ def _build_plan(
     root_fd: int,
     source_data: dict[str, bytes],
     target_root: Path,
+    user_unit_dirs: tuple[str, ...],
+    user_unit_path_evidence: dict[str, Any],
     uid: int,
     gid: int,
     inspect_apply_state: bool,
@@ -1189,7 +1352,12 @@ def _build_plan(
         )
         overlay[target_relative] = data
 
-    composition = _verify_effective_composition(root_fd, overlay)
+    composition = _verify_effective_composition(
+        root_fd,
+        user_unit_dirs=user_unit_dirs,
+        user_unit_path_evidence=user_unit_path_evidence,
+        overlay=overlay,
+    )
     return entries, overlay, composition
 
 
@@ -1585,6 +1753,7 @@ def _apply_operations(
     *,
     entries: list[dict[str, Any]],
     target_root: Path,
+    expected_user_unit_dirs: tuple[str, ...],
     created: list[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     staged: list[dict[str, Any]] = []
@@ -1626,7 +1795,18 @@ def _apply_operations(
         for operation in operations:
             _verify_operation(root_fd, operation)
         target_readback = _verify_entries(root_fd, entries)
-        composition = _verify_effective_composition(root_fd)
+        user_unit_dirs, user_unit_path_evidence = _resolve_user_unit_dirs(
+            target_root
+        )
+        if user_unit_dirs != expected_user_unit_dirs:
+            raise InstallError(
+                "FluidSynth user unit paths changed during the target transaction"
+            )
+        composition = _verify_effective_composition(
+            root_fd,
+            user_unit_dirs=user_unit_dirs,
+            user_unit_path_evidence=user_unit_path_evidence,
+        )
         # This assignment is the explicit transaction commit point. No failure
         # after it may be described as a target-transaction failure or trigger
         # rollback of the now verified target state.
@@ -2119,6 +2299,9 @@ def install(
                 raise InstallError("--apply requires a full 40-character --expected-head")
             if target_root == DEFAULT_TARGET_ROOT and os.geteuid() != 0:
                 raise InstallError("installing below / requires root")
+            user_unit_dirs, user_unit_path_evidence = _resolve_user_unit_dirs(
+                target_root
+            )
             with _open_lock(root_fd, uid, gid) as lock_handle:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
                 head, dirty = repository_identity(source_root)
@@ -2137,6 +2320,8 @@ def install(
                     root_fd=root_fd,
                     source_data=source_data,
                     target_root=target_root,
+                    user_unit_dirs=user_unit_dirs,
+                    user_unit_path_evidence=user_unit_path_evidence,
                     uid=uid,
                     gid=gid,
                     inspect_apply_state=True,
@@ -2154,6 +2339,7 @@ def install(
                     operations,
                     entries=entries,
                     target_root=target_root,
+                    expected_user_unit_dirs=user_unit_dirs,
                     created=created,
                 )
                 receipt = _base_receipt(
@@ -2179,6 +2365,9 @@ def install(
                     created=created,
                 )
 
+        user_unit_dirs, user_unit_path_evidence = _resolve_user_unit_dirs(
+            target_root
+        )
         head, dirty = repository_identity(source_root)
         if expected_head is not None and head != expected_head:
             raise InstallError("repository HEAD differs from --expected-head")
@@ -2190,6 +2379,8 @@ def install(
             root_fd=root_fd,
             source_data=source_data,
             target_root=target_root,
+            user_unit_dirs=user_unit_dirs,
+            user_unit_path_evidence=user_unit_path_evidence,
             uid=uid,
             gid=gid,
             inspect_apply_state=False,
