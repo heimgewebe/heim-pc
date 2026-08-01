@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import pwd
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -27,9 +28,21 @@ BACKUP_ROOT_RELATIVE = "var/lib/heim-pc/host-health/install-backups"
 RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v3.json"
 STRICT_PROFILE = "/usr/local/libexec/heim-pc/ensure-performance-profile"
 FLUIDSYNTH_USER = "alex"
-FLUIDSYNTH_EXEC_START = "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT"
+FLUIDSYNTH_EXEC_START = (
+    "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 "
+    "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT"
+)
 FLUIDSYNTH_SERVICE_TYPE = "notify"
 FLUIDSYNTH_NOTIFY_ACCESS = "main"
+FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS = "1"
+FLUIDSYNTH_EXEC_STOP: list[str] = []
+FLUIDSYNTH_KILL_MODE = "control-group"
+FLUIDSYNTH_KILL_SIGNAL = "SIGTERM"
+FLUIDSYNTH_RESTART_KILL_SIGNAL = "SIGTERM"
+FLUIDSYNTH_TIMEOUT_STOP_SEC = "15s"
+FLUIDSYNTH_SEND_SIGKILL = "yes"
+FLUIDSYNTH_FINAL_KILL_SIGNAL = "SIGKILL"
+FLUIDSYNTH_SHUTDOWN_FAILURE = "timeout_then_sigkill_visible_as_failure"
 FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL = "30s"
 FLUIDSYNTH_LOG_RATE_LIMIT_BURST = "200"
 COMMIT_POINT = (
@@ -312,6 +325,15 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "fluidsynth_exec_start": FLUIDSYNTH_EXEC_START,
         "fluidsynth_service_type": FLUIDSYNTH_SERVICE_TYPE,
         "fluidsynth_notify_access": FLUIDSYNTH_NOTIFY_ACCESS,
+        "fluidsynth_sdl_no_signal_handlers": FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
+        "fluidsynth_exec_stop": FLUIDSYNTH_EXEC_STOP,
+        "fluidsynth_kill_mode": FLUIDSYNTH_KILL_MODE,
+        "fluidsynth_kill_signal": FLUIDSYNTH_KILL_SIGNAL,
+        "fluidsynth_restart_kill_signal": FLUIDSYNTH_RESTART_KILL_SIGNAL,
+        "fluidsynth_timeout_stop_sec": FLUIDSYNTH_TIMEOUT_STOP_SEC,
+        "fluidsynth_send_sigkill": True,
+        "fluidsynth_final_kill_signal": FLUIDSYNTH_FINAL_KILL_SIGNAL,
+        "fluidsynth_shutdown_failure": FLUIDSYNTH_SHUTDOWN_FAILURE,
         "fluidsynth_log_rate_limit_interval": FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
         "fluidsynth_log_rate_limit_burst": FLUIDSYNTH_LOG_RATE_LIMIT_BURST,
     }
@@ -698,6 +720,39 @@ def _effective_list_directive(
     return values, sources, directive_sources
 
 
+def _environment_words(value: str) -> list[str]:
+    try:
+        return shlex.split(value, comments=False, posix=True)
+    except ValueError as exc:
+        raise InstallError("systemd Environment assignment is malformed") from exc
+
+
+def _exec_start_environment_value(
+    commands: list[str],
+    variable: str,
+) -> str | None:
+    if len(commands) != 1:
+        return None
+    words = _environment_words(commands[0])
+    if not words or words[0] != "/usr/bin/env":
+        return None
+    prefix = f"{variable}="
+    for word in words[1:]:
+        if word.startswith(prefix):
+            return word[len(prefix) :]
+        if "=" not in word:
+            break
+    return None
+
+
+def _effective_scalar(
+    directives: dict[str, tuple[list[str], list[str], list[str]]],
+    key: str,
+) -> str | None:
+    values = directives[key][0]
+    return values[-1] if values else None
+
+
 def _verify_effective_composition(
     root_fd: int,
     overlay: dict[str, bytes | None] | None = None,
@@ -749,6 +804,33 @@ def _verify_effective_composition(
             overlay=effective_overlay,
         )
     )
+    fluid_exec_stop, fluid_exec_stop_sources, fluid_exec_stop_directive_sources = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="ExecStop",
+            overlay=effective_overlay,
+        )
+    )
+    shutdown_directives: dict[str, tuple[list[str], list[str], list[str]]] = {}
+    for key in (
+        "KillMode",
+        "KillSignal",
+        "RestartKillSignal",
+        "TimeoutStopSec",
+        "SendSIGKILL",
+        "FinalKillSignal",
+    ):
+        shutdown_directives[key] = _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key=key,
+            overlay=effective_overlay,
+        )
     fluid_rate_interval_values, fluid_rate_interval_sources, _ = (
         _effective_list_directive(
             root_fd,
@@ -771,6 +853,25 @@ def _verify_effective_composition(
     )
     fluid_type = fluid_type_values[-1] if fluid_type_values else None
     fluid_notify_access = fluid_notify_values[-1] if fluid_notify_values else None
+    fluid_sdl_no_signal_handlers = _exec_start_environment_value(
+        fluid_exec_start,
+        "SDL_NO_SIGNAL_HANDLERS",
+    )
+    fluid_kill_mode = _effective_scalar(shutdown_directives, "KillMode")
+    fluid_kill_signal = _effective_scalar(shutdown_directives, "KillSignal")
+    fluid_restart_kill_signal = _effective_scalar(
+        shutdown_directives,
+        "RestartKillSignal",
+    )
+    fluid_timeout_stop_sec = _effective_scalar(
+        shutdown_directives,
+        "TimeoutStopSec",
+    )
+    fluid_send_sigkill = _effective_scalar(shutdown_directives, "SendSIGKILL")
+    fluid_final_kill_signal = _effective_scalar(
+        shutdown_directives,
+        "FinalKillSignal",
+    )
     fluid_rate_interval = (
         fluid_rate_interval_values[-1] if fluid_rate_interval_values else None
     )
@@ -826,6 +927,63 @@ def _verify_effective_composition(
         raise InstallError(
             "effective fluidsynth.service NotifyAccess must be main"
         )
+    managed_fluid_drop_in = (
+        "etc/systemd/user/fluidsynth.service.d/"
+        "zz-heim-pc-interactive-user.conf"
+    )
+    shutdown_directive_sources = [
+        *fluid_exec_stop_directive_sources,
+        *[
+            source
+            for _key, (
+                _values,
+                _sources,
+                directive_sources,
+            ) in shutdown_directives.items()
+            for source in directive_sources
+        ],
+    ]
+    unexpected_shutdown_drop_ins = sorted(
+        {
+            source
+            for source in shutdown_directive_sources
+            if ".d/" in source and source != managed_fluid_drop_in
+        }
+    )
+    if unexpected_shutdown_drop_ins:
+        raise InstallError(
+            "unmanaged fluidsynth.service shutdown directive drop-in(s) are present: "
+            + ", ".join(unexpected_shutdown_drop_ins)
+        )
+    if fluid_sdl_no_signal_handlers != FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS:
+        raise InstallError(
+            "effective fluidsynth.service must disable SDL signal handlers"
+        )
+    if fluid_exec_stop != FLUIDSYNTH_EXEC_STOP:
+        raise InstallError(
+            "effective fluidsynth.service ExecStop must be empty so systemd owns shutdown"
+        )
+    expected_shutdown_directives = {
+        "KillMode": FLUIDSYNTH_KILL_MODE,
+        "KillSignal": FLUIDSYNTH_KILL_SIGNAL,
+        "RestartKillSignal": FLUIDSYNTH_RESTART_KILL_SIGNAL,
+        "TimeoutStopSec": FLUIDSYNTH_TIMEOUT_STOP_SEC,
+        "SendSIGKILL": FLUIDSYNTH_SEND_SIGKILL,
+        "FinalKillSignal": FLUIDSYNTH_FINAL_KILL_SIGNAL,
+    }
+    observed_shutdown_directives = {
+        "KillMode": fluid_kill_mode,
+        "KillSignal": fluid_kill_signal,
+        "RestartKillSignal": fluid_restart_kill_signal,
+        "TimeoutStopSec": fluid_timeout_stop_sec,
+        "SendSIGKILL": fluid_send_sigkill,
+        "FinalKillSignal": fluid_final_kill_signal,
+    }
+    if observed_shutdown_directives != expected_shutdown_directives:
+        raise InstallError(
+            "effective fluidsynth.service shutdown directives differ from the "
+            "bounded SIGTERM contract"
+        )
     if fluid_rate_interval != FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL:
         raise InstallError(
             "effective fluidsynth.service LogRateLimitIntervalSec must be bounded"
@@ -859,6 +1017,15 @@ def _verify_effective_composition(
             "exec_start": fluid_exec_start,
             "type": fluid_type,
             "notify_access": fluid_notify_access,
+            "sdl_no_signal_handlers": fluid_sdl_no_signal_handlers,
+            "exec_stop": fluid_exec_stop,
+            "kill_mode": fluid_kill_mode,
+            "kill_signal": fluid_kill_signal,
+            "restart_kill_signal": fluid_restart_kill_signal,
+            "timeout_stop_sec": fluid_timeout_stop_sec,
+            "send_sigkill": fluid_send_sigkill,
+            "final_kill_signal": fluid_final_kill_signal,
+            "shutdown_failure": FLUIDSYNTH_SHUTDOWN_FAILURE,
             "log_rate_limit_interval": fluid_rate_interval,
             "log_rate_limit_burst": fluid_rate_burst,
             "sources": fluid_sources,
@@ -869,6 +1036,17 @@ def _verify_effective_composition(
             "type_directive_sources": fluid_type_directive_sources,
             "notify_access_sources": fluid_notify_sources,
             "notify_access_directive_sources": fluid_notify_directive_sources,
+            "sdl_no_signal_handlers_source": "exec_start_environment",
+            "exec_stop_sources": fluid_exec_stop_sources,
+            "exec_stop_directive_sources": fluid_exec_stop_directive_sources,
+            "shutdown_directive_sources": {
+                key: sources
+                for key, (
+                    _values,
+                    _all_sources,
+                    sources,
+                ) in shutdown_directives.items()
+            },
             "rate_interval_sources": fluid_rate_interval_sources,
             "rate_burst_sources": fluid_rate_burst_sources,
             "main_unit_sources": fluid_main_unit_sources,
@@ -1907,7 +2085,14 @@ def _base_receipt(
             ),
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
-            "restart alex's user manager or reboot before evaluating the FluidSynth condition",
+            (
+                "reload alex's user manager or reboot before evaluating the "
+                "FluidSynth drop-in"
+            ),
+            (
+                "perform one controlled fluidsynth.service restart and verify "
+                "shutdown before 15s without SIGKILL"
+            ),
         ],
         "does_not_establish": [
             "systemd_activation",

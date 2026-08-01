@@ -155,8 +155,28 @@ Die installierbaren Teile haben folgende Grenzen:
   `zz-heim-pc-gdm-guard.conf`. Vor dem Commit der Transaktion muss die aus allen
   relevanten systemd-Suchpfaden berechnete effektive Bedingung exakt `alex` sein;
   andere Drop-ins mit `ConditionUser` blockieren den Apply-Lauf, auch wenn sie
-  zufällig denselben Endwert erzeugen. Eine Laufzeitprüfung ist erst nach Neustart
-  des betroffenen User-Managers oder nach einem Reboot aussagekräftig.
+  zufällig denselben Endwert erzeugen. Der Drop-in erhält außerdem den
+  shell-freie argv-Struktur, die Distribution-Argumente, `Type=notify`,
+  `NotifyAccess=main` und die Journalrate-Limits, deaktiviert aber mit
+  `SDL_NO_SIGNAL_HANDLERS=1` gezielt die SDL-Signalübernahme. Die Variable wird
+  direkt durch `/usr/bin/env` vor dem FluidSynth-Exec gesetzt, damit die von der
+  Paket-Unit zuvor geladenen, unveränderten `EnvironmentFile`-Werte sie nicht
+  übersteuern können. Beim isolierten, gerätelosen FluidSynth-2.2.5-Beleg wurden
+  SIGTERM und SIGINT von SDL registriert, ohne dass der Serverpfad das erzeugte
+  Quit-Ereignis abholte; beide Signale ließen den Prozess hängen. Mit deaktivierter
+  SDL-Signalübernahme beendete derselbe Prozess beide Signalpfade unmittelbar.
+  Der interaktive `quit`-Pfad beendete FluidSynth zwar regulär, ein `quit` über den
+  TCP-Shellserver aber nur die jeweilige Client-Verbindung. Deshalb fügt der
+  Vertrag weder Shell noch Steuerport hinzu: `ExecStop=` leert frühere
+  Stop-Kommandos, systemd sendet für Stop und Restart SIGTERM an die Control Group
+  und wartet höchstens `TimeoutStopSec=15s`. Nur ein absichtlich nicht reagierender
+  Prozess erreicht danach den ausdrücklich aktivierten SIGKILL-Fallback; systemd
+  macht diesen Timeout als Fehler sichtbar. Spätere fremde Drop-ins, die einen
+  dieser Shutdownwerte oder `SDL_NO_SIGNAL_HANDLERS` setzen, blockieren den
+  Installer fail-closed. Audio-, MIDI- und Routingoptionen sowie der
+  Autostartvertrag bleiben unverändert. Eine Laufzeitprüfung ist erst nach einem
+  separat autorisierten Installationslauf, User-Manager-Reload und kontrollierten
+  Restart aussagekräftig.
 * `cpu-governor.service` nutzt einen Wrapper, der
   `system76-power profile performance` ausführt. Nur ein Fehler mit allen Merkmalen
   „SCSI host profiles“, fehlendes Power-Policy-Ziel und `ENOENT` wird als harmlos

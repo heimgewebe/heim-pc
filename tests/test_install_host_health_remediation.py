@@ -580,6 +580,42 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 installer.FLUIDSYNTH_NOTIFY_ACCESS,
             )
             self.assertEqual(
+                composition["fluidsynth"]["sdl_no_signal_handlers"],
+                installer.FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["exec_stop"],
+                installer.FLUIDSYNTH_EXEC_STOP,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["kill_mode"],
+                installer.FLUIDSYNTH_KILL_MODE,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["kill_signal"],
+                installer.FLUIDSYNTH_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["restart_kill_signal"],
+                installer.FLUIDSYNTH_RESTART_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["timeout_stop_sec"],
+                installer.FLUIDSYNTH_TIMEOUT_STOP_SEC,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["send_sigkill"],
+                installer.FLUIDSYNTH_SEND_SIGKILL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["final_kill_signal"],
+                installer.FLUIDSYNTH_FINAL_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["shutdown_failure"],
+                installer.FLUIDSYNTH_SHUTDOWN_FAILURE,
+            )
+            self.assertEqual(
                 composition["fluidsynth"]["log_rate_limit_interval"],
                 installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
             )
@@ -612,6 +648,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("NotifyAccess=main", fluid_reset)
             self.assertIn("ExecStart=\n", fluid_reset)
             self.assertIn(installer.FLUIDSYNTH_EXEC_START, fluid_reset)
+            self.assertIn(
+                "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/bin/fluidsynth",
+                fluid_reset,
+            )
+            self.assertIn("ExecStop=\n", fluid_reset)
+            self.assertIn("KillMode=control-group", fluid_reset)
+            self.assertIn("KillSignal=SIGTERM", fluid_reset)
+            self.assertIn("RestartKillSignal=SIGTERM", fluid_reset)
+            self.assertIn("TimeoutStopSec=15s", fluid_reset)
+            self.assertIn("SendSIGKILL=yes", fluid_reset)
+            self.assertIn("FinalKillSignal=SIGKILL", fluid_reset)
             self.assertIn("LogRateLimitIntervalSec=30s", fluid_reset)
             self.assertIn("LogRateLimitBurst=200", fluid_reset)
             self.assertNotIn("!gdm", fluid_reset)
@@ -654,6 +701,14 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 installer.FLUIDSYNTH_NOTIFY_ACCESS,
             )
             self.assertEqual(
+                composition["sdl_no_signal_handlers"],
+                installer.FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
+            )
+            self.assertEqual(
+                composition["timeout_stop_sec"],
+                installer.FLUIDSYNTH_TIMEOUT_STOP_SEC,
+            )
+            self.assertEqual(
                 composition["log_rate_limit_interval"],
                 installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
             )
@@ -679,7 +734,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 shutil.copyfile(ROOT / source_relative, destination)
             config_path = source / "config/host-health-remediation.v1.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["deployment"]["fluidsynth_log_rate_limit_burst"] = "9999"
+            config["deployment"]["fluidsynth_timeout_stop_sec"] = "90s"
             config_path.write_text(json.dumps(config), encoding="utf-8")
             run_git(source, "init", "-q")
             run_git(source, "config", "user.name", "Test")
@@ -727,6 +782,31 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertEqual(
                 conflict.read_text(encoding="utf-8"),
                 "[Unit]\nConditionUser=\nConditionUser=alex\n",
+            )
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (target / "usr/local/sbin/heim-pc-host-health").exists()
+            )
+
+    def test_later_shutdown_drop_in_fails_closed_without_target_mutation(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            conflict = target / "etc/systemd/user/service.d/zzz-foreign.conf"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text(
+                "[Service]\nTimeoutStopSec=15s\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "unmanaged fluidsynth.service shutdown directive",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(
+                conflict.read_text(encoding="utf-8"),
+                "[Service]\nTimeoutStopSec=15s\n",
             )
             self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
             self.assertFalse(
