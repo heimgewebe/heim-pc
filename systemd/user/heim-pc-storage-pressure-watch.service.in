@@ -7,13 +7,12 @@ Type=oneshot
 ExecStart=/usr/bin/python3 @RELEASE_ROOT@/scripts/storage_pressure_watch.py --policy @RELEASE_ROOT@/config/storage-pressure.v1.json --state @HOME@/.local/state/heim-pc/storage-pressure-watch/latest.json
 UMask=0077
 NoNewPrivileges=true
-PrivateDevices=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
+# Capability-dropping directives are omitted because this user manager rejects
+# reduced capability bounding sets with status 218/CAPABILITIES.
 ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
