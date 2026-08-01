@@ -777,6 +777,19 @@ def _verify_effective_composition(
     fluid_rate_burst = (
         fluid_rate_burst_values[-1] if fluid_rate_burst_values else None
     )
+    expected_fluid_main_units = {
+        f"{directory}/fluidsynth.service"
+        for directory in USER_UNIT_DIRS
+        if not _is_merged_usr_lib_alias(root_fd, directory)
+    }
+    fluid_main_unit_sources = [
+        source for source in fluid_sources if source in expected_fluid_main_units
+    ]
+    if not fluid_main_unit_sources:
+        raise InstallError(
+            "loadable fluidsynth.service main unit is missing; a managed drop-in "
+            "cannot establish the service by itself"
+        )
     if exec_start != [STRICT_PROFILE]:
         raise InstallError(
             "effective cpu-governor.service ExecStart is not the strict committed wrapper"
@@ -858,6 +871,7 @@ def _verify_effective_composition(
             "notify_access_directive_sources": fluid_notify_directive_sources,
             "rate_interval_sources": fluid_rate_interval_sources,
             "rate_burst_sources": fluid_rate_burst_sources,
+            "main_unit_sources": fluid_main_unit_sources,
             "verified": True,
         },
     }

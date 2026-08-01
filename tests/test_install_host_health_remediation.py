@@ -56,13 +56,39 @@ def install_fixture(
     target: Path,
     *,
     apply: bool,
+    seed_fluidsynth_main_unit: bool = True,
 ):
-    return installer.install(
-        source_root=source,
-        target_root=target,
-        apply=apply,
-        expected_head=head,
-    )
+    if not seed_fluidsynth_main_unit:
+        return installer.install(
+            source_root=source,
+            target_root=target,
+            apply=apply,
+            expected_head=head,
+        )
+
+    original_overlay_bytes = installer._overlay_bytes
+
+    def overlay_with_fixture_main_unit(
+        root_fd: int,
+        relative: str,
+        overlay: dict[str, bytes | None],
+    ) -> bytes | None:
+        data = original_overlay_bytes(root_fd, relative, overlay)
+        if data is None and relative == "usr/lib/systemd/user/fluidsynth.service":
+            return b"[Unit]\nDescription=Fixture FluidSynth service\n"
+        return data
+
+    with mock.patch.object(
+        installer,
+        "_overlay_bytes",
+        side_effect=overlay_with_fixture_main_unit,
+    ):
+        return installer.install(
+            source_root=source,
+            target_root=target,
+            apply=apply,
+            expected_head=head,
+        )
 
 
 def merged_journald_values(cat_config: str) -> dict[str, str]:
@@ -472,6 +498,31 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 target_root=Path("/"),
             )
 
+    def test_missing_fluidsynth_main_unit_blocks_before_receipt(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "loadable fluidsynth.service main unit is missing",
+            ):
+                install_fixture(
+                    source,
+                    head,
+                    target,
+                    apply=True,
+                    seed_fluidsynth_main_unit=False,
+                )
+
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (
+                    target
+                    / "etc/systemd/user/fluidsynth.service.d/"
+                    "zz-heim-pc-interactive-user.conf"
+                ).exists()
+            )
+
     def test_effective_systemd_composition_resets_legacy_values(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
@@ -539,6 +590,10 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn(
                 "usr/lib/systemd/user/fluidsynth.service",
                 composition["fluidsynth"]["directive_sources"],
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["main_unit_sources"],
+                ["usr/lib/systemd/user/fluidsynth.service"],
             )
             self.assertEqual(receipt["effective_systemd_composition"], composition)
             cpu_reset = (
@@ -1269,6 +1324,10 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             legacy.chmod(0o644)
             (target / "usr/lib/systemd/system").mkdir(parents=True)
             (target / "usr/lib/systemd/user").mkdir(parents=True)
+            (target / "usr/lib/systemd/user/fluidsynth.service").write_text(
+                "[Unit]\nDescription=Fixture FluidSynth service\n",
+                encoding="utf-8",
+            )
             (target / "lib").symlink_to("usr/lib", target_is_directory=True)
             privileged = target / "var/lib/heim-pc"
             privileged.mkdir(parents=True)
