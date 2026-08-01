@@ -99,6 +99,9 @@ class InstallWorktreeTargetMaintenanceTests(unittest.TestCase):
             for repository in policy["repositories"]:
                 for root in repository["worktree_roots"]:
                     self.assertIn(f"ReadWritePaths=-{root}", service)
+            timer = (home / ".config/systemd/user/heim-pc-worktree-target-maintenance.timer").read_text()
+            self.assertIn("OnCalendar=*-*-* 04:00:00", timer)
+            self.assertIn("RandomizedDelaySec=30min", timer)
             self.assertTrue((home / ".local/state/heim-pc/worktree-target-maintenance").is_dir())
 
     def test_verify_unit_files_accepts_exact_known_host_crash(self) -> None:

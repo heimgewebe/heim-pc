@@ -11,6 +11,9 @@ verifies_with:
   - scripts/worktree_target_maintenance.py
   - tests/test_worktree_target_maintenance.py
   - tests/test_install_worktree_target_maintenance.py
+  - scripts/storage_pressure_watch.py
+  - tests/test_storage_pressure_watch.py
+  - tests/test_install_storage_pressure_watch.py
 ---
 
 # Speicher-Lifecycle
@@ -114,7 +117,23 @@ Dateideskriptoren und gibt ausschließlich Treffer innerhalb der angefragten
 Target-Wurzeln zurück. Fremde Prozesspfade und Kommandozeilen werden nicht
 projiziert.
 
-Die installierte Runtime ist an einen exakten Git-Commit gebunden. Der User-Timer
-läuft spätestens alle sechs Stunden. Jeder Plan, Zwischenstand und Abschluss
-wird als hashgebundener Receipt unter
+Die installierte Runtime ist an einen exakten Git-Commit gebunden. Der reguläre
+User-Timer läuft einmal täglich. Jeder Plan, Zwischenstand und Abschluss wird als
+hashgebundener Receipt unter
 `~/.local/state/heim-pc/worktree-target-maintenance` gespeichert.
+
+## Wartungstakt und Speicher-Druckwächter
+
+Schwere Inventur- und Cleanup-Läufe richten sich nach der Änderungsrate ihrer
+Sicherheitsvoraussetzungen, nicht nach der Beobachtungsfrequenz. Managed Cargo
+läuft regulär zweimal täglich, Rust-Targets einmal täglich. Die SLO-Grenzen des
+Wartungsmonitors liegen deshalb bei 14 beziehungsweise 26 Stunden.
+
+`heim-pc-storage-pressure-watch.timer` prüft stündlich ausschließlich die
+`statvfs`-Werte des Root-Dateisystems und die letzte private Stichprobe. Er
+durchsucht keine Worktrees oder Caches. Ein zusätzlicher schwerer Lauf wird nur
+bei mindestens 70 Prozent Belegung, höchstens 500 GiB verfügbarem Speicher oder
+einer auf mindestens 32 GiB pro Stunde normierten Wachstumsrate angefordert.
+Cargo besitzt danach sechs Stunden, Targets zwölf Stunden Cooldown. Der Wächter
+startet Dienste asynchron, erteilt selbst keine Löschfreigabe und ersetzt weder
+Lifecycle-, Prozess- noch Evidenzprüfungen der Cleanup-Dienste.

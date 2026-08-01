@@ -33,7 +33,7 @@
         "$HOME/.local/state/heim-pc/managed-builds/maintenance/latest.json"
       ],
       "id": "heim-pc-managed-cargo-maintenance",
-      "max_age_seconds": 10800,
+      "max_age_seconds": 50400,
       "owner_component": "heim-pc",
       "success_evidence": "systemd-service-result",
       "timer_unit": "heim-pc-managed-cargo-maintenance.timer",
@@ -42,11 +42,22 @@
     {
       "evidence_paths": [],
       "id": "heim-pc-worktree-target-maintenance",
-      "max_age_seconds": 10800,
+      "max_age_seconds": 93600,
       "owner_component": "heim-pc",
       "success_evidence": "systemd-service-result",
       "timer_unit": "heim-pc-worktree-target-maintenance.timer",
       "unit": "heim-pc-worktree-target-maintenance.service"
+    },
+    {
+      "evidence_paths": [
+        "$HOME/.local/state/heim-pc/storage-pressure-watch/latest.json"
+      ],
+      "id": "heim-pc-storage-pressure-watch",
+      "max_age_seconds": 10800,
+      "owner_component": "heim-pc",
+      "success_evidence": "systemd-service-result",
+      "timer_unit": "heim-pc-storage-pressure-watch.timer",
+      "unit": "heim-pc-storage-pressure-watch.service"
     },
     {
       "evidence_paths": [
