@@ -70,6 +70,7 @@ class InstallStoragePressureWatchTests(unittest.TestCase):
             ).read_text()
             self.assertIn(str(release), service)
             self.assertIn("ProtectHome=read-only", service)
+            self.assertNotIn("CapabilityBoundingSet=", service)
             self.assertIn(
                 f"ReadWritePaths={home}/.local/state/heim-pc/storage-pressure-watch",
                 service,

@@ -20,5 +20,4 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX
-CapabilityBoundingSet=
 ReadWritePaths=@HOME@/.local/state/heim-pc/storage-pressure-watch
