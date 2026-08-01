@@ -2,6 +2,9 @@ import re
 import sys
 from typing import Dict, Any
 
+FRONTMATTER_FIELD_PATTERN = re.compile(r"^([a-zA-Z0-9_-]+):\s*(.*)$")
+
+
 def parse_frontmatter(file_content: str) -> Dict[str, Any]:
     """
     Parses a simple YAML frontmatter block enclosed by '---'.
@@ -36,7 +39,7 @@ def parse_frontmatter(file_content: str) -> Dict[str, Any]:
             continue
 
         # Parse key-value pairs
-        match = re.match(r"^([a-zA-Z0-9_-]+):\s*(.*)$", line)
+        match = FRONTMATTER_FIELD_PATTERN.match(line)
         if match:
             key = match.group(1)
             value_str = match.group(2).strip()

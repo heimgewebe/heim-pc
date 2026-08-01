@@ -3,6 +3,8 @@ import os
 import re
 from datetime import datetime
 
+REVIEW_POLICY_FIELD_PATTERN = re.compile(r"^([a-zA-Z0-9_]+):\s*(.*)$")
+
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, repo_root)
 
@@ -19,7 +21,7 @@ def load_review_policy(policy_path):
         for line in f:
             if not line.strip() or line.strip().startswith("#"):
                 continue
-            match = re.match(r"^([a-zA-Z0-9_]+):\s*(.*)$", line.strip())
+            match = REVIEW_POLICY_FIELD_PATTERN.match(line.strip())
             if match:
                 key = match.group(1)
                 val = match.group(2).strip()
