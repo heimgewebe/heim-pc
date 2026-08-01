@@ -1656,6 +1656,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                     return_value=1000,
                 ), mock.patch.object(
                     installer,
+                    "_resolve_user_unit_dirs",
+                    return_value=(
+                        installer.FLUIDSYNTH_USER_UNIT_DIRS,
+                        {
+                            "source": "synthetic-root-plan-test",
+                            "live_verified": False,
+                            "paths": list(installer.FLUIDSYNTH_USER_UNIT_DIRS),
+                        },
+                    ),
+                ), mock.patch.object(
+                    installer,
                     "_open_lock",
                     side_effect=AssertionError("plan opened the apply lock"),
                 ):
