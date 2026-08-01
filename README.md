@@ -295,7 +295,7 @@ Leitstand zeigt die Karte read-only an. Für aktuelle Aufgaben, PRs, CI oder Run
 
 `config/agents/repos-root-AGENTS.md` ist die versionierte Vorlage für `~/repos/AGENTS.md`. Sie beginnt beim Host-Maschinenvertrag und verweist nur bei repositoryübergreifenden Systemfragen auf den Systemkatalog. Dadurch wird bei gewöhnlicher Einzelrepo-Arbeit kein unnötiger Gesamtkontext geladen.
 
-Der stündliche `systemkatalog-drift-watch.timer` prüft unabhängig vom GitHub-Zeitplan Organisations-, Fleet- und Primärquellendrift. Er darf keine Semantik schreiben oder mergen. Bei materieller Drift registriert er höchstens einen deduplizierten Bureau-Kandidaten und legt Bericht sowie proposal-only Vorschlag lokal unter `~/.local/state/heim-pc/systemkatalog-drift-watch/` ab.
+Der stündliche `systemkatalog-drift-watch.timer` prüft unabhängig vom GitHub-Zeitplan Organisations-, Fleet- und Primärquellendrift. Er darf keine Semantik schreiben oder mergen. Bei materieller Drift registriert er höchstens einen deduplizierten Bureau-Kandidaten über den integritätsgeprüften kanonischen Runtime-Snapshot statt über einen potenziell veralteten oder unsauberen Checkout und legt Bericht sowie proposal-only Vorschlag lokal unter `~/.local/state/heim-pc/systemkatalog-drift-watch/` ab.
 
 ```bash
 python3 scripts/install_systemkatalog_reliability.py          # Plan anzeigen

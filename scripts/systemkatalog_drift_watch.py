@@ -234,12 +234,11 @@ def _candidate_assessment(
     bureau_root: Path,
     candidate_id: str,
 ) -> tuple[int, str | None] | None:
-    """Read one exact candidate from Bureau instead of relying on a bounded broad list."""
+    """Read one exact candidate through the canonical Bureau runtime snapshot."""
+    del bureau_root  # Compatibility argument; explicit checkout roots are forbidden here.
     assessed = _run(
         [
             "bureau",
-            "--root",
-            str(bureau_root),
             "--json",
             "operator-candidate-assess",
             "--candidate-id",
@@ -316,8 +315,6 @@ def _ensure_bureau_candidate(
 
     register_argv = [
         "bureau",
-        "--root",
-        str(bureau_root),
         "--json",
         "live-register",
         "--kind",
@@ -401,8 +398,8 @@ def run_watch(
     bureau_root: Path,
     state_root: Path,
 ) -> dict[str, Any]:
-    if not bureau_root.exists():
-        raise RuntimeError(f"required Bureau root missing: {bureau_root}")
+    # Kept for existing callers. Candidate helpers use the wrapper's
+    # integrity-checked canonical snapshot and ignore checkout state.
     state_root.mkdir(parents=True, exist_ok=True)
     os.chmod(state_root, 0o700)
     observations = state_root / "observations.json"
@@ -470,7 +467,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--systemkatalog-root", type=Path, default=home / "repos/systemkatalog")
     parser.add_argument("--fleet-file", type=Path, default=home / "repos/metarepo/fleet/repos.yml")
-    parser.add_argument("--bureau-root", type=Path, default=home / "repos/bureau")
+    parser.add_argument(
+        "--bureau-root",
+        type=Path,
+        default=home / "repos/bureau",
+        help="Deprecated compatibility argument; Bureau uses its canonical runtime snapshot.",
+    )
     parser.add_argument("--state-root", type=Path, default=home / ".local/state/heim-pc/systemkatalog-drift-watch")
     args = parser.parse_args()
     try:

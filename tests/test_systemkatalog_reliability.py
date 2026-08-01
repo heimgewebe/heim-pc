@@ -79,8 +79,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
 
         self.assertEqual(result, (572, "active"))
         argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["bureau", "--json"])
         self.assertIn("operator-candidate-assess", argv)
         self.assertEqual(argv[-2:], ["--candidate-id", watchdog.CANDIDATE_ID])
+        self.assertNotIn("--root", argv)
         self.assertNotIn("live-list", argv)
 
     def test_candidate_assessment_treats_exact_unknown_as_absent(self) -> None:
@@ -210,7 +212,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             fleet = base / "metarepo/fleet/repos.yml"
             state = base / "state"
             (systemkatalog / "scripts").mkdir(parents=True)
-            bureau.mkdir()
+            self.assertFalse(bureau.exists())
             fleet.parent.mkdir(parents=True)
             fleet.write_text("repositories: []\n", encoding="utf-8")
             for name in ("read_github_catalog_observations.py", "system_catalog_drift.py"):
@@ -404,8 +406,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 },
             )
             register_argv = next(argv for argv in calls if "live-register" in argv)
+            self.assertEqual(register_argv[:2], ["bureau", "--json"])
             self.assertIn("--promotion-required", register_argv)
             self.assertIn("repo.systemkatalog", register_argv)
+            self.assertNotIn("--root", register_argv)
             self.assertNotIn("--supersedes-event-id", register_argv)
 
     def test_watchdog_reports_concurrent_active_update_after_success(self) -> None:
