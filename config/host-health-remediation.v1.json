@@ -63,7 +63,12 @@
       "/etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
       "/etc/systemd/journald.conf.d/99-heim-pc-retention.conf"
     ],
-    "activation_performed": false
+    "activation_performed": false,
+    "fluidsynth_exec_start": "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT",
+    "fluidsynth_service_type": "notify",
+    "fluidsynth_notify_access": "main",
+    "fluidsynth_log_rate_limit_interval": "30s",
+    "fluidsynth_log_rate_limit_burst": "200"
   },
   "bios": {
     "board_name": "ROG STRIX B550-F GAMING",
