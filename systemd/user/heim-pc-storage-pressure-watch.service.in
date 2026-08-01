@@ -1,0 +1,24 @@
+[Unit]
+Description=Observe lightweight root filesystem pressure
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @RELEASE_ROOT@/scripts/storage_pressure_watch.py --policy @RELEASE_ROOT@/config/storage-pressure.v1.json --state @HOME@/.local/state/heim-pc/storage-pressure-watch/latest.json
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+ReadWritePaths=@HOME@/.local/state/heim-pc/storage-pressure-watch

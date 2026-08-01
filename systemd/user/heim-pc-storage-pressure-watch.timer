@@ -1,0 +1,13 @@
+[Unit]
+Description=Observe lightweight root filesystem pressure hourly
+
+[Timer]
+OnBootSec=20min
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+AccuracySec=1min
+Unit=heim-pc-storage-pressure-watch.service
+
+[Install]
+WantedBy=timers.target

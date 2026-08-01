@@ -49,7 +49,8 @@ class InstallManagedCargoMaintenanceTests(unittest.TestCase):
             self.assertIn(f"ReadWritePaths={home}/.cache/heim-pc/managed-builds", service)
             self.assertNotIn("@RELEASE_ROOT@", service)
             timer = (home / ".config/systemd/user/heim-pc-managed-cargo-maintenance.timer").read_text()
-            self.assertIn("OnCalendar=hourly", timer)
+            self.assertIn("OnCalendar=*-*-* 03,15:00:00", timer)
+            self.assertIn("RandomizedDelaySec=30min", timer)
             import_check = subprocess.run(
                 [sys.executable, str(release / "scripts/managed_cargo_maintenance.py"), "--help"],
                 text=True,
