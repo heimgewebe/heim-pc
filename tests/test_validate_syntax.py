@@ -26,7 +26,7 @@ class TestCollectFiles(unittest.TestCase):
 
         # Write dummy content
         for f in [self.file_a, self.file_b, self.file_c]:
-            with open(f, 'w') as fh:
+            with open(f, 'w', encoding='utf-8', errors='strict') as fh:
                 fh.write("foo: bar")
 
     def tearDown(self):

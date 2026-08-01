@@ -5,7 +5,7 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 # Mock yaml since it's not installed in this environment
 sys.modules["yaml"] = MagicMock()

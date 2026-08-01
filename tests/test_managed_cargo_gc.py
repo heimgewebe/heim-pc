@@ -357,7 +357,7 @@ class ManagedCargoGcTests(unittest.TestCase):
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
             lock_path = managed_cargo_gc._cache_lock_path(state_root, key)
             lock_path.parent.mkdir(parents=True)
-            with lock_path.open("w+") as handle:
+            with lock_path.open("w+", encoding="utf-8", errors="strict") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
                 with self.assertRaisesRegex(
                     managed_cargo_gc.CargoGcError, "lifecycle lock is held"
@@ -678,7 +678,7 @@ class ManagedCargoGcTests(unittest.TestCase):
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
             second_lock = managed_cargo_gc._cache_lock_path(state_root, second)
             second_lock.parent.mkdir(parents=True)
-            with second_lock.open("w+") as handle:
+            with second_lock.open("w+", encoding="utf-8", errors="strict") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
                 with self.assertRaisesRegex(
                     managed_cargo_gc.CargoGcError, "lifecycle lock is held"

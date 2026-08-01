@@ -235,7 +235,7 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         plan_path = maintenance.write_plan(plan, self.state_root)
         lock_path = self.state_root / "apply.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("w") as handle:
+        with lock_path.open("w", encoding="utf-8", errors="strict") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaisesRegex(
                 maintenance.MaintenanceError, "another maintenance instance"
