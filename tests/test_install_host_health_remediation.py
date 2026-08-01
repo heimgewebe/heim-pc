@@ -56,13 +56,39 @@ def install_fixture(
     target: Path,
     *,
     apply: bool,
+    seed_fluidsynth_main_unit: bool = True,
 ):
-    return installer.install(
-        source_root=source,
-        target_root=target,
-        apply=apply,
-        expected_head=head,
-    )
+    if not seed_fluidsynth_main_unit:
+        return installer.install(
+            source_root=source,
+            target_root=target,
+            apply=apply,
+            expected_head=head,
+        )
+
+    original_overlay_bytes = installer._overlay_bytes
+
+    def overlay_with_fixture_main_unit(
+        root_fd: int,
+        relative: str,
+        overlay: dict[str, bytes | None],
+    ) -> bytes | None:
+        data = original_overlay_bytes(root_fd, relative, overlay)
+        if data is None and relative == "usr/lib/systemd/user/fluidsynth.service":
+            return b"[Unit]\nDescription=Fixture FluidSynth service\n"
+        return data
+
+    with mock.patch.object(
+        installer,
+        "_overlay_bytes",
+        side_effect=overlay_with_fixture_main_unit,
+    ):
+        return installer.install(
+            source_root=source,
+            target_root=target,
+            apply=apply,
+            expected_head=head,
+        )
 
 
 def merged_journald_values(cat_config: str) -> dict[str, str]:
@@ -472,6 +498,31 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 target_root=Path("/"),
             )
 
+    def test_missing_fluidsynth_main_unit_blocks_before_receipt(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "loadable fluidsynth.service main unit is missing",
+            ):
+                install_fixture(
+                    source,
+                    head,
+                    target,
+                    apply=True,
+                    seed_fluidsynth_main_unit=False,
+                )
+
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (
+                    target
+                    / "etc/systemd/user/fluidsynth.service.d/"
+                    "zz-heim-pc-interactive-user.conf"
+                ).exists()
+            )
+
     def test_effective_systemd_composition_resets_legacy_values(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
@@ -516,9 +567,33 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 composition["fluidsynth"]["condition_user"],
                 ["alex"],
             )
+            self.assertEqual(
+                composition["fluidsynth"]["exec_start"],
+                [installer.FLUIDSYNTH_EXEC_START],
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["type"],
+                installer.FLUIDSYNTH_SERVICE_TYPE,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["notify_access"],
+                installer.FLUIDSYNTH_NOTIFY_ACCESS,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["log_rate_limit_interval"],
+                installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["log_rate_limit_burst"],
+                installer.FLUIDSYNTH_LOG_RATE_LIMIT_BURST,
+            )
             self.assertIn(
                 "usr/lib/systemd/user/fluidsynth.service",
                 composition["fluidsynth"]["directive_sources"],
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["main_unit_sources"],
+                ["usr/lib/systemd/user/fluidsynth.service"],
             )
             self.assertEqual(receipt["effective_systemd_composition"], composition)
             cpu_reset = (
@@ -533,7 +608,94 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("ExecStart=\n", cpu_reset)
             self.assertIn("ConditionUser=\n", fluid_reset)
             self.assertIn("ConditionUser=alex", fluid_reset)
+            self.assertIn("Type=notify", fluid_reset)
+            self.assertIn("NotifyAccess=main", fluid_reset)
+            self.assertIn("ExecStart=\n", fluid_reset)
+            self.assertIn(installer.FLUIDSYNTH_EXEC_START, fluid_reset)
+            self.assertIn("LogRateLimitIntervalSec=30s", fluid_reset)
+            self.assertIn("LogRateLimitBurst=200", fluid_reset)
             self.assertNotIn("!gdm", fluid_reset)
+
+    def test_managed_fluidsynth_contract_overrides_earlier_shell_pipeline(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            distro = target / "usr/lib/systemd/user/fluidsynth.service"
+            distro.parent.mkdir(parents=True)
+            distro.write_text(
+                "[Service]\n"
+                "Type=notify\n"
+                "NotifyAccess=main\n"
+                f"ExecStart={installer.FLUIDSYNTH_EXEC_START}\n",
+                encoding="utf-8",
+            )
+            observed_pipeline = (
+                target
+                / "etc/systemd/user/fluidsynth.service.d/no-tcp-shell.conf"
+            )
+            observed_pipeline.parent.mkdir(parents=True)
+            observed_pipeline.write_text(
+                "[Service]\n"
+                "Type=simple\n"
+                "NotifyAccess=none\n"
+                "ExecStart=\n"
+                "ExecStart=/bin/bash -c 'tail -f /dev/null | "
+                "/usr/bin/fluidsynth $OTHER_OPTS $SOUND_FONT'\n",
+                encoding="utf-8",
+            )
+            observed_preimage = observed_pipeline.read_bytes()
+
+            receipt = install_fixture(source, head, target, apply=True)
+            composition = receipt["effective_systemd_composition"]["fluidsynth"]
+
+            self.assertEqual(composition["exec_start"], [installer.FLUIDSYNTH_EXEC_START])
+            self.assertEqual(composition["type"], installer.FLUIDSYNTH_SERVICE_TYPE)
+            self.assertEqual(
+                composition["notify_access"],
+                installer.FLUIDSYNTH_NOTIFY_ACCESS,
+            )
+            self.assertEqual(
+                composition["log_rate_limit_interval"],
+                installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
+            )
+            self.assertEqual(
+                composition["log_rate_limit_burst"],
+                installer.FLUIDSYNTH_LOG_RATE_LIMIT_BURST,
+            )
+            self.assertIn(
+                "etc/systemd/user/fluidsynth.service.d/"
+                "zz-heim-pc-interactive-user.conf",
+                composition["exec_start_directive_sources"],
+            )
+            self.assertEqual(observed_pipeline.read_bytes(), observed_preimage)
+
+    def test_fluidsynth_contract_drift_between_json_and_enforced_constants_blocks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as directory:
+            source = Path(source_directory)
+            for source_relative, _target_relative, _mode in installer.FILES:
+                destination = source / source_relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / source_relative, destination)
+            config_path = source / "config/host-health-remediation.v1.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["deployment"]["fluidsynth_log_rate_limit_burst"] = "9999"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            run_git(source, "init", "-q")
+            run_git(source, "config", "user.name", "Test")
+            run_git(source, "config", "user.email", "test@example.invalid")
+            run_git(source, "add", ".")
+            run_git(source, "commit", "-q", "-m", "drifted fixture")
+            head = run_git(source, "rev-parse", "HEAD")
+            target = Path(directory)
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "committed deployment contract differs from installer constants",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
 
     def test_later_conflicting_drop_in_fails_preflight_without_target_mutation(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
@@ -1162,6 +1324,10 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             legacy.chmod(0o644)
             (target / "usr/lib/systemd/system").mkdir(parents=True)
             (target / "usr/lib/systemd/user").mkdir(parents=True)
+            (target / "usr/lib/systemd/user/fluidsynth.service").write_text(
+                "[Unit]\nDescription=Fixture FluidSynth service\n",
+                encoding="utf-8",
+            )
             (target / "lib").symlink_to("usr/lib", target_is_directory=True)
             privileged = target / "var/lib/heim-pc"
             privileged.mkdir(parents=True)

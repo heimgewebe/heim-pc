@@ -27,6 +27,11 @@ BACKUP_ROOT_RELATIVE = "var/lib/heim-pc/host-health/install-backups"
 RECEIPT_RELATIVE = "var/lib/heim-pc/host-health/install-receipt.v3.json"
 STRICT_PROFILE = "/usr/local/libexec/heim-pc/ensure-performance-profile"
 FLUIDSYNTH_USER = "alex"
+FLUIDSYNTH_EXEC_START = "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT"
+FLUIDSYNTH_SERVICE_TYPE = "notify"
+FLUIDSYNTH_NOTIFY_ACCESS = "main"
+FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL = "30s"
+FLUIDSYNTH_LOG_RATE_LIMIT_BURST = "200"
 COMMIT_POINT = (
     "all_target_operations_fsynced_exactly_read_back_and_"
     "effective_systemd_composition_verified"
@@ -304,6 +309,11 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "legacy_removal_policy": "exact_known_preimages_only",
         "fluidsynth_condition_user": FLUIDSYNTH_USER,
         "activation_performed": False,
+        "fluidsynth_exec_start": FLUIDSYNTH_EXEC_START,
+        "fluidsynth_service_type": FLUIDSYNTH_SERVICE_TYPE,
+        "fluidsynth_notify_access": FLUIDSYNTH_NOTIFY_ACCESS,
+        "fluidsynth_log_rate_limit_interval": FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
+        "fluidsynth_log_rate_limit_burst": FLUIDSYNTH_LOG_RATE_LIMIT_BURST,
     }
     if not isinstance(deployment, dict) or any(
         deployment.get(key) != value
@@ -709,6 +719,77 @@ def _verify_effective_composition(
         key="ConditionUser",
         overlay=effective_overlay,
     )
+    fluid_exec_start, fluid_exec_sources, fluid_exec_directive_sources = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="ExecStart",
+            overlay=effective_overlay,
+        )
+    )
+    fluid_type_values, fluid_type_sources, fluid_type_directive_sources = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="Type",
+            overlay=effective_overlay,
+        )
+    )
+    fluid_notify_values, fluid_notify_sources, fluid_notify_directive_sources = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="NotifyAccess",
+            overlay=effective_overlay,
+        )
+    )
+    fluid_rate_interval_values, fluid_rate_interval_sources, _ = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="LogRateLimitIntervalSec",
+            overlay=effective_overlay,
+        )
+    )
+    fluid_rate_burst_values, fluid_rate_burst_sources, _ = (
+        _effective_list_directive(
+            root_fd,
+            unit_dirs=USER_UNIT_DIRS,
+            unit_name="fluidsynth.service",
+            section="Service",
+            key="LogRateLimitBurst",
+            overlay=effective_overlay,
+        )
+    )
+    fluid_type = fluid_type_values[-1] if fluid_type_values else None
+    fluid_notify_access = fluid_notify_values[-1] if fluid_notify_values else None
+    fluid_rate_interval = (
+        fluid_rate_interval_values[-1] if fluid_rate_interval_values else None
+    )
+    fluid_rate_burst = (
+        fluid_rate_burst_values[-1] if fluid_rate_burst_values else None
+    )
+    expected_fluid_main_units = {
+        f"{directory}/fluidsynth.service"
+        for directory in USER_UNIT_DIRS
+        if not _is_merged_usr_lib_alias(root_fd, directory)
+    }
+    fluid_main_unit_sources = [
+        source for source in fluid_sources if source in expected_fluid_main_units
+    ]
+    if not fluid_main_unit_sources:
+        raise InstallError(
+            "loadable fluidsynth.service main unit is missing; a managed drop-in "
+            "cannot establish the service by itself"
+        )
     if exec_start != [STRICT_PROFILE]:
         raise InstallError(
             "effective cpu-governor.service ExecStart is not the strict committed wrapper"
@@ -730,6 +811,28 @@ def _verify_effective_composition(
         raise InstallError(
             f"effective fluidsynth.service ConditionUser must contain only "
             f"{FLUIDSYNTH_USER}"
+        )
+    if fluid_exec_start != [FLUIDSYNTH_EXEC_START]:
+        raise InstallError(
+            "effective fluidsynth.service ExecStart must be the bounded "
+            "no-shell server command"
+        )
+    if fluid_type != FLUIDSYNTH_SERVICE_TYPE:
+        raise InstallError(
+            "effective fluidsynth.service Type must restore the distribution "
+            "notify contract"
+        )
+    if fluid_notify_access != FLUIDSYNTH_NOTIFY_ACCESS:
+        raise InstallError(
+            "effective fluidsynth.service NotifyAccess must be main"
+        )
+    if fluid_rate_interval != FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL:
+        raise InstallError(
+            "effective fluidsynth.service LogRateLimitIntervalSec must be bounded"
+        )
+    if fluid_rate_burst != FLUIDSYNTH_LOG_RATE_LIMIT_BURST:
+        raise InstallError(
+            "effective fluidsynth.service LogRateLimitBurst must be bounded"
         )
     unexpected_fluid_drop_ins = [
         source
@@ -753,8 +856,22 @@ def _verify_effective_composition(
         },
         "fluidsynth": {
             "condition_user": condition_user,
+            "exec_start": fluid_exec_start,
+            "type": fluid_type,
+            "notify_access": fluid_notify_access,
+            "log_rate_limit_interval": fluid_rate_interval,
+            "log_rate_limit_burst": fluid_rate_burst,
             "sources": fluid_sources,
             "directive_sources": fluid_directive_sources,
+            "exec_start_sources": fluid_exec_sources,
+            "exec_start_directive_sources": fluid_exec_directive_sources,
+            "type_sources": fluid_type_sources,
+            "type_directive_sources": fluid_type_directive_sources,
+            "notify_access_sources": fluid_notify_sources,
+            "notify_access_directive_sources": fluid_notify_directive_sources,
+            "rate_interval_sources": fluid_rate_interval_sources,
+            "rate_burst_sources": fluid_rate_burst_sources,
+            "main_unit_sources": fluid_main_unit_sources,
             "verified": True,
         },
     }
