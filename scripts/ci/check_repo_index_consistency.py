@@ -18,7 +18,7 @@ def main():
         print(f"ERROR: Manifest not found at {manifest_path}", file=sys.stderr)
         sys.exit(1)
 
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8", errors="strict") as f:
         manifest_data = parse_repo_index(f.read())
 
     errors = 0
@@ -41,7 +41,7 @@ def main():
                 errors += 1
                 continue
 
-            with open(full_doc_path, "r") as df:
+            with open(full_doc_path, "r", encoding="utf-8", errors="strict") as df:
                 frontmatter = parse_frontmatter(df.read())
 
             if not frontmatter:

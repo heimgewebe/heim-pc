@@ -15,7 +15,6 @@ import socket
 import stat
 import subprocess
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 

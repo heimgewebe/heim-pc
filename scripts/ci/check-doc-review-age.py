@@ -3,6 +3,8 @@ import os
 import re
 from datetime import datetime
 
+REVIEW_POLICY_FIELD_PATTERN = re.compile(r"^([a-zA-Z0-9_]+):\s*(.*)$")
+
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, repo_root)
 
@@ -15,11 +17,11 @@ def load_review_policy(policy_path):
         print(f"WARN: Policy not found at {policy_path}, using defaults.", file=sys.stderr)
         return policy, warnings
 
-    with open(policy_path, "r") as f:
+    with open(policy_path, "r", encoding="utf-8", errors="strict") as f:
         for line in f:
             if not line.strip() or line.strip().startswith("#"):
                 continue
-            match = re.match(r"^([a-zA-Z0-9_]+):\s*(.*)$", line.strip())
+            match = REVIEW_POLICY_FIELD_PATTERN.match(line.strip())
             if match:
                 key = match.group(1)
                 val = match.group(2).strip()
@@ -57,7 +59,7 @@ def main():
         print(f"ERROR: Manifest not found at {manifest_path}", file=sys.stderr)
         sys.exit(1)
 
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8", errors="strict") as f:
         manifest_data = parse_repo_index(f.read())
 
     warnings = policy_warnings
@@ -73,7 +75,7 @@ def main():
             if not os.path.exists(full_doc_path):
                 continue
 
-            with open(full_doc_path, "r") as df:
+            with open(full_doc_path, "r", encoding="utf-8", errors="strict") as df:
                 frontmatter = parse_frontmatter(df.read())
 
             last_reviewed_str = frontmatter.get("last_reviewed")

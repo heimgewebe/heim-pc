@@ -12,7 +12,7 @@ def main():
         print(f"ERROR: Manifest not found at {manifest_path}")
         sys.exit(1)
 
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8", errors="strict") as f:
         manifest_data = parse_repo_index(f.read())
 
     out_lines = [
@@ -46,7 +46,7 @@ def main():
                 out_lines.append(f"| _Missing_ | `{display_path}` | _Missing_ | _Missing_ | _Missing_ |")
                 continue
 
-            with open(full_doc_path, "r") as df:
+            with open(full_doc_path, "r", encoding="utf-8", errors="strict") as df:
                 frontmatter = parse_frontmatter(df.read())
 
             doc_id = frontmatter.get("id", "N/A")
@@ -66,7 +66,7 @@ def main():
         out_lines.append(f"- `{check}`")
 
     out_path = os.path.join(repo_root, "SYSTEM_MAP.md")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8", errors="strict") as f:
         f.write("\n".join(out_lines) + "\n")
 
     print(f"Successfully generated {out_path}")
