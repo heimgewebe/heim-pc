@@ -580,6 +580,51 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 installer.FLUIDSYNTH_NOTIFY_ACCESS,
             )
             self.assertEqual(
+                composition["fluidsynth"]["user_unit_path_evidence"]["paths"],
+                list(installer.FLUIDSYNTH_USER_UNIT_DIRS),
+            )
+            self.assertFalse(
+                composition["fluidsynth"]["user_unit_path_evidence"][
+                    "live_verified"
+                ]
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["sdl_no_signal_handlers"],
+                installer.FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["exec_stop"],
+                installer.FLUIDSYNTH_EXEC_STOP,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["kill_mode"],
+                installer.FLUIDSYNTH_KILL_MODE,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["kill_signal"],
+                installer.FLUIDSYNTH_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["restart_kill_signal"],
+                installer.FLUIDSYNTH_RESTART_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["timeout_stop_sec"],
+                installer.FLUIDSYNTH_TIMEOUT_STOP_SEC,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["send_sigkill"],
+                installer.FLUIDSYNTH_SEND_SIGKILL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["final_kill_signal"],
+                installer.FLUIDSYNTH_FINAL_KILL_SIGNAL,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["shutdown_failure"],
+                installer.FLUIDSYNTH_SHUTDOWN_FAILURE,
+            )
+            self.assertEqual(
                 composition["fluidsynth"]["log_rate_limit_interval"],
                 installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
             )
@@ -612,6 +657,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("NotifyAccess=main", fluid_reset)
             self.assertIn("ExecStart=\n", fluid_reset)
             self.assertIn(installer.FLUIDSYNTH_EXEC_START, fluid_reset)
+            self.assertIn(
+                "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/bin/fluidsynth",
+                fluid_reset,
+            )
+            self.assertIn("ExecStop=\n", fluid_reset)
+            self.assertIn("KillMode=control-group", fluid_reset)
+            self.assertIn("KillSignal=SIGTERM", fluid_reset)
+            self.assertIn("RestartKillSignal=SIGTERM", fluid_reset)
+            self.assertIn("TimeoutStopSec=15s", fluid_reset)
+            self.assertIn("SendSIGKILL=yes", fluid_reset)
+            self.assertIn("FinalKillSignal=SIGKILL", fluid_reset)
             self.assertIn("LogRateLimitIntervalSec=30s", fluid_reset)
             self.assertIn("LogRateLimitBurst=200", fluid_reset)
             self.assertNotIn("!gdm", fluid_reset)
@@ -654,6 +710,14 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 installer.FLUIDSYNTH_NOTIFY_ACCESS,
             )
             self.assertEqual(
+                composition["sdl_no_signal_handlers"],
+                installer.FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
+            )
+            self.assertEqual(
+                composition["timeout_stop_sec"],
+                installer.FLUIDSYNTH_TIMEOUT_STOP_SEC,
+            )
+            self.assertEqual(
                 composition["log_rate_limit_interval"],
                 installer.FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL,
             )
@@ -679,7 +743,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 shutil.copyfile(ROOT / source_relative, destination)
             config_path = source / "config/host-health-remediation.v1.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["deployment"]["fluidsynth_log_rate_limit_burst"] = "9999"
+            config["deployment"]["fluidsynth_timeout_stop_sec"] = "90s"
             config_path.write_text(json.dumps(config), encoding="utf-8")
             run_git(source, "init", "-q")
             run_git(source, "config", "user.name", "Test")
@@ -732,6 +796,253 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertFalse(
                 (target / "usr/local/sbin/heim-pc-host-health").exists()
             )
+
+    def test_later_shutdown_drop_in_fails_closed_without_target_mutation(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            conflict = target / "etc/systemd/user/service.d/zzz-foreign.conf"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text(
+                "[Service]\nTimeoutStopSec=15s\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "unmanaged fluidsynth.service shutdown directive",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(
+                conflict.read_text(encoding="utf-8"),
+                "[Service]\nTimeoutStopSec=15s\n",
+            )
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (target / "usr/local/sbin/heim-pc-host-health").exists()
+            )
+
+    def test_per_user_shutdown_drop_ins_fail_closed_without_target_mutation(
+        self,
+    ) -> None:
+        conflict_dirs = (
+            "home/alex/.config/systemd/user",
+            "home/alex/.config/systemd/user.control",
+            "run/user/1000/systemd/user.control",
+        )
+        for conflict_dir in conflict_dirs:
+            with self.subTest(conflict_dir=conflict_dir), committed_source() as (
+                source,
+                head,
+            ), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                conflict = (
+                    target
+                    / conflict_dir
+                    / "fluidsynth.service.d/zzz-foreign.conf"
+                )
+                conflict.parent.mkdir(parents=True)
+                conflict.write_text(
+                    "[Service]\nTimeoutStopSec=90s\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "unmanaged fluidsynth.service shutdown directive",
+                ):
+                    install_fixture(source, head, target, apply=True)
+
+                self.assertEqual(
+                    conflict.read_text(encoding="utf-8"),
+                    "[Service]\nTimeoutStopSec=90s\n",
+                )
+                self.assertFalse(
+                    (target / installer.RECEIPT_RELATIVE).exists()
+                )
+                self.assertFalse(
+                    (target / "usr/local/sbin/heim-pc-host-health").exists()
+                )
+
+    def test_per_user_drop_in_cannot_shadow_the_managed_drop_in(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            shadow = (
+                target
+                / "home/alex/.config/systemd/user/fluidsynth.service.d/"
+                "zz-heim-pc-interactive-user.conf"
+            )
+            shadow.parent.mkdir(parents=True)
+            shadow.write_text(
+                "[Unit]\nConditionUser=\nConditionUser=alex\n"
+                "[Service]\n"
+                "Type=notify\n"
+                "NotifyAccess=main\n"
+                "ExecStart=\n"
+                "ExecStart=/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT\n"
+                "ExecStop=\n"
+                "KillMode=control-group\n"
+                "KillSignal=SIGTERM\n"
+                "RestartKillSignal=SIGTERM\n"
+                "TimeoutStopSec=15s\n"
+                "SendSIGKILL=yes\n"
+                "FinalKillSignal=SIGKILL\n"
+                "LogRateLimitIntervalSec=30s\n"
+                "LogRateLimitBurst=200\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "effective fluidsynth.service ExecStart",
+            ):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertIn(
+                "ExecStart=/usr/bin/fluidsynth",
+                shadow.read_text(encoding="utf-8"),
+            )
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            self.assertFalse(
+                (target / "usr/local/sbin/heim-pc-host-health").exists()
+            )
+
+    def test_live_user_unit_path_probe_is_exact_and_drops_privileges(self) -> None:
+        account = mock.Mock(
+            pw_uid=installer.FLUIDSYNTH_USER_UID,
+            pw_gid=installer.FLUIDSYNTH_USER_UID,
+            pw_dir=installer.FLUIDSYNTH_USER_HOME,
+        )
+        output = "".join(
+            f"/{relative}\n" for relative in installer.FLUIDSYNTH_USER_UNIT_DIRS
+        )
+        completed = subprocess.CompletedProcess(
+            list(installer.FLUIDSYNTH_USER_UNIT_PATH_PROBE),
+            0,
+            stdout=output,
+            stderr="",
+        )
+        with mock.patch.object(
+            installer.pwd,
+            "getpwnam",
+            return_value=account,
+        ), mock.patch.object(
+            installer.os,
+            "geteuid",
+            return_value=0,
+        ), mock.patch.object(
+            installer.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            observed = installer._live_user_unit_dirs()
+
+        self.assertEqual(observed, installer.FLUIDSYNTH_USER_UNIT_DIRS)
+        self.assertEqual(run.call_args.kwargs["user"], 1000)
+        self.assertEqual(run.call_args.kwargs["group"], 1000)
+        self.assertEqual(run.call_args.kwargs["extra_groups"], [])
+        self.assertEqual(
+            run.call_args.kwargs["env"]["XDG_RUNTIME_DIR"],
+            "/run/user/1000",
+        )
+
+    def test_live_user_unit_path_probe_rejects_path_drift(self) -> None:
+        account = mock.Mock(
+            pw_uid=installer.FLUIDSYNTH_USER_UID,
+            pw_gid=installer.FLUIDSYNTH_USER_GID,
+            pw_dir=installer.FLUIDSYNTH_USER_HOME,
+        )
+        completed = subprocess.CompletedProcess(
+            list(installer.FLUIDSYNTH_USER_UNIT_PATH_PROBE),
+            0,
+            stdout="/home/alex/.config/systemd/user\n/etc/systemd/user\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            installer.pwd,
+            "getpwnam",
+            return_value=account,
+        ), mock.patch.object(
+            installer.os,
+            "geteuid",
+            return_value=installer.FLUIDSYNTH_USER_UID,
+        ), mock.patch.object(
+            installer.subprocess,
+            "run",
+            return_value=completed,
+        ):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "unit paths differ from the committed contract",
+            ):
+                installer._live_user_unit_dirs()
+
+    def test_live_user_unit_path_drift_blocks_before_the_apply_lock(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            root_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+            with mock.patch.object(
+                installer,
+                "_open_root",
+                return_value=root_fd,
+            ), mock.patch.object(
+                installer.os,
+                "geteuid",
+                return_value=0,
+            ), mock.patch.object(
+                installer,
+                "_resolve_user_unit_dirs",
+                side_effect=installer.InstallError(
+                    "effective FluidSynth user unit paths differ"
+                ),
+            ), mock.patch.object(installer, "_open_lock") as open_lock:
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "effective FluidSynth user unit paths differ",
+                ):
+                    installer.install(
+                        source_root=source,
+                        target_root=installer.DEFAULT_TARGET_ROOT,
+                        apply=True,
+                        expected_head=head,
+                    )
+
+            open_lock.assert_not_called()
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_user_unit_path_drift_after_writes_rolls_back_transaction(self) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            expected = installer.FLUIDSYNTH_USER_UNIT_DIRS
+            initial_evidence = {
+                "source": "test-preflight",
+                "live_verified": True,
+                "paths": list(expected),
+            }
+            changed = ("unexpected/systemd/user", *expected)
+            changed_evidence = {
+                "source": "test-post-write",
+                "live_verified": True,
+                "paths": list(changed),
+            }
+
+            with mock.patch.object(
+                installer,
+                "_resolve_user_unit_dirs",
+                side_effect=(
+                    (expected, initial_evidence),
+                    (changed, changed_evidence),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "user unit paths changed during the target transaction",
+                ):
+                    install_fixture(source, head, target, apply=True)
+
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+            for _source_relative, target_relative, _mode in installer.FILES:
+                self.assertFalse(target.joinpath(target_relative).exists())
 
     def test_unmanaged_cpu_drop_in_blocks_even_if_final_command_matches(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
@@ -1343,6 +1654,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                     installer.os,
                     "geteuid",
                     return_value=1000,
+                ), mock.patch.object(
+                    installer,
+                    "_resolve_user_unit_dirs",
+                    return_value=(
+                        installer.FLUIDSYNTH_USER_UNIT_DIRS,
+                        {
+                            "source": "synthetic-root-plan-test",
+                            "live_verified": False,
+                            "paths": list(installer.FLUIDSYNTH_USER_UNIT_DIRS),
+                        },
+                    ),
                 ), mock.patch.object(
                     installer,
                     "_open_lock",
