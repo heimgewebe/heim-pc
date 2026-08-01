@@ -33,6 +33,14 @@ class SourceSnapshot(NamedTuple):
     metarepo_commit: str
 
 
+class CandidateAssessment(NamedTuple):
+    event_id: int
+    status: str | None
+    decision: str | None
+    source_sha256: str | None
+    missing_fields: tuple[str, ...]
+
+
 def _run(argv: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
 
@@ -233,7 +241,7 @@ def _fresh_source_snapshot(
 def _candidate_assessment(
     bureau_root: Path,
     candidate_id: str,
-) -> tuple[int, str | None] | None:
+) -> CandidateAssessment | None:
     """Read one exact candidate through the canonical Bureau runtime snapshot."""
     del bureau_root  # Compatibility argument; explicit checkout roots are forbidden here.
     assessed = _run(
@@ -269,7 +277,39 @@ def _candidate_assessment(
     status = result.get("candidate_status")
     if observed_candidate_id != candidate_id or not isinstance(event_id, int):
         raise RuntimeError("bureau candidate assessment is not identity-bound")
-    return event_id, status if isinstance(status, str) else None
+    source_freshness = result.get("source_freshness")
+    source_sha256 = (
+        source_freshness.get("sha256")
+        if isinstance(source_freshness, dict)
+        and isinstance(source_freshness.get("sha256"), str)
+        else None
+    )
+    decision = result.get("decision")
+    missing_fields = result.get("missing_fields")
+    return CandidateAssessment(
+        event_id=event_id,
+        status=status if isinstance(status, str) else None,
+        decision=decision if isinstance(decision, str) else None,
+        source_sha256=source_sha256,
+        missing_fields=tuple(
+            item for item in missing_fields if isinstance(item, str)
+        )
+        if isinstance(missing_fields, list)
+        else (),
+    )
+
+
+def _candidate_matches_report(
+    assessment: CandidateAssessment | None,
+    report_sha256: str,
+) -> bool:
+    return bool(
+        assessment is not None
+        and assessment.status in ACTIVE_STATUSES
+        and assessment.decision in {"merge", "promote"}
+        and not assessment.missing_fields
+        and assessment.source_sha256 == report_sha256
+    )
 
 
 def _ensure_bureau_candidate(
@@ -277,16 +317,17 @@ def _ensure_bureau_candidate(
     report_path: Path,
     report: dict[str, Any],
 ) -> dict[str, Any]:
+    digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
     initial = _candidate_assessment(bureau_root, CANDIDATE_ID)
-    if initial is not None and initial[1] in ACTIVE_STATUSES:
+    if _candidate_matches_report(initial, digest):
+        assert initial is not None
         return {
             "action": "deduplicated",
             "candidateId": CANDIDATE_ID,
-            "eventId": initial[0],
-            "status": initial[1],
+            "eventId": initial.event_id,
+            "status": initial.status,
         }
 
-    digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
     kinds = sorted(
         {
             str(item.get("kind"))
@@ -304,87 +345,98 @@ def _ensure_bureau_candidate(
     # changed while the drift report was generated or while another operator
     # updated the append-only Live Register.
     current = _candidate_assessment(bureau_root, CANDIDATE_ID)
-    if current is not None and current[1] in ACTIVE_STATUSES:
+    if _candidate_matches_report(current, digest):
+        assert current is not None
         return {
             "action": "deduplicated",
             "candidateId": CANDIDATE_ID,
-            "eventId": current[0],
-            "status": current[1],
+            "eventId": current.event_id,
+            "status": current.status,
         }
-    latest_event_id = current[0] if current is not None else None
+    latest_event_id = current.event_id if current is not None else None
 
+    request = {
+        "schema_version": 1,
+        "idempotency_key": f"systemkatalog-drift:{digest}",
+        "title": "Systemkatalog-Drift prüfen und proposal-only aktualisieren",
+        "source_kind": "heim-pc-systemkatalog-drift-watch-v1",
+        "desired_outcome": (
+            "Den exakten, digestgebundenen Driftbericht semantisch prüfen, "
+            "nur bestätigte stabile Katalogaussagen und Quellenbindungen über "
+            "normale Review-Gates aktualisieren und den Kandidaten erst nach "
+            "verifiziertem Merge schließen oder anhand neuer Drift verfeinern."
+        ),
+        "repo": "repo.systemkatalog",
+        "source_locator": str(report_path),
+        "source_sha256": digest,
+        "observed_at": report.get("generatedAt"),
+        "candidate_id": CANDIDATE_ID,
+        "note": note,
+        "catalog_validation": "strict",
+    }
+    if latest_event_id is not None:
+        request["supersedes_event_id"] = latest_event_id
+    request_path = report_path.with_name("bureau-candidate-request.json")
+    _write_json(request_path, request)
     register_argv = [
         "bureau",
         "--json",
-        "live-register",
-        "--kind",
-        "candidate_task",
-        "--title",
-        "Systemkatalog-Drift prüfen und proposal-only aktualisieren",
-        "--source",
-        "heim-pc-systemkatalog-drift-watch-v1",
-        "--worker-id",
-        "heim-pc-systemkatalog-drift-watch",
-        "--repo",
-        "repo.systemkatalog",
-        "--candidate-id",
-        CANDIDATE_ID,
-        "--status",
-        "active",
-        "--promotion-required",
+        "operator-candidate-record",
+        "--request",
+        str(request_path),
     ]
-    if latest_event_id is not None:
-        register_argv.extend(["--supersedes-event-id", str(latest_event_id)])
-    register_argv.extend(
-        [
-            "--catalog-validation",
-            "strict",
-            "--note",
-            note,
-        ]
-    )
     registered = _run(register_argv)
     if registered.returncode != 0:
         # No unchanged retry after a possible concurrent append. One exact
         # readback may prove that another writer already established the
         # desired active state; every other outcome remains fail-closed.
         readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
-        if readback is not None and readback[1] in ACTIVE_STATUSES:
+        if _candidate_matches_report(readback, digest):
+            assert readback is not None
             return {
                 "action": "deduplicated",
                 "candidateId": CANDIDATE_ID,
-                "eventId": readback[0],
-                "status": readback[1],
+                "eventId": readback.event_id,
+                "status": readback.status,
                 "recoveredFromConcurrentRegistration": True,
             }
-        raise RuntimeError(f"bureau live-register failed: {_command_error(registered)}")
+        raise RuntimeError(
+            f"bureau operator-candidate-record failed: {_command_error(registered)}"
+        )
 
     try:
         receipt = _result_payload(json.loads(registered.stdout))
     except json.JSONDecodeError as exc:
-        raise RuntimeError("bureau live-register returned invalid JSON") from exc
+        raise RuntimeError("bureau operator-candidate-record returned invalid JSON") from exc
     registered_event_id = receipt.get("event_id")
     if not isinstance(registered_event_id, int):
-        raise RuntimeError("bureau live-register receipt is not event-bound")
+        raise RuntimeError("bureau operator-candidate-record receipt is not event-bound")
 
     readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
-    if readback is None or readback[1] not in ACTIVE_STATUSES:
-        raise RuntimeError("bureau candidate post-readback is not active")
-    if readback[0] != registered_event_id:
+    if not _candidate_matches_report(readback, digest):
+        raise RuntimeError("bureau candidate post-readback is not bound to the report")
+    assert readback is not None
+    if readback.event_id != registered_event_id:
         return {
             "action": "deduplicated",
             "candidateId": CANDIDATE_ID,
-            "eventId": readback[0],
-            "status": readback[1],
+            "eventId": readback.event_id,
+            "status": readback.status,
             "registeredEventId": registered_event_id,
             "concurrentUpdateAfterRegistration": True,
         }
 
+    if current is None:
+        action = "registered"
+    elif current.status in ACTIVE_STATUSES:
+        action = "refined"
+    else:
+        action = "reactivated"
     result = {
-        "action": "reactivated" if latest_event_id is not None else "registered",
+        "action": action,
         "candidateId": CANDIDATE_ID,
         "eventId": registered_event_id,
-        "status": readback[1],
+        "status": readback.status,
     }
     if latest_event_id is not None:
         result["supersedesEventId"] = latest_event_id

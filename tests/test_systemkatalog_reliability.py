@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import stat
@@ -67,7 +68,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             "result": {
                 "candidate_id": watchdog.CANDIDATE_ID,
                 "candidate_status": "active",
+                "decision": "promote",
                 "event_id": 572,
+                "missing_fields": [],
+                "source_freshness": {"sha256": "a" * 64},
             }
         }
         with mock.patch.object(
@@ -77,7 +81,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
         ) as run:
             result = watchdog._candidate_assessment(Path("/tmp/bureau"), watchdog.CANDIDATE_ID)
 
-        self.assertEqual(result, (572, "active"))
+        self.assertEqual(
+            result,
+            watchdog.CandidateAssessment(572, "active", "promote", "a" * 64, ()),
+        )
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["bureau", "--json"])
         self.assertIn("operator-candidate-assess", argv)
@@ -101,6 +108,25 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertIsNone(
                 watchdog._candidate_assessment(Path("/tmp/bureau"), watchdog.CANDIDATE_ID)
             )
+
+    def test_candidate_match_requires_promotable_digest_bound_assessment(self) -> None:
+        digest = "a" * 64
+        base = watchdog.CandidateAssessment(1, "active", "promote", digest, ())
+        self.assertTrue(watchdog._candidate_matches_report(base, digest))
+        self.assertTrue(
+            watchdog._candidate_matches_report(
+                base._replace(decision="merge"),
+                digest,
+            )
+        )
+        for assessment in (
+            base._replace(status="closed"),
+            base._replace(decision="refine"),
+            base._replace(decision=None),
+            base._replace(source_sha256="b" * 64),
+            base._replace(missing_fields=("desired_outcome",)),
+        ):
+            self.assertFalse(watchdog._candidate_matches_report(assessment, digest))
 
     def test_candidate_assessment_rejects_unbound_identity(self) -> None:
         payload = {
@@ -244,11 +270,16 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     proposal_path.write_text(json.dumps({"proposalOnly": True}), encoding="utf-8")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 if "operator-candidate-assess" in argv:
+                    report_path = state / "drift-report.json"
+                    digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
                     payload = {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "active",
+                            "decision": "promote",
                             "event_id": 9,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": digest},
                         }
                     }
                     return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
@@ -280,6 +311,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
                 encoding="utf-8",
             )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             calls = []
             assessments = iter(
                 [
@@ -301,7 +333,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "active",
+                            "decision": "promote",
                             "event_id": 42,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": digest},
                         }
                     },
                 ]
@@ -315,7 +350,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         stdout=json.dumps(next(assessments)),
                         stderr="",
                     )
-                if "live-register" in argv:
+                if "operator-candidate-record" in argv:
                     return mock.Mock(
                         returncode=0,
                         stdout=json.dumps({"result": {"event_id": 42}}),
@@ -333,9 +368,13 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertEqual(result["action"], "reactivated")
             self.assertEqual(result["eventId"], 42)
             self.assertEqual(result["supersedesEventId"], 41)
-            register = next(argv for argv in calls if "live-register" in argv)
-            supersedes_index = register.index("--supersedes-event-id")
-            self.assertEqual(register[supersedes_index + 1], "41")
+            register = next(argv for argv in calls if "operator-candidate-record" in argv)
+            request_path = Path(register[register.index("--request") + 1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(request["supersedes_event_id"], 41)
+            self.assertEqual(request["source_sha256"], digest)
+            self.assertEqual(request["candidate_id"], watchdog.CANDIDATE_ID)
+            self.assertTrue(request["desired_outcome"])
             self.assertEqual(
                 len([argv for argv in calls if "operator-candidate-assess" in argv]),
                 3,
@@ -350,6 +389,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 json.dumps({"changeCount": 2, "changes": [{"kind": "repository_unclassified"}]}),
                 encoding="utf-8",
             )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             calls = []
             unknown = {
                 "result": {
@@ -362,7 +402,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 "result": {
                     "candidate_id": watchdog.CANDIDATE_ID,
                     "candidate_status": "active",
+                    "decision": "promote",
                     "event_id": 42,
+                    "missing_fields": [],
+                    "source_freshness": {"sha256": digest},
                 }
             }
             assessments = iter(
@@ -382,7 +425,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         stdout=json.dumps(payload),
                         stderr="",
                     )
-                if "live-register" in argv:
+                if "operator-candidate-record" in argv:
                     return mock.Mock(
                         returncode=0,
                         stdout=json.dumps({"result": {"event_id": 42}}),
@@ -405,12 +448,18 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     "status": "active",
                 },
             )
-            register_argv = next(argv for argv in calls if "live-register" in argv)
+            register_argv = next(
+                argv for argv in calls if "operator-candidate-record" in argv
+            )
             self.assertEqual(register_argv[:2], ["bureau", "--json"])
-            self.assertIn("--promotion-required", register_argv)
-            self.assertIn("repo.systemkatalog", register_argv)
+            request_path = Path(register_argv[register_argv.index("--request") + 1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(request["repo"], "repo.systemkatalog")
+            self.assertEqual(request["source_sha256"], digest)
+            self.assertEqual(request["candidate_id"], watchdog.CANDIDATE_ID)
+            self.assertNotIn("supersedes_event_id", request)
+            self.assertEqual(stat.S_IMODE(request_path.stat().st_mode), 0o600)
             self.assertNotIn("--root", register_argv)
-            self.assertNotIn("--supersedes-event-id", register_argv)
 
     def test_watchdog_reports_concurrent_active_update_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -420,6 +469,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
                 encoding="utf-8",
             )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             assessments = iter(
                 [
                     {
@@ -440,7 +490,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "active",
+                            "decision": "promote",
                             "event_id": 43,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": digest},
                         }
                     },
                 ]
@@ -453,7 +506,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         stdout=json.dumps(next(assessments)),
                         stderr="",
                     )
-                if "live-register" in argv:
+                if "operator-candidate-record" in argv:
                     return mock.Mock(
                         returncode=0,
                         stdout=json.dumps({"result": {"event_id": 42}}),
@@ -481,6 +534,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
                 encoding="utf-8",
             )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             calls = []
             assessments = iter(
                 [
@@ -502,7 +556,10 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "active",
+                            "decision": "promote",
                             "event_id": 43,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": digest},
                         }
                     },
                 ]
@@ -516,7 +573,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         stdout=json.dumps(next(assessments)),
                         stderr="",
                     )
-                if "live-register" in argv:
+                if "operator-candidate-record" in argv:
                     return mock.Mock(
                         returncode=1,
                         stdout="",
@@ -535,9 +592,74 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertEqual(result["eventId"], 43)
             self.assertTrue(result["recoveredFromConcurrentRegistration"])
             self.assertEqual(
-                len([argv for argv in calls if "live-register" in argv]),
+                len([argv for argv in calls if "operator-candidate-record" in argv]),
                 1,
             )
+
+    def test_watchdog_refines_legacy_active_candidate_with_structured_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
+            calls = []
+            legacy = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "active",
+                    "decision": "refine",
+                    "event_id": 572,
+                    "missing_fields": ["desired_outcome", "source.kind"],
+                    "source_freshness": {"sha256": None},
+                }
+            }
+            structured = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "active",
+                    "decision": "promote",
+                    "event_id": 573,
+                    "missing_fields": [],
+                    "source_freshness": {"sha256": digest},
+                }
+            }
+            assessments = iter([legacy, legacy, structured])
+
+            def fake_run(argv, *, cwd=None):
+                calls.append(argv)
+                if "operator-candidate-assess" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps(next(assessments)),
+                        stderr="",
+                    )
+                if "operator-candidate-record" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps({"result": {"event_id": 573}}),
+                        stderr="",
+                    )
+                raise AssertionError(argv)
+
+            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+                result = watchdog._ensure_bureau_candidate(
+                    base,
+                    report_path,
+                    json.loads(report_path.read_text()),
+                )
+
+            self.assertEqual(result["action"], "refined")
+            self.assertEqual(result["eventId"], 573)
+            self.assertEqual(result["supersedesEventId"], 572)
+            register = next(argv for argv in calls if "operator-candidate-record" in argv)
+            request_path = Path(register[register.index("--request") + 1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(request["supersedes_event_id"], 572)
+            self.assertEqual(request["source_sha256"], digest)
+            self.assertTrue(request["desired_outcome"])
 
     def test_command_error_uses_stdout_when_stderr_is_empty(self) -> None:
         completed = mock.Mock(returncode=1, stdout="structured failure", stderr="")
