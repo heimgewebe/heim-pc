@@ -3,12 +3,12 @@
   "kind": "heim_pc.worktree_target_policy",
   "owner_uid": 1000,
   "automatic_apply": true,
-  "warning_bytes": 85899345920,
-  "hard_bytes": 128849018880,
-  "warning_min_age_seconds": 604800,
-  "hard_min_age_seconds": 86400,
-  "max_candidates_per_run": 8,
-  "max_remove_bytes_per_run": 68719476736,
+  "warning_bytes": 34359738368,
+  "hard_bytes": 68719476736,
+  "warning_min_age_seconds": 259200,
+  "hard_min_age_seconds": 43200,
+  "max_candidates_per_run": 16,
+  "max_remove_bytes_per_run": 137438953472,
   "max_tree_entries": 2000000,
   "repositories": [
     {
@@ -16,13 +16,17 @@
       "worktree_roots": [
         "/home/alex/repos/.weltgewebe-standalone",
         "/home/alex/repos/.weltgewebe-worktrees",
-        "/home/alex/worktrees"
+        "/home/alex/worktrees",
+        "/home/alex/repos/.weltgewebe-audit-implementation",
+        "/home/alex/repos/.weltgewebe-audit-main-20260717",
+        "/home/alex/repos/.weltgewebe-release-worktrees"
       ]
     },
     {
       "repository": "/home/alex/repos/semantAH",
       "worktree_roots": [
-        "/home/alex/repos/.semantah-worktrees"
+        "/home/alex/repos/.semantah-worktrees",
+        "/home/alex/repos/.semantah-standalone"
       ]
     },
     {
@@ -36,6 +40,67 @@
       "repository": "/home/alex/repos/hausKI",
       "worktree_roots": [
         "/home/alex/repos/.hauski-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/audio",
+      "worktree_roots": [
+        "/home/alex/repos/.audio-standalone",
+        "/home/alex/repos/.audio-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/hausKI-audio",
+      "worktree_roots": [
+        "/home/alex/repos/.hauski-audio-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/grabowski",
+      "worktree_roots": [
+        "/home/alex/repos/.grabowski-deploy-worktrees",
+        "/home/alex/repos/.grabowski-standalone",
+        "/home/alex/repos/.grabowski-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/heim-pc",
+      "worktree_roots": [
+        "/home/alex/repos/.heim-pc-standalone",
+        "/home/alex/repos/.heim-pc-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/bureau",
+      "worktree_roots": [
+        "/home/alex/repos/.bureau-audit-clones",
+        "/home/alex/repos/.bureau-audits",
+        "/home/alex/repos/.bureau-standalone",
+        "/home/alex/repos/.bureau-task-worktrees",
+        "/home/alex/repos/.bureau-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/repoground",
+      "worktree_roots": [
+        "/home/alex/repos/.repoground-audits",
+        "/home/alex/repos/.repoground-standalone",
+        "/home/alex/repos/.repoground-task-worktrees",
+        "/home/alex/repos/.repoground-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/commonworld",
+      "worktree_roots": [
+        "/home/alex/repos/.commonworld-audits",
+        "/home/alex/repos/.commonworld-standalone",
+        "/home/alex/repos/.commonworld-worktrees"
+      ]
+    },
+    {
+      "repository": "/home/alex/repos/plexer",
+      "worktree_roots": [
+        "/home/alex/repos/.plexer-worktrees"
       ]
     }
   ],

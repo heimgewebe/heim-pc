@@ -11,6 +11,7 @@ import grp
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import pwd
 import re
@@ -31,6 +32,13 @@ FLUIDSYNTH_USER = "alex"
 FLUIDSYNTH_USER_UID = 1000
 FLUIDSYNTH_USER_GID = 1000
 FLUIDSYNTH_USER_HOME = "/home/alex"
+FLUIDSYNTH_XDG_CONFIG_DIRS = "/etc/xdg/xdg-pop:/etc/xdg"
+FLUIDSYNTH_XDG_DATA_DIRS = (
+    "/usr/share/pop:/usr/share/gnome:"
+    "/home/alex/.local/share/flatpak/exports/share:"
+    "/var/lib/flatpak/exports/share:/usr/local/share:/usr/share:"
+    "/var/lib/snapd/desktop"
+)
 FLUIDSYNTH_USER_UNIT_DIRS = (
     "home/alex/.config/systemd/user.control",
     "run/user/1000/systemd/user.control",
@@ -108,6 +116,12 @@ FILES = (
         "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf",
         0o644,
     ),
+    ("systemd/logrotate.d/rsyslog", "etc/logrotate.d/rsyslog", 0o644),
+    (
+        "systemd/system/logrotate.timer.d/zz-heim-pc-storage-hygiene.conf",
+        "etc/systemd/system/logrotate.timer.d/zz-heim-pc-storage-hygiene.conf",
+        0o644,
+    ),
     (
         "systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
         "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
@@ -118,6 +132,8 @@ FILES = (
 REMOVALS = (
     "etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
     "etc/systemd/journald.conf.d/99-heim-pc-retention.conf",
+    "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf",
+    "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf",
     "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
     "usr/local/sbin/heim-pc-set-performance-profile",
     "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
@@ -175,6 +191,18 @@ KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
     },
     "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": {
         "contents": (KNOWN_JOURNALD_512M, KNOWN_JOURNALD_2G),
+        "mode": 0o644,
+    },
+    "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf": {
+        "contents": (
+            b"[Journal]\nSystemMaxUse=512M\nRuntimeMaxUse=256M\nMaxRetentionSec=7day\nCompress=yes\n",
+        ),
+        "mode": 0o644,
+    },
+    "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf": {
+        "contents": (
+            b"[Timer]\nOnCalendar=\nOnCalendar=hourly\nAccuracySec=5m\nRandomizedDelaySec=5m\nPersistent=true\n",
+        ),
         "mode": 0o644,
     },
     "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf": {
@@ -259,24 +287,14 @@ def _live_user_unit_dirs() -> tuple[str, ...]:
         "USER": FLUIDSYNTH_USER,
         "LOGNAME": FLUIDSYNTH_USER,
         "XDG_RUNTIME_DIR": f"/run/user/{FLUIDSYNTH_USER_UID}",
+        "XDG_CONFIG_DIRS": FLUIDSYNTH_XDG_CONFIG_DIRS,
+        "XDG_DATA_DIRS": FLUIDSYNTH_XDG_DATA_DIRS,
         "LC_ALL": "C",
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     }
-    for name in (
-        "SYSTEMD_UNIT_PATH",
-        "XDG_CONFIG_HOME",
-        "XDG_CONFIG_DIRS",
-        "XDG_DATA_HOME",
-        "XDG_DATA_DIRS",
-    ):
-        value = os.environ.get(name)
-        if value is None:
-            continue
-        if "\x00" in value or len(value) > 16_384:
-            raise InstallError(
-                "FluidSynth user unit-path environment is not safely bounded"
-            )
-        environment[name] = value
+    # Do not inherit caller-controlled SYSTEMD_UNIT_PATH or XDG overrides. The
+    # committed unit-path contract must resolve identically for direct user and
+    # root-mediated installation.
 
     run_kwargs: dict[str, Any] = {}
     if effective_uid == 0:
@@ -363,11 +381,22 @@ def _git(
     *,
     text: bool,
 ) -> subprocess.CompletedProcess[Any]:
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise InstallError("repository root is unavailable") from exc
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    command = ["git"]
+    if os.geteuid() == 0:
+        # Git rejects a user-owned repository when the installer runs as root.
+        # Trust only this resolved repository for this one invocation; never
+        # mutate global or system Git configuration.
+        command.extend(["-c", f"safe.directory={resolved_root}"])
+    command.extend(argv)
     return subprocess.run(
-        ["git", *argv],
-        cwd=root,
+        command,
+        cwd=resolved_root,
         text=text,
         capture_output=True,
         check=False,
@@ -780,6 +809,62 @@ def _virtual_names(
     return names
 
 
+def _unit_dir_symlink_target(root_fd: int, directory: str) -> str | None:
+    parts = _relative_parts(directory)
+    parent_parts = parts[:-1]
+    parent_fd = (
+        os.dup(root_fd)
+        if not parent_parts
+        else _open_directory(root_fd, parent_parts, create=False)
+    )
+    if parent_fd is None:
+        return None
+    try:
+        try:
+            metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISLNK(metadata.st_mode):
+            return None
+        target = os.readlink(parts[-1], dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    if "\x00" in target or len(target) > 4096:
+        raise InstallError("user unit-path symlink target is invalid")
+    if target.startswith("/"):
+        normalized = posixpath.normpath(target).lstrip("/")
+    else:
+        parent = str(PurePosixPath(directory).parent)
+        normalized = posixpath.normpath(posixpath.join(parent, target))
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise InstallError("user unit-path symlink escapes the target root")
+    _relative_parts(normalized)
+    return normalized
+
+
+def _composition_unit_dirs(
+    root_fd: int,
+    unit_dirs: tuple[str, ...],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    normalized: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for directory in unit_dirs:
+        target = _unit_dir_symlink_target(root_fd, directory)
+        if target is None:
+            if directory not in normalized:
+                normalized.append(directory)
+            continue
+        if target not in unit_dirs:
+            raise InstallError(
+                "user unit-path symlink target is outside the committed contract: "
+                f"{directory} -> {target}"
+            )
+        if target not in normalized:
+            normalized.append(target)
+        aliases.append({"path": directory, "target": target})
+    return tuple(normalized), aliases
+
+
 def _is_merged_usr_lib_alias(root_fd: int, directory: str) -> bool:
     if not directory.startswith("lib/systemd/"):
         return False
@@ -912,6 +997,9 @@ def _verify_effective_composition(
     overlay: dict[str, bytes | None] | None = None,
 ) -> dict[str, Any]:
     effective_overlay = {} if overlay is None else overlay
+    composition_user_unit_dirs, verified_unit_dir_aliases = _composition_unit_dirs(
+        root_fd, user_unit_dirs
+    )
     exec_start, cpu_sources, cpu_directive_sources = _effective_list_directive(
         root_fd,
         unit_dirs=SYSTEM_UNIT_DIRS,
@@ -922,7 +1010,7 @@ def _verify_effective_composition(
     )
     condition_user, fluid_sources, fluid_directive_sources = _effective_list_directive(
         root_fd,
-        unit_dirs=user_unit_dirs,
+        unit_dirs=composition_user_unit_dirs,
         unit_name="fluidsynth.service",
         section="Unit",
         key="ConditionUser",
@@ -931,7 +1019,7 @@ def _verify_effective_composition(
     fluid_exec_start, fluid_exec_sources, fluid_exec_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStart",
@@ -941,7 +1029,7 @@ def _verify_effective_composition(
     fluid_type_values, fluid_type_sources, fluid_type_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="Type",
@@ -951,7 +1039,7 @@ def _verify_effective_composition(
     fluid_notify_values, fluid_notify_sources, fluid_notify_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="NotifyAccess",
@@ -961,7 +1049,7 @@ def _verify_effective_composition(
     fluid_exec_stop, fluid_exec_stop_sources, fluid_exec_stop_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStop",
@@ -979,7 +1067,7 @@ def _verify_effective_composition(
     ):
         shutdown_directives[key] = _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key=key,
@@ -988,7 +1076,7 @@ def _verify_effective_composition(
     fluid_rate_interval_values, fluid_rate_interval_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitIntervalSec",
@@ -998,7 +1086,7 @@ def _verify_effective_composition(
     fluid_rate_burst_values, fluid_rate_burst_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitBurst",
@@ -1034,7 +1122,7 @@ def _verify_effective_composition(
     )
     expected_fluid_main_units = {
         f"{directory}/fluidsynth.service"
-        for directory in user_unit_dirs
+        for directory in composition_user_unit_dirs
         if not _is_merged_usr_lib_alias(root_fd, directory)
     }
     fluid_main_unit_sources = [
@@ -1167,7 +1255,11 @@ def _verify_effective_composition(
             "verified": True,
         },
         "fluidsynth": {
-            "user_unit_path_evidence": user_unit_path_evidence,
+            "user_unit_path_evidence": {
+                **user_unit_path_evidence,
+                "composition_paths": list(composition_user_unit_dirs),
+                "verified_symlink_aliases": verified_unit_dir_aliases,
+            },
             "condition_user": condition_user,
             "exec_start": fluid_exec_start,
             "type": fluid_type,
@@ -2261,8 +2353,10 @@ def _base_receipt(
             "systemctl restart systemd-journald",
             (
                 "systemd-analyze cat-config systemd/journald.conf; verify the final "
-                "SystemMaxUse=2G, SystemKeepFree=20G and MaxRetentionSec=14day"
+                "SystemMaxUse=512M, RuntimeMaxUse=256M, SystemKeepFree=20G, "
+                "MaxRetentionSec=7day and Compress=yes"
             ),
+            "systemctl enable --now logrotate.timer",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
             (

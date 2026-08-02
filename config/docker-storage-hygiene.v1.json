@@ -1,0 +1,17 @@
+{
+  "automatic_gc_authorized": true,
+  "command_timeout_seconds": 900,
+  "kind": "heim_pc.docker_storage_hygiene_policy",
+  "max_output_bytes_per_command": 32768,
+  "max_receipts": 60,
+  "minimum_unused_age_hours": 168,
+  "named_volumes_preserved": true,
+  "operations": [
+    "container",
+    "image",
+    "builder",
+    "network"
+  ],
+  "schema_version": 1,
+  "volume_prune_authorized": false
+}

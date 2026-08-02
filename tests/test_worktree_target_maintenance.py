@@ -133,21 +133,32 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         self.assertEqual([item["target"] for item in plan["selected"]], [str(self.target)])
         self.assertTrue(plan["process_observation_complete"])
 
-    def test_dirty_retained_and_blocked_worktrees_are_excluded(self) -> None:
+    def test_source_state_does_not_protect_regenerable_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
-        for record, reason in (
-            (self.record(dirty=True), "dirty-or-unknown"),
-            (self.record(state="retained"), "retained-archived-or-classified"),
-            (self.record(blocking=True), "active-lease-task-or-process"),
-        ):
+        for record in (self.record(dirty=True), self.record(state="retained")):
             plan = maintenance.collect_plan(
                 policy,
                 state_root=self.state_root,
                 inventory_provider=self.inventory(record),
                 observer=self.observation,
             )
-            self.assertFalse(plan["selected"])
-            self.assertIn(reason, {item["reason"] for item in plan["exclusions"]})
+            self.assertEqual(
+                [item["target"] for item in plan["selected"]], [str(self.target)]
+            )
+
+    def test_active_coordination_still_protects_target(self) -> None:
+        policy = maintenance.load_policy(self.policy_path)
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(self.record(blocking=True)),
+            observer=self.observation,
+        )
+        self.assertFalse(plan["selected"])
+        self.assertIn(
+            "active-lease-task-or-process",
+            {item["reason"] for item in plan["exclusions"]},
+        )
 
     def test_process_reference_or_incomplete_observation_blocks_selection(self) -> None:
         policy = maintenance.load_policy(self.policy_path)

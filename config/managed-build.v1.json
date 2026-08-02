@@ -21,11 +21,11 @@
     "hard": 21474836480
   },
   "cargo_cache_retention": {
-    "minimum_unused_seconds": 604800,
+    "minimum_unused_seconds": 86400,
     "target_total_bytes": 32212254720,
-    "max_total_bytes": 53687091200,
-    "max_cleanup_per_run_bytes": 21474836480,
-    "max_cleanup_candidates_per_run": 8
+    "max_total_bytes": 42949672960,
+    "max_cleanup_per_run_bytes": 68719476736,
+    "max_cleanup_candidates_per_run": 16
   },
   "max_receipts": 100,
   "tools": {

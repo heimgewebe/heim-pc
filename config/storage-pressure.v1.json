@@ -1,6 +1,6 @@
 {
-  "available_bytes_threshold": 536870912000,
-  "growth_bytes_per_hour_threshold": 34359738368,
+  "available_bytes_threshold": 858993459200,
+  "growth_bytes_per_hour_threshold": 10737418240,
   "kind": "heim_pc_storage_pressure_policy",
   "minimum_growth_sample_seconds": 900,
   "mountpoint": "/",
@@ -13,7 +13,11 @@
     {
       "cooldown_seconds": 43200,
       "unit": "heim-pc-worktree-target-maintenance.service"
+    },
+    {
+      "cooldown_seconds": 43200,
+      "unit": "heim-pc-docker-storage-hygiene.service"
     }
   ],
-  "used_percent_threshold": 70.0
+  "used_percent_threshold": 55.0
 }

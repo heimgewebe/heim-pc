@@ -1,0 +1,23 @@
+[Unit]
+Description=Age-bounded Docker storage hygiene without volume pruning
+After=docker.service
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @RELEASE_ROOT@/scripts/docker_storage_hygiene.py --policy @RELEASE_ROOT@/config/docker-storage-hygiene.v1.json --home @HOME@ --apply
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@HOME@/.local/state/heim-pc/docker-storage-hygiene
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+CPUWeight=25
+IOWeight=10
+Nice=10
+TimeoutStartSec=30min
