@@ -336,12 +336,9 @@ def lifecycle_reason(record: dict[str, Any]) -> str | None:
         return "main-worktree"
     if record.get("exists") is not True or record.get("prunable") is True:
         return "missing-or-prunable"
-    status = record.get("status")
-    if not isinstance(status, dict) or status.get("dirty") is not False:
-        return "dirty-or-unknown"
-    decision = record.get("lifecycle_decision")
-    if not isinstance(decision, dict) or decision.get("state") != "unclassified_clean":
-        return "retained-archived-or-classified"
+    # Rust target trees are reproducible build output. Source cleanliness and
+    # lifecycle classification are not deletion gates. Coordination remains
+    # authoritative: tasks, leases and processes keep the target protected.
     coordination = record.get("coordination")
     if not isinstance(coordination, dict) or coordination.get("blocking") is not False:
         return "active-lease-task-or-process"

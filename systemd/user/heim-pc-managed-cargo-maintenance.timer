@@ -1,10 +1,10 @@
 [Unit]
-Description=Run bounded managed Cargo cache maintenance twice daily
+Description=Run bounded managed Cargo cache maintenance daily
 
 [Timer]
 OnBootSec=30min
-OnCalendar=*-*-* 03,15:00:00
-RandomizedDelaySec=30min
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=20min
 Persistent=true
 AccuracySec=1min
 Unit=heim-pc-managed-cargo-maintenance.service

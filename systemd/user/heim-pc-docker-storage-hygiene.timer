@@ -1,0 +1,13 @@
+[Unit]
+Description=Run age-bounded Docker storage hygiene daily
+
+[Timer]
+OnBootSec=45min
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=1min
+Unit=heim-pc-docker-storage-hygiene.service
+
+[Install]
+WantedBy=timers.target

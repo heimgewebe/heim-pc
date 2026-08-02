@@ -88,7 +88,9 @@
       "/etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
       "/etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
       "/etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
-      "/etc/systemd/journald.conf.d/99-heim-pc-retention.conf"
+      "/etc/systemd/journald.conf.d/99-heim-pc-retention.conf",
+      "/etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf",
+      "/etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf"
     ],
     "activation_performed": false,
     "fluidsynth_exec_start": "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT",

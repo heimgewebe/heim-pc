@@ -379,6 +379,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": (
                     installer.KNOWN_JOURNALD_2G
                 ),
+                "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf": (
+                    installer.KNOWN_OBSOLETE_ASSETS[
+                        "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf"
+                    ]["contents"][0]
+                ),
+                "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf": (
+                    installer.KNOWN_OBSOLETE_ASSETS[
+                        "etc/systemd/system/logrotate.timer.d/"
+                        "heim-pc-storage-hygiene.conf"
+                    ]["contents"][0]
+                ),
                 "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf": (
                     b"[Service]\nExecStart=\nExecStart=/usr/local/sbin/heim-pc-set-performance-profile\n"
                 ),
@@ -944,6 +955,58 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.kwargs["env"]["XDG_RUNTIME_DIR"],
             "/run/user/1000",
+        )
+        self.assertEqual(
+            run.call_args.kwargs["env"]["XDG_CONFIG_DIRS"],
+            installer.FLUIDSYNTH_XDG_CONFIG_DIRS,
+        )
+        self.assertEqual(
+            run.call_args.kwargs["env"]["XDG_DATA_DIRS"],
+            installer.FLUIDSYNTH_XDG_DATA_DIRS,
+        )
+        self.assertNotIn("SYSTEMD_UNIT_PATH", run.call_args.kwargs["env"])
+
+
+    def test_live_user_unit_path_probe_ignores_caller_xdg_overrides(self) -> None:
+        account = mock.Mock(
+            pw_uid=installer.FLUIDSYNTH_USER_UID,
+            pw_gid=installer.FLUIDSYNTH_USER_GID,
+            pw_dir=installer.FLUIDSYNTH_USER_HOME,
+        )
+        output = "".join(
+            f"/{relative}\n" for relative in installer.FLUIDSYNTH_USER_UNIT_DIRS
+        )
+        completed = subprocess.CompletedProcess(
+            list(installer.FLUIDSYNTH_USER_UNIT_PATH_PROBE),
+            0,
+            stdout=output,
+            stderr="",
+        )
+        with mock.patch.object(
+            installer.pwd, "getpwnam", return_value=account
+        ), mock.patch.object(
+            installer.os, "geteuid", return_value=0
+        ), mock.patch.dict(
+            installer.os.environ,
+            {
+                "SYSTEMD_UNIT_PATH": "/tmp/hostile",
+                "XDG_CONFIG_DIRS": "/tmp/config",
+                "XDG_DATA_DIRS": "/tmp/data",
+            },
+            clear=False,
+        ), mock.patch.object(
+            installer.subprocess, "run", return_value=completed
+        ) as run:
+            observed = installer._live_user_unit_dirs()
+
+        self.assertEqual(observed, installer.FLUIDSYNTH_USER_UNIT_DIRS)
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn("SYSTEMD_UNIT_PATH", environment)
+        self.assertEqual(
+            environment["XDG_CONFIG_DIRS"], installer.FLUIDSYNTH_XDG_CONFIG_DIRS
+        )
+        self.assertEqual(
+            environment["XDG_DATA_DIRS"], installer.FLUIDSYNTH_XDG_DATA_DIRS
         )
 
     def test_live_user_unit_path_probe_rejects_path_drift(self) -> None:
@@ -1805,9 +1868,11 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             merged_journald_values(cat_config),
             {
                 "Storage": "persistent",
-                "SystemMaxUse": "2G",
+                "SystemMaxUse": "512M",
+                "RuntimeMaxUse": "256M",
                 "SystemKeepFree": "20G",
-                "MaxRetentionSec": "14day",
+                "MaxRetentionSec": "7day",
+                "Compress": "yes",
             },
         )
 

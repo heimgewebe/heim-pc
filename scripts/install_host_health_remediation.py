@@ -31,6 +31,13 @@ FLUIDSYNTH_USER = "alex"
 FLUIDSYNTH_USER_UID = 1000
 FLUIDSYNTH_USER_GID = 1000
 FLUIDSYNTH_USER_HOME = "/home/alex"
+FLUIDSYNTH_XDG_CONFIG_DIRS = "/etc/xdg/xdg-pop:/etc/xdg"
+FLUIDSYNTH_XDG_DATA_DIRS = (
+    "/usr/share/pop:/usr/share/gnome:"
+    "/home/alex/.local/share/flatpak/exports/share:"
+    "/var/lib/flatpak/exports/share:/usr/local/share:/usr/share:"
+    "/var/lib/snapd/desktop"
+)
 FLUIDSYNTH_USER_UNIT_DIRS = (
     "home/alex/.config/systemd/user.control",
     "run/user/1000/systemd/user.control",
@@ -108,6 +115,12 @@ FILES = (
         "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf",
         0o644,
     ),
+    ("systemd/logrotate.d/rsyslog", "etc/logrotate.d/rsyslog", 0o644),
+    (
+        "systemd/system/logrotate.timer.d/zz-heim-pc-storage-hygiene.conf",
+        "etc/systemd/system/logrotate.timer.d/zz-heim-pc-storage-hygiene.conf",
+        0o644,
+    ),
     (
         "systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
         "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-interactive-user.conf",
@@ -118,6 +131,8 @@ FILES = (
 REMOVALS = (
     "etc/systemd/journald.conf.d/50-heim-pc-retention.conf",
     "etc/systemd/journald.conf.d/99-heim-pc-retention.conf",
+    "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf",
+    "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf",
     "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
     "usr/local/sbin/heim-pc-set-performance-profile",
     "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
@@ -175,6 +190,18 @@ KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
     },
     "etc/systemd/journald.conf.d/99-heim-pc-retention.conf": {
         "contents": (KNOWN_JOURNALD_512M, KNOWN_JOURNALD_2G),
+        "mode": 0o644,
+    },
+    "etc/systemd/journald.conf.d/heim-pc-storage-hygiene.conf": {
+        "contents": (
+            b"[Journal]\nSystemMaxUse=512M\nRuntimeMaxUse=256M\nMaxRetentionSec=7day\nCompress=yes\n",
+        ),
+        "mode": 0o644,
+    },
+    "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf": {
+        "contents": (
+            b"[Timer]\nOnCalendar=\nOnCalendar=hourly\nAccuracySec=5m\nRandomizedDelaySec=5m\nPersistent=true\n",
+        ),
         "mode": 0o644,
     },
     "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf": {
@@ -259,24 +286,14 @@ def _live_user_unit_dirs() -> tuple[str, ...]:
         "USER": FLUIDSYNTH_USER,
         "LOGNAME": FLUIDSYNTH_USER,
         "XDG_RUNTIME_DIR": f"/run/user/{FLUIDSYNTH_USER_UID}",
+        "XDG_CONFIG_DIRS": FLUIDSYNTH_XDG_CONFIG_DIRS,
+        "XDG_DATA_DIRS": FLUIDSYNTH_XDG_DATA_DIRS,
         "LC_ALL": "C",
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     }
-    for name in (
-        "SYSTEMD_UNIT_PATH",
-        "XDG_CONFIG_HOME",
-        "XDG_CONFIG_DIRS",
-        "XDG_DATA_HOME",
-        "XDG_DATA_DIRS",
-    ):
-        value = os.environ.get(name)
-        if value is None:
-            continue
-        if "\x00" in value or len(value) > 16_384:
-            raise InstallError(
-                "FluidSynth user unit-path environment is not safely bounded"
-            )
-        environment[name] = value
+    # Do not inherit caller-controlled SYSTEMD_UNIT_PATH or XDG overrides. The
+    # committed unit-path contract must resolve identically for direct user and
+    # root-mediated installation.
 
     run_kwargs: dict[str, Any] = {}
     if effective_uid == 0:
@@ -2261,8 +2278,10 @@ def _base_receipt(
             "systemctl restart systemd-journald",
             (
                 "systemd-analyze cat-config systemd/journald.conf; verify the final "
-                "SystemMaxUse=2G, SystemKeepFree=20G and MaxRetentionSec=14day"
+                "SystemMaxUse=512M, RuntimeMaxUse=256M, SystemKeepFree=20G, "
+                "MaxRetentionSec=7day and Compress=yes"
             ),
+            "systemctl enable --now logrotate.timer",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl restart cpu-governor.service",
             (

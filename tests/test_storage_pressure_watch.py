@@ -65,9 +65,9 @@ def sample(*, observed: int, used: int, available: int, percent: float) -> dict:
 class StoragePressureWatchTests(unittest.TestCase):
     def test_policy_file_is_valid(self) -> None:
         loaded = watch.load_policy(ROOT / "config/storage-pressure.v1.json")
-        self.assertEqual(loaded["used_percent_threshold"], 70.0)
-        self.assertEqual(loaded["available_bytes_threshold"], 500 * 1024**3)
-        self.assertEqual(loaded["growth_bytes_per_hour_threshold"], 32 * 1024**3)
+        self.assertEqual(loaded["used_percent_threshold"], 55.0)
+        self.assertEqual(loaded["available_bytes_threshold"], 800 * 1024**3)
+        self.assertEqual(loaded["growth_bytes_per_hour_threshold"], 10 * 1024**3)
 
     def test_filesystem_percentage_matches_df_usable_denominator(self) -> None:
         fake = SimpleNamespace(
