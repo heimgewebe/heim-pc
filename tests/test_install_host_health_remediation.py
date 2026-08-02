@@ -642,6 +642,18 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(
+                composition["fluidsynth"]["user_unit_path_evidence"][
+                    "composition_paths"
+                ],
+                list(installer.FLUIDSYNTH_USER_UNIT_DIRS),
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["user_unit_path_evidence"][
+                    "verified_symlink_aliases"
+                ],
+                [],
+            )
+            self.assertEqual(
                 composition["fluidsynth"]["sdl_no_signal_handlers"],
                 installer.FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS,
             )
@@ -1050,6 +1062,48 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         self.assertEqual(
             environment["XDG_DATA_DIRS"], installer.FLUIDSYNTH_XDG_DATA_DIRS
         )
+
+    def test_composition_unit_dirs_skip_attested_symlink_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "etc/xdg/systemd").mkdir(parents=True)
+            (root / "etc/systemd/user").mkdir(parents=True)
+            (root / "etc/xdg/systemd/user").symlink_to(
+                "../../systemd/user", target_is_directory=True
+            )
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                normalized, aliases = installer._composition_unit_dirs(
+                    root_fd,
+                    ("etc/xdg/systemd/user", "etc/systemd/user"),
+                )
+            finally:
+                os.close(root_fd)
+
+        self.assertEqual(normalized, ("etc/systemd/user",))
+        self.assertEqual(
+            aliases,
+            [{"path": "etc/xdg/systemd/user", "target": "etc/systemd/user"}],
+        )
+
+    def test_composition_unit_dirs_reject_unattested_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "etc/xdg/systemd").mkdir(parents=True)
+            (root / "tmp/outside").mkdir(parents=True)
+            (root / "etc/xdg/systemd/user").symlink_to(
+                "/tmp/outside", target_is_directory=True
+            )
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(
+                    installer.InstallError, "outside the committed contract"
+                ):
+                    installer._composition_unit_dirs(
+                        root_fd, ("etc/xdg/systemd/user", "etc/systemd/user")
+                    )
+            finally:
+                os.close(root_fd)
 
     def test_live_user_unit_path_probe_rejects_path_drift(self) -> None:
         account = mock.Mock(

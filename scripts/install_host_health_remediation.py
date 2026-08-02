@@ -11,6 +11,7 @@ import grp
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import pwd
 import re
@@ -808,6 +809,62 @@ def _virtual_names(
     return names
 
 
+def _unit_dir_symlink_target(root_fd: int, directory: str) -> str | None:
+    parts = _relative_parts(directory)
+    parent_parts = parts[:-1]
+    parent_fd = (
+        os.dup(root_fd)
+        if not parent_parts
+        else _open_directory(root_fd, parent_parts, create=False)
+    )
+    if parent_fd is None:
+        return None
+    try:
+        try:
+            metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISLNK(metadata.st_mode):
+            return None
+        target = os.readlink(parts[-1], dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    if "\x00" in target or len(target) > 4096:
+        raise InstallError("user unit-path symlink target is invalid")
+    if target.startswith("/"):
+        normalized = posixpath.normpath(target).lstrip("/")
+    else:
+        parent = str(PurePosixPath(directory).parent)
+        normalized = posixpath.normpath(posixpath.join(parent, target))
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise InstallError("user unit-path symlink escapes the target root")
+    _relative_parts(normalized)
+    return normalized
+
+
+def _composition_unit_dirs(
+    root_fd: int,
+    unit_dirs: tuple[str, ...],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    normalized: list[str] = []
+    aliases: list[dict[str, str]] = []
+    for directory in unit_dirs:
+        target = _unit_dir_symlink_target(root_fd, directory)
+        if target is None:
+            if directory not in normalized:
+                normalized.append(directory)
+            continue
+        if target not in unit_dirs:
+            raise InstallError(
+                "user unit-path symlink target is outside the committed contract: "
+                f"{directory} -> {target}"
+            )
+        if target not in normalized:
+            normalized.append(target)
+        aliases.append({"path": directory, "target": target})
+    return tuple(normalized), aliases
+
+
 def _is_merged_usr_lib_alias(root_fd: int, directory: str) -> bool:
     if not directory.startswith("lib/systemd/"):
         return False
@@ -940,6 +997,9 @@ def _verify_effective_composition(
     overlay: dict[str, bytes | None] | None = None,
 ) -> dict[str, Any]:
     effective_overlay = {} if overlay is None else overlay
+    composition_user_unit_dirs, verified_unit_dir_aliases = _composition_unit_dirs(
+        root_fd, user_unit_dirs
+    )
     exec_start, cpu_sources, cpu_directive_sources = _effective_list_directive(
         root_fd,
         unit_dirs=SYSTEM_UNIT_DIRS,
@@ -950,7 +1010,7 @@ def _verify_effective_composition(
     )
     condition_user, fluid_sources, fluid_directive_sources = _effective_list_directive(
         root_fd,
-        unit_dirs=user_unit_dirs,
+        unit_dirs=composition_user_unit_dirs,
         unit_name="fluidsynth.service",
         section="Unit",
         key="ConditionUser",
@@ -959,7 +1019,7 @@ def _verify_effective_composition(
     fluid_exec_start, fluid_exec_sources, fluid_exec_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStart",
@@ -969,7 +1029,7 @@ def _verify_effective_composition(
     fluid_type_values, fluid_type_sources, fluid_type_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="Type",
@@ -979,7 +1039,7 @@ def _verify_effective_composition(
     fluid_notify_values, fluid_notify_sources, fluid_notify_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="NotifyAccess",
@@ -989,7 +1049,7 @@ def _verify_effective_composition(
     fluid_exec_stop, fluid_exec_stop_sources, fluid_exec_stop_directive_sources = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="ExecStop",
@@ -1007,7 +1067,7 @@ def _verify_effective_composition(
     ):
         shutdown_directives[key] = _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key=key,
@@ -1016,7 +1076,7 @@ def _verify_effective_composition(
     fluid_rate_interval_values, fluid_rate_interval_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitIntervalSec",
@@ -1026,7 +1086,7 @@ def _verify_effective_composition(
     fluid_rate_burst_values, fluid_rate_burst_sources, _ = (
         _effective_list_directive(
             root_fd,
-            unit_dirs=user_unit_dirs,
+            unit_dirs=composition_user_unit_dirs,
             unit_name="fluidsynth.service",
             section="Service",
             key="LogRateLimitBurst",
@@ -1062,7 +1122,7 @@ def _verify_effective_composition(
     )
     expected_fluid_main_units = {
         f"{directory}/fluidsynth.service"
-        for directory in user_unit_dirs
+        for directory in composition_user_unit_dirs
         if not _is_merged_usr_lib_alias(root_fd, directory)
     }
     fluid_main_unit_sources = [
@@ -1195,7 +1255,11 @@ def _verify_effective_composition(
             "verified": True,
         },
         "fluidsynth": {
-            "user_unit_path_evidence": user_unit_path_evidence,
+            "user_unit_path_evidence": {
+                **user_unit_path_evidence,
+                "composition_paths": list(composition_user_unit_dirs),
+                "verified_symlink_aliases": verified_unit_dir_aliases,
+            },
             "condition_user": condition_user,
             "exec_start": fluid_exec_start,
             "type": fluid_type,
