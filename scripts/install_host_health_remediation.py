@@ -380,11 +380,22 @@ def _git(
     *,
     text: bool,
 ) -> subprocess.CompletedProcess[Any]:
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise InstallError("repository root is unavailable") from exc
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    command = ["git"]
+    if os.geteuid() == 0:
+        # Git rejects a user-owned repository when the installer runs as root.
+        # Trust only this resolved repository for this one invocation; never
+        # mutate global or system Git configuration.
+        command.extend(["-c", f"safe.directory={resolved_root}"])
+    command.extend(argv)
     return subprocess.run(
-        ["git", *argv],
-        cwd=root,
+        command,
+        cwd=resolved_root,
         text=text,
         capture_output=True,
         check=False,

@@ -155,6 +155,48 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 ),
             )
 
+    def test_root_git_trusts_only_the_exact_resolved_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            completed = subprocess.CompletedProcess(
+                ["git"], 0, stdout="head\n", stderr=""
+            )
+            with mock.patch.object(
+                installer.os, "geteuid", return_value=0
+            ), mock.patch.object(
+                installer.subprocess, "run", return_value=completed
+            ) as run:
+                result = installer._git(
+                    root, ["rev-parse", "--verify", "HEAD^{commit}"], text=True
+                )
+
+        self.assertIs(result, completed)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[:3], ["git", "-c", f"safe.directory={root}"]
+        )
+        self.assertEqual(
+            command[3:], ["rev-parse", "--verify", "HEAD^{commit}"]
+        )
+        self.assertNotIn("--global", command)
+        self.assertNotIn("safe.directory=*", command)
+        self.assertEqual(run.call_args.kwargs["cwd"], root)
+
+    def test_non_root_git_does_not_add_safe_directory_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            completed = subprocess.CompletedProcess(
+                ["git"], 0, stdout="head\n", stderr=""
+            )
+            with mock.patch.object(
+                installer.os, "geteuid", return_value=installer.FLUIDSYNTH_USER_UID
+            ), mock.patch.object(
+                installer.subprocess, "run", return_value=completed
+            ) as run:
+                installer._git(root, ["rev-parse", "HEAD"], text=True)
+
+        self.assertEqual(run.call_args.args[0], ["git", "rev-parse", "HEAD"])
+
     def test_apply_reads_expected_git_object_after_one_time_identity_check(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
