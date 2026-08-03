@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -718,16 +719,17 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("ExecStart=\n", cpu_reset)
             self.assertIn("ConditionUser=\n", fluid_reset)
             self.assertIn("ConditionUser=alex", fluid_reset)
-            self.assertIn("Type=notify", fluid_reset)
+            self.assertIn("Type=simple", fluid_reset)
             self.assertIn("NotifyAccess=main", fluid_reset)
             self.assertIn("ExecStart=\n", fluid_reset)
             self.assertIn(installer.FLUIDSYNTH_EXEC_START, fluid_reset)
             self.assertIn(
-                "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/bin/fluidsynth",
+                "/usr/local/libexec/heim-pc/fluidsynth-supervisor -- "
+                "/usr/bin/fluidsynth -q",
                 fluid_reset,
             )
             self.assertIn("ExecStop=\n", fluid_reset)
-            self.assertIn("KillMode=control-group", fluid_reset)
+            self.assertIn("KillMode=mixed", fluid_reset)
             self.assertIn("KillSignal=SIGTERM", fluid_reset)
             self.assertIn("RestartKillSignal=SIGTERM", fluid_reset)
             self.assertIn("TimeoutStopSec=15s", fluid_reset)
@@ -735,6 +737,33 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("FinalKillSignal=SIGKILL", fluid_reset)
             self.assertIn("LogRateLimitIntervalSec=30s", fluid_reset)
             self.assertIn("LogRateLimitBurst=200", fluid_reset)
+            exec_start_line = next(
+                line for line in fluid_reset.splitlines()
+                if line.startswith("ExecStart=/usr/bin/env")
+            )
+            exec_words = shlex.split(exec_start_line.split("=", 1)[1])
+            separator = exec_words.index("--")
+            child_words = exec_words[separator + 1 :]
+            for forbidden in installer.FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS:
+                self.assertNotIn(forbidden, child_words)
+            self.assertNotIn("9800", child_words)
+            self.assertEqual(
+                composition["fluidsynth"]["supervisor"],
+                installer.FLUIDSYNTH_SUPERVISOR,
+            )
+            self.assertEqual(
+                composition["fluidsynth"]["forbidden_lifecycle_flags"],
+                list(installer.FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS),
+            )
+            self.assertFalse(composition["fluidsynth"]["tcp_server_enabled"])
+            installed_supervisor = (
+                target / "usr/local/libexec/heim-pc/fluidsynth-supervisor"
+            )
+            self.assertEqual(
+                installed_supervisor.read_bytes(),
+                (source / "scripts/fluidsynth_supervisor.py").read_bytes(),
+            )
+            self.assertEqual(installed_supervisor.stat().st_mode & 0o777, 0o755)
             self.assertNotIn("!gdm", fluid_reset)
 
     def test_managed_fluidsynth_contract_overrides_earlier_shell_pipeline(self) -> None:

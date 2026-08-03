@@ -68,21 +68,27 @@ FLUIDSYNTH_USER_UNIT_PATH_PROBE = (
     "--user",
     "unit-paths",
 )
+FLUIDSYNTH_SUPERVISOR = "/usr/local/libexec/heim-pc/fluidsynth-supervisor"
+FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS = ("-i", "-s", "--no-shell", "--server")
+FLUIDSYNTH_TCP_SERVER_ENABLED = False
 FLUIDSYNTH_EXEC_START = (
     "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 "
-    "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT"
+    f"{FLUIDSYNTH_SUPERVISOR} -- /usr/bin/fluidsynth -q "
+    "$OTHER_OPTS $SOUND_FONT"
 )
-FLUIDSYNTH_SERVICE_TYPE = "notify"
+FLUIDSYNTH_SERVICE_TYPE = "simple"
 FLUIDSYNTH_NOTIFY_ACCESS = "main"
 FLUIDSYNTH_SDL_NO_SIGNAL_HANDLERS = "1"
 FLUIDSYNTH_EXEC_STOP: list[str] = []
-FLUIDSYNTH_KILL_MODE = "control-group"
+FLUIDSYNTH_KILL_MODE = "mixed"
 FLUIDSYNTH_KILL_SIGNAL = "SIGTERM"
 FLUIDSYNTH_RESTART_KILL_SIGNAL = "SIGTERM"
 FLUIDSYNTH_TIMEOUT_STOP_SEC = "15s"
 FLUIDSYNTH_SEND_SIGKILL = "yes"
 FLUIDSYNTH_FINAL_KILL_SIGNAL = "SIGKILL"
-FLUIDSYNTH_SHUTDOWN_FAILURE = "timeout_then_sigkill_visible_as_failure"
+FLUIDSYNTH_SHUTDOWN_FAILURE = (
+    "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure"
+)
 FLUIDSYNTH_LOG_RATE_LIMIT_INTERVAL = "30s"
 FLUIDSYNTH_LOG_RATE_LIMIT_BURST = "200"
 COMMIT_POINT = (
@@ -94,6 +100,7 @@ RESIDUE_TOKEN = re.compile(r"^[0-9a-f]{16}$")
 FILES = (
     ("config/host-health-remediation.v1.json", "etc/heim-pc/host-health-remediation.v1.json", 0o644),
     ("scripts/ensure_performance_profile.py", "usr/local/libexec/heim-pc/ensure-performance-profile", 0o755),
+    ("scripts/fluidsynth_supervisor.py", "usr/local/libexec/heim-pc/fluidsynth-supervisor", 0o755),
     ("scripts/host_health_diagnostics.py", "usr/local/sbin/heim-pc-host-health", 0o755),
     ("systemd/system/cpu-governor.service", "etc/systemd/system/cpu-governor.service", 0o644),
     (
@@ -502,6 +509,9 @@ def _validate_committed_contract(source_data: dict[str, bytes]) -> None:
         "fluidsynth_user_home": FLUIDSYNTH_USER_HOME,
         "fluidsynth_user_unit_dirs": list(FLUIDSYNTH_USER_UNIT_DIRS),
         "activation_performed": False,
+        "fluidsynth_supervisor": FLUIDSYNTH_SUPERVISOR,
+        "fluidsynth_forbidden_lifecycle_flags": list(FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS),
+        "fluidsynth_tcp_server_enabled": FLUIDSYNTH_TCP_SERVER_ENABLED,
         "fluidsynth_exec_start": FLUIDSYNTH_EXEC_START,
         "fluidsynth_service_type": FLUIDSYNTH_SERVICE_TYPE,
         "fluidsynth_notify_access": FLUIDSYNTH_NOTIFY_ACCESS,
@@ -1255,6 +1265,9 @@ def _verify_effective_composition(
             "verified": True,
         },
         "fluidsynth": {
+            "supervisor": FLUIDSYNTH_SUPERVISOR,
+            "forbidden_lifecycle_flags": list(FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS),
+            "tcp_server_enabled": FLUIDSYNTH_TCP_SERVER_ENABLED,
             "user_unit_path_evidence": {
                 **user_unit_path_evidence,
                 "composition_paths": list(composition_user_unit_dirs),

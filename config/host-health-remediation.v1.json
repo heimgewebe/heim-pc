@@ -93,20 +93,28 @@
       "/etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf"
     ],
     "activation_performed": false,
-    "fluidsynth_exec_start": "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT",
-    "fluidsynth_service_type": "notify",
+    "fluidsynth_exec_start": "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/local/libexec/heim-pc/fluidsynth-supervisor -- /usr/bin/fluidsynth -q $OTHER_OPTS $SOUND_FONT",
+    "fluidsynth_service_type": "simple",
     "fluidsynth_notify_access": "main",
     "fluidsynth_sdl_no_signal_handlers": "1",
     "fluidsynth_exec_stop": [],
-    "fluidsynth_kill_mode": "control-group",
+    "fluidsynth_kill_mode": "mixed",
     "fluidsynth_kill_signal": "SIGTERM",
     "fluidsynth_restart_kill_signal": "SIGTERM",
     "fluidsynth_timeout_stop_sec": "15s",
     "fluidsynth_send_sigkill": true,
     "fluidsynth_final_kill_signal": "SIGKILL",
-    "fluidsynth_shutdown_failure": "timeout_then_sigkill_visible_as_failure",
+    "fluidsynth_shutdown_failure": "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure",
     "fluidsynth_log_rate_limit_interval": "30s",
-    "fluidsynth_log_rate_limit_burst": "200"
+    "fluidsynth_log_rate_limit_burst": "200",
+    "fluidsynth_supervisor": "/usr/local/libexec/heim-pc/fluidsynth-supervisor",
+    "fluidsynth_forbidden_lifecycle_flags": [
+      "-i",
+      "-s",
+      "--no-shell",
+      "--server"
+    ],
+    "fluidsynth_tcp_server_enabled": false
   },
   "bios": {
     "board_name": "ROG STRIX B550-F GAMING",
