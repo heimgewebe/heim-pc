@@ -13,7 +13,7 @@ User-level systemd IP firewalling and `PrivateNetwork=yes` were tested and expli
 
 ## Decision
 
-`/usr/local/libexec/heim-pc/fluidsynth-supervisor` becomes the service main process. It starts exactly `/usr/bin/fluidsynth` with stdin connected to a private pipe and rejects all command forms that enable the TCP server or disable the stdin shell:
+`/usr/local/libexec/heim-pc-fluidsynth-supervisor` becomes the service main process. It starts exactly `/usr/bin/fluidsynth` with stdin connected to a private pipe and rejects all command forms that enable the TCP server or disable the stdin shell:
 
 - `-s` and compact short-option forms containing `s`;
 - `--server`;

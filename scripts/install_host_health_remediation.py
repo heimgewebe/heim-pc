@@ -68,7 +68,7 @@ FLUIDSYNTH_USER_UNIT_PATH_PROBE = (
     "--user",
     "unit-paths",
 )
-FLUIDSYNTH_SUPERVISOR = "/usr/local/libexec/heim-pc/fluidsynth-supervisor"
+FLUIDSYNTH_SUPERVISOR = "/usr/local/libexec/heim-pc-fluidsynth-supervisor"
 FLUIDSYNTH_FORBIDDEN_LIFECYCLE_FLAGS = ("-i", "-s", "--no-shell", "--server")
 FLUIDSYNTH_TCP_SERVER_ENABLED = False
 FLUIDSYNTH_EXEC_START = (
@@ -100,7 +100,7 @@ RESIDUE_TOKEN = re.compile(r"^[0-9a-f]{16}$")
 FILES = (
     ("config/host-health-remediation.v1.json", "etc/heim-pc/host-health-remediation.v1.json", 0o644),
     ("scripts/ensure_performance_profile.py", "usr/local/libexec/heim-pc/ensure-performance-profile", 0o755),
-    ("scripts/fluidsynth_supervisor.py", "usr/local/libexec/heim-pc/fluidsynth-supervisor", 0o755),
+    ("scripts/fluidsynth_supervisor.py", "usr/local/libexec/heim-pc-fluidsynth-supervisor", 0o755),
     ("scripts/host_health_diagnostics.py", "usr/local/sbin/heim-pc-host-health", 0o755),
     ("systemd/system/cpu-governor.service", "etc/systemd/system/cpu-governor.service", 0o644),
     (

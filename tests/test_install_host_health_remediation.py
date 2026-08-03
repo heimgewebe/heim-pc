@@ -724,7 +724,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertIn("ExecStart=\n", fluid_reset)
             self.assertIn(installer.FLUIDSYNTH_EXEC_START, fluid_reset)
             self.assertIn(
-                "/usr/local/libexec/heim-pc/fluidsynth-supervisor -- "
+                "/usr/local/libexec/heim-pc-fluidsynth-supervisor -- "
                 "/usr/bin/fluidsynth -q",
                 fluid_reset,
             )
@@ -757,7 +757,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             )
             self.assertFalse(composition["fluidsynth"]["tcp_server_enabled"])
             installed_supervisor = (
-                target / "usr/local/libexec/heim-pc/fluidsynth-supervisor"
+                target / "usr/local/libexec/heim-pc-fluidsynth-supervisor"
             )
             self.assertEqual(
                 installed_supervisor.read_bytes(),

@@ -124,7 +124,7 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
         self.assertIn("ExecStart=", service)
         expected_exec = (
             "ExecStart=/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 "
-            "/usr/local/libexec/heim-pc/fluidsynth-supervisor -- "
+            "/usr/local/libexec/heim-pc-fluidsynth-supervisor -- "
             "/usr/bin/fluidsynth -q $OTHER_OPTS $SOUND_FONT"
         )
         self.assertIn(expected_exec, service)
@@ -160,7 +160,7 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
         )
         self.assertEqual(
             deployment["fluidsynth_supervisor"],
-            "/usr/local/libexec/heim-pc/fluidsynth-supervisor",
+            "/usr/local/libexec/heim-pc-fluidsynth-supervisor",
         )
         self.assertEqual(
             deployment["fluidsynth_forbidden_lifecycle_flags"],
