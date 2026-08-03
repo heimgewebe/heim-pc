@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -100,7 +101,9 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
             "timed_out": timed_out,
             "used_sigkill": used_sigkill,
             "failure": (
-                "timeout_then_sigkill_visible_as_failure" if timed_out else None
+                "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure"
+                if timed_out
+                else None
             ),
         }
 
@@ -116,19 +119,25 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
         service = assignments(drop_in, "Service")
         deployment = json.loads(CONTRACT.read_text(encoding="utf-8"))["deployment"]
 
-        self.assertIn("Type=notify", service)
+        self.assertIn("Type=simple", service)
         self.assertIn("NotifyAccess=main", service)
         self.assertIn("ExecStart=", service)
-        self.assertIn(
+        expected_exec = (
             "ExecStart=/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 "
-            "/usr/bin/fluidsynth -is $OTHER_OPTS $SOUND_FONT",
-            service,
+            "/usr/local/libexec/heim-pc/fluidsynth-supervisor -- "
+            "/usr/bin/fluidsynth -q $OTHER_OPTS $SOUND_FONT"
         )
+        self.assertIn(expected_exec, service)
+        exec_words = shlex.split(expected_exec.split("=", 1)[1])
+        child_words = exec_words[exec_words.index("--") + 1 :]
+        for forbidden in ("-i", "-s", "--no-shell", "--server"):
+            self.assertNotIn(forbidden, child_words)
+        self.assertNotIn("9800", child_words)
         self.assertNotIn("/bin/sh", drop_in)
         self.assertNotIn("/bin/bash", drop_in)
         self.assertNotIn("Environment=SDL_NO_SIGNAL_HANDLERS=1", service)
         self.assertIn("ExecStop=", service)
-        self.assertIn("KillMode=control-group", service)
+        self.assertIn("KillMode=mixed", service)
         self.assertIn("KillSignal=SIGTERM", service)
         self.assertIn("RestartKillSignal=SIGTERM", service)
         self.assertIn("TimeoutStopSec=15s", service)
@@ -149,12 +158,23 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
             "run/user/1000/systemd/user.control",
             deployment["fluidsynth_user_unit_dirs"],
         )
+        self.assertEqual(
+            deployment["fluidsynth_supervisor"],
+            "/usr/local/libexec/heim-pc/fluidsynth-supervisor",
+        )
+        self.assertEqual(
+            deployment["fluidsynth_forbidden_lifecycle_flags"],
+            ["-i", "-s", "--no-shell", "--server"],
+        )
+        self.assertFalse(deployment["fluidsynth_tcp_server_enabled"])
+        self.assertEqual(deployment["fluidsynth_service_type"], "simple")
+        self.assertEqual(deployment["fluidsynth_kill_mode"], "mixed")
         self.assertEqual(deployment["fluidsynth_exec_stop"], [])
         self.assertEqual(deployment["fluidsynth_timeout_stop_sec"], "15s")
         self.assertTrue(deployment["fluidsynth_send_sigkill"])
         self.assertEqual(
             deployment["fluidsynth_shutdown_failure"],
-            "timeout_then_sigkill_visible_as_failure",
+            "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure",
         )
 
     def test_drop_in_preserves_scope_routing_rate_limits_and_autostart(self) -> None:
@@ -213,7 +233,7 @@ class FluidSynthShutdownContractTests(unittest.TestCase):
         self.assertEqual(result["return_code"], -signal.SIGKILL)
         self.assertEqual(
             result["failure"],
-            "timeout_then_sigkill_visible_as_failure",
+            "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure",
         )
         self.assertLess(result["elapsed"], 2)
         self.assert_reaped(process)
