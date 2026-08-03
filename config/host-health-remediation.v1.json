@@ -93,7 +93,7 @@
       "/etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf"
     ],
     "activation_performed": false,
-    "fluidsynth_exec_start": "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/local/libexec/heim-pc/fluidsynth-supervisor -- /usr/bin/fluidsynth -q $OTHER_OPTS $SOUND_FONT",
+    "fluidsynth_exec_start": "/usr/bin/env SDL_NO_SIGNAL_HANDLERS=1 /usr/local/libexec/heim-pc-fluidsynth-supervisor -- /usr/bin/fluidsynth -q $OTHER_OPTS $SOUND_FONT",
     "fluidsynth_service_type": "simple",
     "fluidsynth_notify_access": "main",
     "fluidsynth_sdl_no_signal_handlers": "1",
@@ -107,7 +107,7 @@
     "fluidsynth_shutdown_failure": "supervisor_quit_then_sigterm_then_sigkill_visible_as_failure",
     "fluidsynth_log_rate_limit_interval": "30s",
     "fluidsynth_log_rate_limit_burst": "200",
-    "fluidsynth_supervisor": "/usr/local/libexec/heim-pc/fluidsynth-supervisor",
+    "fluidsynth_supervisor": "/usr/local/libexec/heim-pc-fluidsynth-supervisor",
     "fluidsynth_forbidden_lifecycle_flags": [
       "-i",
       "-s",
