@@ -19,7 +19,9 @@ from typing import Any, Iterator, NamedTuple
 from urllib.parse import urlparse
 
 CANDIDATE_ID = "SYSTEMKATALOG-DRIFT-CLOSED-LOOP-V1"
-ACTIVE_STATUSES = {"active", "paused", "waiting", "blocked", "in_progress"}
+NONTERMINAL_CANDIDATE_STATUSES = {"active", "paused", "observed", "promoted"}
+TERMINAL_CANDIDATE_STATUSES = {"closed", "dropped"}
+LIVE_CANDIDATE_STATUSES = NONTERMINAL_CANDIDATE_STATUSES | TERMINAL_CANDIDATE_STATUSES
 SYSTEMKATALOG_REPOSITORY = "heimgewebe/systemkatalog"
 METAREPO_REPOSITORY = "heimgewebe/metarepo"
 REMOTE_NAME = "origin"
@@ -305,7 +307,7 @@ def _candidate_matches_report(
 ) -> bool:
     return bool(
         assessment is not None
-        and assessment.status in ACTIVE_STATUSES
+        and assessment.status in NONTERMINAL_CANDIDATE_STATUSES
         and assessment.decision in {"merge", "promote"}
         and not assessment.missing_fields
         and assessment.source_sha256 == report_sha256
@@ -335,6 +337,8 @@ def _ensure_bureau_candidate(
             if isinstance(item, dict)
         }
     )
+    title = "Systemkatalog-Drift prüfen und proposal-only aktualisieren"
+    source_kind = "heim-pc-systemkatalog-drift-watch-v1"
     note = (
         f"Unabhängiger Heim-PC-Watchdog erkannte {report.get('changeCount')} Systemkatalog-Abweichungen. "
         f"Driftarten: {', '.join(kinds) or 'unknown'}. Lokaler Bericht: {report_path}; sha256={digest}. "
@@ -353,13 +357,101 @@ def _ensure_bureau_candidate(
             "eventId": current.event_id,
             "status": current.status,
         }
+    if current is not None and current.status not in LIVE_CANDIDATE_STATUSES:
+        raise RuntimeError(
+            f"bureau candidate assessment returned unsupported status: {current.status!r}"
+        )
     latest_event_id = current.event_id if current is not None else None
+    reactivation_event_id: int | None = None
+    reactivation_supersedes_event_id: int | None = None
+
+    if current is not None and current.status in TERMINAL_CANDIDATE_STATUSES:
+        reactivation_supersedes_event_id = current.event_id
+        # Bureau inherits repo, task and operator_intake from the exact
+        # predecessor when these identity fields are omitted.
+        reactivated = _run(
+            [
+                "bureau",
+                "--json",
+                "live-register",
+                "--kind",
+                "candidate_task",
+                "--title",
+                title,
+                "--source",
+                source_kind,
+                "--candidate-id",
+                CANDIDATE_ID,
+                "--supersedes-event-id",
+                str(current.event_id),
+                "--status",
+                "observed",
+                "--catalog-validation",
+                "strict",
+            ]
+        )
+        if reactivated.returncode != 0:
+            # The CAS-style supersession may have appended before reporting a
+            # failure. Never retry it unchanged: accept only an exact report
+            # established by a concurrent writer, otherwise fail closed.
+            readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
+            if _candidate_matches_report(readback, digest):
+                assert readback is not None
+                return {
+                    "action": "deduplicated",
+                    "candidateId": CANDIDATE_ID,
+                    "eventId": readback.event_id,
+                    "status": readback.status,
+                    "recoveredFromConcurrentReactivation": True,
+                }
+            raise RuntimeError(
+                f"bureau live-register reactivation failed: {_command_error(reactivated)}"
+            )
+
+        try:
+            receipt = _result_payload(json.loads(reactivated.stdout))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("bureau live-register reactivation returned invalid JSON") from exc
+        reactivation_event_id = receipt.get("event_id")
+        if not isinstance(reactivation_event_id, int):
+            raise RuntimeError("bureau live-register reactivation receipt is not event-bound")
+
+        # _candidate_assessment rejects candidate identity drift; bind the
+        # remaining readback to this exact event and the requested status.
+        readback = _candidate_assessment(bureau_root, CANDIDATE_ID)
+        if readback is None or readback.event_id != reactivation_event_id:
+            if _candidate_matches_report(readback, digest):
+                assert readback is not None
+                return {
+                    "action": "deduplicated",
+                    "candidateId": CANDIDATE_ID,
+                    "eventId": readback.event_id,
+                    "status": readback.status,
+                    "concurrentUpdateAfterReactivation": True,
+                }
+            raise RuntimeError(
+                "bureau candidate reactivation post-readback is not bound to the event"
+            )
+        if readback.status != "observed":
+            raise RuntimeError(
+                "bureau candidate reactivation post-readback has unexpected status"
+            )
+        current = readback
+        latest_event_id = reactivation_event_id
+        if _candidate_matches_report(current, digest):
+            return {
+                "action": "reactivated",
+                "candidateId": CANDIDATE_ID,
+                "eventId": current.event_id,
+                "status": current.status,
+                "supersedesEventId": reactivation_supersedes_event_id,
+            }
 
     request = {
         "schema_version": 1,
         "idempotency_key": f"systemkatalog-drift:{digest}",
-        "title": "Systemkatalog-Drift prüfen und proposal-only aktualisieren",
-        "source_kind": "heim-pc-systemkatalog-drift-watch-v1",
+        "title": title,
+        "source_kind": source_kind,
         "desired_outcome": (
             "Den exakten, digestgebundenen Driftbericht semantisch prüfen, "
             "nur bestätigte stabile Katalogaussagen und Quellenbindungen über "
@@ -428,10 +520,10 @@ def _ensure_bureau_candidate(
 
     if current is None:
         action = "registered"
-    elif current.status in ACTIVE_STATUSES:
-        action = "refined"
-    else:
+    elif reactivation_event_id is not None:
         action = "reactivated"
+    else:
+        action = "refined"
     result = {
         "action": action,
         "candidateId": CANDIDATE_ID,
