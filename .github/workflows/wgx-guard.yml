@@ -10,30 +10,6 @@ permissions:
 
 jobs:
   guard:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Checkout WGX Tooling
-        uses: actions/checkout@v7
-        with:
-          repository: heimgewebe/wgx
-          path: .wgx-tooling
-
-      - name: Setup WGX
-        run: |
-          chmod +x .wgx-tooling/cli/wgx
-          echo "${PWD}/.wgx-tooling/cli" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: |
-          pip install yamllint
-          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          chmod +x ./actionlint || true
-          echo "${PWD}" >> $GITHUB_PATH
-
-      - name: Verify WGX Profile
-        run: wgx tasks --json --safe || true
-
-      - name: Run WGX Guard
-        run: wgx task guard
+    uses: heimgewebe/metarepo/.github/workflows/reusable-repo-verify.yml@fe6950616b2d06343e284a56a8944e0a36f1f972
+    with:
+      mode: guard
