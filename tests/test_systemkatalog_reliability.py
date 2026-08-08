@@ -111,7 +111,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
 
     def test_candidate_match_requires_promotable_digest_bound_assessment(self) -> None:
         digest = "a" * 64
-        base = watchdog.CandidateAssessment(1, "active", "promote", digest, ())
+        base = watchdog.CandidateAssessment(1, "observed", "promote", digest, ())
         self.assertTrue(watchdog._candidate_matches_report(base, digest))
         self.assertTrue(
             watchdog._candidate_matches_report(
@@ -119,8 +119,13 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 digest,
             )
         )
+        for status in ("active", "paused", "promoted"):
+            self.assertTrue(
+                watchdog._candidate_matches_report(base._replace(status=status), digest)
+            )
         for assessment in (
             base._replace(status="closed"),
+            base._replace(status="dropped"),
             base._replace(decision="refine"),
             base._replace(decision=None),
             base._replace(source_sha256="b" * 64),
@@ -275,7 +280,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     payload = {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "active",
+                            "candidate_status": "observed",
                             "decision": "promote",
                             "event_id": 9,
                             "missing_fields": [],
@@ -313,28 +318,45 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             )
             digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
             calls = []
+            previous_digest = "b" * 64
             assessments = iter(
                 [
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "closed",
+                            "decision": "drop",
                             "event_id": 41,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": previous_digest},
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
                             "candidate_status": "closed",
+                            "decision": "drop",
                             "event_id": 41,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": previous_digest},
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "active",
+                            "candidate_status": "observed",
                             "decision": "promote",
                             "event_id": 42,
+                            "missing_fields": [],
+                            "source_freshness": {"sha256": previous_digest},
+                        }
+                    },
+                    {
+                        "result": {
+                            "candidate_id": watchdog.CANDIDATE_ID,
+                            "candidate_status": "observed",
+                            "decision": "promote",
+                            "event_id": 43,
                             "missing_fields": [],
                             "source_freshness": {"sha256": digest},
                         }
@@ -350,10 +372,16 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                         stdout=json.dumps(next(assessments)),
                         stderr="",
                     )
-                if "operator-candidate-record" in argv:
+                if "live-register" in argv:
                     return mock.Mock(
                         returncode=0,
                         stdout=json.dumps({"result": {"event_id": 42}}),
+                        stderr="",
+                    )
+                if "operator-candidate-record" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps({"result": {"event_id": 43}}),
                         stderr="",
                     )
                 raise AssertionError(argv)
@@ -366,19 +394,143 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["action"], "reactivated")
-            self.assertEqual(result["eventId"], 42)
-            self.assertEqual(result["supersedesEventId"], 41)
+            self.assertEqual(result["eventId"], 43)
+            self.assertEqual(result["status"], "observed")
+            self.assertEqual(result["supersedesEventId"], 42)
+            reactivation = next(argv for argv in calls if "live-register" in argv)
+            self.assertEqual(reactivation[:2], ["bureau", "--json"])
+            self.assertEqual(
+                reactivation[reactivation.index("--supersedes-event-id") + 1],
+                "41",
+            )
+            self.assertEqual(
+                reactivation[reactivation.index("--candidate-id") + 1],
+                watchdog.CANDIDATE_ID,
+            )
+            self.assertEqual(reactivation[reactivation.index("--status") + 1], "observed")
+            self.assertNotIn("--repo", reactivation)
+            self.assertNotIn("--task-id", reactivation)
+            self.assertNotIn("--promotion-required", reactivation)
             register = next(argv for argv in calls if "operator-candidate-record" in argv)
+            self.assertLess(calls.index(reactivation), calls.index(register))
             request_path = Path(register[register.index("--request") + 1])
             request = json.loads(request_path.read_text(encoding="utf-8"))
-            self.assertEqual(request["supersedes_event_id"], 41)
+            self.assertEqual(request["supersedes_event_id"], 42)
             self.assertEqual(request["source_sha256"], digest)
             self.assertEqual(request["candidate_id"], watchdog.CANDIDATE_ID)
             self.assertTrue(request["desired_outcome"])
             self.assertEqual(
                 len([argv for argv in calls if "operator-candidate-assess" in argv]),
-                3,
+                4,
             )
+
+    def test_watchdog_deduplicates_exact_report_after_reactivation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
+            calls = []
+            closed = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "closed",
+                    "decision": "drop",
+                    "event_id": 41,
+                }
+            }
+            exact = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "observed",
+                    "decision": "promote",
+                    "event_id": 43,
+                    "missing_fields": [],
+                    "source_freshness": {"sha256": digest},
+                }
+            }
+            assessments = iter([closed, closed, exact])
+
+            def fake_run(argv, *, cwd=None):
+                calls.append(argv)
+                if "operator-candidate-assess" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps(next(assessments)),
+                        stderr="",
+                    )
+                if "live-register" in argv:
+                    return mock.Mock(returncode=1, stdout="", stderr="concurrent append")
+                raise AssertionError(argv)
+
+            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+                result = watchdog._ensure_bureau_candidate(
+                    base,
+                    report_path,
+                    json.loads(report_path.read_text()),
+                )
+
+            self.assertEqual(result["action"], "deduplicated")
+            self.assertEqual(result["eventId"], 43)
+            self.assertTrue(result["recoveredFromConcurrentReactivation"])
+            self.assertEqual(len([argv for argv in calls if "live-register" in argv]), 1)
+            self.assertFalse(any("operator-candidate-record" in argv for argv in calls))
+
+    def test_watchdog_fails_closed_after_inexact_reactivation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            report_path = base / "report.json"
+            report_path.write_text(
+                json.dumps({"changeCount": 1, "changes": [{"kind": "primary_source_changed"}]}),
+                encoding="utf-8",
+            )
+            calls = []
+            previous_digest = "b" * 64
+            closed = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "closed",
+                    "decision": "drop",
+                    "event_id": 41,
+                }
+            }
+            inexact = {
+                "result": {
+                    "candidate_id": watchdog.CANDIDATE_ID,
+                    "candidate_status": "observed",
+                    "decision": "promote",
+                    "event_id": 43,
+                    "missing_fields": [],
+                    "source_freshness": {"sha256": previous_digest},
+                }
+            }
+            assessments = iter([closed, closed, inexact])
+
+            def fake_run(argv, *, cwd=None):
+                calls.append(argv)
+                if "operator-candidate-assess" in argv:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps(next(assessments)),
+                        stderr="",
+                    )
+                if "live-register" in argv:
+                    return mock.Mock(returncode=1, stdout="", stderr="concurrent append")
+                raise AssertionError(argv)
+
+            with mock.patch.object(watchdog, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "live-register reactivation failed"):
+                    watchdog._ensure_bureau_candidate(
+                        base,
+                        report_path,
+                        json.loads(report_path.read_text()),
+                    )
+
+            self.assertEqual(len([argv for argv in calls if "live-register" in argv]), 1)
+            self.assertFalse(any("operator-candidate-record" in argv for argv in calls))
 
 
     def test_watchdog_registers_when_exact_candidate_is_unknown(self) -> None:
@@ -401,7 +553,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             active = {
                 "result": {
                     "candidate_id": watchdog.CANDIDATE_ID,
-                    "candidate_status": "active",
+                    "candidate_status": "observed",
                     "decision": "promote",
                     "event_id": 42,
                     "missing_fields": [],
@@ -445,7 +597,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     "action": "registered",
                     "candidateId": watchdog.CANDIDATE_ID,
                     "eventId": 42,
-                    "status": "active",
+                    "status": "observed",
                 },
             )
             register_argv = next(
@@ -461,7 +613,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(request_path.stat().st_mode), 0o600)
             self.assertNotIn("--root", register_argv)
 
-    def test_watchdog_reports_concurrent_active_update_after_success(self) -> None:
+    def test_watchdog_reports_concurrent_observed_update_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             report_path = base / "report.json"
@@ -475,21 +627,21 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "closed",
+                            "candidate_status": "observed",
                             "event_id": 41,
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "closed",
+                            "candidate_status": "observed",
                             "event_id": 41,
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "active",
+                            "candidate_status": "observed",
                             "decision": "promote",
                             "event_id": 43,
                             "missing_fields": [],
@@ -526,7 +678,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
             self.assertEqual(result["registeredEventId"], 42)
             self.assertTrue(result["concurrentUpdateAfterRegistration"])
 
-    def test_watchdog_accepts_concurrent_active_registration_after_failure(self) -> None:
+    def test_watchdog_accepts_concurrent_observed_registration_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             report_path = base / "report.json"
@@ -541,21 +693,21 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "closed",
+                            "candidate_status": "observed",
                             "event_id": 41,
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "closed",
+                            "candidate_status": "observed",
                             "event_id": 41,
                         }
                     },
                     {
                         "result": {
                             "candidate_id": watchdog.CANDIDATE_ID,
-                            "candidate_status": "active",
+                            "candidate_status": "observed",
                             "decision": "promote",
                             "event_id": 43,
                             "missing_fields": [],
@@ -595,6 +747,7 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
                 len([argv for argv in calls if "operator-candidate-record" in argv]),
                 1,
             )
+            self.assertFalse(any("live-register" in argv for argv in calls))
 
     def test_watchdog_refines_legacy_active_candidate_with_structured_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
