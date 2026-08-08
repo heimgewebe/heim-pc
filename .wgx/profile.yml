@@ -5,24 +5,8 @@ tasks:
   guard:
     enabled: true
     steps:
-      - id: yaml-lint
-        run: yamllint
-        files:
-          - ".github/**/*.yml"
-          - ".github/**/*.yaml"
-          - ".wgx/**/*.yml"
-          - ".wgx/**/*.yaml"
-          - "config/**/*.yml"
-          - "config/**/*.yaml"
-      - id: json-lint
-        run: python3 -m json.tool
-        files:
-          - "state/**/*.json"
-          - "contracts/**/*.json"
-          - "snapshots/**/*.json"
-      - id: actionlint
-        run: actionlint
-        files: [".github/workflows/*.yml"]
+      - id: repository-syntax
+        run: python3 scripts/validate_syntax.py
 
   smoke:
     enabled: true

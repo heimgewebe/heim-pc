@@ -91,10 +91,22 @@ def main() -> None:
     repo_root = utils.get_repo_root()
     utils.log_info(f"Running syntax validation for repo: {repo_root}")
 
-    # With recursive=True, config/**/*.yml also matches config/*.yml
-    yaml_patterns = ['.github/workflows/*.yml', '.wgx/profile.yml', 'config/**/*.yml']
-    # state/*.json are validated by validate_contracts.py in CI; removing here avoids redundant parsing
-    json_patterns = ['snapshots/*.summary.json', 'runtime/program-inventory.v1.json']
+    # Keep the fast repository guard self-contained: PyYAML is the only
+    # non-stdlib parser dependency required by the shared verification runner.
+    yaml_patterns = [
+        '.github/**/*.yml',
+        '.github/**/*.yaml',
+        '.wgx/**/*.yml',
+        '.wgx/**/*.yaml',
+        'config/**/*.yml',
+        'config/**/*.yaml',
+    ]
+    json_patterns = [
+        'state/**/*.json',
+        'contracts/**/*.json',
+        'snapshots/**/*.json',
+        'runtime/program-inventory.v1.json',
+    ]
 
     utils.log_info("Validating YAML files...")
     yaml_has_error = validate_yaml(yaml_patterns, repo_root)

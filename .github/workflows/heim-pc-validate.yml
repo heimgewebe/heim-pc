@@ -39,6 +39,12 @@ jobs:
         working-directory: ./heim-pc
         run: python3 -m pip install -r requirements.txt
 
+      - name: Validate GitHub Actions workflows
+        working-directory: ./heim-pc
+        run: |
+          bash ../_metarepo/scripts/tools/actionlint-pin.sh ensure
+          ../_metarepo/tools/bin/actionlint -color
+
       - name: Verify scripts syntax
         run: python3 -m compileall -q heim-pc/scripts
 
