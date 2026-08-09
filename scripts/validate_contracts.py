@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""
-Validates configuration and state files against canonical schemas from the metarepo.
-"""
-import sys
-import os
-from typing import List, Tuple
+"""Validate heim-pc data against explicitly resolved canonical Metarepo schemas."""
+from __future__ import annotations
 
-from jsonschema import validate, ValidationError
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any, List, Sequence, Tuple
+
+from jsonschema import ValidationError, validate
+
+from contract_source import ContractSourceError, resolve_contract_source
 import utils
+
 
 def validate_zones(config_path: str, schema_path: str) -> bool:
     """Validates the zones configuration."""
@@ -34,6 +42,7 @@ def validate_zones(config_path: str, schema_path: str) -> bool:
     except Exception as e:
         utils.log_error(f'Error processing {config_path}: {e}')
         return False
+
 
 def validate_state_file(data_file: str, schema_file: str, base_dir: str, schema_base_dir: str) -> bool:
     """Validates a single state file against its schema."""
@@ -62,60 +71,239 @@ def validate_state_file(data_file: str, schema_file: str, base_dir: str, schema_
         utils.log_error(f'Error processing {data_file}: {e}')
         return False
 
-def main() -> None:
-    repo_root = utils.get_repo_root()
 
-    # In CI, metarepo is checked out to '_metarepo' as a sibling of 'heim-pc'.
-    # So if we are in '.../workspace/heim-pc', metarepo is at '.../workspace/_metarepo'.
-    # We allow overriding via env var for flexibility.
-    metarepo_path_env = os.environ.get('METAREPO_PATH')
-    if metarepo_path_env:
-        metarepo_root = metarepo_path_env
-    else:
-        # Default assumption for CI structure: sibling directory of the repo root
-        metarepo_root = os.path.abspath(os.path.join(repo_root, '..', '_metarepo'))
-
-    utils.log_info(f"Repo root: {repo_root}")
-    utils.log_info(f"Metarepo root: {metarepo_root}")
-
-    # Check if metarepo exists
-    if not os.path.exists(metarepo_root):
-        utils.log_error(f"Metarepo directory not found at {metarepo_root}. Cannot validate contracts.")
-        # We exit with 1 because validation cannot occur
-        sys.exit(1)
-
-    contracts_base = os.path.join(metarepo_root, 'contracts/heim-pc')
-
-    # Fallback to webmaschine if heim-pc directory doesn't exist in metarepo yet
-    if not os.path.exists(contracts_base):
-        utils.log_warning(f"Contracts directory {contracts_base} not found. Falling back to 'contracts/webmaschine'.")
-        contracts_base = os.path.join(metarepo_root, 'contracts/webmaschine')
-
-    # 1. Validate Zones
-    zones_success = validate_zones(
-        os.path.join(repo_root, 'config/zones.yml'),
-        os.path.join(contracts_base, 'config/zones.schema.json')
+def _validate_zones_bound(
+    config_path: Path,
+    schema: dict[str, Any],
+    schema_path: str,
+) -> bool:
+    utils.log_info(
+        f"Validating {config_path} against canonical JSON schema {schema_path}..."
     )
+    if not config_path.exists():
+        utils.log_error(f"Config file {config_path} not found.")
+        return False
+    try:
+        data = utils.load_yaml(str(config_path))
+        validate(instance=data, schema=schema)
+        utils.log_info(f"OK: {config_path}")
+        return True
+    except ValidationError as exc:
+        utils.log_error(f"Validation Error in {config_path}: {exc.message}")
+        return False
+    except Exception as exc:
+        utils.log_error(f"Error processing {config_path}: {exc}")
+        return False
 
-    # 2. Validate provenance-bearing state files. Legacy placeholder fixtures
-    # state/index.json and state/repos.json are intentionally excluded from
-    # the active truth path until a generator binds them to source evidence.
-    # Current heim-pc contracts use a namespaced filename; the pinned legacy
-    # webmaschine fallback keeps the older generic filename.
-    schema_prefix = 'heim-pc.state.' if os.path.basename(contracts_base) == 'heim-pc' else ''
-    files_to_validate: List[Tuple[str, str]] = [
-        ('state/uncertainties.json', f'state/{schema_prefix}uncertainties.schema.json'),
-        ('state/insights.json', f'state/{schema_prefix}insights.schema.json'),
-        ('state/drift.json', f'state/{schema_prefix}drift.schema.json')
-    ]
 
-    state_success = True
-    for data_f, schema_f in files_to_validate:
-        if not validate_state_file(data_f, schema_f, repo_root, contracts_base):
-            state_success = False
+def _validate_state_bound(
+    data_file: str,
+    schema_path: str,
+    repo_root: Path,
+    schema: dict[str, Any],
+) -> bool:
+    data_path = repo_root / data_file
+    if not data_path.exists():
+        utils.log_info(f"Skipping {data_file} (not found)")
+        return True
 
-    if not zones_success or not state_success:
-        sys.exit(1)
+    utils.log_info(
+        f"Validating {data_file} against canonical schema {schema_path}..."
+    )
+    try:
+        data = utils.load_json(str(data_path))
+        validate(instance=data, schema=schema)
+        utils.log_info(f"OK: {data_file}")
+        return True
+    except ValidationError as exc:
+        utils.log_error(f"Validation Error in {data_file}: {exc.message}")
+        return False
+    except Exception as exc:
+        utils.log_error(f"Error processing {data_file}: {exc}")
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _consumer_git_state(repo_root: Path) -> dict[str, Any]:
+    def run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo_root), *args],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            stderr = getattr(exc, "stderr", "") or ""
+            detail = stderr.strip() or str(exc)
+            raise ContractSourceError("CONSUMER_GIT_STATE", detail) from exc
+        return result.stdout.strip()
+
+    head = run("rev-parse", "HEAD").lower()
+    if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
+        raise ContractSourceError(
+            "CONSUMER_GIT_STATE", "consumer HEAD is not a full 40-hex commit"
+        )
+    status = run("status", "--porcelain=v1", "--untracked-files=all")
+    return {
+        "repository": "heimgewebe/heim-pc",
+        "head": head,
+        "dirty": bool(status),
+    }
+
+
+def build_validation_receipt(
+    *,
+    repo_root: Path,
+    source: Any,
+    artifact_paths: Sequence[str],
+) -> dict[str, Any]:
+    artifacts = []
+    for relative in sorted(set(artifact_paths)):
+        path = repo_root / relative
+        if path.is_file():
+            artifacts.append({"path": relative, "sha256": _sha256_file(path)})
+
+    return {
+        "schema_version": 1,
+        "contract_source": source.source_receipt(),
+        "schemas": source.schema_receipts(),
+        "consumer": _consumer_git_state(repo_root),
+        "validated_artifacts": artifacts,
+    }
+
+
+def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    payload = json.dumps(
+        receipt,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8", errors="strict")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Validate heim-pc contracts from one explicit, identity-bound "
+            "heimgewebe/metarepo source."
+        )
+    )
+    parser.add_argument(
+        "--metarepo-source",
+        help="Path to the explicit heimgewebe/metarepo Git repository root.",
+    )
+    parser.add_argument(
+        "--metarepo-manifest",
+        help=(
+            "Path to a manifest binding a detached archive or approved offline "
+            "cache to repository identity, commit, and schema SHA-256 values. "
+            "Exactly one source argument is required."
+        ),
+    )
+    parser.add_argument(
+        "--metarepo-expected-commit",
+        help="Require the resolved Metarepo source to match this exact 40-hex commit.",
+    )
+    parser.add_argument(
+        "--allow-dirty-metarepo-for-development",
+        action="store_true",
+        help=(
+            "Explicit local-development override for a dirty Git source. "
+            "Never implied by environment or checkout layout."
+        ),
+    )
+    parser.add_argument(
+        "--receipt",
+        help="Optional path for the deterministic validation receipt JSON.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = _parser().parse_args(argv)
+    repo_root = Path(utils.get_repo_root()).resolve()
+
+    try:
+        source = resolve_contract_source(
+            source_path=args.metarepo_source,
+            manifest_path=args.metarepo_manifest,
+            expected_commit=args.metarepo_expected_commit,
+            allow_dirty=args.allow_dirty_metarepo_for_development,
+        )
+
+        utils.log_info(f"Repo root: {repo_root}")
+        utils.log_info(
+            "Contract source: "
+            f"{source.repository}@{source.commit} "
+            f"({source.source_kind}, dirty={source.dirty})"
+        )
+
+        zones_schema_path = "contracts/heim-pc/config/zones.schema.json"
+        zones_schema = source.load_schema(zones_schema_path)
+        zones_success = _validate_zones_bound(
+            repo_root / "config/zones.yml",
+            zones_schema,
+            zones_schema_path,
+        )
+
+        files_to_validate: List[Tuple[str, str]] = [
+            (
+                "state/uncertainties.json",
+                "contracts/heim-pc/state/heim-pc.state.uncertainties.schema.json",
+            ),
+            (
+                "state/insights.json",
+                "contracts/heim-pc/state/heim-pc.state.insights.schema.json",
+            ),
+            (
+                "state/drift.json",
+                "contracts/heim-pc/state/heim-pc.state.drift.schema.json",
+            ),
+        ]
+
+        state_success = True
+        artifact_paths = ["config/zones.yml"]
+        for data_file, schema_path in files_to_validate:
+            data_path = repo_root / data_file
+            if not data_path.exists():
+                utils.log_info(f"Skipping {data_file} (not found)")
+                continue
+            schema = source.load_schema(schema_path)
+            artifact_paths.append(data_file)
+            if not _validate_state_bound(data_file, schema_path, repo_root, schema):
+                state_success = False
+
+        # Bind success to the exact source bytes and Git projection used above.
+        source.verify_stable()
+
+        if not zones_success or not state_success:
+            raise SystemExit(1)
+
+        receipt = build_validation_receipt(
+            repo_root=repo_root,
+            source=source,
+            artifact_paths=artifact_paths,
+        )
+        payload = json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        print(payload)
+        if args.receipt:
+            _write_receipt(Path(args.receipt).expanduser(), receipt)
+
+    except ContractSourceError as exc:
+        utils.log_error(str(exc))
+        raise SystemExit(2) from exc
+
 
 if __name__ == "__main__":
     main()

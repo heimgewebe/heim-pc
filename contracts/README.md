@@ -2,12 +2,87 @@
 
 **This repository is a consumer, not an owner, of data contracts.**
 
-All JSON schemas that define the structure of the `state/` and `config/` files are centrally managed in the `heimgewebe/metarepo` repository. This ensures a single source of truth for data interchange across the entire Heimgewebe ecosystem.
+All JSON schemas that define the structure of `state/` and `config/` files are
+centrally managed in `heimgewebe/metarepo`. Local copies are intentionally not
+authoritative.
 
-## Validation
+## Resolver contract
 
-The CI pipeline in this repository (`.github/workflows/heim-pc-validate.yml`) is configured to:
-1.  Check out a fresh copy of the `heimgewebe/metarepo`.
-2.  Validate all local data files against the canonical schemas found there.
+`python3 scripts/validate_contracts.py` accepts exactly one explicit Metarepo
+source. Ambient environment variables and sibling directories are never source
+authority.
 
-Local schemas have been intentionally removed to prevent architectural drift. Do not add them back.
+### Git checkout
+
+Use an explicit repository root. Pin the expected commit whenever a caller
+already has an immutable revision, as CI does:
+
+```bash
+python3 scripts/validate_contracts.py \
+  --metarepo-source ../_metarepo \
+  --metarepo-expected-commit 0123456789abcdef0123456789abcdef01234567
+```
+
+The validator verifies that `remote.origin.url` identifies
+`heimgewebe/metarepo`, records the exact 40-hex `HEAD`, and fails closed if the
+checkout is dirty. A deliberately dirty local developer checkout can be used
+only with the explicit `--allow-dirty-metarepo-for-development` flag. That flag
+is never inferred from environment or checkout layout.
+
+### Detached archive or approved offline cache
+
+A non-Git source is accepted only through `--metarepo-manifest`. The manifest
+binds the source to repository identity, commit, source kind, a relative content
+root, and SHA-256 for every schema the consumer may use:
+
+```json
+{
+  "schema_version": 1,
+  "repository": "heimgewebe/metarepo",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "source_kind": "detached_archive",
+  "source_root": "content",
+  "schemas": {
+    "contracts/heim-pc/config/zones.schema.json": "<64-hex-sha256>"
+  }
+}
+```
+
+`source_kind` is either `detached_archive` or `offline_cache`. `source_root`
+must remain below the manifest directory. A consumed schema that is absent from
+the manifest, has a mismatching hash, escapes the source root, or changes during
+validation is rejected.
+
+Example:
+
+```bash
+python3 scripts/validate_contracts.py \
+  --metarepo-manifest /path/to/metarepo-contract-source.v1.json \
+  --metarepo-expected-commit 0123456789abcdef0123456789abcdef01234567
+```
+
+## Deterministic validation receipt
+
+Every successful run emits one canonical JSON receipt. `--receipt PATH` writes
+the same payload to a file. The receipt contains:
+
+- contract repository identity, source kind, commit, and dirty state;
+- manifest SHA-256 for archive/cache sources;
+- every consumed schema path and SHA-256;
+- the heim-pc consumer `HEAD` and dirty state;
+- every validated consumer artifact path and SHA-256.
+
+No timestamp or machine-local source path is part of the receipt, so identical
+inputs produce identical provenance payloads. Before success is reported, Git
+sources are rechecked for `HEAD`, dirty-projection, and consumed-schema
+movement; manifest sources are rehashed against the bound schema bytes.
+
+## CI
+
+`.github/workflows/heim-pc-validate.yml` checks out the pinned Metarepo revision
+as `_metarepo` and passes both the explicit path and `METAREPO_REF` to the
+validator. The checkout layout alone has no authority.
+
+Local schemas must not be added back. If the canonical Metarepo source is
+missing or cannot be identity-bound, validation fails closed instead of falling
+back to another repository contract.
