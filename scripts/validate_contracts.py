@@ -72,28 +72,41 @@ def validate_state_file(data_file: str, schema_file: str, base_dir: str, schema_
         return False
 
 
+def _read_consumer_artifact(path: Path, relative: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ContractSourceError(
+            "CONSUMER_ARTIFACT_UNREADABLE",
+            f"cannot read validated consumer artifact {relative}: {exc}",
+        ) from exc
+
+
 def _validate_zones_bound(
     config_path: Path,
     schema: dict[str, Any],
     schema_path: str,
-) -> bool:
+) -> tuple[bool, str | None]:
     utils.log_info(
         f"Validating {config_path} against canonical JSON schema {schema_path}..."
     )
     if not config_path.exists():
         utils.log_error(f"Config file {config_path} not found.")
-        return False
+        return False, None
+    relative = "config/zones.yml"
+    data_bytes = _read_consumer_artifact(config_path, relative)
+    digest = hashlib.sha256(data_bytes).hexdigest()
     try:
-        data = utils.load_yaml(str(config_path))
+        data = utils.yaml.safe_load(data_bytes.decode("utf-8", errors="strict"))
         validate(instance=data, schema=schema)
         utils.log_info(f"OK: {config_path}")
-        return True
+        return True, digest
     except ValidationError as exc:
         utils.log_error(f"Validation Error in {config_path}: {exc.message}")
-        return False
+        return False, digest
     except Exception as exc:
         utils.log_error(f"Error processing {config_path}: {exc}")
-        return False
+        return False, digest
 
 
 def _validate_state_bound(
@@ -101,30 +114,38 @@ def _validate_state_bound(
     schema_path: str,
     repo_root: Path,
     schema: dict[str, Any],
-) -> bool:
+) -> tuple[bool, str]:
     data_path = repo_root / data_file
-    if not data_path.exists():
-        utils.log_info(f"Skipping {data_file} (not found)")
-        return True
-
     utils.log_info(
         f"Validating {data_file} against canonical schema {schema_path}..."
     )
+    data_bytes = _read_consumer_artifact(data_path, data_file)
+    digest = hashlib.sha256(data_bytes).hexdigest()
     try:
-        data = utils.load_json(str(data_path))
+        data = json.loads(data_bytes.decode("utf-8", errors="strict"))
         validate(instance=data, schema=schema)
         utils.log_info(f"OK: {data_file}")
-        return True
+        return True, digest
     except ValidationError as exc:
         utils.log_error(f"Validation Error in {data_file}: {exc.message}")
-        return False
+        return False, digest
     except Exception as exc:
         utils.log_error(f"Error processing {data_file}: {exc}")
-        return False
+        return False, digest
 
 
-def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _verify_consumer_artifacts_stable(
+    repo_root: Path, artifact_hashes: dict[str, str]
+) -> None:
+    for relative, expected_digest in sorted(artifact_hashes.items()):
+        observed = hashlib.sha256(
+            _read_consumer_artifact(repo_root / relative, relative)
+        ).hexdigest()
+        if observed != expected_digest:
+            raise ContractSourceError(
+                "CONSUMER_MOVED",
+                f"validated consumer artifact changed during validation: {relative}",
+            )
 
 
 def _consumer_git_state(repo_root: Path) -> dict[str, Any]:
@@ -159,19 +180,19 @@ def build_validation_receipt(
     *,
     repo_root: Path,
     source: Any,
-    artifact_paths: Sequence[str],
+    artifact_hashes: dict[str, str],
+    consumer_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    artifacts = []
-    for relative in sorted(set(artifact_paths)):
-        path = repo_root / relative
-        if path.is_file():
-            artifacts.append({"path": relative, "sha256": _sha256_file(path)})
+    artifacts = [
+        {"path": relative, "sha256": digest}
+        for relative, digest in sorted(artifact_hashes.items())
+    ]
 
     return {
         "schema_version": 1,
         "contract_source": source.source_receipt(),
         "schemas": source.schema_receipts(),
-        "consumer": _consumer_git_state(repo_root),
+        "consumer": consumer_state or _consumer_git_state(repo_root),
         "validated_artifacts": artifacts,
     }
 
@@ -243,14 +264,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"{source.repository}@{source.commit} "
             f"({source.source_kind}, dirty={source.dirty})"
         )
+        consumer_state = _consumer_git_state(repo_root)
+        artifact_hashes: dict[str, str] = {}
 
         zones_schema_path = "contracts/heim-pc/config/zones.schema.json"
         zones_schema = source.load_schema(zones_schema_path)
-        zones_success = _validate_zones_bound(
+        zones_success, zones_digest = _validate_zones_bound(
             repo_root / "config/zones.yml",
             zones_schema,
             zones_schema_path,
         )
+        if zones_digest is not None:
+            artifact_hashes["config/zones.yml"] = zones_digest
 
         files_to_validate: List[Tuple[str, str]] = [
             (
@@ -268,27 +293,36 @@ def main(argv: Sequence[str] | None = None) -> None:
         ]
 
         state_success = True
-        artifact_paths = ["config/zones.yml"]
         for data_file, schema_path in files_to_validate:
             data_path = repo_root / data_file
             if not data_path.exists():
                 utils.log_info(f"Skipping {data_file} (not found)")
                 continue
             schema = source.load_schema(schema_path)
-            artifact_paths.append(data_file)
-            if not _validate_state_bound(data_file, schema_path, repo_root, schema):
+            valid, digest = _validate_state_bound(
+                data_file, schema_path, repo_root, schema
+            )
+            artifact_hashes[data_file] = digest
+            if not valid:
                 state_success = False
-
-        # Bind success to the exact source bytes and Git projection used above.
-        source.verify_stable()
 
         if not zones_success or not state_success:
             raise SystemExit(1)
 
+        # Bind success to the exact source and consumer bytes observed above.
+        source.verify_stable()
+        _verify_consumer_artifacts_stable(repo_root, artifact_hashes)
+        if _consumer_git_state(repo_root) != consumer_state:
+            raise ContractSourceError(
+                "CONSUMER_MOVED",
+                "heim-pc HEAD or dirty state changed during validation",
+            )
+
         receipt = build_validation_receipt(
             repo_root=repo_root,
             source=source,
-            artifact_paths=artifact_paths,
+            artifact_hashes=artifact_hashes,
+            consumer_state=consumer_state,
         )
         payload = json.dumps(
             receipt,

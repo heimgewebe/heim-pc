@@ -41,31 +41,40 @@ def _run_git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _normalize_repository_identity(value: str) -> str:
+def _repository_identity_from_remote(value: str) -> str:
+    """Return owner/repo only for an explicit github.com Git remote URL."""
+
     raw = value.strip()
     if not raw:
         return ""
 
-    lowered = raw.lower()
     path = ""
-    if "://" not in raw and ":" in raw:
-        authority, candidate = raw.split(":", 1)
-        host = authority.rsplit("@", 1)[-1].lower()
-        if host == "github.com":
-            path = candidate
-    elif "://" in raw:
+    if "://" in raw:
         parsed = urlparse(raw)
         if (parsed.hostname or "").lower() != "github.com":
             return ""
+        if parsed.scheme.lower() not in {"https", "ssh", "git"}:
+            return ""
+        if parsed.query or parsed.fragment:
+            return ""
         path = parsed.path
-    elif lowered.startswith("github.com/"):
-        path = raw[len("github.com/") :]
-    elif "/" in raw and ":" not in raw:
-        path = raw
+    elif ":" in raw:
+        authority, candidate = raw.split(":", 1)
+        host = authority.rsplit("@", 1)[-1].lower()
+        if host != "github.com":
+            return ""
+        path = candidate
+    else:
+        # Bare owner/repo values are valid only inside a signed/bound manifest,
+        # never as proof of a Git checkout's remote identity.
+        return ""
 
     normalized = path.strip("/")
     if normalized.lower().endswith(".git"):
         normalized = normalized[:-4]
+    parts = normalized.split("/")
+    if len(parts) != 2 or not all(parts):
+        return ""
     return normalized.lower()
 
 
@@ -241,11 +250,11 @@ def _resolve_git_source(
         )
 
     origin = _run_git(root, "config", "--get", "remote.origin.url")
-    repository = _normalize_repository_identity(origin)
+    repository = _repository_identity_from_remote(origin)
     if repository != EXPECTED_REPOSITORY:
         raise ContractSourceError(
             "SOURCE_WRONG_REPOSITORY",
-            f"expected {EXPECTED_REPOSITORY}, observed origin {origin!r}",
+            f"expected GitHub repository {EXPECTED_REPOSITORY}; explicit origin did not resolve to that canonical identity",
         )
 
     head = _validate_commit(
@@ -305,12 +314,16 @@ def _resolve_manifest_source(
             "MANIFEST_INVALID", "schema_version must be integer 1"
         )
 
-    repository = _normalize_repository_identity(str(raw.get("repository", "")))
-    if repository != EXPECTED_REPOSITORY:
+    repository_value = raw.get("repository")
+    if (
+        not isinstance(repository_value, str)
+        or repository_value.strip().lower() != EXPECTED_REPOSITORY
+    ):
         raise ContractSourceError(
             "SOURCE_WRONG_REPOSITORY",
             f"manifest must bind repository {EXPECTED_REPOSITORY}",
         )
+    repository = EXPECTED_REPOSITORY
 
     commit = _validate_commit(str(raw.get("commit", "")), "MANIFEST_COMMIT_INVALID")
     if expected_commit is not None:

@@ -411,3 +411,78 @@ def test_validation_receipt_binds_source_schemas_consumer_and_artifacts(
 
     emitted = capsys.readouterr().out.splitlines()[-1]
     assert json.loads(emitted) == receipt
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["heimgewebe/metarepo", "github.com/heimgewebe/metarepo"],
+)
+def test_git_source_rejects_bare_or_relative_repository_identity(
+    tmp_path: Path,
+    load_script_module: Callable[[str], Any],
+    origin: str,
+) -> None:
+    module = load_script_module("scripts/validate_contracts.py")
+    root, head, _ = _make_metarepo(tmp_path / "metarepo")
+    _git(root, "remote", "set-url", "origin", origin)
+
+    with pytest.raises(module.ContractSourceError) as rejected:
+        module.resolve_contract_source(
+            source_path=str(root),
+            manifest_path=None,
+            expected_commit=head,
+            allow_dirty=False,
+        )
+
+    assert rejected.value.code == "SOURCE_WRONG_REPOSITORY"
+
+
+def test_rejected_credential_bearing_origin_is_redacted(
+    tmp_path: Path,
+    load_script_module: Callable[[str], Any],
+) -> None:
+    module = load_script_module("scripts/validate_contracts.py")
+    root, head, _ = _make_metarepo(tmp_path / "metarepo")
+    secret = "super-secret-token"
+    origin = f"https://ci-user:{secret}@github.com/heimgewebe/not-metarepo.git"
+    _git(root, "remote", "set-url", "origin", origin)
+
+    with pytest.raises(module.ContractSourceError) as rejected:
+        module.resolve_contract_source(
+            source_path=str(root),
+            manifest_path=None,
+            expected_commit=head,
+            allow_dirty=False,
+        )
+
+    diagnostic = str(rejected.value)
+    assert rejected.value.code == "SOURCE_WRONG_REPOSITORY"
+    assert secret not in diagnostic
+    assert "ci-user" not in diagnostic
+    assert origin not in diagnostic
+
+
+def test_consumer_artifact_movement_after_validation_fails_closed(
+    tmp_path: Path,
+    load_script_module: Callable[[str], Any],
+) -> None:
+    module = load_script_module("scripts/validate_contracts.py")
+    consumer = tmp_path / "heim-pc"
+    config = consumer / "config/zones.yml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("zones: []\n", encoding="utf-8")
+
+    valid, digest = module._validate_zones_bound(
+        config,
+        {"type": "object", "required": ["zones"]},
+        "contracts/heim-pc/config/zones.schema.json",
+    )
+    assert valid is True
+    assert digest == hashlib.sha256(b"zones: []\n").hexdigest()
+
+    config.write_text("zones: [changed]\n", encoding="utf-8")
+    with pytest.raises(module.ContractSourceError) as moved:
+        module._verify_consumer_artifacts_stable(
+            consumer, {"config/zones.yml": digest}
+        )
+    assert moved.value.code == "CONSUMER_MOVED"
