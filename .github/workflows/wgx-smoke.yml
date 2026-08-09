@@ -10,6 +10,6 @@ permissions:
 
 jobs:
   smoke:
-    uses: heimgewebe/metarepo/.github/workflows/reusable-repo-verify.yml@fe6950616b2d06343e284a56a8944e0a36f1f972
+    uses: heimgewebe/metarepo/.github/workflows/reusable-repo-verify.yml@5afd566efb27fb6594ff32daa4d3b86c5184ba30
     with:
       mode: smoke
