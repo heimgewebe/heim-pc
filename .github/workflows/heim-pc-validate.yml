@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  METAREPO_REF: "23a48938d7ac7d739da7cbaa9768d1a8a4d05b91" # Pinned to a specific, verified metarepo commit for reproducibility
+  METAREPO_REF: "9d985c3a426d387173d8753b09dd5175a242a7d5" # Pinned to a specific, verified metarepo commit for reproducibility
 
 jobs:
   validate:
@@ -27,7 +27,7 @@ jobs:
           path: _metarepo
           ref: ${{ env.METAREPO_REF }}
           fetch-depth: 1
-      
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -65,7 +65,10 @@ jobs:
 
       - name: Smoke-run validate_contracts
         working-directory: ./heim-pc
-        run: python3 scripts/validate_contracts.py
+        run: |
+          python3 scripts/validate_contracts.py \
+            --metarepo-source ../_metarepo \
+            --metarepo-expected-commit "${METAREPO_REF}"
 
       - name: Check repo-index consistency
         working-directory: ./heim-pc
