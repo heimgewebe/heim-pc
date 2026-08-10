@@ -80,6 +80,7 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
             ROOT / "config/host-health-remediation.v1.json"
         )
         self.mce_policy = diagnostics._mce_config(self.config)
+        self.tmpfiles_policy = diagnostics._tmpfiles_config(self.config)
 
     @staticmethod
     def record(timestamp: int, message: str, boot: str = "boot-a"):
@@ -412,6 +413,145 @@ class HostHealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["new_occurrences"], 0)
         self.assertEqual(state["total_occurrences"], 1)
         self.assertTrue(state["occurrence_evidence"])
+
+
+
+    def test_tmpfiles_journal_reports_success_failure_and_incomplete(self) -> None:
+        records = [
+            self.record(1_000_000, "Starting Create Volatile Files and Directories...", boot="boot-a"),
+            self.record(41_000_000, "Finished Create Volatile Files and Directories.", boot="boot-a"),
+            self.record(50_000_000, "Starting Create Volatile Files and Directories...", boot="boot-b"),
+            self.record(55_000_000, "systemd-tmpfiles-setup.service: Main process exited, code=killed", boot="boot-b"),
+            self.record(70_000_000, "Stopped Create Volatile Files and Directories.", boot="boot-b"),
+            self.record(80_000_000, "Starting Create Volatile Files and Directories...", boot="boot-c"),
+        ]
+        analyzed = diagnostics.analyze_tmpfiles_journal(records, self.tmpfiles_policy)
+        by_boot = {item["boot_id"]: item for item in analyzed["recent_runs"]}
+        self.assertEqual(by_boot["boot-a"]["status"], "success")
+        self.assertEqual(by_boot["boot-a"]["duration_seconds"], 40.0)
+        self.assertEqual(by_boot["boot-b"]["status"], "failed")
+        self.assertEqual(by_boot["boot-b"]["duration_seconds"], 20.0)
+        self.assertEqual(by_boot["boot-c"]["status"], "incomplete")
+        self.assertEqual(analyzed["latest_successful_duration_seconds"], 40.0)
+        self.assertEqual(analyzed["historical_max_duration_seconds"], 40.0)
+
+    def test_tmpfiles_report_thresholds_preserve_historical_evidence(self) -> None:
+        journal = {
+            "recent_runs": [
+                {"boot_id": "fast", "status": "success", "duration_seconds": 0.02},
+                {"boot_id": "slow", "status": "success", "duration_seconds": 121.0},
+            ],
+            "latest_successful_duration_seconds": 0.02,
+            "historical_max_duration_seconds": 121.0,
+            "incomplete_or_failed_runs": 0,
+        }
+        inventory = {
+            "groups": [],
+            "matched_candidates_scanned": 0,
+            "candidate_enumeration_truncated": False,
+            "total_entries_bounded": 0,
+            "total_bytes_bounded": 0,
+            "truncated_candidate_count": 0,
+            "top_offenders": [],
+        }
+        report = diagnostics.build_tmpfiles_boot_report(journal, inventory, self.tmpfiles_policy)
+        self.assertEqual(report["status"], "healthy")
+        self.assertEqual(report["history_status"], "critical")
+        self.assertEqual(report["historical_incident_count"], 1)
+        self.assertTrue(report["read_only"])
+        self.assertIn(
+            "tmpfiles_duration_critical",
+            {item["code"] for item in report["historical_reasons"]},
+        )
+
+    def test_tmpfiles_latest_critical_controls_current_status(self) -> None:
+        journal = {
+            "recent_runs": [
+                {"boot_id": "now", "status": "success", "duration_seconds": 130.0}
+            ],
+            "latest_successful_duration_seconds": 130.0,
+            "historical_max_duration_seconds": 130.0,
+            "incomplete_or_failed_runs": 0,
+        }
+        inventory = {
+            "groups": [],
+            "matched_candidates_scanned": 0,
+            "candidate_enumeration_truncated": False,
+            "total_entries_bounded": 0,
+            "total_bytes_bounded": 0,
+            "truncated_candidate_count": 0,
+            "top_offenders": [],
+        }
+        report = diagnostics.build_tmpfiles_boot_report(
+            journal, inventory, self.tmpfiles_policy
+        )
+        self.assertEqual(report["status"], "critical")
+        self.assertEqual(report["history_status"], "healthy")
+
+    def test_tmpfiles_candidate_mount_is_not_traversed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory)
+            device = candidate.lstat().st_dev
+            report = diagnostics._bounded_tree_metrics(
+                candidate, entry_limit=100, expected_device=device + 1
+            )
+            self.assertEqual(report["status"], "skipped_mount")
+            self.assertEqual(report["entries"], 0)
+            self.assertEqual(report["skipped_mounts"], 1)
+
+    def test_tmpfiles_journal_query_is_bounded(self) -> None:
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return completed(0, "")
+        diagnostics.read_bounded_tmpfiles_journal(self.tmpfiles_policy, runner=runner)
+        self.assertIn("--unit=systemd-tmpfiles-setup.service", calls[0])
+        self.assertIn("--lines=2000", calls[0])
+        self.assertIn("--since=-168h", calls[0])
+        self.assertIn("--output=json", calls[0])
+
+    def test_tmpfiles_config_rejects_unbounded_unknown_candidate_pattern(self) -> None:
+        invalid = copy.deepcopy(self.config)
+        invalid["tmpfiles_boot"]["candidates"][0]["pattern"] = "**"
+        with self.assertRaisesRegex(diagnostics.DiagnosticError, "unsupported"):
+            diagnostics._tmpfiles_config(invalid)
+
+    def test_tmpfiles_config_rejects_reversed_duration_thresholds(self) -> None:
+        invalid = copy.deepcopy(self.config)
+        invalid["tmpfiles_boot"]["critical_seconds"] = 10
+        with self.assertRaisesRegex(diagnostics.DiagnosticError, "critical_seconds"):
+            diagnostics._tmpfiles_config(invalid)
+
+    def test_tmpfiles_scan_is_bounded_and_does_not_follow_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tmp_root = base / "tmp"
+            var_tmp_root = base / "var-tmp"
+            outside = base / "outside"
+            tmp_root.mkdir()
+            var_tmp_root.mkdir()
+            outside.mkdir()
+            private = tmp_root / "systemd-private-test"
+            private.mkdir()
+            for index in range(20):
+                (private / f"entry-{index}").write_bytes(b"x" * 10)
+            (outside / "large").write_bytes(b"x" * 100000)
+            (private / "outside-link").symlink_to(outside, target_is_directory=True)
+            flatpak = var_tmp_root / "flatpak-cache-test"
+            flatpak.mkdir()
+            (flatpak / "small").write_bytes(b"abc")
+            policy = copy.deepcopy(self.tmpfiles_policy)
+            policy["max_entries_per_candidate"] = 10
+            inventory = diagnostics.scan_tmpfiles_candidates(
+                policy,
+                root_overrides={"/tmp": tmp_root, "/var/tmp": var_tmp_root},
+            )
+            self.assertGreaterEqual(inventory["matched_candidates_scanned"], 2)
+            self.assertGreaterEqual(inventory["truncated_candidate_count"], 1)
+            candidates = [item for group in inventory["groups"] for item in group["candidates"]]
+            private_report = next(item for item in candidates if item["path"].endswith("systemd-private-test"))
+            self.assertTrue(private_report["truncated"])
+            self.assertLess(private_report["bytes"], 100000)
 
     def test_kvm_truth_distinguishes_bios_flag_from_module_failure(self) -> None:
         bios_disabled = diagnostics.evaluate_kvm_svm(

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run bounded tmpfiles boot and backlog monitor
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+Persistent=yes
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

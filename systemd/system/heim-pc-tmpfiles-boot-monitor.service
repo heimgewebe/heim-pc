@@ -1,0 +1,22 @@
+[Unit]
+Description=Bounded tmpfiles boot and backlog monitor
+Documentation=https://github.com/heimgewebe/heim-pc
+After=systemd-journald.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/heim-pc-host-health --config /etc/heim-pc/host-health-remediation.v1.json tmpfiles-boot
+StateDirectory=heim-pc/host-health
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=90s
+CPUQuota=10%
+MemoryMax=96M
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/tmp /var/tmp
+ReadWritePaths=/var/lib/heim-pc/host-health

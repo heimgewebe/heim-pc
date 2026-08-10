@@ -112,6 +112,23 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         installer.TRANSACTION_FAULT_HOOK = None
 
+    def test_tmpfiles_monitor_reads_host_tmp_without_becoming_boot_blocker(self) -> None:
+        service = (
+            ROOT / "systemd/system/heim-pc-tmpfiles-boot-monitor.service"
+        ).read_text(encoding="utf-8")
+        timer = (
+            ROOT / "systemd/system/heim-pc-tmpfiles-boot-monitor.timer"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("PrivateTmp=yes", service)
+        self.assertIn("ReadOnlyPaths=/tmp /var/tmp", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("StateDirectory=heim-pc/host-health", service)
+        self.assertIn("OnBootSec=5min", timer)
+        self.assertIn("OnUnitActiveSec=6h", timer)
+        self.assertNotIn("Before=", service)
+        self.assertNotIn("WantedBy=multi-user.target", service)
+
     def test_plan_has_no_side_effects_and_is_commit_bound(self) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
