@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 ENVIRONMENT_D = ROOT / "systemd/environment.d/60-heim-pc-pytest-temp-hygiene.conf"
@@ -84,3 +85,55 @@ def test_failed_sessions_are_bounded_to_one(tmp_path: Path) -> None:
     sessions = _numbered_sessions(temproot)
     assert len(sessions) <= 1
     assert sessions
+
+
+def test_active_session_is_not_removed_by_concurrent_cleanup(tmp_path: Path) -> None:
+    temproot = tmp_path / "temproot"
+    temproot.mkdir()
+    active_dir = tmp_path / "nested-active"
+    active_dir.mkdir()
+    ready_file = tmp_path / "active-ready"
+    active_test = active_dir / "test_active.py"
+    active_test.write_text(
+        "from pathlib import Path\n"
+        "import time\n"
+        "def test_active(tmp_path):\n"
+        "    payload = tmp_path / 'payload'\n"
+        "    payload.write_text('alive')\n"
+        f"    Path({str(ready_file)!r}).write_text(str(payload))\n"
+        "    time.sleep(2)\n"
+        "    assert payload.read_text() == 'alive'\n",
+        encoding="utf-8",
+    )
+    peer_dir = tmp_path / "nested-peer"
+    peer_dir.mkdir()
+    peer_test = peer_dir / "test_peer.py"
+    peer_test.write_text(
+        "def test_peer(tmp_path):\n"
+        "    (tmp_path / 'peer').write_text('ok')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTEST_ADDOPTS"] = _pytest_addopts()
+    env["PYTEST_DEBUG_TEMPROOT"] = str(temproot)
+    active = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-q", str(active_test)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=active_dir,
+    )
+    deadline = time.monotonic() + 10
+    while not ready_file.exists() and active.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ready_file.exists(), active.communicate()[0:2]
+    active_payload = Path(ready_file.read_text(encoding="utf-8"))
+    assert active_payload.read_text(encoding="utf-8") == "alive"
+
+    peer = _run_nested_pytest(temproot, peer_test)
+    assert peer.returncode == 0, peer.stdout + peer.stderr
+    assert active_payload.read_text(encoding="utf-8") == "alive"
+
+    stdout, stderr = active.communicate(timeout=10)
+    assert active.returncode == 0, stdout + stderr
