@@ -150,7 +150,7 @@ def test_systemd_service_sees_host_tmp_and_runs_as_alex() -> None:
     assert "ProtectSystem=strict" in service
     assert "ReadOnlyPaths=/tmp" in service
     assert "ReadWritePaths=-/tmp/pytest-of-alex" in service
-    assert "ExecStart=/usr/local/libexec/heim-pc/pytest-temp-gc --min-age-seconds 600" in service
+    assert "ExecStart=/usr/local/bin/heim-pc-pytest-temp-gc --min-age-seconds 600" in service
     assert "OnBootSec=10min" in timer
     assert "OnUnitActiveSec=10min" in timer
 

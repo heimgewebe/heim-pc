@@ -261,7 +261,10 @@ Die installierbaren Teile haben folgende Grenzen:
   `-o`-Optionen auf der Pytest-Kommandozeile können die Baseline für einen gezielten
   Debug-Lauf übersteuern.
 * `heim-pc-pytest-temp-gc.timer` schließt Pytests verbleibende Crash-Lücke:
-  alle zehn Minuten prüft ein als `alex` laufender, gehärteter Service ausschließlich
+  Der Cleaner liegt bewusst unter `/usr/local/bin/heim-pc-pytest-temp-gc`, damit der
+  unprivilegierte Service ihn aus einem für `alex` traversierbaren Pfad starten kann;
+  das root-exklusive `/usr/local/libexec/heim-pc` bleibt unverändert geschützt.
+  Alle zehn Minuten prüft ein als `alex` laufender, gehärteter Service ausschließlich
   direkte `garbage-<uuid>`-Reste unter `/tmp/pytest-of-alex`. Entfernt wird erst nach
   mindestens zehn Minuten und nur wenn ein vorhandener Pytest-Lock eine tote PID nennt,
   kein gleichberechtigter Prozess den Baum als CWD/offene Datei verwendet, keine Mounts,

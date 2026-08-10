@@ -135,7 +135,7 @@ FILES = (
     ),
     (
         "scripts/pytest_temp_gc.py",
-        "usr/local/libexec/heim-pc/pytest-temp-gc",
+        "usr/local/bin/heim-pc-pytest-temp-gc",
         0o755,
     ),
     (
@@ -173,6 +173,7 @@ REMOVALS = (
     "etc/systemd/system/logrotate.timer.d/heim-pc-storage-hygiene.conf",
     "etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
     "usr/local/sbin/heim-pc-set-performance-profile",
+    "usr/local/libexec/heim-pc/pytest-temp-gc",
     "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
     "etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
     "etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",
@@ -251,6 +252,13 @@ KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
     },
     "usr/local/sbin/heim-pc-set-performance-profile": {
         "contents": (KNOWN_LEGACY_PROFILE_SCRIPT,),
+        "mode": 0o755,
+        "live_owner": ("root", "root"),
+    },
+    "usr/local/libexec/heim-pc/pytest-temp-gc": {
+        "sha256s": (
+            "2495a0f5be34018e7d9c996a55c50fdadd8ed5276a50d07f182b8371749fa5c5",
+        ),
         "mode": 0o755,
         "live_owner": ("root", "root"),
     },
@@ -773,8 +781,18 @@ def _validate_obsolete_preimage(
         return None
     contract = KNOWN_OBSOLETE_ASSETS[target_relative]
     mismatch: list[str] = []
-    if before["data"] not in contract["contents"]:
-        mismatch.append("content")
+    known_contents = contract.get("contents")
+    known_sha256s = contract.get("sha256s")
+    if known_contents is not None:
+        if before["data"] not in known_contents:
+            mismatch.append("content")
+    elif known_sha256s is not None:
+        if before["sha256"] not in known_sha256s:
+            mismatch.append("content")
+    else:
+        raise InstallError(
+            f"known obsolete contract has no content identity: {target_relative}"
+        )
     if before["mode"] != contract["mode"]:
         mismatch.append("mode")
     expected_live_owner: tuple[int, int] | None = None

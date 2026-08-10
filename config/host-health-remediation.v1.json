@@ -113,6 +113,7 @@
     "legacy_removals": [
       "/etc/systemd/system/cpu-governor.service.d/10-verified-profile.conf",
       "/usr/local/sbin/heim-pc-set-performance-profile",
+      "/usr/local/libexec/heim-pc/pytest-temp-gc",
       "/etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf",
       "/etc/systemd/user/fluidsynth.service.d/50-heim-pc-gdm-guard.conf",
       "/etc/systemd/user/fluidsynth.service.d/zz-heim-pc-gdm-guard.conf",

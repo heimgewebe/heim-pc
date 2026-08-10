@@ -112,9 +112,27 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         installer.TRANSACTION_FAULT_HOOK = None
 
+    def test_pytest_garbage_gc_migrates_from_root_only_libexec_path(self) -> None:
+        old_target = "usr/local/libexec/heim-pc/pytest-temp-gc"
+        new_entry = (
+            "scripts/pytest_temp_gc.py",
+            "usr/local/bin/heim-pc-pytest-temp-gc",
+            0o755,
+        )
+
+        self.assertIn(old_target, installer.REMOVALS)
+        self.assertIn(new_entry, installer.FILES)
+        contract = installer.KNOWN_OBSOLETE_ASSETS[old_target]
+        self.assertEqual(
+            contract["sha256s"],
+            ("2495a0f5be34018e7d9c996a55c50fdadd8ed5276a50d07f182b8371749fa5c5",),
+        )
+        self.assertEqual(contract["mode"], 0o755)
+        self.assertEqual(contract["live_owner"], ("root", "root"))
+
     def test_pytest_garbage_gc_is_installed_as_narrow_system_service(self) -> None:
         expected = {
-            ("scripts/pytest_temp_gc.py", "usr/local/libexec/heim-pc/pytest-temp-gc", 0o755),
+            ("scripts/pytest_temp_gc.py", "usr/local/bin/heim-pc-pytest-temp-gc", 0o755),
             (
                 "systemd/system/heim-pc-pytest-temp-gc.service",
                 "etc/systemd/system/heim-pc-pytest-temp-gc.service",
@@ -485,6 +503,9 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 "usr/local/sbin/heim-pc-set-performance-profile": (
                     installer.KNOWN_LEGACY_PROFILE_SCRIPT
                 ),
+                "usr/local/libexec/heim-pc/pytest-temp-gc": (
+                    ROOT / "scripts/pytest_temp_gc.py"
+                ).read_bytes(),
                 "etc/systemd/user/fluidsynth.service.d/10-interactive-user.conf": (
                     b"[Unit]\nConditionUser=alex\n"
                 ),
