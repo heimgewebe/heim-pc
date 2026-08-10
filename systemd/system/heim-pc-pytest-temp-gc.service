@@ -1,0 +1,28 @@
+[Unit]
+Description=Remove orphaned pytest garbage residues safely
+Documentation=https://github.com/heimgewebe/heim-pc
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=alex
+Group=alex
+ExecStart=/usr/local/libexec/heim-pc/pytest-temp-gc --min-age-seconds 600
+PrivateTmp=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/tmp
+ReadWritePaths=-/tmp/pytest-of-alex
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+TimeoutStartSec=30min

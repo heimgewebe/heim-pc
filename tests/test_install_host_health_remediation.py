@@ -112,6 +112,22 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         installer.TRANSACTION_FAULT_HOOK = None
 
+    def test_pytest_garbage_gc_is_installed_as_narrow_system_service(self) -> None:
+        expected = {
+            ("scripts/pytest_temp_gc.py", "usr/local/libexec/heim-pc/pytest-temp-gc", 0o755),
+            (
+                "systemd/system/heim-pc-pytest-temp-gc.service",
+                "etc/systemd/system/heim-pc-pytest-temp-gc.service",
+                0o644,
+            ),
+            (
+                "systemd/system/heim-pc-pytest-temp-gc.timer",
+                "etc/systemd/system/heim-pc-pytest-temp-gc.timer",
+                0o644,
+            ),
+        }
+        self.assertTrue(expected.issubset(set(installer.FILES)))
+
     def test_pytest_temp_hygiene_uses_native_retention_without_redirecting_tmp(self) -> None:
         relative = "systemd/environment.d/60-heim-pc-pytest-temp-hygiene.conf"
         config = (ROOT / relative).read_text(encoding="utf-8")
