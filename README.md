@@ -240,6 +240,19 @@ Die installierbaren Teile haben folgende Grenzen:
   derselben abgeschnittenen Gruppe, wird der Zustand konservativ nicht
   fortgeschrieben und der Lauf meldet die Mehrdeutigkeit. Die gesamte persistierte
   Konstituenten-Evidenz bleibt auf die maximale Journalabfrage begrenzt.
+* `heim-pc-host-health tmpfiles-boot` schreibt einen rein lesenden, hart
+  begrenzten Bericht nach `/var/lib/heim-pc/host-health/tmpfiles-boot-report.v1.json`.
+  Er korreliert die persistente `systemd-tmpfiles-setup.service`-Historie mit
+  dem hart begrenzten Inhalt von `/tmp` sowie den explizit bootseitig entfernten
+  `systemd-private-*`-/Flatpak-Resten unter `/var/tmp`. Das breite `/tmp`-Inventar
+  ist absichtlich an die lokale systemd-Regel `D /tmp` gebunden: `--remove`
+  entfernt deren gesamten Inhalt. Der Monitor folgt keinen Symlinks, überschreitet
+  keine Mountgrenzen und löscht selbst nichts. `heim-pc-tmpfiles-boot-monitor.timer` startet den
+  Check erst fünf Minuten nach dem Boot und danach sechsstündlich; der Monitor
+  liegt damit nicht im Boot-Critical-Path. Warnungen zeigen wachsenden
+  `systemd-private-*`-/Flatpak-Temp-Ballast früh, ohne systemd-tmpfiles-Regeln
+  zu überschreiben oder zu duplizieren.
+
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI
   deaktivierte oder anderweitig verborgene Virtualisierung. Ist `svm` vorhanden,

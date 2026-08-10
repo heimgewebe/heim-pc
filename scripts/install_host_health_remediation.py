@@ -119,6 +119,16 @@ FILES = (
         0o644,
     ),
     (
+        "systemd/system/heim-pc-tmpfiles-boot-monitor.service",
+        "etc/systemd/system/heim-pc-tmpfiles-boot-monitor.service",
+        0o644,
+    ),
+    (
+        "systemd/system/heim-pc-tmpfiles-boot-monitor.timer",
+        "etc/systemd/system/heim-pc-tmpfiles-boot-monitor.timer",
+        0o644,
+    ),
+    (
         "systemd/journald.conf.d/zz-heim-pc-retention.conf",
         "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf",
         0o644,
@@ -2371,6 +2381,7 @@ def _base_receipt(
             ),
             "systemctl enable --now logrotate.timer",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
+            "systemctl enable --now heim-pc-tmpfiles-boot-monitor.timer",
             "systemctl restart cpu-governor.service",
             (
                 "reload alex's user manager or reboot before evaluating the "

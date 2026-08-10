@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import fnmatch
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import zipfile
 DEFAULT_CONFIG = Path("/etc/heim-pc/host-health-remediation.v1.json")
 DEFAULT_MCE_STATE = Path("/var/lib/heim-pc/host-health/mce-edac-state.v1.json")
 DEFAULT_MCE_REPORT = Path("/var/lib/heim-pc/host-health/mce-edac-report.v1.json")
+DEFAULT_TMPFILES_REPORT = Path("/var/lib/heim-pc/host-health/tmpfiles-boot-report.v1.json")
 DEFAULT_BOARD_NAME = Path("/sys/class/dmi/id/board_name")
 DEFAULT_BIOS_VERSION = Path("/sys/class/dmi/id/bios_version")
 FSCK_OUTPUT_LIMIT_BYTES = 4096
@@ -150,6 +152,66 @@ def read_bounded_kernel_journal(
             records.append(item)
     return records
 
+
+
+_TMPFILES_ALLOWED_CANDIDATES = {
+    ("/tmp", "*"),
+    ("/var/tmp", "systemd-private-*"),
+    ("/var/tmp", "flatpak-cache-*"),
+}
+_TMPFILES_START_PREFIX = "Starting Create Volatile Files and Directories"
+_TMPFILES_FINISH_PREFIX = "Finished Create Volatile Files and Directories"
+_TMPFILES_STOP_PREFIX = "Stopped Create Volatile Files and Directories"
+
+
+def _tmpfiles_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("tmpfiles_boot")
+    if not isinstance(value, dict):
+        raise DiagnosticError("tmpfiles_boot config is missing")
+    limits = {
+        "lookback_hours": (1, 720),
+        "max_journal_entries": (16, 10000),
+        "recent_runs": (1, 64),
+        "warning_seconds": (1, 3600),
+        "critical_seconds": (1, 7200),
+        "max_candidates": (1, 1024),
+        "max_entries_per_candidate": (10, 100000),
+        "top_offenders": (1, 50),
+        "warning_candidate_entries": (1, 10_000_000),
+        "warning_candidate_bytes": (1, 1 << 50),
+    }
+    result: dict[str, Any] = {}
+    for key, (minimum, maximum) in limits.items():
+        candidate = value.get(key)
+        if not isinstance(candidate, int) or isinstance(candidate, bool) or not minimum <= candidate <= maximum:
+            raise DiagnosticError(
+                f"tmpfiles_boot.{key} must be between {minimum} and {maximum}"
+            )
+        result[key] = candidate
+    if result["critical_seconds"] < result["warning_seconds"]:
+        raise DiagnosticError(
+            "tmpfiles_boot.critical_seconds must be >= warning_seconds"
+        )
+    candidates = value.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise DiagnosticError("tmpfiles_boot.candidates must be a non-empty list")
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        if not isinstance(item, dict) or set(item) != {"label", "root", "pattern"}:
+            raise DiagnosticError("tmpfiles_boot candidate fields are invalid")
+        label, root, pattern = item["label"], item["root"], item["pattern"]
+        if not all(isinstance(part, str) and part for part in (label, root, pattern)):
+            raise DiagnosticError("tmpfiles_boot candidate values must be non-empty text")
+        pair = (root, pattern)
+        if pair not in _TMPFILES_ALLOWED_CANDIDATES:
+            raise DiagnosticError(f"unsupported tmpfiles_boot candidate: {root}/{pattern}")
+        if pair in seen:
+            raise DiagnosticError("duplicate tmpfiles_boot candidate")
+        seen.add(pair)
+        normalized.append({"label": label, "root": root, "pattern": pattern})
+    result["candidates"] = normalized
+    return result
 
 def is_mce_edac_event(message: str) -> bool:
     normalized = message.casefold()
@@ -597,6 +659,408 @@ def run_mce_edac(
     _atomic_json(report_path, report)
     return report
 
+
+
+
+def read_bounded_tmpfiles_journal(
+    policy: dict[str, Any], *, runner: Runner = subprocess.run
+) -> list[dict[str, Any]]:
+    completed = _completed(
+        runner,
+        [
+            "journalctl",
+            "--no-pager",
+            "--output=json",
+            f"--since=-{policy['lookback_hours']}h",
+            f"--lines={policy['max_journal_entries']}",
+            "--unit=systemd-tmpfiles-setup.service",
+        ],
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "journalctl failed").strip()
+        raise DiagnosticError(f"cannot read tmpfiles journal: {detail[:500]}")
+    records: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DiagnosticError("tmpfiles journal returned invalid JSON") from exc
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _tmpfiles_record_key(record: dict[str, Any]) -> tuple[int, str]:
+    raw = record.get("__REALTIME_TIMESTAMP")
+    try:
+        timestamp = int(raw)
+    except (TypeError, ValueError):
+        timestamp = 0
+    return timestamp, str(record.get("_BOOT_ID", ""))
+
+
+def analyze_tmpfiles_journal(
+    records: Iterable[dict[str, Any]], policy: dict[str, Any]
+) -> dict[str, Any]:
+    current: dict[str, dict[str, Any]] = {}
+    runs: list[dict[str, Any]] = []
+
+    def finish(boot_id: str, *, end_us: int | None, status: str) -> None:
+        run = current.pop(boot_id, None)
+        if run is None:
+            return
+        start_us = run["start_timestamp_us"]
+        duration = None
+        if end_us is not None and end_us >= start_us:
+            duration = round((end_us - start_us) / 1_000_000, 6)
+        runs.append(
+            {
+                "boot_id": boot_id,
+                "status": status,
+                "start_timestamp_us": start_us,
+                "end_timestamp_us": end_us,
+                "started_at_utc": _utc(start_us),
+                "ended_at_utc": _utc(end_us),
+                "duration_seconds": duration,
+                "failure_evidence": list(run["failure_evidence"]),
+            }
+        )
+
+    for record in sorted(records, key=_tmpfiles_record_key):
+        boot_id = record.get("_BOOT_ID")
+        message = record.get("MESSAGE")
+        raw_timestamp = record.get("__REALTIME_TIMESTAMP")
+        if not isinstance(boot_id, str) or not boot_id or not isinstance(message, str):
+            continue
+        try:
+            timestamp_us = int(raw_timestamp)
+        except (TypeError, ValueError):
+            continue
+        if message.startswith(_TMPFILES_START_PREFIX):
+            if boot_id in current:
+                finish(boot_id, end_us=None, status="incomplete")
+            current[boot_id] = {
+                "start_timestamp_us": timestamp_us,
+                "failure_evidence": [],
+            }
+            continue
+        run = current.get(boot_id)
+        if run is None:
+            continue
+        if "Main process exited" in message or "Failed with result" in message:
+            concise = " ".join(message.split())[:240]
+            if concise not in run["failure_evidence"]:
+                run["failure_evidence"].append(concise)
+        if message.startswith(_TMPFILES_FINISH_PREFIX):
+            finish(boot_id, end_us=timestamp_us, status="success")
+        elif message.startswith(_TMPFILES_STOP_PREFIX):
+            finish(
+                boot_id,
+                end_us=timestamp_us,
+                status="failed" if run["failure_evidence"] else "stopped",
+            )
+
+    for boot_id in list(current):
+        finish(boot_id, end_us=None, status="incomplete")
+
+    runs.sort(key=lambda item: (item["start_timestamp_us"], item["boot_id"]), reverse=True)
+    completed_runs = [item for item in runs if item["duration_seconds"] is not None]
+    successful = [item for item in completed_runs if item["status"] == "success"]
+    return {
+        "recent_runs": runs[: policy["recent_runs"]],
+        "observed_run_count": len(runs),
+        "latest_successful_duration_seconds": (
+            successful[0]["duration_seconds"] if successful else None
+        ),
+        "historical_max_duration_seconds": max(
+            (item["duration_seconds"] for item in completed_runs), default=None
+        ),
+        "incomplete_or_failed_runs": sum(
+            item["status"] != "success" for item in runs
+        ),
+    }
+
+
+def _bounded_tree_metrics(
+    path: Path, *, entry_limit: int, expected_device: int
+) -> dict[str, Any]:
+    try:
+        root_stat = path.lstat()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "entries": 0,
+            "bytes": 0,
+            "truncated": False,
+            "skipped_mounts": 0,
+            "symlinks": 0,
+            "errors": [f"lstat: {exc.__class__.__name__}"],
+        }
+    if root_stat.st_dev != expected_device:
+        return {
+            "status": "skipped_mount",
+            "entries": 0,
+            "bytes": 0,
+            "truncated": False,
+            "skipped_mounts": 1,
+            "symlinks": 0,
+            "errors": [],
+        }
+    root_device = expected_device
+    stack = [path]
+    entries = 0
+    total_bytes = 0
+    skipped_mounts = 0
+    symlinks = 0
+    truncated = False
+    errors: list[str] = []
+    while stack:
+        if entries >= entry_limit:
+            truncated = True
+            break
+        current_path = stack.pop()
+        try:
+            metadata = current_path.lstat()
+        except OSError as exc:
+            if len(errors) < 5:
+                errors.append(f"lstat:{exc.__class__.__name__}")
+            continue
+        entries += 1
+        if stat.S_ISLNK(metadata.st_mode):
+            symlinks += 1
+            continue
+        if metadata.st_dev != root_device:
+            skipped_mounts += 1
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            total_bytes += metadata.st_size
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        try:
+            with os.scandir(current_path) as iterator:
+                for child in iterator:
+                    if entries + len(stack) >= entry_limit:
+                        truncated = True
+                        break
+                    stack.append(Path(child.path))
+        except OSError as exc:
+            if len(errors) < 5:
+                errors.append(f"scandir:{exc.__class__.__name__}")
+    return {
+        "status": "partial" if errors or truncated else "ok",
+        "entries": entries,
+        "bytes": total_bytes,
+        "truncated": truncated,
+        "skipped_mounts": skipped_mounts,
+        "symlinks": symlinks,
+        "errors": errors,
+    }
+
+
+def scan_tmpfiles_candidates(
+    policy: dict[str, Any], *, root_overrides: dict[str, Path] | None = None
+) -> dict[str, Any]:
+    root_overrides = root_overrides or {}
+    scanned: list[dict[str, Any]] = []
+    enumeration_truncated = False
+    matched = 0
+    for spec in policy["candidates"]:
+        logical_root = spec["root"]
+        root = root_overrides.get(logical_root, Path(logical_root))
+        group: dict[str, Any] = {
+            "label": spec["label"],
+            "root": logical_root,
+            "pattern": spec["pattern"],
+            "status": "ok",
+            "candidates": [],
+        }
+        try:
+            metadata = root.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("root is not a real directory")
+            with os.scandir(root) as iterator:
+                for entry in iterator:
+                    if not fnmatch.fnmatchcase(entry.name, spec["pattern"]):
+                        continue
+                    if matched >= policy["max_candidates"]:
+                        enumeration_truncated = True
+                        break
+                    matched += 1
+                    metrics = _bounded_tree_metrics(
+                        Path(entry.path),
+                        entry_limit=policy["max_entries_per_candidate"],
+                        expected_device=metadata.st_dev,
+                    )
+                    group["candidates"].append(
+                        {
+                            "path": f"{logical_root.rstrip('/')}/{entry.name}",
+                            **metrics,
+                        }
+                    )
+        except OSError as exc:
+            group["status"] = "unavailable"
+            group["error"] = exc.__class__.__name__
+        scanned.append(group)
+        if enumeration_truncated:
+            break
+    all_candidates = [candidate for group in scanned for candidate in group["candidates"]]
+    total_entries = sum(item["entries"] for item in all_candidates)
+    total_bytes = sum(item["bytes"] for item in all_candidates)
+    top = sorted(
+        all_candidates,
+        key=lambda item: (item["bytes"], item["entries"], item["path"]),
+        reverse=True,
+    )[: policy["top_offenders"]]
+    return {
+        "groups": scanned,
+        "matched_candidates_scanned": matched,
+        "candidate_enumeration_truncated": enumeration_truncated,
+        "total_entries_bounded": total_entries,
+        "total_bytes_bounded": total_bytes,
+        "truncated_candidate_count": sum(item["truncated"] for item in all_candidates),
+        "top_offenders": top,
+    }
+
+
+def _tmpfiles_run_reason(
+    run: dict[str, Any], policy: dict[str, Any]
+) -> tuple[int, list[dict[str, Any]]]:
+    severity = 0
+    reasons: list[dict[str, Any]] = []
+    duration = run["duration_seconds"]
+    if duration is not None and duration >= policy["critical_seconds"]:
+        severity = 2
+        reasons.append(
+            {
+                "code": "tmpfiles_duration_critical",
+                "boot_id": run["boot_id"],
+                "duration_seconds": duration,
+            }
+        )
+    elif duration is not None and duration >= policy["warning_seconds"]:
+        severity = 1
+        reasons.append(
+            {
+                "code": "tmpfiles_duration_warning",
+                "boot_id": run["boot_id"],
+                "duration_seconds": duration,
+            }
+        )
+    if run["status"] in {"failed", "incomplete"}:
+        severity = max(severity, 1)
+        reasons.append(
+            {"code": f"tmpfiles_run_{run['status']}", "boot_id": run["boot_id"]}
+        )
+    return severity, reasons
+
+
+def build_tmpfiles_boot_report(
+    journal: dict[str, Any], inventory: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, Any]:
+    reasons: list[dict[str, Any]] = []
+    severity = 0
+    recent_runs = journal["recent_runs"]
+    latest_run = recent_runs[0] if recent_runs else None
+    if latest_run is not None:
+        latest_severity, latest_reasons = _tmpfiles_run_reason(latest_run, policy)
+        severity = max(severity, latest_severity)
+        reasons.extend(latest_reasons)
+
+    if inventory["total_entries_bounded"] >= policy["warning_candidate_entries"]:
+        severity = max(severity, 1)
+        reasons.append(
+            {
+                "code": "tmpfiles_candidate_entries_warning",
+                "entries": inventory["total_entries_bounded"],
+            }
+        )
+    if inventory["total_bytes_bounded"] >= policy["warning_candidate_bytes"]:
+        severity = max(severity, 1)
+        reasons.append(
+            {
+                "code": "tmpfiles_candidate_bytes_warning",
+                "bytes": inventory["total_bytes_bounded"],
+            }
+        )
+    if inventory["candidate_enumeration_truncated"] or inventory["truncated_candidate_count"]:
+        severity = max(severity, 1)
+        reasons.append({"code": "tmpfiles_inventory_truncated"})
+
+    historical_reasons: list[dict[str, Any]] = []
+    historical_severity = 0
+    historical_incident_count = 0
+    for run in recent_runs[1:]:
+        run_severity, run_reasons = _tmpfiles_run_reason(run, policy)
+        if run_reasons:
+            historical_incident_count += 1
+            historical_severity = max(historical_severity, run_severity)
+            historical_reasons.extend(run_reasons)
+
+    unavailable_groups = sum(
+        group["status"] != "ok" for group in inventory["groups"]
+    )
+    if latest_run is None and severity == 0:
+        status = "unknown"
+    elif not recent_runs and unavailable_groups == len(inventory["groups"]):
+        status = "unknown"
+    else:
+        status = ("healthy", "warning", "critical")[severity]
+    history_status = ("healthy", "warning", "critical")[historical_severity]
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc_tmpfiles_boot_report",
+        "status": status,
+        "reasons": reasons[:20],
+        "history_status": history_status,
+        "historical_reasons": historical_reasons[:20],
+        "historical_incident_count": historical_incident_count,
+        "latest_successful_duration_seconds": journal["latest_successful_duration_seconds"],
+        "historical_max_duration_seconds": journal["historical_max_duration_seconds"],
+        "incomplete_or_failed_runs": journal["incomplete_or_failed_runs"],
+        "recent_runs": recent_runs,
+        "inventory": inventory,
+        "bounds": {
+            key: policy[key]
+            for key in (
+                "lookback_hours",
+                "max_journal_entries",
+                "recent_runs",
+                "warning_seconds",
+                "critical_seconds",
+                "max_candidates",
+                "max_entries_per_candidate",
+                "top_offenders",
+                "warning_candidate_entries",
+                "warning_candidate_bytes",
+            )
+        },
+        "read_only": True,
+        "does_not_establish": [
+            "the_process_that_created_observed_temporary_files",
+            "absence_of_tmpfiles_work_outside_the_bounded_journal_window",
+            "safe_permission_to_delete_any_reported_path",
+            "complete_filesystem_usage_outside_the_explicit_candidate_set",
+        ],
+    }
+
+
+def run_tmpfiles_boot(
+    config: dict[str, Any],
+    *,
+    report_path: Path,
+    runner: Runner = subprocess.run,
+    root_overrides: dict[str, Path] | None = None,
+) -> dict[str, Any]:
+    policy = _tmpfiles_config(config)
+    records = read_bounded_tmpfiles_journal(policy, runner=runner)
+    journal = analyze_tmpfiles_journal(records, policy)
+    inventory = scan_tmpfiles_candidates(policy, root_overrides=root_overrides)
+    report = build_tmpfiles_boot_report(journal, inventory, policy)
+    _atomic_json(report_path, report)
+    return report
 
 def parse_cpuinfo(text: str) -> tuple[str, set[str]]:
     vendor = ""
@@ -1052,6 +1516,11 @@ def main() -> int:
     mce.add_argument("--state", type=Path, default=DEFAULT_MCE_STATE)
     mce.add_argument("--report", type=Path, default=DEFAULT_MCE_REPORT)
 
+    tmpfiles = subparsers.add_parser(
+        "tmpfiles-boot", help="report bounded tmpfiles boot duration and backlog evidence"
+    )
+    tmpfiles.add_argument("--report", type=Path, default=DEFAULT_TMPFILES_REPORT)
+
     subparsers.add_parser("kvm-svm", help="report CPU-flag, module, and /dev/kvm truth")
 
     fat = subparsers.add_parser("fat", help="check or explicitly repair an offline FAT device")
@@ -1076,6 +1545,9 @@ def main() -> int:
                 state_path=args.state,
                 report_path=args.report,
             )
+            returncode = 0
+        elif args.command == "tmpfiles-boot":
+            report = run_tmpfiles_boot(config, report_path=args.report)
             returncode = 0
         elif args.command == "kvm-svm":
             report = kvm_svm_truth()

@@ -35,6 +35,35 @@
     "deduplication": "bounded_constituent_overlap_and_boundary_span",
     "constituent_evidence_limit": 2000
   },
+  "tmpfiles_boot": {
+    "lookback_hours": 168,
+    "max_journal_entries": 2000,
+    "recent_runs": 24,
+    "warning_seconds": 30,
+    "critical_seconds": 120,
+    "max_candidates": 256,
+    "max_entries_per_candidate": 10000,
+    "top_offenders": 10,
+    "warning_candidate_entries": 5000,
+    "warning_candidate_bytes": 536870912,
+    "candidates": [
+      {
+        "label": "tmp-contents",
+        "root": "/tmp",
+        "pattern": "*"
+      },
+      {
+        "label": "var-tmp-systemd-private",
+        "root": "/var/tmp",
+        "pattern": "systemd-private-*"
+      },
+      {
+        "label": "var-tmp-flatpak-cache",
+        "root": "/var/tmp",
+        "pattern": "flatpak-cache-*"
+      }
+    ]
+  },
   "deployment": {
     "source_binding": "expected_git_commit_tree_verified_blob_objects",
     "exclusive_lock": "/var/lib/heim-pc/host-health/install.lock",
