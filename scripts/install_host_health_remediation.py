@@ -129,6 +129,11 @@ FILES = (
         0o644,
     ),
     (
+        "systemd/environment.d/60-heim-pc-pytest-temp-hygiene.conf",
+        "etc/environment.d/60-heim-pc-pytest-temp-hygiene.conf",
+        0o644,
+    ),
+    (
         "systemd/journald.conf.d/zz-heim-pc-retention.conf",
         "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf",
         0o644,
@@ -2382,6 +2387,12 @@ def _base_receipt(
             "systemctl enable --now logrotate.timer",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl enable --now heim-pc-tmpfiles-boot-monitor.timer",
+            (
+                "as alex: systemctl --user set-environment "
+                "'PYTEST_ADDOPTS=-o tmp_path_retention_count=1 "
+                "-o tmp_path_retention_policy=failed'; "
+                "the /etc/environment.d baseline persists across future user-manager starts"
+            ),
             "systemctl restart cpu-governor.service",
             (
                 "reload alex's user manager or reboot before evaluating the "
