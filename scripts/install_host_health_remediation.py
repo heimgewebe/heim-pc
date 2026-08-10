@@ -134,6 +134,21 @@ FILES = (
         0o644,
     ),
     (
+        "scripts/pytest_temp_gc.py",
+        "usr/local/libexec/heim-pc/pytest-temp-gc",
+        0o755,
+    ),
+    (
+        "systemd/system/heim-pc-pytest-temp-gc.service",
+        "etc/systemd/system/heim-pc-pytest-temp-gc.service",
+        0o644,
+    ),
+    (
+        "systemd/system/heim-pc-pytest-temp-gc.timer",
+        "etc/systemd/system/heim-pc-pytest-temp-gc.timer",
+        0o644,
+    ),
+    (
         "systemd/journald.conf.d/zz-heim-pc-retention.conf",
         "etc/systemd/journald.conf.d/zz-heim-pc-retention.conf",
         0o644,
@@ -2387,6 +2402,7 @@ def _base_receipt(
             "systemctl enable --now logrotate.timer",
             "systemctl enable --now heim-pc-mce-edac-monitor.timer",
             "systemctl enable --now heim-pc-tmpfiles-boot-monitor.timer",
+            "systemctl enable --now heim-pc-pytest-temp-gc.timer",
             (
                 "as alex: systemctl --user set-environment "
                 "'PYTEST_ADDOPTS=-o tmp_path_retention_count=1 "

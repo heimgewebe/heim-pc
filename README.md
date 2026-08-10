@@ -260,6 +260,14 @@ Die installierbaren Teile haben folgende Grenzen:
   keinen `TMPDIR`-/`--basetemp`-Redirect und keinen fremden `rm -rf`-Cleanup. Explizite
   `-o`-Optionen auf der Pytest-Kommandozeile können die Baseline für einen gezielten
   Debug-Lauf übersteuern.
+* `heim-pc-pytest-temp-gc.timer` schließt Pytests verbleibende Crash-Lücke:
+  alle zehn Minuten prüft ein als `alex` laufender, gehärteter Service ausschließlich
+  direkte `garbage-<uuid>`-Reste unter `/tmp/pytest-of-alex`. Entfernt wird erst nach
+  mindestens zehn Minuten und nur wenn ein vorhandener Pytest-Lock eine tote PID nennt,
+  kein gleichberechtigter Prozess den Baum als CWD/offene Datei verwendet, keine Mounts,
+  fremden Eigentümer oder Spezialdateien darin liegen. `pytest-N` und `pytest-current`
+  sind ausdrücklich außerhalb des Auswahlraums. Damit wird Pytests dreitägige
+  Crash-Retention für verwaiste Löschreste verkürzt, ohne aktive Tests anzutasten.
 
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI

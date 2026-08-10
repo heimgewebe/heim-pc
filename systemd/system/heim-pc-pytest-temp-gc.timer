@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically remove orphaned pytest garbage residues
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+AccuracySec=1min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=heim-pc-pytest-temp-gc.service
+
+[Install]
+WantedBy=timers.target
