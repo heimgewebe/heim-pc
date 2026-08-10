@@ -252,6 +252,14 @@ Die installierbaren Teile haben folgende Grenzen:
   liegt damit nicht im Boot-Critical-Path. Warnungen zeigen wachsenden
   `systemd-private-*`-/Flatpak-Temp-Ballast früh, ohne systemd-tmpfiles-Regeln
   zu überschreiben oder zu duplizieren.
+* `/etc/environment.d/60-heim-pc-pytest-temp-hygiene.conf` setzt für neue
+  User-/Operator-Prozesse `PYTEST_ADDOPTS` auf
+  `tmp_path_retention_count=1` und `tmp_path_retention_policy=failed`. Erfolgreiche
+  `tmp_path`-Sitzungen werden damit von Pytest selbst beim Session-Ende entfernt;
+  bei Fehlern bleibt höchstens eine Sitzung für die Diagnose erhalten. Es gibt bewusst
+  keinen `TMPDIR`-/`--basetemp`-Redirect und keinen fremden `rm -rf`-Cleanup. Explizite
+  `-o`-Optionen auf der Pytest-Kommandozeile können die Baseline für einen gezielten
+  Debug-Lauf übersteuern.
 
 * `heim-pc-host-health kvm-svm` trennt die Ebenen: Fehlt bei AMD das CPU-Flag
   `svm`, liegt der Befund vor der KVM-Modulladephase und weist auf in UEFI

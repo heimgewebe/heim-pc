@@ -112,6 +112,19 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
     def tearDown(self) -> None:
         installer.TRANSACTION_FAULT_HOOK = None
 
+    def test_pytest_temp_hygiene_uses_native_retention_without_redirecting_tmp(self) -> None:
+        relative = "systemd/environment.d/60-heim-pc-pytest-temp-hygiene.conf"
+        config = (ROOT / relative).read_text(encoding="utf-8")
+
+        self.assertIn("tmp_path_retention_count=1", config)
+        self.assertIn("tmp_path_retention_policy=failed", config)
+        self.assertNotIn("--basetemp", config)
+        self.assertNotIn("TMPDIR", config)
+        self.assertIn(
+            (relative, "etc/environment.d/60-heim-pc-pytest-temp-hygiene.conf", 0o644),
+            installer.FILES,
+        )
+
     def test_tmpfiles_monitor_reads_host_tmp_without_becoming_boot_blocker(self) -> None:
         service = (
             ROOT / "systemd/system/heim-pc-tmpfiles-boot-monitor.service"
