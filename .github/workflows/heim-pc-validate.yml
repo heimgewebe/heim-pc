@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  METAREPO_REF: "9d985c3a426d387173d8753b09dd5175a242a7d5" # Pinned to a specific, verified metarepo commit for reproducibility
+  METAREPO_REF: "6f410fcc01c8a5bce22ecf0b95bb6bb2c7679441" # Merge commit of metarepo PR #710; includes the manifest producer and provenance hardening
 
 jobs:
   validate:
@@ -63,11 +63,34 @@ jobs:
         working-directory: ./heim-pc
         run: python3 scripts/validate_syntax.py
 
-      - name: Smoke-run validate_contracts
+      - name: Smoke-run validate_contracts via Git checkout
         working-directory: ./heim-pc
         run: |
           python3 scripts/validate_contracts.py \
             --metarepo-source ../_metarepo \
+            --metarepo-expected-commit "${METAREPO_REF}"
+
+      - name: Emit and verify manifest-bound Metarepo source
+        run: |
+          python3 _metarepo/scripts/contracts/emit_source_manifest.py \
+            --source "${GITHUB_WORKSPACE}/_metarepo" \
+            --out-dir "${RUNNER_TEMP}/metarepo-contract-source" \
+            --consumer heim-pc \
+            --source-kind detached_archive \
+            --expected-commit "${METAREPO_REF}"
+          python3 _metarepo/scripts/contracts/emit_source_manifest.py \
+            --source "${GITHUB_WORKSPACE}/_metarepo" \
+            --out-dir "${RUNNER_TEMP}/metarepo-contract-source" \
+            --consumer heim-pc \
+            --source-kind detached_archive \
+            --expected-commit "${METAREPO_REF}" \
+            --verify >/dev/null
+
+      - name: Smoke-run validate_contracts via manifest
+        working-directory: ./heim-pc
+        run: |
+          python3 scripts/validate_contracts.py \
+            --metarepo-manifest "${RUNNER_TEMP}/metarepo-contract-source/metarepo-contract-source.v1.json" \
             --metarepo-expected-commit "${METAREPO_REF}"
 
       - name: Check repo-index consistency
