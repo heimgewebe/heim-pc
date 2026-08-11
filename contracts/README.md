@@ -53,11 +53,27 @@ must remain below the manifest directory. A consumed schema that is absent from
 the manifest, has a mismatching hash, escapes the source root, or changes during
 validation is rejected.
 
-Example:
+Create a manifest-bound archive from an explicit, pinned Metarepo checkout with
+the canonical producer shipped by Metarepo:
+
+```bash
+python3 ../_metarepo/scripts/contracts/emit_source_manifest.py \
+  --source ../_metarepo \
+  --out-dir /path/to/contract-source \
+  --consumer heim-pc \
+  --source-kind detached_archive \
+  --expected-commit 0123456789abcdef0123456789abcdef01234567
+```
+
+The producer binds committed Git-object bytes and the complete local schema
+resource closure. `--verify` re-proves an existing archive against the same
+explicit Metarepo source without rewriting it.
+
+Consume the resulting archive through the same heim-pc validator:
 
 ```bash
 python3 scripts/validate_contracts.py \
-  --metarepo-manifest /path/to/metarepo-contract-source.v1.json \
+  --metarepo-manifest /path/to/contract-source/metarepo-contract-source.v1.json \
   --metarepo-expected-commit 0123456789abcdef0123456789abcdef01234567
 ```
 
@@ -79,9 +95,15 @@ movement; manifest sources are rehashed against the bound schema bytes.
 
 ## CI
 
-`.github/workflows/heim-pc-validate.yml` checks out the pinned Metarepo revision
-as `_metarepo` and passes both the explicit path and `METAREPO_REF` to the
-validator. The checkout layout alone has no authority.
+`.github/workflows/heim-pc-validate.yml` checks out one exact Metarepo commit as
+`_metarepo` and validates both supported resolver routes against that same
+revision:
+
+1. the explicit Git checkout via `--metarepo-source`;
+2. a freshly emitted and verified detached archive via `--metarepo-manifest`.
+
+The checkout layout alone has no authority. Both routes remain bound to
+`METAREPO_REF`, so a pin movement is an explicit reviewed change.
 
 Local schemas must not be added back. If the canonical Metarepo source is
 missing or cannot be identity-bound, validation fails closed instead of falling
