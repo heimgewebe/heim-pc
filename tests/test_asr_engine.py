@@ -29,8 +29,14 @@ def test_policy_contract_and_default():
     assert comparator["package"] == "faster-whisper==1.2.1"
     assert comparator["legacy_comparator"] is True
 
-    assert policy["engines"]["parakeet"]["german_support"] is True
-    assert policy["engines"]["parakeet"]["runnable"] is False
+    parakeet = policy["engines"]["parakeet"]
+    assert parakeet["german_support"] is True
+    assert parakeet["runnable"] is True
+    assert parakeet["adapter"] == "transformers_tdt_cuda"
+    assert parakeet["package"] == "transformers[torch,accelerate]==5.15.0"
+    assert parakeet["package_version"] == "5.15.0"
+    assert parakeet["dependencies"] == ["librosa==0.11.0"]
+    assert parakeet["model_revision"] == "541d1f99c6b0c3cd0b11a95167540bb8edefd82b"
     assert policy["engines"]["moss"]["remote_code_risk"] is True
 
     cohere = policy["engines"]["cohere"]
@@ -47,8 +53,6 @@ def test_gated_and_unadapted_engines_fail_closed():
         asr_engine.check_runnable(policy["engines"]["cohere"], "cohere")
     with pytest.raises(ValueError, match="no validated local adapter"):
         asr_engine.check_runnable(policy["engines"]["moss"], "moss")
-    with pytest.raises(ValueError, match="no validated local adapter"):
-        asr_engine.check_runnable(policy["engines"]["parakeet"], "parakeet")
 
 
 def test_nonzero_cost_fails_closed():
@@ -261,3 +265,70 @@ def test_faster_whisper_cache_requires_model_and_metadata(tmp_path, monkeypatch)
     assert asr_engine.model_cache_ready("faster-whisper") is False
     (snapshot / "model.bin").write_bytes(b"model")
     assert asr_engine.model_cache_ready("faster-whisper") is True
+
+
+def test_parakeet_child_uses_transformers_tdt_offline_contract():
+    source = asr_engine.PARAKEET_CHILD
+    assert "AutoModelForTDT.from_pretrained" in source
+    assert "AutoProcessor.from_pretrained" in source
+    assert "revision=revision" in source
+    assert "local_files_only=True" in source
+    assert "model.generate" in source
+    assert "processor.decode" in source
+    assert "chunk_samples = 60 * 16000" in source
+
+
+def test_parakeet_cache_requires_exact_revision_and_core_files(tmp_path, monkeypatch):
+    policy = asr_engine.load_policy()
+    revision = policy["engines"]["parakeet"]["model_revision"]
+    hub = tmp_path / "hub"
+    snapshot = hub / "models--nvidia--parakeet-tdt-0.6b-v3" / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    monkeypatch.setattr(asr_engine, "HF_HUB_CACHE_DIR", hub)
+    for name in ("config.json", "model.safetensors", "processor_config.json"):
+        (snapshot / name).write_bytes(b"x")
+    assert asr_engine.model_cache_ready("parakeet") is False
+    (snapshot / "tokenizer.json").write_bytes(b"x")
+    assert asr_engine.model_cache_ready("parakeet") is True
+
+
+def test_setup_parakeet_pins_package_and_model_revision(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
+    monkeypatch.setattr(asr_engine, "HF_HOME_DIR", cache / "hf_home")
+    monkeypatch.setattr(asr_engine, "HF_HUB_CACHE_DIR", cache / "hf_home" / "hub")
+    monkeypatch.setattr(asr_engine.shutil, "which", lambda _tool: "/usr/bin/uv")
+    monkeypatch.setattr(asr_engine, "package_probe", lambda _engine: (True, "5.15.0"))
+    monkeypatch.setattr(asr_engine, "model_cache_ready", lambda _engine: True)
+    with patch.object(asr_engine.subprocess, "run") as run:
+        asr_engine.cmd_setup(Namespace(engine="parakeet"))
+    commands = [call.args[0] for call in run.call_args_list]
+    assert any("transformers[torch,accelerate]==5.15.0" in command for command in commands)
+    assert any("librosa==0.11.0" in command for command in commands)
+    download = next(command for command in commands if len(command) > 2 and command[1] == "-c" and "snapshot_download" in command[2])
+    assert "nvidia/parakeet-tdt-0.6b-v3" in download
+    assert "541d1f99c6b0c3cd0b11a95167540bb8edefd82b" in download
+
+
+def test_run_inference_parakeet_forces_offline_and_revision(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    venv = cache / "venv_parakeet" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
+    monkeypatch.setattr(asr_engine, "HF_HOME_DIR", cache / "hf_home")
+    monkeypatch.setattr(asr_engine, "HF_HUB_CACHE_DIR", cache / "hf_home" / "hub")
+    monkeypatch.setattr(asr_engine, "model_cache_ready", lambda _engine: True)
+    observed = {}
+    def child(argv, env):
+        observed["argv"] = argv
+        observed["env"] = env
+        return 0, json.dumps({"text": "x", "language": None, "version": "5.15.0"}), "", 512
+    monkeypatch.setattr(asr_engine, "run_child_with_gpu_observation", child)
+    conf = asr_engine.load_policy()["engines"]["parakeet"]
+    result = asr_engine.run_inference("parakeet", conf, tmp_path / "a.wav")
+    assert result["text"] == "x"
+    assert observed["env"]["HF_HUB_OFFLINE"] == "1"
+    assert observed["env"]["TRANSFORMERS_OFFLINE"] == "1"
+    assert conf["model"] in observed["argv"]
+    assert conf["model_revision"] in observed["argv"]
