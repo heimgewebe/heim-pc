@@ -206,6 +206,16 @@ def _faster_whisper_snapshot_complete(snapshot: Path) -> bool:
     return all((snapshot / name).is_file() for name in required)
 
 
+def _parakeet_snapshot_complete(snapshot: Path) -> bool:
+    required = (
+        "config.json",
+        "model.safetensors",
+        "processor_config.json",
+        "tokenizer.json",
+    )
+    return all((snapshot / name).is_file() for name in required)
+
+
 def model_cache_ready(engine_name: str) -> bool:
     if engine_name == "qwen":
         snapshots = (
@@ -221,6 +231,18 @@ def model_cache_ready(engine_name: str) -> bool:
             / "snapshots"
         )
         validator = _faster_whisper_snapshot_complete
+    elif engine_name == "parakeet":
+        engine_conf = get_engine(load_policy(), engine_name)
+        revision = engine_conf.get("model_revision")
+        if not isinstance(revision, str) or len(revision) != 40:
+            return False
+        snapshot = (
+            HF_HUB_CACHE_DIR
+            / "models--nvidia--parakeet-tdt-0.6b-v3"
+            / "snapshots"
+            / revision
+        )
+        return snapshot.is_dir() and _parakeet_snapshot_complete(snapshot)
     else:
         return False
     if not snapshots.is_dir():
@@ -246,6 +268,14 @@ def package_probe(engine_name: str) -> tuple[bool, str]:
             "assert ctranslate2.get_cuda_device_count() > 0, 'ctranslate2-cuda-unavailable'; "
             f"print(m.version('{distribution}'))"
         )
+    elif engine_name == "parakeet":
+        distribution = "transformers"
+        code = (
+            "import importlib.metadata as m; import librosa; import torch; "
+            "from transformers import AutoModelForTDT, AutoProcessor; "
+            "assert torch.cuda.is_available(), 'torch-cuda-unavailable'; "
+            f"print(m.version('{distribution}'))"
+        )
     else:
         return False, "adapter-unsupported"
     result = subprocess.run(
@@ -257,7 +287,11 @@ def package_probe(engine_name: str) -> tuple[bool, str]:
     )
     if result.returncode != 0:
         return False, "package-or-cuda-probe-failed"
-    return True, result.stdout.strip()
+    observed_version = result.stdout.strip()
+    expected_version = get_engine(load_policy(), engine_name).get("package_version")
+    if isinstance(expected_version, str) and observed_version != expected_version:
+        return False, "package-version-mismatch"
+    return True, observed_version
 
 
 def cmd_doctor(args: argparse.Namespace) -> bool:
@@ -354,6 +388,39 @@ def cmd_setup(args: argparse.Namespace) -> None:
             env=env,
             check=True,
         )
+    elif engine_name == "parakeet":
+        revision = engine_conf.get("model_revision")
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise ValueError("Parakeet requires an exact 40-character model revision")
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                python_exec,
+                engine_conf["package"],
+                *engine_conf.get("dependencies", []),
+            ],
+            env=env,
+            check=True,
+        )
+        download_code = (
+            "from huggingface_hub import snapshot_download; import sys; "
+            "snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], cache_dir=sys.argv[3], allow_patterns=['config.json', 'generation_config.json', 'model.safetensors', 'processor_config.json', 'tokenizer.json', 'tokenizer_config.json'])"
+        )
+        subprocess.run(
+            [
+                python_exec,
+                "-c",
+                download_code,
+                engine_conf["model"],
+                revision,
+                str(HF_HUB_CACHE_DIR),
+            ],
+            env=env,
+            check=True,
+        )
     else:
         raise ValueError(f"Setup adapter missing for {engine_name}")
 
@@ -426,6 +493,69 @@ print(json.dumps({
 '''
 
 
+PARAKEET_CHILD = r'''
+import importlib.metadata as metadata
+import json
+import subprocess
+import sys
+
+import numpy as np
+import torch
+from transformers import AutoModelForTDT, AutoProcessor
+
+decoded = subprocess.run(
+    [
+        "ffmpeg", "-v", "error", "-i", sys.argv[3],
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    check=False,
+)
+if decoded.returncode != 0 or not decoded.stdout:
+    raise RuntimeError("ffmpeg could not decode input media for Parakeet ASR")
+audio = np.frombuffer(decoded.stdout, dtype="<f4")
+
+model_id = sys.argv[1]
+revision = sys.argv[2]
+processor = AutoProcessor.from_pretrained(
+    model_id, revision=revision, local_files_only=True
+)
+model = AutoModelForTDT.from_pretrained(
+    model_id,
+    revision=revision,
+    local_files_only=True,
+    dtype=torch.float16,
+    device_map="cuda:0",
+)
+
+# Bound memory on the 16-GB heim-pc GPU while preserving the full input.
+chunk_samples = 60 * 16000
+texts = []
+for start in range(0, len(audio), chunk_samples):
+    chunk = audio[start:start + chunk_samples]
+    inputs = processor(
+        chunk, sampling_rate=processor.feature_extractor.sampling_rate, return_tensors="pt"
+    )
+    inputs.to(device=model.device, dtype=model.dtype)
+    with torch.inference_mode():
+        output = model.generate(**inputs, return_dict_in_generate=True)
+    decoded_text = processor.decode(output.sequences, skip_special_tokens=True)
+    if isinstance(decoded_text, list):
+        decoded_text = " ".join(str(item) for item in decoded_text)
+    decoded_text = str(decoded_text).strip()
+    if decoded_text:
+        texts.append(decoded_text)
+
+print(json.dumps({
+    "text": " ".join(texts).strip(),
+    "language": None,
+    "version": metadata.version("transformers"),
+}, ensure_ascii=False))
+'''
+
+
 def run_inference(
     engine_name: str, engine_conf: dict[str, Any], audio_path: Path
 ) -> dict[str, Any]:
@@ -445,6 +575,18 @@ def run_inference(
             FASTER_WHISPER_CHILD,
             str(audio_path),
             str(FASTER_WHISPER_MODEL_DIR),
+        ]
+    elif engine_name == "parakeet":
+        revision = engine_conf.get("model_revision")
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise BackendError("Parakeet model revision is not exact")
+        argv = [
+            str(python_exec),
+            "-c",
+            PARAKEET_CHILD,
+            engine_conf["model"],
+            revision,
+            str(audio_path),
         ]
     else:
         raise BackendError(f"No inference adapter for {engine_name}")
@@ -529,6 +671,8 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         "technical_duration_seconds": duration,
         "engine": engine_name,
         "model": engine_conf["model"],
+        "model_revision": engine_conf.get("model_revision"),
+        "package": engine_conf.get("package"),
         "repo_head": get_repo_head(),
         "repo_dirty": get_repo_dirty(),
         "policy_sha256": policy_sha256(),
@@ -576,7 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser("doctor", help="Read-only ASR readiness check")
-    doctor.add_argument("--engine", choices=("qwen", "faster-whisper"))
+    doctor.add_argument("--engine", choices=("qwen", "faster-whisper", "parakeet"))
 
     setup = subparsers.add_parser("setup", help="Explicitly install one local ASR engine")
     setup.add_argument("--engine", required=True)

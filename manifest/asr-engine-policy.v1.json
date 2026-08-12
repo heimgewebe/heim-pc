@@ -53,21 +53,28 @@
     },
     "parakeet": {
       "model": "nvidia/parakeet-tdt-0.6b-v3",
-      "adapter": null,
+      "model_revision": "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+      "adapter": "transformers_tdt_cuda",
+      "package": "transformers[torch,accelerate]==5.15.0",
+      "package_distribution": "transformers",
+      "package_version": "5.15.0",
       "type": "local",
       "license": "CC-BY-4.0",
       "gated": false,
-      "runnable": false,
+      "runnable": true,
       "cost": "zero",
       "german_support": true,
-      "automatic_setup_support": false,
-      "automatic_inference_support": false,
+      "automatic_setup_support": true,
+      "automatic_inference_support": true,
       "features": {
         "language_detection": true,
         "timestamps": true,
         "diarization": false,
         "streaming_in_current_adapter": false
-      }
+      },
+      "dependencies": [
+        "librosa==0.11.0"
+      ]
     },
     "moss": {
       "model": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
