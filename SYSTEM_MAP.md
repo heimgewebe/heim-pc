@@ -18,6 +18,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
 | operatorium-entry | [architecture/operatorium-entry.md](architecture/operatorium-entry.md) | canonical | 2026-07-13 | model, security, zones, drift-policy |
+| asr-engine | [architecture/asr-engine.md](architecture/asr-engine.md) | canonical | 2026-08-12 | operatorium-entry, security |
 | model | [architecture/model.md](architecture/model.md) | canonical | 2026-07-13 | security |
 | security | [architecture/security.md](architecture/security.md) | canonical | 2026-02-28 | - |
 | zones | [architecture/zones.md](architecture/zones.md) | canonical | 2026-02-28 | - |
