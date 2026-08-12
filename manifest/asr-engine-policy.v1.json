@@ -1,0 +1,36 @@
+{
+  "id": "asr-engine-policy.v1",
+  "default_engine": "qwen",
+  "engines": {
+    "qwen": {
+      "model": "Qwen3-ASR-1.7B",
+      "type": "local",
+      "gated": false,
+      "cost": "zero"
+    },
+    "parakeet": {
+      "model": "Parakeet v3",
+      "type": "local",
+      "gated": false,
+      "cost": "zero"
+    },
+    "moss": {
+      "model": "MOSS Transcribe-Diarize",
+      "type": "local",
+      "gated": false,
+      "cost": "zero"
+    },
+    "faster-whisper": {
+      "model": "faster-whisper",
+      "type": "local",
+      "gated": false,
+      "cost": "zero"
+    },
+    "cohere": {
+      "model": "Cohere Transcribe",
+      "type": "cloud",
+      "gated": true,
+      "cost": "metered"
+    }
+  }
+}
