@@ -1,36 +1,111 @@
 {
   "id": "asr-engine-policy.v1",
+  "schema_version": 1,
   "default_engine": "qwen",
+  "invariants": {
+    "zero_incremental_cost": true,
+    "local_inference_only": true,
+    "paid_or_metered_api_allowed": false,
+    "gated_engine_unattended_use_allowed": false,
+    "setup_is_explicit": true,
+    "doctor_may_download": false,
+    "benchmark_may_download": false
+  },
   "engines": {
     "qwen": {
-      "model": "Qwen3-ASR-1.7B",
+      "model": "Qwen/Qwen3-ASR-1.7B",
+      "adapter": "qwen_asr_transformers",
+      "package": "qwen-asr==0.0.6",
       "type": "local",
+      "license": "Apache-2.0",
       "gated": false,
-      "cost": "zero"
-    },
-    "parakeet": {
-      "model": "Parakeet v3",
-      "type": "local",
-      "gated": false,
-      "cost": "zero"
-    },
-    "moss": {
-      "model": "MOSS Transcribe-Diarize",
-      "type": "local",
-      "gated": false,
-      "cost": "zero"
+      "runnable": true,
+      "cost": "zero",
+      "german_support": true,
+      "automatic_setup_support": true,
+      "automatic_inference_support": true,
+      "features": {
+        "language_detection": true,
+        "timestamps": false,
+        "diarization": false,
+        "streaming_in_current_adapter": false
+      }
     },
     "faster-whisper": {
-      "model": "faster-whisper",
+      "model": "Systran/faster-whisper-large-v3",
+      "adapter": "faster_whisper_cuda",
+      "package": "faster-whisper==1.2.1",
       "type": "local",
+      "license": "MIT",
       "gated": false,
-      "cost": "zero"
+      "runnable": true,
+      "cost": "zero",
+      "german_support": true,
+      "automatic_setup_support": true,
+      "automatic_inference_support": true,
+      "legacy_comparator": true,
+      "features": {
+        "language_detection": true,
+        "timestamps": true,
+        "diarization": false,
+        "streaming_in_current_adapter": false
+      }
+    },
+    "parakeet": {
+      "model": "nvidia/parakeet-tdt-0.6b-v3",
+      "adapter": null,
+      "type": "local",
+      "license": "CC-BY-4.0",
+      "gated": false,
+      "runnable": false,
+      "cost": "zero",
+      "german_support": true,
+      "automatic_setup_support": false,
+      "automatic_inference_support": false,
+      "features": {
+        "language_detection": true,
+        "timestamps": true,
+        "diarization": false,
+        "streaming_in_current_adapter": false
+      }
+    },
+    "moss": {
+      "model": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+      "adapter": null,
+      "type": "local",
+      "license": "Apache-2.0",
+      "gated": false,
+      "runnable": false,
+      "cost": "zero",
+      "german_support": true,
+      "automatic_setup_support": false,
+      "automatic_inference_support": false,
+      "remote_code_risk": true,
+      "features": {
+        "language_detection": true,
+        "timestamps": true,
+        "diarization": true,
+        "streaming_in_current_adapter": false
+      }
     },
     "cohere": {
-      "model": "Cohere Transcribe",
-      "type": "cloud",
+      "model": "CohereLabs/cohere-transcribe-03-2026",
+      "adapter": null,
+      "type": "local",
+      "license": "Apache-2.0",
       "gated": true,
-      "cost": "metered"
+      "runnable": false,
+      "cost": "zero",
+      "german_support": true,
+      "automatic_setup_support": false,
+      "automatic_inference_support": false,
+      "manual_only": true,
+      "features": {
+        "language_detection": false,
+        "timestamps": false,
+        "diarization": false,
+        "streaming_in_current_adapter": false
+      }
     }
   }
 }
