@@ -158,6 +158,63 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     ):
         _require_host_path(host.get(field), f"host.{field}", errors)
 
+    capability_locators = _require_object(
+        contract.get("capabilityLocators"), "capabilityLocators", errors
+    )
+    transcription = _require_object(
+        capability_locators.get("audioTranscription"),
+        "capabilityLocators.audioTranscription",
+        errors,
+    )
+    required_transcription_intents = {
+        "audio.transcribe",
+        "speech_to_text",
+        "transcription",
+        "asr",
+    }
+    transcription_intents = transcription.get("intents")
+    if not isinstance(transcription_intents, list) or not required_transcription_intents.issubset(
+        set(transcription_intents)
+    ):
+        errors.append("capabilityLocators.audioTranscription.intents is incomplete")
+    if transcription.get("schemaVersion") != 1:
+        errors.append("capabilityLocators.audioTranscription.schemaVersion must be 1")
+    if transcription.get("authority") != "heim_pc_asr_open_engine":
+        errors.append("capabilityLocators.audioTranscription.authority is invalid")
+    if transcription.get("authorityKind") != "capability_locator_only":
+        errors.append("capabilityLocators.audioTranscription.authorityKind must remain locator-only")
+    for field in ("repository", "architecture", "policy"):
+        _require_host_path(
+            transcription.get(field),
+            f"capabilityLocators.audioTranscription.{field}",
+            errors,
+        )
+    expected_asr_entry = [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/asr_engine.py",
+    ]
+    if transcription.get("entryArgvPrefix") != expected_asr_entry:
+        errors.append("capabilityLocators.audioTranscription.entryArgvPrefix must name the canonical ASR entry")
+    if transcription.get("defaultOperation") != "transcribe":
+        errors.append("capabilityLocators.audioTranscription.defaultOperation must be transcribe")
+    if transcription.get("policyResolution") != "read_at_execution_time":
+        errors.append("capabilityLocators.audioTranscription.policyResolution must be read_at_execution_time")
+    if transcription.get("consumerEnginePinningAllowed") is not False:
+        errors.append("capabilityLocators.audioTranscription.consumerEnginePinningAllowed must remain false")
+    if transcription.get("cloudOrMeteredUseAuthorizedByLocator") is not False:
+        errors.append("capabilityLocators.audioTranscription.cloudOrMeteredUseAuthorizedByLocator must remain false")
+    required_transcription_limits = {
+        "current_engine_readiness",
+        "audio_file_access",
+        "cloud_cost_authorization",
+        "transcription_correctness",
+    }
+    transcription_limits = transcription.get("doesNotEstablish")
+    if not isinstance(transcription_limits, list) or not required_transcription_limits.issubset(
+        set(transcription_limits)
+    ):
+        errors.append("capabilityLocators.audioTranscription.doesNotEstablish is incomplete")
+
     managed_builds = _require_object(contract.get("managedBuilds"), "managedBuilds", errors)
     _require_host_path(managed_builds.get("policy"), "managedBuilds.policy", errors)
     _require_host_path(managed_builds.get("installedPolicy"), "managedBuilds.installedPolicy", errors)
@@ -302,6 +359,7 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         "operator_context",
         "local_entry",
         "scope_classification",
+        "capability_resolution",
         "source_resolution",
         "target_specific_live_state",
     }

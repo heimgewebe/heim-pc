@@ -33,6 +33,34 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(contract["host"]["role"], "primary_local_operator_host")
         self.assertEqual(contract["host"]["installedEntryFile"], "${HOME}/.config/heimgewebe/operator-entry.v1.json")
         self.assertEqual(contract["host"]["repositoriesAgentPointer"], "${HOME}/repos/AGENTS.md")
+        transcription = contract["capabilityLocators"]["audioTranscription"]
+        self.assertEqual(transcription["schemaVersion"], 1)
+        self.assertEqual(
+            set(transcription["intents"]),
+            {"audio.transcribe", "speech_to_text", "transcription", "asr"},
+        )
+        self.assertEqual(transcription["authority"], "heim_pc_asr_open_engine")
+        self.assertEqual(transcription["authorityKind"], "capability_locator_only")
+        self.assertEqual(transcription["repository"], "${HOME}/repos/heim-pc")
+        self.assertEqual(
+            transcription["architecture"],
+            "${HOME}/repos/heim-pc/architecture/asr-engine.md",
+        )
+        self.assertEqual(
+            transcription["policy"],
+            "${HOME}/repos/heim-pc/manifest/asr-engine-policy.v1.json",
+        )
+        self.assertEqual(
+            transcription["entryArgvPrefix"],
+            ["python3", "${HOME}/repos/heim-pc/scripts/asr_engine.py"],
+        )
+        self.assertEqual(transcription["defaultOperation"], "transcribe")
+        self.assertEqual(transcription["policyResolution"], "read_at_execution_time")
+        self.assertFalse(transcription["consumerEnginePinningAllowed"])
+        self.assertFalse(transcription["cloudOrMeteredUseAuthorizedByLocator"])
+        self.assertNotIn("faster-whisper", json.dumps(transcription, ensure_ascii=False))
+        self.assertNotIn("qwen", json.dumps(transcription, ensure_ascii=False).lower())
+        self.assertNotIn("parakeet", json.dumps(transcription, ensure_ascii=False).lower())
         policy = contract["transferPolicy"]
         self.assertEqual(policy["principle"], "role_based_dual_transport")
         self.assertEqual(policy["scope"], "heim_pc_mobile_devices")
@@ -150,6 +178,7 @@ class OperatorEntryTests(unittest.TestCase):
         )
         entry_ids = {item["id"] for item in contract["entrySequence"]}
         self.assertIn("operator_context", entry_ids)
+        self.assertIn("capability_resolution", entry_ids)
         self.assertIn("target_specific_live_state", entry_ids)
         self.assertIn("stableEcosystemSemantics", contract["truthSources"])
         self.assertIn("executionRuntimeLeases", contract["truthSources"])
@@ -197,6 +226,33 @@ class OperatorEntryTests(unittest.TestCase):
             self.assertFalse(receipt["valid"])
             self.assertIn(
                 "managedBuilds.automaticCleanupAuthorized must remain false",
+                receipt["errors"],
+            )
+
+    def test_checker_rejects_transcription_locator_engine_pinning_or_cloud_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            locator = contract["capabilityLocators"]["audioTranscription"]
+            locator["consumerEnginePinningAllowed"] = True
+            locator["cloudOrMeteredUseAuthorizedByLocator"] = True
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            policy_path = ROOT / "config/managed-build.v1.json"
+            with (
+                patch.object(checker, "CONTRACT_PATH", contract_path),
+                patch.object(checker, "MANAGED_BUILD_POLICY_PATH", policy_path),
+            ):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertFalse(receipt["valid"])
+            self.assertIn(
+                "capabilityLocators.audioTranscription.consumerEnginePinningAllowed must remain false",
+                receipt["errors"],
+            )
+            self.assertIn(
+                "capabilityLocators.audioTranscription.cloudOrMeteredUseAuthorizedByLocator must remain false",
                 receipt["errors"],
             )
 
