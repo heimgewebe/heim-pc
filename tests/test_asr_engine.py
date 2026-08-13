@@ -14,8 +14,13 @@ def test_policy_contract_and_default():
     policy = asr_engine.load_policy()
     assert policy["id"] == "asr-engine-policy.v1"
     assert policy["default_engine"] == "qwen"
-    assert policy["invariants"]["zero_incremental_cost"] is True
-    assert policy["invariants"]["paid_or_metered_api_allowed"] is False
+    invariants = policy["invariants"]
+    assert invariants["default_path_zero_incremental_cost"] is True
+    assert invariants["default_path_local_inference_only"] is True
+    assert invariants["paid_or_metered_api_allowed_without_explicit_per_run_opt_in"] is False
+    assert "zero_incremental_cost" not in invariants
+    assert "local_inference_only" not in invariants
+    assert "paid_or_metered_api_allowed" not in invariants
 
     qwen = policy["engines"]["qwen"]
     assert qwen["model"] == "Qwen/Qwen3-ASR-1.7B"
@@ -69,6 +74,16 @@ def test_no_simulation_or_dry_run_surface():
     source = Path(asr_engine.__file__).read_text(encoding="utf-8").casefold()
     assert "simulating inference" not in source
     assert "dummy implementation" not in source
+
+
+def test_embedded_backend_programs_import_sys_for_argv():
+    for source in (
+        asr_engine.QWEN_CHILD,
+        asr_engine.FASTER_WHISPER_CHILD,
+        asr_engine.PARAKEET_CHILD,
+    ):
+        assert "\nimport sys\n" in source
+        assert "sys.argv" in source
 
 
 def test_qwen_child_uses_official_qwen_asr_api():
@@ -391,7 +406,7 @@ def test_policy_local_first_and_cloud_is_explicit_only():
     assert routing["default_local_engine"] == "qwen"
     assert routing["automatic_cloud_escalation"] is False
     assert routing["local_engines"] == ["qwen", "parakeet", "faster-whisper"]
-    assert policy["invariants"]["paid_or_metered_api_allowed"] is False
+    assert policy["invariants"]["paid_or_metered_api_allowed_without_explicit_per_run_opt_in"] is False
     assert policy["invariants"]["automatic_cloud_escalation_allowed"] is False
     assert policy["invariants"]["metered_cloud_allowed_with_explicit_per_run_opt_in"] is True
     assert policy["invariants"]["paid_or_metered_api_semantics"] == "not-allowed-without-explicit-per-run-opt-in"
@@ -404,6 +419,16 @@ def test_policy_local_first_and_cloud_is_explicit_only():
         assert cloud["provider"] == "openai"
         assert cloud["cost"] == "metered"
         assert cloud["requires_explicit_metered_opt_in"] is True
+
+
+def test_policy_rejects_ambiguous_legacy_cost_flags(tmp_path, monkeypatch):
+    policy = json.loads(asr_engine.MANIFEST_PATH.read_text(encoding="utf-8"))
+    policy["invariants"]["local_inference_only"] = True
+    manifest = tmp_path / "asr-policy.json"
+    manifest.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "MANIFEST_PATH", manifest)
+    with pytest.raises(ValueError, match="ambiguous legacy cost flags"):
+        asr_engine.load_policy()
 
 
 def test_normalized_result_does_not_invent_unsupported_metadata():
