@@ -21,6 +21,36 @@
     "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
     "role": "primary_local_operator_host"
   },
+  "capabilityLocators": {
+    "audioTranscription": {
+      "schemaVersion": 1,
+      "intents": [
+        "audio.transcribe",
+        "speech_to_text",
+        "transcription",
+        "asr"
+      ],
+      "authority": "heim_pc_asr_open_engine",
+      "authorityKind": "capability_locator_only",
+      "repository": "${HOME}/repos/heim-pc",
+      "architecture": "${HOME}/repos/heim-pc/architecture/asr-engine.md",
+      "policy": "${HOME}/repos/heim-pc/manifest/asr-engine-policy.v1.json",
+      "entryArgvPrefix": [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/asr_engine.py"
+      ],
+      "defaultOperation": "transcribe",
+      "policyResolution": "read_at_execution_time",
+      "consumerEnginePinningAllowed": false,
+      "cloudOrMeteredUseAuthorizedByLocator": false,
+      "doesNotEstablish": [
+        "current_engine_readiness",
+        "audio_file_access",
+        "cloud_cost_authorization",
+        "transcription_correctness"
+      ]
+    }
+  },
   "transferPolicy": {
     "scope": "heim_pc_mobile_devices",
     "principle": "role_based_dual_transport",
@@ -215,6 +245,12 @@
         "task_selection",
         "historical_evidence"
       ]
+    },
+    {
+      "id": "capability_resolution",
+      "surface": "contract",
+      "operation": "resolve_capability_locator_if_present",
+      "purpose": "map generic host intents to canonical capability authorities without pinning provider, model or current runtime state"
     },
     {
       "id": "source_resolution",
