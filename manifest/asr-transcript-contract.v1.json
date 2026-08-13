@@ -1,0 +1,36 @@
+{
+  "id": "asr-transcript-contract.v1",
+  "schema_version": 1,
+  "kind": "heim-pc.asr-transcript",
+  "required_fields": [
+    "schema_version",
+    "kind",
+    "provider",
+    "engine",
+    "model",
+    "model_revision",
+    "backend_version",
+    "text",
+    "language",
+    "segments"
+  ],
+  "nullable_fields": [
+    "model_revision",
+    "backend_version",
+    "language",
+    "segments[].start",
+    "segments[].end",
+    "segments[].speaker"
+  ],
+  "segment_fields": [
+    "start",
+    "end",
+    "speaker",
+    "text"
+  ],
+  "rules": [
+    "Backends MUST NOT invent language, timestamps, speakers or segments when unavailable.",
+    "The legacy transcribe command may print only text; structured router output uses this contract.",
+    "Transcript objects are ephemeral output and are not written to benchmark evidence by the ASR engine."
+  ]
+}

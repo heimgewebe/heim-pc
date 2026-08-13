@@ -8,6 +8,7 @@ zones:
     canonical_docs:
       - operatorium-entry.md
       - asr-engine.md
+      - asr-golden-corpus.md
       - model.md
       - security.md
       - zones.md

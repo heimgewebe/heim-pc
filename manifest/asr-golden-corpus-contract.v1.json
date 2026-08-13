@@ -1,0 +1,33 @@
+{
+  "id": "asr-golden-corpus-contract.v1",
+  "schema_version": 1,
+  "kind": "heim-pc.asr-golden-corpus-contract",
+  "private_manifest_kind": "heim-pc.asr-golden-corpus",
+  "minimum_quality_samples": 20,
+  "required_quality_categories": [
+    "clear_speech",
+    "fast_or_quiet_speech",
+    "background_noise",
+    "proper_names_or_domain_terms",
+    "multi_speaker"
+  ],
+  "item_fields": [
+    "id",
+    "categories",
+    "audio",
+    "reference",
+    "reference_kind"
+  ],
+  "privacy_rules": [
+    "Private manifest, audio, references and transcript text MUST remain outside the repository.",
+    "Persisted benchmark evidence may contain only digests, category labels, model/adapter identity and technical/quality metrics.",
+    "Machine-generated transcripts MUST NOT be used as reference ground truth."
+  ],
+  "selection_rules": [
+    "Qwen remains default unless a private corpus satisfies minimum sample count and category coverage.",
+    "WER and CER require human-corrected reference text.",
+    "RTF, wall time and GPU memory are independent performance axes and cannot substitute for WER/CER.",
+    "Cloud results may be compared separately but cannot automatically change the local default."
+  ],
+  "required_reference_kind": "human-corrected"
+}

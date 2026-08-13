@@ -9,7 +9,12 @@
     "gated_engine_unattended_use_allowed": false,
     "setup_is_explicit": true,
     "doctor_may_download": false,
-    "benchmark_may_download": false
+    "benchmark_may_download": false,
+    "metered_cloud_registered": true,
+    "metered_cloud_requires_explicit_per_run_opt_in": true,
+    "automatic_cloud_escalation_allowed": false,
+    "paid_or_metered_api_semantics": "not-allowed-without-explicit-per-run-opt-in",
+    "metered_cloud_allowed_with_explicit_per_run_opt_in": true
   },
   "engines": {
     "qwen": {
@@ -28,7 +33,8 @@
         "language_detection": true,
         "timestamps": false,
         "diarization": false,
-        "streaming_in_current_adapter": false
+        "streaming_in_current_adapter": false,
+        "timestamps_in_current_adapter": false
       }
     },
     "faster-whisper": {
@@ -48,7 +54,8 @@
         "language_detection": true,
         "timestamps": true,
         "diarization": false,
-        "streaming_in_current_adapter": false
+        "streaming_in_current_adapter": false,
+        "timestamps_in_current_adapter": true
       }
     },
     "parakeet": {
@@ -70,7 +77,8 @@
         "language_detection": true,
         "timestamps": true,
         "diarization": false,
-        "streaming_in_current_adapter": false
+        "streaming_in_current_adapter": false,
+        "timestamps_in_current_adapter": false
       },
       "dependencies": [
         "librosa==0.11.0"
@@ -112,6 +120,72 @@
         "timestamps": false,
         "diarization": false,
         "streaming_in_current_adapter": false
+      }
+    }
+  },
+  "routing": {
+    "schema_version": 1,
+    "default_strategy": "local-first",
+    "default_local_engine": "qwen",
+    "local_engines": [
+      "qwen",
+      "parakeet",
+      "faster-whisper"
+    ],
+    "dual_local_default_secondary": "parakeet",
+    "dual_local_disagreement_threshold": 0.18,
+    "automatic_cloud_escalation": false,
+    "cloud_escalation_requires": [
+      "--escalate-to-cloud",
+      "--allow-metered-cloud"
+    ],
+    "default_cloud_model": "gpt-4o-transcribe"
+  },
+  "cloud_engines": {
+    "gpt-4o-transcribe": {
+      "provider": "openai",
+      "model": "gpt-4o-transcribe",
+      "type": "cloud",
+      "cost": "metered",
+      "endpoint": "https://api.openai.com/v1/audio/transcriptions",
+      "runnable": true,
+      "requires_explicit_metered_opt_in": true,
+      "response_format": "json",
+      "features": {
+        "language_detection": true,
+        "timestamps": false,
+        "diarization": false
+      }
+    },
+    "gpt-4o-mini-transcribe": {
+      "provider": "openai",
+      "model": "gpt-4o-mini-transcribe",
+      "type": "cloud",
+      "cost": "metered",
+      "endpoint": "https://api.openai.com/v1/audio/transcriptions",
+      "runnable": true,
+      "requires_explicit_metered_opt_in": true,
+      "response_format": "json",
+      "features": {
+        "language_detection": true,
+        "timestamps": false,
+        "diarization": false
+      }
+    },
+    "gpt-4o-transcribe-diarize": {
+      "provider": "openai",
+      "model": "gpt-4o-transcribe-diarize",
+      "type": "cloud",
+      "cost": "metered",
+      "endpoint": "https://api.openai.com/v1/audio/transcriptions",
+      "runnable": true,
+      "requires_explicit_metered_opt_in": true,
+      "response_format": "diarized_json",
+      "chunking_strategy": "auto",
+      "features": {
+        "language_detection": false,
+        "timestamps": true,
+        "diarization": true
       }
     }
   }
