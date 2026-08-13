@@ -1,7 +1,7 @@
 {
   "id": "asr-engine-policy.v1",
   "schema_version": 1,
-  "default_engine": "qwen",
+  "default_engine": "faster-whisper",
   "invariants": {
     "default_path_zero_incremental_cost": true,
     "default_path_local_inference_only": true,
@@ -35,7 +35,8 @@
         "diarization": false,
         "streaming_in_current_adapter": false,
         "timestamps_in_current_adapter": false
-      }
+      },
+      "role": "quality-fallback"
     },
     "faster-whisper": {
       "model": "Systran/faster-whisper-large-v3",
@@ -49,13 +50,17 @@
       "german_support": true,
       "automatic_setup_support": true,
       "automatic_inference_support": true,
-      "legacy_comparator": true,
       "features": {
         "language_detection": true,
         "timestamps": true,
         "diarization": false,
         "streaming_in_current_adapter": false,
         "timestamps_in_current_adapter": true
+      },
+      "role": "quality-default",
+      "decoding": {
+        "vad_filter": true,
+        "no_repeat_ngram_size": 3
       }
     },
     "parakeet": {
@@ -78,11 +83,13 @@
         "timestamps": true,
         "diarization": false,
         "streaming_in_current_adapter": false,
-        "timestamps_in_current_adapter": false
+        "timestamps_in_current_adapter": false,
+        "language_detection_in_current_adapter": false
       },
       "dependencies": [
         "librosa==0.11.0"
-      ]
+      ],
+      "role": "speed-low-vram-comparator"
     },
     "moss": {
       "model": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
@@ -126,20 +133,22 @@
   "routing": {
     "schema_version": 1,
     "default_strategy": "local-first",
-    "default_local_engine": "qwen",
+    "default_local_engine": "faster-whisper",
     "local_engines": [
+      "faster-whisper",
       "qwen",
-      "parakeet",
-      "faster-whisper"
+      "parakeet"
     ],
-    "dual_local_default_secondary": "parakeet",
+    "dual_local_default_secondary": "qwen",
     "dual_local_disagreement_threshold": 0.18,
     "automatic_cloud_escalation": false,
     "cloud_escalation_requires": [
       "--escalate-to-cloud",
       "--allow-metered-cloud"
     ],
-    "default_cloud_model": "gpt-4o-transcribe"
+    "default_cloud_model": "gpt-4o-transcribe",
+    "local_fallback_engine": "qwen",
+    "speed_local_engine": "parakeet"
   },
   "cloud_engines": {
     "gpt-4o-transcribe": {
@@ -188,5 +197,19 @@
         "diarization": true
       }
     }
+  },
+  "selection": {
+    "schema_version": 1,
+    "selected_at": "2026-08-13",
+    "decision": "operator-reviewed",
+    "quality_default_engine": "faster-whisper",
+    "quality_fallback_engine": "qwen",
+    "speed_low_vram_engine": "parakeet",
+    "basis": "three human-reference samples plus one qualitative long-form sample",
+    "human_reference_sample_count": 3,
+    "qualitative_long_form_sample_count": 1,
+    "winner_on_all_discriminating_reference_samples": "faster-whisper",
+    "full_golden_gate_retained_for_future_revalidation": true,
+    "automatic_default_change_allowed": false
   }
 }

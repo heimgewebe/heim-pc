@@ -13,13 +13,11 @@ verifies_with:
 
 ## Zweck
 
-Der Golden-Korpus entscheidet nicht automatisch über einen ASR-Default. Er liefert reproduzierbare, menschlich referenzierte Qualitätsdaten, auf deren Grundlage ein späterer Review Qwen, Parakeet oder faster-whisper vergleichen kann.
+Der Golden-Korpus liefert reproduzierbare, menschlich referenzierte Qualitätsdaten für lokale ASR-Engines. Er **ändert den ASR-Default niemals automatisch**. Der aktuelle Qualitätsdefault ist faster-whisper large-v3; der Korpus dient seiner breiteren Revalidierung und kann eine spätere reviewte Rollenänderung begründen.
 
 Der Korpus selbst ist **privat und repo-extern**. In Git oder Bureau dürfen weder Audio, Referenztext, maschinelles Transkript noch private Dateipfade landen.
 
 ## Privates Manifest
-
-Das Manifest liegt außerhalb des Repositories, beispielsweise unter einem privaten lokalen Datenpfad. Beispiel:
 
 ```json
 {
@@ -37,11 +35,11 @@ Das Manifest liegt außerhalb des Repositories, beispielsweise unter einem priva
 }
 ```
 
-`audio` und `reference` werden relativ zum privaten Manifest aufgelöst. Das Tool lehnt Manifest, Audio oder Referenz innerhalb des Heim-PC-Repositories ab. `reference_kind` muss `human-corrected` sein; ein maschinell erzeugtes Transkript ist keine zulässige Ground Truth.
+`audio` und `reference` werden relativ zum privaten Manifest aufgelöst. Das Tool lehnt Manifest, Audio oder Referenz innerhalb des Heim-PC-Repositories ab. `reference_kind` muss `human-corrected` sein; ein maschinell erzeugtes Transkript ist keine Ground Truth.
 
 ## Qualitätsabdeckung
 
-Ein Korpus ist erst für einen Default-Review qualifiziert, wenn er mindestens 20 Samples enthält und jede der folgenden Kategorien mindestens einmal abdeckt:
+Die vollständige Golden-Revalidierung ist erst qualifiziert, wenn sie mindestens 20 Samples enthält und jede Kategorie mindestens einmal abdeckt:
 
 - `clear_speech`
 - `fast_or_quiet_speech`
@@ -49,19 +47,24 @@ Ein Korpus ist erst für einen Default-Review qualifiziert, wenn er mindestens 2
 - `proper_names_or_domain_terms`
 - `multi_speaker`
 
-Diese Schwelle ist eine Mindestanforderung, kein Beweis statistischer Allgemeingültigkeit.
+Diese Schwelle ist ein **Voll-Audit-Gate**, kein Verbot einer expliziten, reviewten Operatorentscheidung. Ein Mensch kann die Policy nach eigener Evidenzbasis bewusst ändern; ein Benchmark darf das niemals selbst tun.
 
-## Metriken
+## Metrikvertrag v2
 
-Für jedes lokale Modell werden getrennt gemessen:
+Jede lokale Engine erhält parallel zwei Qualitätsansichten:
 
-- WER – Word Error Rate gegen den menschlich korrigierten Referenztext;
-- CER – Character Error Rate;
+- `wer` / `cer`: bisherige strict-v1-Semantik; Casefolding und Whitespace-Normalisierung, Interpunktion bleibt Bestandteil der Zeichen-/Wortdarstellung;
+- `lexical_wer` / `lexical_cer`: punctuation-normalized-v2; reine Satzzeichenformatierung beeinflusst die Erkennungswertung nicht.
+
+Für künftige Golden-Default-Reviews ist `mean_lexical_wer` die Auswahlmetrik. `mean_wer` bleibt erhalten, damit bestehende und neue Evidenz vergleichbar bleibt. Alte Receipts werden nicht nachträglich neu interpretiert.
+
+Zusätzlich werden getrennt gemessen:
+
 - Wall Time;
 - RTF – Laufzeit relativ zur Audiodauer;
 - beobachteter GPU-Speicherpeak.
 
-WER/CER sind Qualitätsmetriken. RTF/Laufzeit/VRAM sind Leistungsmetriken. Eine schnellere Engine darf nicht allein deshalb zum Qualitätsdefault werden.
+Qualität hat Vorrang vor Geschwindigkeit. Parakeet kann deshalb trotz sehr guter Laufzeit/VRAM-Werte Speed-Pfad bleiben, ohne Qualitätsdefault zu sein.
 
 ## Persistierte Evidenz
 
@@ -71,7 +74,9 @@ WER/CER sind Qualitätsmetriken. RTF/Laufzeit/VRAM sind Leistungsmetriken. Eine 
 - Audio- und Referenz-Digests;
 - Kategorien;
 - Engine-/Modell-/Adapter-/Git-/Policy-Identität;
-- WER/CER/RTF/Laufzeit/GPU-Metriken;
+- Metrik-Schemaversion;
+- strict WER/CER und lexical WER/CER;
+- RTF/Laufzeit/GPU-Metriken;
 - aggregierte Mittelwerte.
 
 Nicht gespeichert werden:
@@ -82,28 +87,30 @@ Nicht gespeichert werden:
 - Transkripttext;
 - API-Schlüssel.
 
-Die Evidenz landet wie der bestehende Einzelbenchmark unter `~/.local/state/heim-pc/asr-open-engine/` und erhält Dateimodus 0600.
+Die Evidenz landet unter `~/.local/state/heim-pc/asr-open-engine/` und erhält Dateimodus `0600`.
 
 ## Bedienung
 
 ```bash
-# Nur privaten Manifestvertrag und Abdeckung prüfen
+# Vertrag und Abdeckung prüfen
 ./scripts/asr_engine.py golden-check \
   --manifest /privater/pfad/golden.json
 
-# Alle drei lokalen Engines vergleichen
+# Alle drei lokalen Rollen vergleichen
 ./scripts/asr_engine.py golden-benchmark \
   --manifest /privater/pfad/golden.json
 
-# Explizite Teilmenge
+# Qualitätsdefault gegen Fallback
 ./scripts/asr_engine.py golden-benchmark \
   --manifest /privater/pfad/golden.json \
-  --engine qwen \
-  --engine parakeet
+  --engine faster-whisper \
+  --engine qwen
 ```
 
-Der Golden-Benchmark akzeptiert ausschließlich lokale Engines. Cloud-Ergebnisse können über getrennte, explizit freigegebene Transkriptionsläufe untersucht werden, gehören aber nicht in die automatische lokale Default-Auswahl.
+Cloud-Ergebnisse gehören nicht in die automatische lokale Default-Auswahl und erfordern weiterhin eine getrennte explizite Kostenfreigabe.
 
 ## Default-Regel
 
-Der aktuelle Default bleibt Qwen. Selbst ein vollständiger Golden-Lauf ändert keine Policy-Datei. Bei erfüllter Mindestabdeckung wird lediglich `eligible_for_default_review=true` und der beste lokale Kandidat nach mittlerer WER ausgewiesen. Ein tatsächlicher Default-Wechsel erfordert eine separate reviewte Repository-Änderung.
+Der aktuelle Default ist **faster-whisper large-v3**. Bei erfüllter 20-Sample-Abdeckung und vollständigen Messungen weist der Golden-Lauf sowohl den besten Kandidaten nach strict `mean_wer` als auch nach bevorzugtem `mean_lexical_wer` aus und setzt `eligible_for_default_review=true`. `automatic_default_change_allowed` bleibt immer `false`.
+
+Ein tatsächlicher Defaultwechsel erfordert weiterhin eine separate reviewte Repository-Änderung. Genau so wurde der Wechsel zu faster-whisper am 2026-08-13 vorgenommen: als bewusste Operatorentscheidung, nicht als automatische Benchmarkmutation.
