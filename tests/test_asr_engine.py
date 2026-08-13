@@ -13,7 +13,7 @@ import asr_engine
 def test_policy_contract_and_default():
     policy = asr_engine.load_policy()
     assert policy["id"] == "asr-engine-policy.v1"
-    assert policy["default_engine"] == "qwen"
+    assert policy["default_engine"] == "faster-whisper"
     invariants = policy["invariants"]
     assert invariants["default_path_zero_incremental_cost"] is True
     assert invariants["default_path_local_inference_only"] is True
@@ -29,10 +29,19 @@ def test_policy_contract_and_default():
     assert qwen["german_support"] is True
     assert qwen["runnable"] is True
 
-    comparator = policy["engines"]["faster-whisper"]
-    assert comparator["model"] == "Systran/faster-whisper-large-v3"
-    assert comparator["package"] == "faster-whisper==1.2.1"
-    assert comparator["legacy_comparator"] is True
+    default = policy["engines"]["faster-whisper"]
+    assert default["model"] == "Systran/faster-whisper-large-v3"
+    assert default["package"] == "faster-whisper==1.2.1"
+    assert default["role"] == "quality-default"
+    assert default["decoding"] == {"vad_filter": True, "no_repeat_ngram_size": 3}
+    assert policy["engines"]["qwen"]["role"] == "quality-fallback"
+    selection = policy["selection"]
+    assert selection["decision"] == "operator-reviewed"
+    assert selection["quality_default_engine"] == "faster-whisper"
+    assert selection["quality_fallback_engine"] == "qwen"
+    assert selection["speed_low_vram_engine"] == "parakeet"
+    assert selection["human_reference_sample_count"] == 3
+    assert selection["automatic_default_change_allowed"] is False
 
     parakeet = policy["engines"]["parakeet"]
     assert parakeet["german_support"] is True
@@ -42,6 +51,8 @@ def test_policy_contract_and_default():
     assert parakeet["package_version"] == "5.15.0"
     assert parakeet["dependencies"] == ["librosa==0.11.0"]
     assert parakeet["model_revision"] == "541d1f99c6b0c3cd0b11a95167540bb8edefd82b"
+    assert parakeet["role"] == "speed-low-vram-comparator"
+    assert parakeet["features"]["language_detection_in_current_adapter"] is False
     assert policy["engines"]["moss"]["remote_code_risk"] is True
 
     cohere = policy["engines"]["cohere"]
@@ -106,6 +117,22 @@ def test_wer_cer_metrics():
     assert 0.0 < cer <= 1.0
 
 
+def test_lexical_metrics_ignore_punctuation_but_not_word_errors():
+    strict_wer, strict_cer = asr_engine.compute_wer_cer("Hallo, Welt!", "Hallo Welt")
+    lexical_wer, lexical_cer = asr_engine.compute_lexical_wer_cer(
+        "Hallo, Welt!", "Hallo Welt"
+    )
+    assert strict_wer > 0.0
+    assert strict_cer > 0.0
+    assert lexical_wer == 0.0
+    assert lexical_cer == 0.0
+    lexical_wer, lexical_cer = asr_engine.compute_lexical_wer_cer(
+        "eins zwei", "eins drei"
+    )
+    assert lexical_wer == 0.5
+    assert lexical_cer > 0.0
+
+
 def test_benchmark_success_persists_metrics_not_text(tmp_path, monkeypatch):
     monkeypatch.setattr(asr_engine, "STATE_DIR", tmp_path / "state")
     audio = tmp_path / "private-audio.wav"
@@ -137,8 +164,13 @@ def test_benchmark_success_persists_metrics_not_text(tmp_path, monkeypatch):
     serialized = evidence_path.read_text(encoding="utf-8")
 
     assert evidence["outcome"] == "success"
+    assert evidence["metric_schema_version"] == 2
     assert evidence["wer"] == 0.0
     assert evidence["cer"] == 0.0
+    assert evidence["lexical_wer"] == 0.0
+    assert evidence["lexical_cer"] == 0.0
+    assert evidence["wer_semantics"] == "strict-casefold-whitespace-v1"
+    assert evidence["lexical_wer_semantics"] == "punctuation-normalized-v2"
     assert evidence["reference_digest"] == asr_engine.file_sha256(reference)
     assert evidence["rtf"] >= 0.0
     assert evidence["repo_dirty"] is False
@@ -195,6 +227,28 @@ def test_transcribe_outputs_only_to_stdout(tmp_path, monkeypatch, capsys):
     asr_engine.cmd_transcribe(Namespace(engine="qwen", audio=audio))
     assert capsys.readouterr().out == "nur stdout\n"
     assert not state.exists()
+
+
+
+
+def test_default_transcribe_uses_local_first_route(tmp_path, monkeypatch, capsys):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    expected = _transcript("qwen", "fallback stdout")
+    observed = {}
+
+    def route(path, *, strategy):
+        observed["path"] = path
+        observed["strategy"] = strategy
+        return {"selected": expected}
+
+    monkeypatch.setattr(asr_engine, "route_transcription", route)
+    with patch.object(asr_engine, "run_inference") as direct:
+        asr_engine.cmd_transcribe(Namespace(engine=None, audio=audio))
+    assert capsys.readouterr().out == "fallback stdout\n"
+    assert observed["path"] == audio.resolve()
+    assert observed["strategy"] == "local-first"
+    direct.assert_not_called()
 
 
 def test_doctor_is_read_only(monkeypatch):
@@ -405,12 +459,15 @@ def _write_golden_manifest(root: Path, count: int, *, reference_kind="human-corr
 
 def test_policy_local_first_and_cloud_is_explicit_only():
     policy = asr_engine.load_policy()
-    assert policy["default_engine"] == "qwen"
+    assert policy["default_engine"] == "faster-whisper"
     routing = policy["routing"]
     assert routing["default_strategy"] == "local-first"
-    assert routing["default_local_engine"] == "qwen"
+    assert routing["default_local_engine"] == "faster-whisper"
+    assert routing["local_fallback_engine"] == "qwen"
+    assert routing["dual_local_default_secondary"] == "qwen"
+    assert routing["speed_local_engine"] == "parakeet"
     assert routing["automatic_cloud_escalation"] is False
-    assert routing["local_engines"] == ["qwen", "parakeet", "faster-whisper"]
+    assert routing["local_engines"] == ["faster-whisper", "qwen", "parakeet"]
     assert policy["invariants"]["paid_or_metered_api_allowed_without_explicit_per_run_opt_in"] is False
     assert policy["invariants"]["automatic_cloud_escalation_allowed"] is False
     assert policy["invariants"]["metered_cloud_allowed_with_explicit_per_run_opt_in"] is True
@@ -433,6 +490,38 @@ def test_policy_rejects_ambiguous_legacy_cost_flags(tmp_path, monkeypatch):
     manifest.write_text(json.dumps(policy), encoding="utf-8")
     monkeypatch.setattr(asr_engine, "MANIFEST_PATH", manifest)
     with pytest.raises(ValueError, match="ambiguous legacy cost flags"):
+        asr_engine.load_policy()
+
+
+
+
+def test_policy_rejects_default_routing_role_drift(tmp_path, monkeypatch):
+    policy = json.loads(asr_engine.MANIFEST_PATH.read_text(encoding="utf-8"))
+    policy["routing"]["default_local_engine"] = "qwen"
+    manifest = tmp_path / "asr-policy.json"
+    manifest.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "MANIFEST_PATH", manifest)
+    with pytest.raises(ValueError, match="default engine and default local route must match"):
+        asr_engine.load_policy()
+
+
+def test_policy_rejects_default_as_own_local_fallback(tmp_path, monkeypatch):
+    policy = json.loads(asr_engine.MANIFEST_PATH.read_text(encoding="utf-8"))
+    policy["routing"]["local_fallback_engine"] = "faster-whisper"
+    manifest = tmp_path / "asr-policy.json"
+    manifest.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "MANIFEST_PATH", manifest)
+    with pytest.raises(ValueError, match="fallback/secondary must differ"):
+        asr_engine.load_policy()
+
+
+def test_policy_rejects_selection_role_drift(tmp_path, monkeypatch):
+    policy = json.loads(asr_engine.MANIFEST_PATH.read_text(encoding="utf-8"))
+    policy["selection"]["quality_default_engine"] = "qwen"
+    manifest = tmp_path / "asr-policy.json"
+    manifest.write_text(json.dumps(policy), encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "MANIFEST_PATH", manifest)
+    with pytest.raises(ValueError, match="selection quality default"):
         asr_engine.load_policy()
 
 
@@ -564,8 +653,30 @@ def test_local_first_router_calls_only_primary_local(tmp_path, monkeypatch):
     monkeypatch.setattr(asr_engine, "run_local_transcription", local)
     with patch.object(asr_engine, "run_openai_transcription") as cloud:
         result = asr_engine.route_transcription(audio)
-    assert calls == ["qwen"]
+    assert calls == ["faster-whisper"]
+    assert result["selected"]["engine"] == "faster-whisper"
+    assert result["cloud_used"] is False
+    cloud.assert_not_called()
+
+
+def test_local_first_uses_qwen_fallback_before_any_cloud(tmp_path, monkeypatch):
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"audio")
+    calls = []
+
+    def local(engine, _audio):
+        calls.append(engine)
+        if engine == "faster-whisper":
+            raise asr_engine.BackendError("primary failed")
+        return _transcript(engine, "fallback lokal")
+
+    monkeypatch.setattr(asr_engine, "run_local_transcription", local)
+    with patch.object(asr_engine, "run_openai_transcription") as cloud:
+        result = asr_engine.route_transcription(audio)
+    assert calls == ["faster-whisper", "qwen"]
     assert result["selected"]["engine"] == "qwen"
+    assert result["local_primary_failed"] is True
+    assert result["local_fallback_used"] is True
     assert result["cloud_used"] is False
     cloud.assert_not_called()
 
@@ -575,7 +686,7 @@ def test_dual_local_disagreement_only_recommends_cloud(tmp_path, monkeypatch):
     audio.write_bytes(b"audio")
 
     def local(engine, _audio):
-        text = "eins zwei drei" if engine == "qwen" else "ganz anderer text"
+        text = "eins zwei drei" if engine == "faster-whisper" else "ganz anderer text"
         return _transcript(engine, text)
 
     monkeypatch.setattr(asr_engine, "run_local_transcription", local)
@@ -585,7 +696,7 @@ def test_dual_local_disagreement_only_recommends_cloud(tmp_path, monkeypatch):
         )
     assert result["cloud_recommended"] is True
     assert result["cloud_used"] is False
-    assert result["selected"]["engine"] == "qwen"
+    assert result["selected"]["engine"] == "faster-whisper"
     cloud.assert_not_called()
 
 
@@ -596,8 +707,8 @@ def test_dual_local_evidence_is_digest_only(tmp_path, monkeypatch):
     monkeypatch.setattr(asr_engine, "get_repo_head", lambda: "a" * 40)
     monkeypatch.setattr(asr_engine, "get_repo_dirty", lambda: False)
     monkeypatch.setattr(asr_engine, "policy_sha256", lambda: "b" * 64)
-    first = _transcript("qwen", "geheimer erster text")
-    second = _transcript("parakeet", "geheimer zweiter text")
+    first = _transcript("faster-whisper", "geheimer erster text")
+    second = _transcript("qwen", "geheimer zweiter text")
     result = {
         "strategy": "dual-local",
         "comparison": {
@@ -683,8 +794,11 @@ def test_golden_benchmark_evidence_contains_no_private_text_or_paths(tmp_path, m
             "model_revision": None,
             "backend_version": "test",
             "detected_language": "de",
+            "metric_schema_version": 2,
             "wer": 0.1 if engine == "qwen" else 0.2,
             "cer": 0.05,
+            "lexical_wer": 0.08 if engine == "qwen" else 0.18,
+            "lexical_cer": 0.04,
             "wall_time_seconds": 0.1,
             "rtf": 0.1,
             "gpu_memory_used_peak_mib_observed": 100,
@@ -694,13 +808,54 @@ def test_golden_benchmark_evidence_contains_no_private_text_or_paths(tmp_path, m
     evidence = asr_engine.run_golden_benchmark(manifest, ["qwen", "parakeet"])
     serialized = json.dumps(evidence, ensure_ascii=False)
     assert evidence["quality_gate_eligible"] is False
+    assert evidence["metric_schema_version"] == 2
+    assert evidence["default_review_metric"] == "mean_lexical_wer"
     assert evidence["best_local_engine_by_mean_wer"] is None
-    assert evidence["current_default_engine"] == "qwen"
+    assert evidence["best_local_engine_by_mean_lexical_wer"] is None
+    assert evidence["current_default_engine"] == "faster-whisper"
     assert "Referenz" not in serialized
     assert "sample-" not in serialized
     assert str(corpus) not in serialized
     assert "audio-0.wav" not in serialized
     assert "reference-0.txt" not in serialized
+
+
+def test_golden_default_review_prefers_lexical_wer_without_auto_mutation(tmp_path, monkeypatch):
+    corpus = tmp_path / "full-corpus"
+    corpus.mkdir()
+    manifest = _write_golden_manifest(corpus, 20)
+    monkeypatch.setattr(asr_engine, "get_repo_head", lambda: "a" * 40)
+    monkeypatch.setattr(asr_engine, "get_repo_dirty", lambda: False)
+    monkeypatch.setattr(asr_engine, "policy_sha256", lambda: "b" * 64)
+
+    def measurement(engine, _audio, _reference):
+        strict = 0.05 if engine == "qwen" else 0.10
+        lexical = 0.08 if engine == "qwen" else 0.02
+        return {
+            "outcome": "success",
+            "model": engine,
+            "model_revision": None,
+            "backend_version": "test",
+            "detected_language": "de",
+            "metric_schema_version": 2,
+            "wer": strict,
+            "cer": strict,
+            "lexical_wer": lexical,
+            "lexical_cer": lexical,
+            "wall_time_seconds": 0.1,
+            "rtf": 0.1,
+            "gpu_memory_used_peak_mib_observed": 100,
+        }
+
+    monkeypatch.setattr(asr_engine, "_golden_engine_measurement", measurement)
+    evidence = asr_engine.run_golden_benchmark(manifest, ["qwen", "faster-whisper"])
+    assert evidence["quality_gate_eligible"] is True
+    assert evidence["all_measurements_complete"] is True
+    assert evidence["best_local_engine_by_mean_wer"] == "qwen"
+    assert evidence["best_local_engine_by_mean_lexical_wer"] == "faster-whisper"
+    assert evidence["default_review_metric"] == "mean_lexical_wer"
+    assert evidence["eligible_for_default_review"] is True
+    assert evidence["automatic_default_change_allowed"] is False
 
 
 def test_parser_exposes_cloud_only_as_explicit_flags():
@@ -709,4 +864,4 @@ def test_parser_exposes_cloud_only_as_explicit_flags():
     assert args.strategy == "local-first"
     assert args.escalate_to_cloud is False
     assert args.allow_metered_cloud is False
-    assert asr_engine.load_policy()["default_engine"] == "qwen"
+    assert asr_engine.load_policy()["default_engine"] == "faster-whisper"

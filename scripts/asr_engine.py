@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -156,6 +157,45 @@ def validate_policy(policy: dict[str, Any]) -> None:
         raise ValueError("Explicit per-run metered cloud ASR must remain representable")
     if invariants.get("automatic_cloud_escalation_allowed") is not False:
         raise ValueError("Automatic cloud escalation must remain disabled")
+
+    engines = policy.get("engines")
+    routing = policy.get("routing")
+    if not isinstance(engines, dict) or not isinstance(routing, dict):
+        raise ValueError("ASR policy engines and routing must be objects")
+    default_engine = policy.get("default_engine")
+    default_local = routing.get("default_local_engine")
+    fallback_local = routing.get("local_fallback_engine")
+    secondary_local = routing.get("dual_local_default_secondary")
+    speed_local = routing.get("speed_local_engine")
+    local_engines = routing.get("local_engines")
+    if default_engine != default_local:
+        raise ValueError("ASR default engine and default local route must match")
+    if not isinstance(local_engines, list) or not local_engines:
+        raise ValueError("ASR routing local_engines must be a non-empty list")
+    for role, engine_name in (
+        ("default", default_engine),
+        ("fallback", fallback_local),
+        ("dual-local secondary", secondary_local),
+        ("speed", speed_local),
+    ):
+        if not isinstance(engine_name, str) or engine_name not in engines:
+            raise ValueError(f"ASR {role} engine is not registered")
+        if engine_name not in local_engines:
+            raise ValueError(f"ASR {role} engine is not in local_engines")
+    if default_engine == fallback_local or default_engine == secondary_local:
+        raise ValueError("ASR fallback/secondary must differ from the default engine")
+
+    selection = policy.get("selection")
+    if not isinstance(selection, dict):
+        raise ValueError("ASR policy selection must be an object")
+    if selection.get("quality_default_engine") != default_engine:
+        raise ValueError("ASR selection quality default must match the routed default")
+    if selection.get("quality_fallback_engine") != fallback_local:
+        raise ValueError("ASR selection quality fallback must match routing")
+    if selection.get("speed_low_vram_engine") != speed_local:
+        raise ValueError("ASR selection speed engine must match routing")
+    if selection.get("automatic_default_change_allowed") is not False:
+        raise ValueError("ASR selection may not authorize automatic default mutation")
 
 
 def load_policy() -> dict[str, Any]:
@@ -613,7 +653,12 @@ model = WhisperModel(
     download_root=sys.argv[2],
     local_files_only=True,
 )
-segments, info = model.transcribe(sys.argv[1], language=None, vad_filter=True)
+segments, info = model.transcribe(
+    sys.argv[1],
+    language=None,
+    vad_filter=True,
+    no_repeat_ngram_size=3,
+)
 segment_items = []
 texts = []
 for segment in segments:
@@ -898,6 +943,7 @@ def route_transcription(
     policy = load_policy()
     routing = policy["routing"]
     primary = primary_engine or routing["default_local_engine"]
+    fallback = routing["local_fallback_engine"]
     secondary = secondary_engine or routing["dual_local_default_secondary"]
     threshold = (
         float(disagreement_threshold)
@@ -924,9 +970,31 @@ def route_transcription(
 
     try:
         first = run_local_transcription(primary, audio_path)
-    except BackendError:
+    except BackendError as primary_error:
+        if strategy == "local-first" and fallback != primary:
+            try:
+                selected = run_local_transcription(fallback, audio_path)
+            except BackendError as fallback_error:
+                if not escalate_to_cloud:
+                    raise BackendError(
+                        "Primary and local fallback ASR engines both failed"
+                    ) from fallback_error
+            else:
+                return {
+                    "schema_version": 1,
+                    "kind": "heim-pc.asr-route-result",
+                    "strategy": strategy,
+                    "selected": selected,
+                    "comparison": None,
+                    "cloud_recommended": False,
+                    "cloud_used": False,
+                    "local_primary_failed": True,
+                    "local_fallback_used": True,
+                    "primary_local_engine": primary,
+                    "fallback_local_engine": fallback,
+                }
         if not escalate_to_cloud:
-            raise
+            raise primary_error
         selected = run_openai_transcription(
             cloud_name, audio_path, allow_metered_cloud=allow_metered_cloud
         )
@@ -1049,6 +1117,18 @@ def normalize_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def normalize_lexical_text(value: str) -> str:
+    joined_punctuation = {"'", "’", "-", "‐", "‑", "‒", "–", "—"}
+    normalized: list[str] = []
+    for character in value.casefold():
+        if unicodedata.category(character).startswith("P"):
+            if character not in joined_punctuation:
+                normalized.append(" ")
+            continue
+        normalized.append(character)
+    return " ".join("".join(normalized).split())
+
+
 def edit_distance(reference: Sequence[str], hypothesis: Sequence[str]) -> int:
     previous = list(range(len(hypothesis) + 1))
     for ref_index, ref_item in enumerate(reference, start=1):
@@ -1074,6 +1154,14 @@ def error_rate(reference: Sequence[str], hypothesis: Sequence[str]) -> float:
 def compute_wer_cer(reference: str, hypothesis: str) -> tuple[float, float]:
     ref = normalize_text(reference)
     hyp = normalize_text(hypothesis)
+    wer = error_rate(ref.split(), hyp.split())
+    cer = error_rate(list(ref.replace(" ", "")), list(hyp.replace(" ", "")))
+    return wer, cer
+
+
+def compute_lexical_wer_cer(reference: str, hypothesis: str) -> tuple[float, float]:
+    ref = normalize_lexical_text(reference)
+    hyp = normalize_lexical_text(hypothesis)
     wer = error_rate(ref.split(), hyp.split())
     cer = error_rate(list(ref.replace(" ", "")), list(hyp.replace(" ", "")))
     return wer, cer
@@ -1197,14 +1285,18 @@ def _golden_engine_measurement(
     payload = run_inference(engine_name, conf, audio_path)
     wall = time.monotonic() - start
     wer, cer = compute_wer_cer(reference, payload["text"])
+    lexical_wer, lexical_cer = compute_lexical_wer_cer(reference, payload["text"])
     return {
         "outcome": "success",
         "model": conf["model"],
         "model_revision": conf.get("model_revision"),
         "backend_version": payload.get("version"),
         "detected_language": payload.get("language"),
+        "metric_schema_version": 2,
         "wer": wer,
         "cer": cer,
+        "lexical_wer": lexical_wer,
+        "lexical_cer": lexical_cer,
         "wall_time_seconds": wall,
         "rtf": wall / duration,
         "gpu_memory_used_peak_mib_observed": payload.get(
@@ -1276,6 +1368,8 @@ def run_golden_benchmark(
             "success_count": len(successful),
             "mean_wer": sum(item["wer"] for item in successful) / len(successful),
             "mean_cer": sum(item["cer"] for item in successful) / len(successful),
+            "mean_lexical_wer": sum(item["lexical_wer"] for item in successful) / len(successful),
+            "mean_lexical_cer": sum(item["lexical_cer"] for item in successful) / len(successful),
             "mean_rtf": sum(item["rtf"] for item in successful) / len(successful),
             "max_gpu_memory_used_peak_mib_observed": (
                 max(gpu_samples) if gpu_samples else None
@@ -1285,9 +1379,13 @@ def run_golden_benchmark(
         aggregates.get(engine, {}).get("success_count") == len(samples)
         for engine in unique_engines
     )
-    best = None
+    best_strict = None
+    best_lexical = None
     if summary["quality_gate_eligible"] and complete:
-        best = min(unique_engines, key=lambda name: aggregates[name]["mean_wer"])
+        best_strict = min(unique_engines, key=lambda name: aggregates[name]["mean_wer"])
+        best_lexical = min(
+            unique_engines, key=lambda name: aggregates[name]["mean_lexical_wer"]
+        )
     return {
         "schema_version": 1,
         "kind": "heim-pc.asr-golden-benchmark",
@@ -1304,8 +1402,11 @@ def run_golden_benchmark(
         "aggregates": aggregates,
         "samples": samples,
         "current_default_engine": load_policy()["default_engine"],
-        "best_local_engine_by_mean_wer": best,
-        "eligible_for_default_review": bool(best),
+        "metric_schema_version": 2,
+        "default_review_metric": "mean_lexical_wer",
+        "best_local_engine_by_mean_wer": best_strict,
+        "best_local_engine_by_mean_lexical_wer": best_lexical,
+        "eligible_for_default_review": bool(best_lexical),
         "automatic_default_change_allowed": False,
     }
 
@@ -1355,11 +1456,15 @@ def write_evidence(engine_name: str, audio_digest: str, evidence: dict[str, Any]
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
+    audio_path = args.audio.expanduser().resolve(strict=True)
+    if args.engine is None:
+        result = route_transcription(audio_path, strategy="local-first")["selected"]
+        print(result["text"])
+        return
     policy = load_policy()
-    engine_name = args.engine or policy["default_engine"]
+    engine_name = args.engine
     engine_conf = get_engine(policy, engine_name)
     check_runnable(engine_conf, engine_name)
-    audio_path = args.audio.expanduser().resolve(strict=True)
     result = run_inference(engine_name, engine_conf, audio_path)
     print(result["text"])
 
@@ -1408,8 +1513,13 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         "policy_sha256": policy_sha256(),
         "adapter_sha256": file_sha256(Path(__file__).resolve()),
         "reference_digest": None,
+        "metric_schema_version": 2,
+        "wer_semantics": "strict-casefold-whitespace-v1",
+        "lexical_wer_semantics": "punctuation-normalized-v2",
         "wer": None,
         "cer": None,
+        "lexical_wer": None,
+        "lexical_cer": None,
     }
 
     start = time.monotonic()
@@ -1428,6 +1538,9 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
             evidence["reference_digest"] = file_sha256(reference_path)
             evidence["wer"], evidence["cer"] = compute_wer_cer(
                 reference, result["text"]
+            )
+            evidence["lexical_wer"], evidence["lexical_cer"] = (
+                compute_lexical_wer_cer(reference, result["text"])
             )
     except Exception as exc:  # evidence is still emitted, but the command fails closed
         failure = exc
