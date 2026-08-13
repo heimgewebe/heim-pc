@@ -638,10 +638,33 @@ import importlib.metadata as metadata
 import json
 import subprocess
 import sys
+import types
 
 import numpy as np
 import torch
 from transformers import AutoModelForTDT, AutoProcessor
+from transformers.audio_utils import mel_filter_bank
+import transformers.models.parakeet.feature_extraction_parakeet as parakeet_features
+
+
+def _jit_free_mel(*, sr, n_fft, n_mels, fmin, fmax, norm):
+    return mel_filter_bank(
+        num_frequency_bins=n_fft // 2 + 1,
+        num_mel_filters=n_mels,
+        min_frequency=fmin,
+        max_frequency=fmax,
+        sampling_rate=sr,
+        norm=norm,
+        mel_scale="slaney",
+    ).T.astype(np.float32)
+
+
+# Transformers 5.15 only needs librosa for this matrix construction.  Avoid
+# importing librosa.filters -> numba/llvmlite so inference also works inside
+# hardened runtimes that forbid executable JIT memory.
+parakeet_features.librosa = types.SimpleNamespace(
+    filters=types.SimpleNamespace(mel=_jit_free_mel)
+)
 
 decoded = subprocess.run(
     [

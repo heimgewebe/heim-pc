@@ -291,6 +291,11 @@ def test_parakeet_child_uses_transformers_tdt_offline_contract():
     assert "model.generate" in source
     assert "processor.decode" in source
     assert "chunk_samples = 60 * 16000" in source
+    assert "from transformers.audio_utils import mel_filter_bank" in source
+    assert "parakeet_features.librosa = types.SimpleNamespace" in source
+    assert "num_frequency_bins=n_fft // 2 + 1" in source
+    assert ").T.astype(np.float32)" in source
+    assert "NUMBA_DISABLE_JIT" not in source
 
 
 def test_parakeet_cache_requires_exact_revision_and_core_files(tmp_path, monkeypatch):
