@@ -16,6 +16,8 @@ verifies_with:
 
 `heim-pc` stellt eine **local-first, benchmark-selected und optional cloud-escalatable** Transkriptionsoberfläche bereit. Der Normalfall bleibt lokale GPU-Inferenz ohne nutzungsabhängige externe Kosten. Cloud-ASR ist eine ausdrücklich kostenpflichtige Eskalationsoption und darf den lokalen Standardpfad weder still ersetzen noch automatisch auslösen.
 
+Die Kosteninvarianten sind deshalb **pfadbezogen** formuliert: `default_path_zero_incremental_cost=true` und `default_path_local_inference_only=true` gelten für den Standardpfad. Metered Cloud bleibt ohne ausdrückliches Per-Run-Opt-in verboten (`paid_or_metered_api_allowed_without_explicit_per_run_opt_in=false`); automatische Cloud-Eskalation bleibt ebenfalls verboten. Damit bedeutet local-first nicht local-only.
+
 Maschinenlesbare Verträge:
 
 - `manifest/asr-engine-policy.v1.json` – Engine-, Routing- und Kostenpolicy;

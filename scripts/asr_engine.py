@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical zero-incremental-cost local ASR CLI for the heim-pc."""
+"""Canonical local-first ASR CLI for the heim-pc."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -133,8 +132,38 @@ def validate_transcript_result(result: dict[str, Any]) -> None:
     normalize_segments(result.get("segments"))
 
 
+def validate_policy(policy: dict[str, Any]) -> None:
+    invariants = policy.get("invariants")
+    if not isinstance(invariants, dict):
+        raise ValueError("ASR policy invariants must be an object")
+    ambiguous_legacy_flags = {
+        "zero_incremental_cost",
+        "local_inference_only",
+        "paid_or_metered_api_allowed",
+    }
+    present = sorted(ambiguous_legacy_flags.intersection(invariants))
+    if present:
+        raise ValueError(f"ASR policy contains ambiguous legacy cost flags: {present}")
+    if invariants.get("default_path_zero_incremental_cost") is not True:
+        raise ValueError("ASR default path must remain zero-incremental-cost")
+    if invariants.get("default_path_local_inference_only") is not True:
+        raise ValueError("ASR default path must remain local-only")
+    if invariants.get("paid_or_metered_api_allowed_without_explicit_per_run_opt_in") is not False:
+        raise ValueError("Metered ASR must remain blocked without explicit per-run opt-in")
+    if invariants.get("metered_cloud_requires_explicit_per_run_opt_in") is not True:
+        raise ValueError("Metered cloud ASR must require explicit per-run opt-in")
+    if invariants.get("metered_cloud_allowed_with_explicit_per_run_opt_in") is not True:
+        raise ValueError("Explicit per-run metered cloud ASR must remain representable")
+    if invariants.get("automatic_cloud_escalation_allowed") is not False:
+        raise ValueError("Automatic cloud escalation must remain disabled")
+
+
 def load_policy() -> dict[str, Any]:
-    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    policy = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    if not isinstance(policy, dict):
+        raise ValueError("ASR policy must be a JSON object")
+    validate_policy(policy)
+    return policy
 
 
 def file_sha256(path: Path) -> str:

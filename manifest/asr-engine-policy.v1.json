@@ -3,9 +3,9 @@
   "schema_version": 1,
   "default_engine": "qwen",
   "invariants": {
-    "zero_incremental_cost": true,
-    "local_inference_only": true,
-    "paid_or_metered_api_allowed": false,
+    "default_path_zero_incremental_cost": true,
+    "default_path_local_inference_only": true,
+    "paid_or_metered_api_allowed_without_explicit_per_run_opt_in": false,
     "gated_engine_unattended_use_allowed": false,
     "setup_is_explicit": true,
     "doctor_may_download": false,
