@@ -18,7 +18,7 @@
         "direct_delivery_client"
       ],
       "transports": [
-        "icloud_drive",
+        "google_drive",
         "tailscale_taildrop"
       ]
     },
@@ -29,19 +29,25 @@
       "taildropTarget": "a54-von-alexander",
       "roles": [
         "remote_fallback",
+        "shared_exchange_client",
         "direct_delivery_client"
       ],
       "transports": [
+        "google_drive",
         "tailscale_taildrop"
       ]
     }
   ],
   "routing": {
     "sharedPersistentWorkspace": {
-      "transport": "icloud_drive",
-      "directory": "${HOME}/iCloud/Drive/halde",
+      "transport": "google_drive",
+      "directory": "${HOME}/GDrive",
+      "remote": "gdrive:",
+      "mountService": "google-drive-rclone.service",
+      "requiredRcloneScope": "drive",
       "eligibleTargets": [
-        "ipad"
+        "ipad",
+        "a54"
       ]
     },
     "directOneShotDelivery": {
@@ -61,7 +67,7 @@
   "doesNotEstablish": [
     "target_online_now",
     "taildrop_transfer_completed",
-    "icloud_sync_completed",
+    "google_drive_mobile_visibility_now",
     "mobile_application_import_completed"
   ]
 }

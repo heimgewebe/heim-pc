@@ -69,23 +69,27 @@ class OperatorEntryTests(unittest.TestCase):
             "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
         )
         self.assertTrue(policy["targetAvailabilityRequiresFreshRead"])
-        self.assertEqual(policy["sharedExchangeTransport"], "icloudSharedExchange")
+        self.assertEqual(policy["sharedExchangeTransport"], "googleDriveSharedExchange")
         self.assertEqual(policy["directDeliveryTransport"], "taildropDirectDelivery")
-        self.assertEqual(policy["selectionRules"]["sharedPersistentWorkspace"], "icloudSharedExchange")
+        self.assertEqual(policy["selectionRules"]["sharedPersistentWorkspace"], "googleDriveSharedExchange")
         self.assertEqual(policy["selectionRules"]["directOneShotDelivery"], "taildropDirectDelivery")
         self.assertEqual(policy["selectionRules"]["largeOrSensitiveDelivery"], "taildropDirectDelivery")
         self.assertTrue(set(policy["selectionRules"].values()).issubset(contract["transferPaths"]))
         self.assertNotEqual(policy["sharedExchangeTransport"], policy["directDeliveryTransport"])
 
-        shared = contract["transferPaths"]["icloudSharedExchange"]
+        shared = contract["transferPaths"]["googleDriveSharedExchange"]
         self.assertEqual(shared["role"], "shared_exchange")
-        self.assertEqual(shared["canonicalDirectory"], "${HOME}/iCloud/Drive/halde")
-        self.assertEqual(shared["transport"], "icloud_drive")
+        self.assertEqual(shared["canonicalDirectory"], "${HOME}/GDrive")
+        self.assertEqual(shared["remote"], "gdrive:")
+        self.assertEqual(shared["mountService"], "google-drive-rclone.service")
+        self.assertEqual(shared["requiredRcloneScope"], "drive")
+        self.assertEqual(shared["transport"], "google_drive")
         self.assertEqual(shared["direction"], "bidirectional")
-        self.assertEqual(shared["endpoints"], ["heim_pc", "ipad"])
-        self.assertIn("icloud_sync_completed_on_heim_pc", shared["doesNotEstablish"])
-        self.assertIn("icloud_sync_completed_on_ipad", shared["doesNotEstablish"])
+        self.assertEqual(shared["endpoints"], ["heim_pc", "mobile_devices"])
+        self.assertIn("google_drive_visibility_on_mobile_now", shared["doesNotEstablish"])
+        self.assertIn("mobile_google_drive_client_available_now", shared["doesNotEstablish"])
         self.assertNotIn("fallbackTransport", shared)
+        self.assertNotIn("icloudSharedExchange", contract["transferPaths"])
 
         direct = contract["transferPaths"]["taildropDirectDelivery"]
         self.assertEqual(direct["role"], "direct_delivery")
