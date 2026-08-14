@@ -16,6 +16,7 @@ class MobileTransferTargetsTests(unittest.TestCase):
         self.assertEqual(self.contract["kind"], "heim_pc_mobile_transfer_targets")
         self.assertTrue(self.contract["availabilityRequiresFreshRead"])
         self.assertIn("target_online_now", self.contract["doesNotEstablish"])
+        self.assertIn("google_drive_mobile_visibility_now", self.contract["doesNotEstablish"])
 
     def test_ipad_and_a54_are_distinct_mobile_targets(self):
         targets = {item["id"]: item for item in self.contract["targets"]}
@@ -24,11 +25,19 @@ class MobileTransferTargetsTests(unittest.TestCase):
         self.assertEqual(targets["a54"]["taildropTarget"], "a54-von-alexander")
         self.assertIn("remote_primary", targets["ipad"]["roles"])
         self.assertIn("remote_fallback", targets["a54"]["roles"])
-        self.assertEqual(targets["a54"]["transports"], ["tailscale_taildrop"])
+        self.assertEqual(targets["ipad"]["transports"], ["google_drive", "tailscale_taildrop"])
+        self.assertEqual(targets["a54"]["transports"], ["google_drive", "tailscale_taildrop"])
+        self.assertIn("shared_exchange_client", targets["a54"]["roles"])
 
     def test_routing_distinguishes_shared_exchange_from_direct_delivery(self):
         routing = self.contract["routing"]
-        self.assertEqual(routing["sharedPersistentWorkspace"]["eligibleTargets"], ["ipad"])
+        shared = routing["sharedPersistentWorkspace"]
+        self.assertEqual(shared["transport"], "google_drive")
+        self.assertEqual(shared["directory"], "${HOME}/GDrive")
+        self.assertEqual(shared["remote"], "gdrive:")
+        self.assertEqual(shared["mountService"], "google-drive-rclone.service")
+        self.assertEqual(shared["requiredRcloneScope"], "drive")
+        self.assertEqual(shared["eligibleTargets"], ["ipad", "a54"])
         direct = routing["directOneShotDelivery"]
         self.assertEqual(direct["eligibleTargets"], ["ipad", "a54"])
         self.assertEqual(direct["remoteFallbackOrder"], ["ipad", "a54"])

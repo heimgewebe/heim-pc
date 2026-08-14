@@ -54,15 +54,15 @@
   "transferPolicy": {
     "scope": "heim_pc_mobile_devices",
     "principle": "role_based_dual_transport",
-    "sharedExchangeTransport": "icloudSharedExchange",
+    "sharedExchangeTransport": "googleDriveSharedExchange",
     "directDeliveryTransport": "taildropDirectDelivery",
     "selectionRules": {
-      "sharedPersistentWorkspace": "icloudSharedExchange",
-      "iterativeCrossDeviceWork": "icloudSharedExchange",
+      "sharedPersistentWorkspace": "googleDriveSharedExchange",
+      "iterativeCrossDeviceWork": "googleDriveSharedExchange",
       "directOneShotDelivery": "taildropDirectDelivery",
       "largeOrSensitiveDelivery": "taildropDirectDelivery",
-      "icloudUnavailable": "taildropDirectDelivery",
-      "taildropUnavailable": "icloudSharedExchange"
+      "googleDriveUnavailable": "taildropDirectDelivery",
+      "taildropUnavailable": "googleDriveSharedExchange"
     },
     "mobileTargetsManifest": "${HOME}/repos/heim-pc/manifest/mobile-transfer-targets.v1.json",
     "targetAvailabilityRequiresFreshRead": true,
@@ -79,24 +79,28 @@
     }
   },
   "transferPaths": {
-    "icloudSharedExchange": {
+    "googleDriveSharedExchange": {
       "role": "shared_exchange",
-      "canonicalDirectory": "${HOME}/iCloud/Drive/halde",
-      "transport": "icloud_drive",
+      "canonicalDirectory": "${HOME}/GDrive",
+      "remote": "gdrive:",
+      "mountService": "google-drive-rclone.service",
+      "requiredRcloneScope": "drive",
+      "transport": "google_drive",
       "direction": "bidirectional",
       "endpoints": [
         "heim_pc",
-        "ipad"
+        "mobile_devices"
       ],
-      "purpose": "persistent shared workspace for files that must remain discoverable and editable from both devices",
+      "purpose": "persistent Google Drive workspace for files that must remain discoverable and editable across the heim-pc and mobile devices",
       "preconditions": [
-        "iCloud Drive mount is active",
-        "canonicalDirectory resolves to an existing directory",
+        "google-drive-rclone.service is active on the heim-pc",
+        "canonicalDirectory is an active gdrive: mount",
+        "gdrive: can enumerate the Google Drive root",
         "the completed file is readable after write"
       ],
       "doesNotEstablish": [
-        "icloud_sync_completed_on_heim_pc",
-        "icloud_sync_completed_on_ipad"
+        "google_drive_visibility_on_mobile_now",
+        "mobile_google_drive_client_available_now"
       ]
     },
     "taildropDirectDelivery": {
