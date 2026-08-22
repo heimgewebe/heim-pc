@@ -791,6 +791,17 @@ def collect(
     return artifact
 
 
+def _run_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact, artifact-bound success record intended for stdout."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "heim_pc_maintenance_outcomes_run_receipt",
+        "generated_at_unix": result["generated_at_unix"],
+        "artifact_sha256": result["artifact_sha256"],
+        "summary": result["summary"],
+    }
+
+
 def main() -> int:
     home = Path.home().resolve()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -804,10 +815,11 @@ def main() -> int:
     parser.add_argument("--home", type=Path, default=home)
     parser.add_argument("--now-unix", type=int)
     args = parser.parse_args()
+    output_path = args.output.expanduser().resolve()
     try:
         result = collect(
             policy_path=args.policy.expanduser().resolve(),
-            output_path=args.output.expanduser().resolve(),
+            output_path=output_path,
             bureau_root=args.bureau_root.expanduser().resolve(),
             home=args.home.expanduser().resolve(),
             now_unix=args.now_unix,
@@ -822,7 +834,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    print(
+        json.dumps(
+            _run_receipt(result),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
