@@ -151,6 +151,8 @@ def load_policy(path: Path, *, home: Path) -> dict[str, Any]:
             "source",
             "category",
             "compatibility_symlink",
+            "merge_existing",
+            "allow_internal_symlinks",
         }:
             raise HygieneError(f"legacy_artifact_roots[{index}] is invalid")
         source = item["source"]
@@ -165,8 +167,9 @@ def load_policy(path: Path, *, home: Path) -> dict[str, Any]:
         alias_sources.add(source)
         if item["category"] not in categories:
             raise HygieneError(f"legacy alias category is unknown: {item['category']}")
-        if not isinstance(item["compatibility_symlink"], bool):
-            raise HygieneError("compatibility_symlink must be boolean")
+        for flag in ("compatibility_symlink", "merge_existing", "allow_internal_symlinks"):
+            if not isinstance(item[flag], bool):
+                raise HygieneError(f"{flag} must be boolean")
 
     loose = policy.get("loose_file_rules")
     if not isinstance(loose, dict):
@@ -271,11 +274,54 @@ def _file_observation(path: Path, *, hash_limit: int) -> dict[str, Any]:
     return observation
 
 
-def _tree_observation(path: Path) -> dict[str, Any]:
+def _safe_internal_symlink_observation(
+    path: Path, *, root: Path, allow_absolute: bool = False
+) -> dict[str, Any]:
+    metadata = path.lstat()
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise HygieneError(f"legacy artifact entry is not a symlink: {path}")
+    target = os.readlink(path)
+    target_is_absolute = os.path.isabs(target)
+    if target_is_absolute and not allow_absolute:
+        raise HygieneError(f"legacy artifact symlink is absolute: {path}")
+    try:
+        root_resolved = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        raise HygieneError(f"legacy artifact symlink is dangling or unresolvable: {path}") from exc
+    if not _path_within(resolved, root_resolved):
+        raise HygieneError(f"legacy artifact symlink escapes its root: {path}")
+    root_device = root.lstat().st_dev
+    if resolved.stat().st_dev != root_device:
+        raise HygieneError(f"legacy artifact symlink crosses a device boundary: {path}")
+    observation: dict[str, Any] = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "target": target,
+        "target_is_absolute": target_is_absolute,
+        "resolved_relative": resolved.relative_to(root_resolved).as_posix(),
+    }
+    observation["identity_sha256"] = _sha256_json(observation)
+    return observation
+
+
+def _tree_observation(
+    path: Path,
+    *,
+    allow_internal_symlinks: bool = False,
+    symlink_root: Path | None = None,
+    allow_absolute_internal_symlinks: bool = False,
+) -> dict[str, Any]:
     root_metadata = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
         raise HygieneError(f"legacy artifact root is not a real directory: {path}")
     root_device = root_metadata.st_dev
+    link_root = path if symlink_root is None else symlink_root
+    if link_root.is_symlink() or not link_root.is_dir():
+        raise HygieneError(f"legacy artifact symlink boundary is unsafe: {link_root}")
     rows: list[list[Any]] = []
     allocated = 0
     stack = [path]
@@ -285,8 +331,28 @@ def _tree_observation(path: Path) -> dict[str, Any]:
         relative = "." if current == path else current.relative_to(path).as_posix()
         if metadata.st_dev != root_device:
             raise HygieneError(f"legacy artifact tree crosses a device boundary: {current}")
-        if current.is_symlink():
-            raise HygieneError(f"legacy artifact tree contains a symlink: {current}")
+        if stat.S_ISLNK(metadata.st_mode):
+            if not allow_internal_symlinks:
+                raise HygieneError(f"legacy artifact tree contains a symlink: {current}")
+            symlink_observation = _safe_internal_symlink_observation(
+                current,
+                root=link_root,
+                allow_absolute=allow_absolute_internal_symlinks,
+            )
+            rows.append(
+                [
+                    relative,
+                    stat.S_IFLNK,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    symlink_observation["target"],
+                    symlink_observation["target_is_absolute"],
+                    symlink_observation["resolved_relative"],
+                ]
+            )
+            if len(rows) > MAX_TREE_ENTRIES:
+                raise HygieneError(f"legacy artifact tree exceeds {MAX_TREE_ENTRIES} entries")
+            continue
         mode_type = stat.S_IFMT(metadata.st_mode)
         rows.append([relative, mode_type, metadata.st_size, metadata.st_mtime_ns])
         if len(rows) > MAX_TREE_ENTRIES:
@@ -302,10 +368,72 @@ def _tree_observation(path: Path) -> dict[str, Any]:
     return {
         "device": root_device,
         "inode": root_metadata.st_ino,
+        "size_bytes": root_metadata.st_size,
+        "mtime_ns": root_metadata.st_mtime_ns,
+        "mode": stat.S_IMODE(root_metadata.st_mode),
         "entry_count": len(rows),
         "allocated_bytes": allocated,
         "tree_sha256": _sha256_json(rows),
     }
+
+
+def _alias_entry_observation(
+    path: Path,
+    *,
+    source_root: Path,
+    allow_internal_symlinks: bool,
+    allow_absolute_internal_symlinks: bool,
+    hash_limit: int,
+) -> dict[str, Any]:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        if not allow_internal_symlinks:
+            raise HygieneError(f"legacy artifact tree contains a symlink: {path}")
+        return {
+            "kind": "symlink",
+            "observation": _safe_internal_symlink_observation(
+                path,
+                root=source_root,
+                allow_absolute=allow_absolute_internal_symlinks,
+            ),
+        }
+    if stat.S_ISREG(metadata.st_mode):
+        return {"kind": "file", "observation": _file_observation(path, hash_limit=hash_limit)}
+    if stat.S_ISDIR(metadata.st_mode):
+        return {
+            "kind": "directory",
+            "observation": _tree_observation(
+                path,
+                allow_internal_symlinks=allow_internal_symlinks,
+                symlink_root=source_root,
+                allow_absolute_internal_symlinks=allow_absolute_internal_symlinks,
+            ),
+        }
+    raise HygieneError(f"legacy artifact tree contains an unsupported entry: {path}")
+
+def _alias_entry_lstat_matches(path: Path, planned: dict[str, Any]) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    observation = planned["observation"]
+    actual = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size_bytes": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "mode": stat.S_IMODE(metadata.st_mode),
+    }
+    if any(actual[key] != observation.get(key) for key in actual):
+        return False
+    kind = planned["kind"]
+    if kind == "symlink":
+        return stat.S_ISLNK(metadata.st_mode) and os.readlink(path) == observation.get("target")
+    if kind == "file":
+        return stat.S_ISREG(metadata.st_mode) and not path.is_symlink()
+    if kind == "directory":
+        return stat.S_ISDIR(metadata.st_mode) and not path.is_symlink()
+    return False
 
 
 def _mapped_file_targets(lines: Iterable[str]) -> list[Path]:
@@ -699,6 +827,7 @@ def build_alias_plan(
     now = int(time.time()) if now_unix is None else now_unix
     artifact_root: Path = policy["_resolved"]["artifact_root"]
     categories = policy["artifact_categories"]
+    hash_limit = policy["loose_file_rules"]["full_hash_max_bytes"]
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     candidate_roots: list[Path] = []
@@ -714,11 +843,21 @@ def build_alias_plan(
         if not source.is_dir():
             skipped.append({"source": str(source), "reason": "source_not_directory"})
             continue
-        if target.exists() and (target.is_symlink() or not target.is_dir() or any(target.iterdir())):
-            skipped.append({"source": str(source), "target": str(target), "reason": "target_not_empty"})
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            skipped.append(
+                {"source": str(source), "target": str(target), "reason": "unsafe_target"}
+            )
             continue
         try:
-            observation = _tree_observation(source)
+            observation = _tree_observation(
+                source,
+                allow_internal_symlinks=alias["allow_internal_symlinks"],
+                symlink_root=source,
+                allow_absolute_internal_symlinks=(
+                    alias["allow_internal_symlinks"]
+                    and alias["compatibility_symlink"]
+                ),
+            )
         except HygieneError as exc:
             skipped.append(
                 {
@@ -729,12 +868,69 @@ def build_alias_plan(
                 }
             )
             continue
+
+        target_nonempty = target.exists() and any(target.iterdir())
+        mode = "replace"
+        merge_entries: list[dict[str, Any]] = []
+        if target_nonempty:
+            if not alias["merge_existing"]:
+                skipped.append(
+                    {"source": str(source), "target": str(target), "reason": "target_not_empty"}
+                )
+                continue
+            collision: str | None = None
+            for child in sorted(source.iterdir(), key=lambda value: value.name):
+                destination = target / child.name
+                if destination.exists() or destination.is_symlink():
+                    collision = child.name
+                    break
+                try:
+                    child_observation = _alias_entry_observation(
+                        child,
+                        source_root=source,
+                        allow_internal_symlinks=alias["allow_internal_symlinks"],
+                        allow_absolute_internal_symlinks=(
+                            alias["allow_internal_symlinks"]
+                            and alias["compatibility_symlink"]
+                        ),
+                        hash_limit=hash_limit,
+                    )
+                except HygieneError as exc:
+                    collision = f"unsafe:{child.name}:{exc}"
+                    break
+                merge_entries.append(
+                    {
+                        "name": child.name,
+                        "source": str(child),
+                        "target": str(destination),
+                        **child_observation,
+                    }
+                )
+            if collision is not None:
+                skipped.append(
+                    {
+                        "source": str(source),
+                        "target": str(target),
+                        "reason": "target_collision",
+                        "detail": collision,
+                    }
+                )
+                continue
+            mode = "merge"
+
         candidates.append(
             {
                 "source": str(source),
                 "target": str(target),
+                "mode": mode,
                 "compatibility_symlink": alias["compatibility_symlink"],
+                "allow_internal_symlinks": alias["allow_internal_symlinks"],
+                "allow_absolute_internal_symlinks": (
+                    alias["allow_internal_symlinks"]
+                    and alias["compatibility_symlink"]
+                ),
                 "observation": observation,
+                "merge_entries": merge_entries,
             }
         )
         candidate_roots.append(source)
@@ -771,6 +967,19 @@ def build_alias_plan(
     return plan
 
 
+def _current_alias_tree_observation(item: dict[str, Any], source: Path) -> dict[str, Any]:
+    allow_internal = bool(item.get("allow_internal_symlinks"))
+    allow_absolute = bool(item.get("allow_absolute_internal_symlinks"))
+    if not allow_internal and not allow_absolute:
+        return _tree_observation(source)
+    return _tree_observation(
+        source,
+        allow_internal_symlinks=allow_internal,
+        symlink_root=source,
+        allow_absolute_internal_symlinks=allow_absolute,
+    )
+
+
 def apply_alias_plan(
     policy: dict[str, Any],
     *,
@@ -797,17 +1006,35 @@ def apply_alias_plan(
         raise HygieneError("legacy artifact root acquired a live process reference")
     artifact_root: Path = policy["_resolved"]["artifact_root"]
     _ensure_owned_directory(artifact_root, home=home, create=True)
+
     for item in candidates:
         source = Path(item["source"])
         target = Path(item["target"])
+        mode = item.get("mode", "replace")
         if source.parent != home or not _path_within(target, artifact_root):
             raise HygieneError("alias candidate path binding is invalid")
-        if _tree_observation(source) != item["observation"]:
+        if _current_alias_tree_observation(item, source) != item["observation"]:
             raise HygieneError(f"legacy artifact tree changed after planning: {source}")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if target.exists():
-            if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise HygieneError(f"alias target is unsafe: {target}")
+        if mode == "replace":
+            if target.exists() and any(target.iterdir()):
                 raise HygieneError(f"alias target is no longer empty: {target}")
+        elif mode == "merge":
+            if not target.exists() or not target.is_dir():
+                raise HygieneError(f"alias merge target disappeared: {target}")
+            for entry in item.get("merge_entries", []):
+                entry_source = Path(entry["source"])
+                entry_target = Path(entry["target"])
+                if entry_source.parent != source or entry_target.parent != target:
+                    raise HygieneError("alias merge entry path binding is invalid")
+                if entry_target.exists() or entry_target.is_symlink():
+                    raise HygieneError(f"alias merge collision appeared: {entry_target}")
+                if not _alias_entry_lstat_matches(entry_source, entry):
+                    raise HygieneError(f"alias merge entry changed after planning: {entry_source}")
+        else:
+            raise HygieneError(f"unsupported alias migration mode: {mode}")
         if policy["safety"]["require_same_filesystem_moves"]:
             target_device = target.stat().st_dev if target.exists() else target.parent.stat().st_dev
             if source.stat().st_dev != target_device:
@@ -818,25 +1045,89 @@ def apply_alias_plan(
     for item in candidates:
         source = Path(item["source"])
         target = Path(item["target"])
+        mode = item.get("mode", "replace")
+        moved_entries: list[dict[str, Any]] = []
+        symlink_target: str | None = None
+        replace_effect_started = False
         try:
-            if _tree_observation(source) != item["observation"]:
+            if _current_alias_tree_observation(item, source) != item["observation"]:
                 raise HygieneError(
                     f"legacy artifact tree changed immediately before migration: {source}"
                 )
-            if target.exists():
-                if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
-                    raise HygieneError(f"alias target changed before migration: {target}")
-                target.rmdir()
-            os.replace(source, target)
-            symlink_target: str | None = None
-            if item["compatibility_symlink"]:
-                symlink_target = os.path.relpath(target, source.parent)
-                source.symlink_to(symlink_target, target_is_directory=True)
-            if not target.is_dir() or (item["compatibility_symlink"] and not source.is_symlink()):
-                raise HygieneError(f"alias migration readback failed for {source}")
-            migrated.append({**item, "symlink_target": symlink_target})
+            if mode == "replace":
+                if target.exists():
+                    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+                        raise HygieneError(f"alias target changed before migration: {target}")
+                    target.rmdir()
+                os.replace(source, target)
+                replace_effect_started = True
+                if item["compatibility_symlink"]:
+                    symlink_target = os.path.relpath(target, source.parent)
+                    source.symlink_to(symlink_target, target_is_directory=True)
+                if not target.is_dir() or (
+                    item["compatibility_symlink"] and not source.is_symlink()
+                ):
+                    raise HygieneError(f"alias migration readback failed for {source}")
+                post_observation = _tree_observation(
+                    target,
+                    allow_internal_symlinks=bool(item.get("allow_internal_symlinks")),
+                    symlink_root=target,
+                    allow_absolute_internal_symlinks=bool(
+                        item.get("allow_absolute_internal_symlinks")
+                    ),
+                )
+                if post_observation["tree_sha256"] != item["observation"]["tree_sha256"]:
+                    raise HygieneError(f"alias target content readback failed for {target}")
+            else:
+                for entry in item.get("merge_entries", []):
+                    entry_source = Path(entry["source"])
+                    entry_target = Path(entry["target"])
+                    if entry_target.exists() or entry_target.is_symlink():
+                        raise HygieneError(f"alias merge collision appeared: {entry_target}")
+                    current = _alias_entry_observation(
+                        entry_source,
+                        source_root=source,
+                        allow_internal_symlinks=bool(item.get("allow_internal_symlinks")),
+                        allow_absolute_internal_symlinks=bool(
+                            item.get("allow_absolute_internal_symlinks")
+                        ),
+                        hash_limit=policy["loose_file_rules"]["full_hash_max_bytes"],
+                    )
+                    if current != {"kind": entry["kind"], "observation": entry["observation"]}:
+                        raise HygieneError(
+                            f"alias merge entry changed immediately before migration: {entry_source}"
+                        )
+                    os.replace(entry_source, entry_target)
+                    if entry_source.exists() or entry_source.is_symlink():
+                        raise HygieneError(f"alias merge source still exists: {entry_source}")
+                    if not (entry_target.exists() or entry_target.is_symlink()):
+                        raise HygieneError(f"alias merge target missing after move: {entry_target}")
+                    moved_entries.append(entry)
+                if any(source.iterdir()):
+                    raise HygieneError(f"alias merge source retained unexpected entries: {source}")
+                source.rmdir()
+                if item["compatibility_symlink"]:
+                    symlink_target = os.path.relpath(target, source.parent)
+                    source.symlink_to(symlink_target, target_is_directory=True)
+            migrated.append(
+                {
+                    **item,
+                    "moved_entries": moved_entries,
+                    "symlink_target": symlink_target,
+                }
+            )
         except (OSError, HygieneError) as exc:
             failure = f"{type(exc).__name__}: {exc}"
+            if moved_entries or replace_effect_started:
+                migrated.append(
+                    {
+                        **item,
+                        "moved_entries": moved_entries,
+                        "symlink_target": symlink_target,
+                        "partial": True,
+                        "replace_effect_started": replace_effect_started,
+                    }
+                )
             break
 
     applied_at_ns = time.time_ns()
@@ -850,8 +1141,13 @@ def apply_alias_plan(
         "migrated": migrated,
         "failure": failure,
         "process_observation_warnings": process_observation_warnings,
-        "remaining_count": len(candidates) - len(migrated),
-        "restoration": "remove any recorded compatibility symlink and move target back to source",
+        "remaining_count": len(candidates) - sum(
+            1 for item in migrated if not item.get("partial")
+        ),
+        "restoration": (
+            "for replace mode remove the recorded compatibility symlink and move target back; "
+            "for merge mode recreate source and move each recorded moved_entries target back to source"
+        ),
     }
     receipt["receipt_sha256"] = _sha256_json(receipt)
     state_root: Path = policy["_resolved"]["state_root"]

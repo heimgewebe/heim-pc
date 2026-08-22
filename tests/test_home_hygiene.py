@@ -157,11 +157,43 @@ class HomeHygieneTests(unittest.TestCase):
         skipped = {item["source"]: item["reason"] for item in plan["skipped"]}
         self.assertEqual(skipped[str(source)], "target_not_empty")
 
-    def test_alias_plan_skips_unsafe_tree_but_keeps_other_candidate(self) -> None:
-        unsafe = self.home / "logs"
-        unsafe.mkdir()
-        (unsafe / "target.log").write_text("log", encoding="utf-8")
-        (unsafe / "latest.log").symlink_to("target.log")
+    def test_alias_plan_allows_internal_logs_symlink_with_compatibility_root(self) -> None:
+        source = self.home / "logs"
+        source.mkdir()
+        target_file = source / "target.log"
+        target_file.write_text("log", encoding="utf-8")
+        (source / "latest.log").symlink_to(target_file)
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(
+                self.policy, home=self.home, now_unix=100
+            )
+
+        candidate = next(item for item in plan["candidates"] if item["source"] == str(source))
+        self.assertEqual(candidate["mode"], "replace")
+        self.assertTrue(candidate["allow_internal_symlinks"])
+        self.assertTrue(candidate["allow_absolute_internal_symlinks"])
+        plan_path = self.root / "logs-alias-plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            result = home_hygiene.apply_alias_plan(
+                self.policy,
+                home=self.home,
+                plan_path=plan_path,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=home_hygiene.ALIAS_CONFIRMATION,
+            )
+        migrated = self.home / "artifacts/logs"
+        self.assertTrue(source.is_symlink())
+        self.assertEqual((migrated / "latest.log").resolve(), migrated / "target.log")
+        self.assertEqual(result["receipt"]["status"], "success")
+
+    def test_alias_plan_rejects_logs_symlink_escaping_root(self) -> None:
+        source = self.home / "logs"
+        source.mkdir()
+        outside = self.home / "outside.log"
+        outside.write_text("outside", encoding="utf-8")
+        (source / "latest.log").symlink_to(outside)
         safe = self.home / "audits"
         safe.mkdir()
         (safe / "record.json").write_text("{}", encoding="utf-8")
@@ -174,9 +206,78 @@ class HomeHygieneTests(unittest.TestCase):
         candidates = {item["source"] for item in plan["candidates"]}
         skipped = {item["source"]: item for item in plan["skipped"]}
         self.assertIn(str(safe), candidates)
-        self.assertEqual(skipped[str(unsafe)]["reason"], "unsafe_source_tree")
-        self.assertIn("contains a symlink", skipped[str(unsafe)]["detail"])
-        self.assertTrue(plan["applicable"])
+        self.assertEqual(skipped[str(source)]["reason"], "unsafe_source_tree")
+        self.assertIn("escapes its root", skipped[str(source)]["detail"])
+
+    def test_alias_merge_into_nonempty_target_is_collision_free(self) -> None:
+        source = self.home / "diffs"
+        source.mkdir()
+        (source / "new.diff").write_text("new", encoding="utf-8")
+        target = self.home / "artifacts/diffs"
+        target.mkdir(parents=True)
+        (target / "existing.diff").write_text("old", encoding="utf-8")
+        plan_path = self.root / "alias-plan.json"
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(self.policy, home=self.home, now_unix=100)
+            candidate = next(item for item in plan["candidates"] if item["source"] == str(source))
+            self.assertEqual(candidate["mode"], "merge")
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            result = home_hygiene.apply_alias_plan(
+                self.policy,
+                home=self.home,
+                plan_path=plan_path,
+                expected_plan_sha256=plan["plan_sha256"],
+                confirmation=home_hygiene.ALIAS_CONFIRMATION,
+            )
+
+        self.assertFalse(source.exists())
+        self.assertEqual((target / "existing.diff").read_text(), "old")
+        self.assertEqual((target / "new.diff").read_text(), "new")
+        self.assertEqual(result["receipt"]["status"], "success")
+        self.assertEqual(len(result["receipt"]["migrated"][0]["moved_entries"]), 1)
+
+    def test_alias_merge_refuses_existing_destination_name(self) -> None:
+        source = self.home / "diffs"
+        source.mkdir()
+        (source / "same.diff").write_text("new", encoding="utf-8")
+        target = self.home / "artifacts/diffs"
+        target.mkdir(parents=True)
+        (target / "same.diff").write_text("old", encoding="utf-8")
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(self.policy, home=self.home, now_unix=100)
+        skipped = {item["source"]: item for item in plan["skipped"]}
+        self.assertEqual(skipped[str(source)]["reason"], "target_collision")
+        self.assertEqual(skipped[str(source)]["detail"], "same.diff")
+
+    def test_alias_replace_partial_effect_is_receipted_after_root_move(self) -> None:
+        source = self.home / "logs"
+        source.mkdir()
+        (source / "run.log").write_text("log", encoding="utf-8")
+        plan_path = self.root / "logs-partial-plan.json"
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(self.policy, home=self.home, now_unix=100)
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with mock.patch.object(Path, "symlink_to", side_effect=OSError("injected")):
+                with self.assertRaisesRegex(home_hygiene.HygieneError, "partial effect"):
+                    home_hygiene.apply_alias_plan(
+                        self.policy,
+                        home=self.home,
+                        plan_path=plan_path,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=home_hygiene.ALIAS_CONFIRMATION,
+                    )
+        target = self.home / "artifacts/logs"
+        self.assertTrue(target.is_dir())
+        self.assertFalse(source.exists())
+        receipts = list(
+            (self.home / ".local/state/heim-pc/home-hygiene/alias-receipts").glob("*.json")
+        )
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "partial_failure")
+        self.assertTrue(receipt["migrated"][0]["partial"])
+        self.assertTrue(receipt["migrated"][0]["replace_effect_started"])
 
     def test_installer_root_plan_is_bounded_and_hashes_content(self) -> None:
         plan = install_home_hygiene._root_plan(
