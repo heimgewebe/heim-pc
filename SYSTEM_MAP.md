@@ -29,7 +29,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | managed-builds | [architecture/managed-builds.md](architecture/managed-builds.md) | canonical | 2026-07-22 | storage-lifecycle, operatorium-entry, security |
 | cache-maintenance | [architecture/cache-maintenance.md](architecture/cache-maintenance.md) | canonical | 2026-07-15 | storage-lifecycle, managed-builds, security |
 | maintenance-outcomes | [architecture/maintenance-outcomes.md](architecture/maintenance-outcomes.md) | canonical | 2026-07-24 | storage-lifecycle, security, drift-policy |
-| home-hygiene | [architecture/home-hygiene.md](architecture/home-hygiene.md) | canonical | 2026-07-26 | operatorium-entry, security, storage-lifecycle, managed-builds |
+| home-hygiene | [architecture/home-hygiene.md](architecture/home-hygiene.md) | canonical | 2026-08-22 | operatorium-entry, security, storage-lifecycle, managed-builds |
 | runaway-guard | [architecture/runaway-guard.md](architecture/runaway-guard.md) | canonical | 2026-07-27 | security |
 | network-identity | [architecture/network-identity.md](architecture/network-identity.md) | canonical | 2026-07-28 | security, runaway-guard |
 

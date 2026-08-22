@@ -39,37 +39,51 @@
     {
       "source": "audits",
       "category": "audits",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": false,
+      "allow_internal_symlinks": false
     },
     {
       "source": "cleanup-backups",
       "category": "cleanup_backups",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": false,
+      "allow_internal_symlinks": false
     },
     {
       "source": "diffs",
       "category": "diffs",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": true,
+      "allow_internal_symlinks": false
     },
     {
       "source": "logs",
       "category": "logs",
-      "compatibility_symlink": true
+      "compatibility_symlink": true,
+      "merge_existing": false,
+      "allow_internal_symlinks": true
     },
     {
       "source": "merges",
       "category": "merges",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": false,
+      "allow_internal_symlinks": false
     },
     {
       "source": "patches",
       "category": "patches",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": false,
+      "allow_internal_symlinks": false
     },
     {
       "source": "review-artifacts",
       "category": "reviews",
-      "compatibility_symlink": false
+      "compatibility_symlink": false,
+      "merge_existing": false,
+      "allow_internal_symlinks": false
     }
   ],
   "loose_file_rules": {

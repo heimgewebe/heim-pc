@@ -2,7 +2,7 @@
 id: home-hygiene
 role: norm
 status: canonical
-last_reviewed: 2026-07-26
+last_reviewed: 2026-08-22
 depends_on:
   - operatorium-entry
   - security
@@ -136,14 +136,14 @@ Die Verzeichnisse `audits`, `cleanup-backups`, `diffs`, `logs`, `merges`, `patch
 
 Vor der Migration gelten dieselben Grundgrenzen:
 
-- reales Verzeichnis, keine Symlinks im Baum;
-- begrenzter vollständiger Baumfingerabdruck;
+- reales Quellverzeichnis und begrenzter vollständiger Baumfingerabdruck;
 - kein Mount- oder Gerätewechsel;
 - keine tatsächlich beobachteten Prozessreferenzen;
-- Ziel fehlt oder ist leer;
-- erneuter Fingerprint unmittelbar vor der Wirkung.
+- erneuter Fingerprint unmittelbar vor jeder Wirkung;
+- Symlinks bleiben grundsätzlich verboten, außer eine einzelne Legacy-Wurzel erlaubt ausdrücklich interne Links; solche Links müssen streng auf ein existierendes Ziel innerhalb derselben Quellwurzel und desselben Dateisystems auflösen. Absolute interne Links sind nur zulässig, wenn zugleich ein Root-Kompatibilitätssymlink erhalten bleibt;
+- ein nichtleeres Ziel bleibt grundsätzlich blockiert. Nur ausdrücklich mit `merge_existing` markierte Wurzeln dürfen kollisionsfreie unmittelbare Quelleinträge in ein vorhandenes Ziel verschieben. Schon ein vorhandener gleichnamiger Zielpfad blockiert die gesamte Wurzel; es gibt kein Überschreiben, Deduping nach Vermutung oder `--force`.
 
-Nur `logs` behält laut aktuellem Vertrag vorübergehend einen Kompatibilitätssymlink. Die übrigen Legacy-Einstiege verschwinden nach erfolgreicher Migration aus der sichtbaren Home-Wurzel.
+Aktuell nutzt nur `diffs` den kollisionsfreien Merge-Pfad. `logs` darf seine sechs intern gebundenen historischen Links erhalten und behält den Kompatibilitätssymlink, weil aktuelle Producer den Altpfad noch verwenden. `merges` bleibt bei einem nichtleeren Ziel fail-closed; insbesondere wird ein unterschiedliches `weltgewebe-production-backups/latest-pull.receipt` nicht automatisch ersetzt. Die übrigen Legacy-Einstiege verschwinden nach erfolgreicher Migration aus der sichtbaren Home-Wurzel.
 
 Diese Migration ist nie automatisch. `apply-aliases` verlangt Plan-SHA und `apply-home-alias-migration`.
 
@@ -205,7 +205,8 @@ Der Vertrag erlaubt nicht:
 Quarantäne und Aliasmigration schreiben vor und nach der Wirkung gebundene Receipts. Die Wiederherstellung erfolgt ausschließlich gegen diese Pfade:
 
 - Quarantäne: Ziel zurück an die aufgezeichnete Quelle verschieben;
-- Aliasmigration: Kompatibilitätssymlink entfernen, Ziel zurück an Quelle verschieben;
+- Aliasmigration im Replace-Modus: Kompatibilitätssymlink entfernen und Ziel zurück an Quelle verschieben;
+- Aliasmigration im Merge-Modus: Quelle wieder anlegen und ausschließlich die im Receipt einzeln aufgezeichneten verschobenen Ziele an ihre Quellpfade zurückbewegen;
 - Root-Routing: versionierte Dateien aus `/etc/sysctl.d` und `/etc/security/limits.d` entfernen oder auf den belegten Vorgängerinhalt zurücksetzen, danach Sysctl erneut laden;
 - User-Units: Timer deaktivieren und commitgebundene Units entfernen.
 
