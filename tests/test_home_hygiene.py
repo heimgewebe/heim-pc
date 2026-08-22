@@ -237,6 +237,50 @@ class HomeHygieneTests(unittest.TestCase):
         self.assertEqual(result["receipt"]["status"], "success")
         self.assertEqual(len(result["receipt"]["migrated"][0]["moved_entries"]), 1)
 
+    def test_alias_merge_race_does_not_replace_competing_destination(self) -> None:
+        source = self.home / "diffs"
+        source.mkdir()
+        source_entry = source / "new.diff"
+        source_entry.write_text("new", encoding="utf-8")
+        target = self.home / "artifacts/diffs"
+        target.mkdir(parents=True)
+        (target / "existing.diff").write_text("old", encoding="utf-8")
+        target_entry = target / "new.diff"
+        plan_path = self.root / "alias-race-plan.json"
+
+        with mock.patch.object(home_hygiene, "_process_references", return_value=({}, [])):
+            plan = home_hygiene.build_alias_plan(self.policy, home=self.home, now_unix=100)
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            original_rename = home_hygiene._rename_noreplace
+
+            def inject_competing_target(entry_source: Path, entry_target: Path) -> None:
+                entry_target.write_text("competitor", encoding="utf-8")
+                original_rename(entry_source, entry_target)
+
+            with mock.patch.object(
+                home_hygiene, "_rename_noreplace", side_effect=inject_competing_target
+            ):
+                with self.assertRaisesRegex(
+                    home_hygiene.HygieneError, "alias migration had a partial effect"
+                ):
+                    home_hygiene.apply_alias_plan(
+                        self.policy,
+                        home=self.home,
+                        plan_path=plan_path,
+                        expected_plan_sha256=plan["plan_sha256"],
+                        confirmation=home_hygiene.ALIAS_CONFIRMATION,
+                    )
+
+        self.assertEqual(target_entry.read_text(encoding="utf-8"), "competitor")
+        self.assertEqual(source_entry.read_text(encoding="utf-8"), "new")
+        receipts = list(
+            (self.home / ".local/state/heim-pc/home-hygiene/alias-receipts").glob("*.json")
+        )
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        self.assertIn("alias merge collision appeared", receipt["failure"])
+        self.assertEqual(receipt["migrated"], [])
+
     def test_alias_merge_refuses_existing_destination_name(self) -> None:
         source = self.home / "diffs"
         source.mkdir()

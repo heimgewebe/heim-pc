@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -83,6 +85,42 @@ def _path_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Atomically rename one entry without ever replacing an existing target."""
+    if sys.platform != "linux":
+        raise HygieneError("atomic no-replace rename requires Linux renameat2")
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise HygieneError("atomic no-replace rename is unavailable") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,  # AT_FDCWD
+        os.fsencode(target),
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise HygieneError(f"alias merge collision appeared: {target}")
+    if error in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        raise HygieneError(
+            f"atomic no-replace rename is unavailable for {source} -> {target}"
+        )
+    raise OSError(error, os.strerror(error), str(source))
 
 
 def _expand_home(value: Any, home: Path, *, label: str) -> Path:
@@ -1097,7 +1135,7 @@ def apply_alias_plan(
                         raise HygieneError(
                             f"alias merge entry changed immediately before migration: {entry_source}"
                         )
-                    os.replace(entry_source, entry_target)
+                    _rename_noreplace(entry_source, entry_target)
                     if entry_source.exists() or entry_source.is_symlink():
                         raise HygieneError(f"alias merge source still exists: {entry_source}")
                     if not (entry_target.exists() or entry_target.is_symlink()):
