@@ -89,6 +89,51 @@ class MaintenanceOutcomeTests(unittest.TestCase):
             with self.assertRaisesRegex(outcomes.OutcomeError, "success_evidence"):
                 outcomes._validate_policy(path)
 
+    def test_main_emits_compact_artifact_bound_success_receipt(self) -> None:
+        artifact = {
+            "schema_version": 1,
+            "kind": outcomes.ARTIFACT_KIND,
+            "generated_at_unix": 2000,
+            "artifact_sha256": "a" * 64,
+            "summary": {
+                "producer_count": 1,
+                "status_counts": {
+                    "observed": 1,
+                    "stale": 0,
+                    "failed": 0,
+                    "unknown": 0,
+                    "not-applicable": 0,
+                },
+                "attention_count": 0,
+                "automatic_repair_authorized": False,
+            },
+            "producers": [{"id": "noisy", "detail": "x" * 5000}],
+        }
+        argv = [
+            "maintenance_outcomes.py",
+            "--policy",
+            "/tmp/maintenance-policy.json",
+            "--output",
+            "/tmp/maintenance-outcomes.json",
+        ]
+        with (
+            mock.patch.object(outcomes, "collect", return_value=artifact),
+            mock.patch.object(outcomes.sys, "argv", argv),
+            mock.patch("builtins.print") as printer,
+        ):
+            returncode = outcomes.main()
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(printer.call_count, 1)
+        encoded = printer.call_args.args[0]
+        payload = json.loads(encoded)
+        self.assertEqual(payload["kind"], "heim_pc_maintenance_outcomes_run_receipt")
+        self.assertEqual(payload["artifact_sha256"], "a" * 64)
+        self.assertEqual(payload["generated_at_unix"], 2000)
+        self.assertEqual(payload["summary"], artifact["summary"])
+        self.assertNotIn("producers", payload)
+        self.assertLess(len(encoded.encode("utf-8")), 1024)
+
     def test_collect_classifies_success_failure_and_deduplicates_same_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

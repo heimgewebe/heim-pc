@@ -2,7 +2,7 @@
 id: maintenance-outcomes
 role: norm
 status: canonical
-last_reviewed: 2026-07-24
+last_reviewed: 2026-08-22
 depends_on:
   - storage-lifecycle
   - security
@@ -23,6 +23,8 @@ verifies_with:
 `~/.local/state/heim-pc/maintenance-outcomes/maintenance-outcomes.v1.json`
 
 Das Artefakt ist eine abgeleitete Beobachtungsprojektion für Leitstand und Operator. Es ersetzt weder systemd, Grabowski, Bureau, Leitstand, Chronik noch die Lifecycle-Verträge der einzelnen Produzenten.
+
+Die vollständige Produzentenprojektion bleibt ausschließlich in dieser eigentümerkontrollierten Artefaktdatei. Ein erfolgreicher CLI- oder systemd-Lauf schreibt auf `stdout` nur einen kompakten, über `artifact_sha256` an genau dieses Artefakt gebundenen Run-Receipt mit Zeitstempel und Summary. Dadurch dupliziert der 15-Minuten-Timer nicht bei jedem Lauf die vollständigen Produzentendetails im Journal. Fehler bleiben als begrenztes JSON auf `stderr` sichtbar.
 
 ## Zuständigkeiten
 
