@@ -2040,6 +2040,15 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 install_fixture(source, head, target, apply=True)
             self.assertEqual(outside.read_bytes(), b"outside")
 
+    def test_rsyslog_rotation_uses_unique_same_day_timestamp_names(self) -> None:
+        config = (ROOT / "systemd/logrotate.d/rsyslog").read_text(encoding="utf-8")
+        lines = [line.strip() for line in config.splitlines()]
+
+        self.assertIn("maxsize 100M", lines)
+        self.assertIn("dateext", lines)
+        self.assertIn("dateformat -%Y%m%d-%H%M%S", lines)
+        self.assertLess(lines.index("dateext"), lines.index("dateformat -%Y%m%d-%H%M%S"))
+
     def test_journald_drop_in_sorts_after_pop_and_wins_merged_cat_config(self) -> None:
         journald_path = ROOT / "systemd/journald.conf.d/zz-heim-pc-retention.conf"
         self.assertEqual(
