@@ -48,6 +48,42 @@
         "audio_file_access",
         "cloud_cost_authorization",
         "transcription_correctness"
+      ],
+      "purpose": "Transcribe local audio through the canonical heim-pc ASR authority without pinning an engine in the locator",
+      "entryKind": "argv",
+      "readinessOperation": "doctor"
+    },
+    "documentTextExtraction": {
+      "schemaVersion": 1,
+      "purpose": "Extract text from local PDF and image documents through bounded local-first routes",
+      "intents": [
+        "document.text_extract",
+        "document.ocr",
+        "pdf.text_extract",
+        "image.ocr",
+        "ocr"
+      ],
+      "authority": "heim_pc_document_text_engine",
+      "authorityKind": "capability_locator_only",
+      "repository": "${HOME}/repos/heim-pc",
+      "architecture": "${HOME}/repos/heim-pc/architecture/document-text-engine.md",
+      "policy": "${HOME}/repos/heim-pc/manifest/document-text-engine-policy.v1.json",
+      "contract": "${HOME}/repos/heim-pc/manifest/document-text-contract.v1.json",
+      "entryKind": "argv",
+      "entryArgvPrefix": [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/document_text_engine.py"
+      ],
+      "defaultOperation": "extract",
+      "readinessOperation": "doctor",
+      "policyResolution": "read_at_execution_time",
+      "cloudOrMeteredUseAuthorizedByLocator": false,
+      "doesNotEstablish": [
+        "current_tool_readiness",
+        "source_file_access",
+        "extraction_correctness",
+        "layout_fidelity",
+        "cloud_or_metered_cost_authorization"
       ]
     }
   },

@@ -161,6 +161,64 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     capability_locators = _require_object(
         contract.get("capabilityLocators"), "capabilityLocators", errors
     )
+    seen_capability_intents: dict[str, str] = {}
+    for locator_id, locator_value in capability_locators.items():
+        if not isinstance(locator_id, str) or not locator_id.strip():
+            errors.append("capabilityLocators keys must be non-empty strings")
+            continue
+        label = f"capabilityLocators.{locator_id}"
+        locator = _require_object(locator_value, label, errors)
+        if locator.get("schemaVersion") != 1:
+            errors.append(f"{label}.schemaVersion must be 1")
+        for field in ("purpose", "authority", "defaultOperation", "readinessOperation"):
+            value = locator.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{label}.{field} must be non-empty text")
+        if locator.get("authorityKind") != "capability_locator_only":
+            errors.append(f"{label}.authorityKind must remain locator-only")
+        if locator.get("entryKind") != "argv":
+            errors.append(f"{label}.entryKind must be argv")
+        if locator.get("policyResolution") != "read_at_execution_time":
+            errors.append(f"{label}.policyResolution must be read_at_execution_time")
+        _require_host_path(locator.get("repository"), f"{label}.repository", errors)
+        for field in ("architecture", "policy", "contract"):
+            value = locator.get(field)
+            if value is not None:
+                _require_host_path(value, f"{label}.{field}", errors)
+        argv_prefix = locator.get("entryArgvPrefix")
+        if (
+            not isinstance(argv_prefix, list)
+            or len(argv_prefix) < 2
+            or any(not isinstance(item, str) or not item for item in argv_prefix)
+        ):
+            errors.append(f"{label}.entryArgvPrefix must be a non-empty argv prefix")
+        intents = locator.get("intents")
+        if not isinstance(intents, list) or not intents:
+            errors.append(f"{label}.intents must be a non-empty array")
+        else:
+            for intent in intents:
+                if not isinstance(intent, str) or not intent.strip():
+                    errors.append(f"{label}.intents must contain non-empty strings")
+                    continue
+                normalized = intent.casefold()
+                previous = seen_capability_intents.get(normalized)
+                if previous is not None:
+                    errors.append(
+                        f"capability intent {intent!r} is ambiguous between {previous} and {locator_id}"
+                    )
+                else:
+                    seen_capability_intents[normalized] = locator_id
+        limits = locator.get("doesNotEstablish")
+        if not isinstance(limits, list) or not limits or any(
+            not isinstance(item, str) or not item for item in limits
+        ):
+            errors.append(f"{label}.doesNotEstablish must be a non-empty string array")
+        if (
+            "cloudOrMeteredUseAuthorizedByLocator" in locator
+            and locator.get("cloudOrMeteredUseAuthorizedByLocator") is not False
+        ):
+            errors.append(f"{label}.cloudOrMeteredUseAuthorizedByLocator must remain false when declared")
+
     transcription = _require_object(
         capability_locators.get("audioTranscription"),
         "capabilityLocators.audioTranscription",
@@ -214,6 +272,56 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         set(transcription_limits)
     ):
         errors.append("capabilityLocators.audioTranscription.doesNotEstablish is incomplete")
+
+    document_text = _require_object(
+        capability_locators.get("documentTextExtraction"),
+        "capabilityLocators.documentTextExtraction",
+        errors,
+    )
+    required_document_intents = {
+        "document.text_extract",
+        "document.ocr",
+        "pdf.text_extract",
+        "image.ocr",
+        "ocr",
+    }
+    document_intents = document_text.get("intents")
+    if not isinstance(document_intents, list) or not required_document_intents.issubset(
+        set(document_intents)
+    ):
+        errors.append("capabilityLocators.documentTextExtraction.intents is incomplete")
+    if document_text.get("authority") != "heim_pc_document_text_engine":
+        errors.append("capabilityLocators.documentTextExtraction.authority is invalid")
+    for field in ("repository", "architecture", "policy", "contract"):
+        _require_host_path(
+            document_text.get(field),
+            f"capabilityLocators.documentTextExtraction.{field}",
+            errors,
+        )
+    expected_document_entry = [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/document_text_engine.py",
+    ]
+    if document_text.get("entryArgvPrefix") != expected_document_entry:
+        errors.append(
+            "capabilityLocators.documentTextExtraction.entryArgvPrefix must name the canonical document text entry"
+        )
+    if document_text.get("defaultOperation") != "extract":
+        errors.append("capabilityLocators.documentTextExtraction.defaultOperation must be extract")
+    if document_text.get("readinessOperation") != "doctor":
+        errors.append("capabilityLocators.documentTextExtraction.readinessOperation must be doctor")
+    required_document_limits = {
+        "current_tool_readiness",
+        "source_file_access",
+        "extraction_correctness",
+        "layout_fidelity",
+        "cloud_or_metered_cost_authorization",
+    }
+    document_limits = document_text.get("doesNotEstablish")
+    if not isinstance(document_limits, list) or not required_document_limits.issubset(
+        set(document_limits)
+    ):
+        errors.append("capabilityLocators.documentTextExtraction.doesNotEstablish is incomplete")
 
     managed_builds = _require_object(contract.get("managedBuilds"), "managedBuilds", errors)
     _require_host_path(managed_builds.get("policy"), "managedBuilds.policy", errors)

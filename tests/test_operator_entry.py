@@ -61,6 +61,25 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertNotIn("faster-whisper", json.dumps(transcription, ensure_ascii=False))
         self.assertNotIn("qwen", json.dumps(transcription, ensure_ascii=False).lower())
         self.assertNotIn("parakeet", json.dumps(transcription, ensure_ascii=False).lower())
+        self.assertEqual(transcription["entryKind"], "argv")
+        self.assertEqual(transcription["readinessOperation"], "doctor")
+        document_text = contract["capabilityLocators"]["documentTextExtraction"]
+        self.assertEqual(document_text["schemaVersion"], 1)
+        self.assertEqual(
+            set(document_text["intents"]),
+            {"document.text_extract", "document.ocr", "pdf.text_extract", "image.ocr", "ocr"},
+        )
+        self.assertEqual(document_text["authority"], "heim_pc_document_text_engine")
+        self.assertEqual(document_text["authorityKind"], "capability_locator_only")
+        self.assertEqual(document_text["entryKind"], "argv")
+        self.assertEqual(
+            document_text["entryArgvPrefix"],
+            ["python3", "${HOME}/repos/heim-pc/scripts/document_text_engine.py"],
+        )
+        self.assertEqual(document_text["defaultOperation"], "extract")
+        self.assertEqual(document_text["readinessOperation"], "doctor")
+        self.assertEqual(document_text["policyResolution"], "read_at_execution_time")
+        self.assertFalse(document_text["cloudOrMeteredUseAuthorizedByLocator"])
         policy = contract["transferPolicy"]
         self.assertEqual(policy["principle"], "role_based_dual_transport")
         self.assertEqual(policy["scope"], "heim_pc_mobile_devices")
@@ -257,6 +276,49 @@ class OperatorEntryTests(unittest.TestCase):
             )
             self.assertIn(
                 "capabilityLocators.audioTranscription.cloudOrMeteredUseAuthorizedByLocator must remain false",
+                receipt["errors"],
+            )
+
+    def test_checker_accepts_additional_generic_locator_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            contract["capabilityLocators"]["exampleReadOnly"] = {
+                "schemaVersion": 1,
+                "purpose": "Test the generic locator validator without a named capability special case",
+                "intents": ["example.read_only"],
+                "authority": "heim_pc_example_read_only",
+                "authorityKind": "capability_locator_only",
+                "repository": "${HOME}/repos/heim-pc",
+                "entryKind": "argv",
+                "entryArgvPrefix": ["python3", "${HOME}/repos/heim-pc/scripts/check_operator_entry.py"],
+                "defaultOperation": "check",
+                "readinessOperation": "check",
+                "policyResolution": "read_at_execution_time",
+                "doesNotEstablish": ["current_runtime_readiness"],
+            }
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with patch.object(checker, "CONTRACT_PATH", contract_path):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertTrue(receipt["valid"], receipt["errors"])
+
+    def test_checker_rejects_casefold_ambiguous_capability_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            contract["capabilityLocators"]["documentTextExtraction"]["intents"].append("ASR")
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with patch.object(checker, "CONTRACT_PATH", contract_path):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertFalse(receipt["valid"])
+            self.assertTrue(
+                any("capability intent 'ASR' is ambiguous" in error for error in receipt["errors"]),
                 receipt["errors"],
             )
 
