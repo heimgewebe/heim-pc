@@ -76,6 +76,7 @@ class DocumentTextEngineTests(unittest.TestCase):
             ".ssh/document.pdf",
             ".gnupg/document.pdf",
             ".password-store/document.pdf",
+            ".thunderbird/profile/document.pdf",
             ".mozilla/firefox/profile/document.pdf",
             ".config/google-chrome/Default/document.pdf",
             ".config/BraveSoftware/Brave-Browser/Default/document.pdf",

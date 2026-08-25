@@ -23,7 +23,7 @@ DOCLING_READINESS_PATH = (
 )
 
 SOURCE_ROOT = Path.home().resolve()
-SENSITIVE_COMPONENTS = frozenset({".ssh", ".gnupg", ".password-store", "keyrings"})
+SENSITIVE_COMPONENTS = frozenset({".ssh", ".gnupg", ".password-store", ".thunderbird", "keyrings"})
 SENSITIVE_PATH_SEQUENCES = (
     (".mozilla", "firefox"),
     (".config", "google-chrome"),
