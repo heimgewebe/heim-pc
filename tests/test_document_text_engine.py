@@ -82,6 +82,8 @@ class DocumentTextEngineTests(unittest.TestCase):
 
     def test_sensitive_source_areas_are_rejected(self) -> None:
         protected = (
+            ".cache/document.pdf",
+            ".local/share/Trash/document.pdf",
             ".ssh/document.pdf",
             ".gnupg/document.pdf",
             ".password-store/document.pdf",
@@ -90,6 +92,15 @@ class DocumentTextEngineTests(unittest.TestCase):
             ".config/google-chrome/Default/document.pdf",
             ".config/BraveSoftware/Brave-Browser/Default/document.pdf",
             ".local/share/keyrings/document.pdf",
+            "node_modules/document.pdf",
+            ".venv/document.pdf",
+            "venv/document.pdf",
+            "dist/document.pdf",
+            "build/document.pdf",
+            "target/document.pdf",
+            "__pycache__/document.pdf",
+            ".mypy_cache/document.pdf",
+            ".pytest_cache/document.pdf",
         )
         with tempfile.TemporaryDirectory() as directory:
             engine.SOURCE_ROOT = Path(directory).resolve()
@@ -432,6 +443,49 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(text, "abc")
         self.assertEqual(original_bytes, 6)
         self.assertIs(truncated, True)
+
+    def test_doctor_isolates_tesseract_readiness_failure_from_text_pdf_route(self) -> None:
+        fake_which = {
+            "pdftotext": "/usr/bin/pdftotext",
+            "pdfinfo": "/usr/bin/pdfinfo",
+            "ocrmypdf": "/usr/bin/ocrmypdf",
+            "tesseract": "/usr/bin/tesseract",
+        }
+        with (
+            mock.patch.object(engine.shutil, "which", side_effect=lambda name: fake_which.get(name)),
+            mock.patch.object(
+                engine,
+                "_run",
+                side_effect=engine.DocumentTextError(
+                    "route_unavailable",
+                    "tesseract readiness failed without leaking process details",
+                ),
+            ),
+            mock.patch.object(
+                engine,
+                "_docling_readiness",
+                return_value={"status": "unattested", "automatic_use": False},
+            ),
+        ):
+            readiness = engine.doctor(self.policy)
+        self.assertEqual(readiness["status"], "degraded")
+        self.assertIs(readiness["routes"]["pdf_text_layer"], True)
+        self.assertIs(readiness["routes"]["pdf_ocr"], False)
+        self.assertIs(readiness["routes"]["image_ocr"], False)
+        self.assertEqual(readiness["languages"]["status"], "unavailable")
+        self.assertEqual(readiness["languages"]["reason"], "readiness_probe_failed")
+        self.assertEqual(readiness["languages"]["error_code"], "route_unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "text.pdf")
+            with (
+                mock.patch.object(engine, "_pdf_page_count", return_value=1),
+                mock.patch.object(engine, "_probe_pdf_text_layer", return_value=True),
+                mock.patch.object(engine, "doctor", return_value=readiness),
+            ):
+                inspection = engine.inspect_source(str(source), self.policy)
+        self.assertEqual(inspection["status"], "ready")
+        self.assertEqual(inspection["recommended_method"], "pdftotext")
 
     def test_doctor_does_not_authorize_docling_or_cloud(self) -> None:
         fake_which = {

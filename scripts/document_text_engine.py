@@ -24,8 +24,27 @@ DOCLING_READINESS_PATH = (
 )
 
 SOURCE_ROOT = Path.home().resolve()
-SENSITIVE_COMPONENTS = frozenset({".ssh", ".gnupg", ".password-store", ".thunderbird", "keyrings"})
-SENSITIVE_PATH_SEQUENCES = (
+ALWAYS_EXCLUDED_COMPONENTS = frozenset(
+    {
+        ".cache",
+        ".ssh",
+        ".gnupg",
+        ".password-store",
+        ".thunderbird",
+        "keyrings",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "target",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+    }
+)
+ALWAYS_EXCLUDED_PATH_SEQUENCES = (
+    (".local", "share", "trash"),
     (".mozilla", "firefox"),
     (".config", "google-chrome"),
     (".config", "chromium"),
@@ -234,12 +253,12 @@ def _enforce_source_path_policy(path: Path) -> None:
             "source is outside the approved user-home root",
         ) from exc
     parts = tuple(part.casefold() for part in relative.parts)
-    if any(part in SENSITIVE_COMPONENTS for part in parts):
+    if any(part in ALWAYS_EXCLUDED_COMPONENTS for part in parts):
         raise DocumentTextError(
             "source_not_authorized",
             "source is inside a protected filesystem area",
         )
-    if any(_path_contains_sequence(parts, sequence) for sequence in SENSITIVE_PATH_SEQUENCES):
+    if any(_path_contains_sequence(parts, sequence) for sequence in ALWAYS_EXCLUDED_PATH_SEQUENCES):
         raise DocumentTextError(
             "source_not_authorized",
             "source is inside a protected filesystem area",
@@ -483,9 +502,27 @@ def _tesseract_languages(policy: dict[str, Any]) -> dict[str, Any]:
     executable = shutil.which(name)
     if executable is None:
         return {"status": "unavailable", "tool": name, "installed": []}
-    completed = _run([executable, "--list-langs"], policy=policy, operation="tesseract-language-readiness")
+    try:
+        completed = _run(
+            [executable, "--list-langs"],
+            policy=policy,
+            operation="tesseract-language-readiness",
+        )
+    except DocumentTextError as exc:
+        return {
+            "status": "unavailable",
+            "tool": name,
+            "installed": [],
+            "reason": "readiness_probe_failed",
+            "error_code": exc.code,
+        }
     if completed.returncode != 0:
-        return {"status": "unavailable", "tool": name, "installed": []}
+        return {
+            "status": "unavailable",
+            "tool": name,
+            "installed": [],
+            "reason": "readiness_probe_failed",
+        }
     lines = completed.stdout.decode("utf-8", errors="replace").splitlines()
     installed = sorted({line.strip() for line in lines[1:] if line.strip()})
     required = policy["languages"].get("required_installed", [])
