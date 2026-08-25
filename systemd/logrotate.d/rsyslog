@@ -21,6 +21,7 @@
 	compress
 	delaycompress
 	dateext
+	dateformat -%Y%m%d-%H%M%S
 	sharedscripts
 	postrotate
 		/usr/lib/rsyslog/rsyslog-rotate
