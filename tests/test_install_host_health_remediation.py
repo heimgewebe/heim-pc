@@ -2085,6 +2085,64 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             second = install_fixture(source, head, target, apply=True)
             self.assertEqual(second["legacy_rsyslog_archive_migration"]["count"], 0)
 
+    def test_rsyslog_archive_migration_never_overwrites_racing_destination(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            legacy = target / "var/log/syslog-20260824.gz"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"legacy syslog\n")
+            legacy_inode = legacy.stat().st_ino
+            destination = target / "var/log/syslog-20260824-000000.gz"
+            original_rename = installer._rename_noreplace_at
+            injected = False
+
+            def inject_destination_race(
+                parent_fd: int,
+                source_name: str,
+                destination_name: str,
+                *,
+                operation: str,
+            ) -> None:
+                nonlocal injected
+                if not injected and operation == "legacy rsyslog archive migration":
+                    injected = True
+                    fd = os.open(
+                        destination_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        os.write(fd, b"racing destination\n")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                original_rename(
+                    parent_fd,
+                    source_name,
+                    destination_name,
+                    operation=operation,
+                )
+
+            with mock.patch.object(
+                installer,
+                "_rename_noreplace_at",
+                side_effect=inject_destination_race,
+            ):
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "destination appeared",
+                ):
+                    install_fixture(source, head, target, apply=True)
+
+            self.assertTrue(injected)
+            self.assertEqual(legacy.read_bytes(), b"legacy syslog\n")
+            self.assertEqual(legacy.stat().st_ino, legacy_inode)
+            self.assertEqual(destination.read_bytes(), b"racing destination\n")
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+
     def test_rsyslog_archive_migration_rolls_back_if_install_fails(
         self,
     ) -> None:

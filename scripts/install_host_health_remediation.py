@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import errno
 import fcntl
@@ -750,6 +751,54 @@ def _snapshot(root_fd: int, relative: str) -> dict[str, Any]:
                 pass
 
 
+def _rename_noreplace_at(
+    parent_fd: int,
+    source_name: str,
+    destination_name: str,
+    *,
+    operation: str,
+) -> None:
+    """Atomically rename within one opened directory without replacing a target."""
+    if sys.platform != "linux":
+        raise InstallError(
+            f"{operation} requires Linux renameat2(RENAME_NOREPLACE)"
+        )
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise InstallError(
+            f"{operation} requires renameat2(RENAME_NOREPLACE)"
+        ) from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = renameat2(
+        parent_fd,
+        os.fsencode(source_name),
+        parent_fd,
+        os.fsencode(destination_name),
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise InstallError(
+            f"{operation} destination appeared: {destination_name}"
+        )
+    if error in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        raise InstallError(
+            f"{operation} cannot guarantee atomic no-replace rename"
+        )
+    raise OSError(error, os.strerror(error), source_name)
+
+
 def _metadata_snapshot_at(parent_fd: int, name: str) -> dict[str, Any]:
     try:
         metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -951,11 +1000,11 @@ def _rollback_rsyslog_legacy_archive_migration(
                 raise InstallError("legacy archive source was replaced before rollback")
             if not _same_metadata_snapshot(destination_now, item["before"]):
                 raise InstallError("migrated archive identity changed before rollback")
-            os.rename(
+            _rename_noreplace_at(
+                parent_fd,
                 destination.name,
                 source.name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
+                operation="legacy rsyslog archive rollback",
             )
             os.fsync(parent_fd)
         except Exception as exc:
@@ -994,11 +1043,11 @@ def _commit_rsyslog_legacy_archive_migration(
                     raise InstallError(
                         f"legacy archive migration destination appeared: {item['destination_relative']}"
                     )
-                os.rename(
+                _rename_noreplace_at(
+                    parent_fd,
                     source.name,
                     destination.name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
+                    operation="legacy rsyslog archive migration",
                 )
                 completed.append(item)
                 os.fsync(parent_fd)
