@@ -10,16 +10,22 @@ import json
 import os
 import re
 import resource
+import selectors
 import shutil
+import signal
 import stat
 import struct
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "manifest" / "document-text-engine-policy.v1.json"
+CONFIG_PATH = REPO_ROOT / "config" / "heim-pc.yml"
 CONTRACT_PATH = REPO_ROOT / "manifest" / "document-text-contract.v1.json"
 DOCLING_READINESS_PATH = (
     Path.home() / ".local" / "state" / "heim-pc" / "document-text-engine" / "docling-readiness.v1.json"
@@ -166,14 +172,63 @@ def _stderr_evidence(value: bytes, maximum: int) -> dict[str, Any]:
     }
 
 
+def _process_stderr_evidence(
+    completed: subprocess.CompletedProcess[bytes], maximum: int
+) -> dict[str, Any]:
+    evidence = getattr(completed, "_bounded_stderr_evidence", None)
+    if isinstance(evidence, dict):
+        return dict(evidence)
+    value = completed.stderr if isinstance(completed.stderr, bytes) else b""
+    return _stderr_evidence(value, maximum)
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(entry_stat.st_mode):
+                        total += entry_stat.st_size
+                    elif stat.S_ISDIR(entry_stat.st_mode):
+                        stack.append(Path(entry.path))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return total
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
 def _run(
     argv: Sequence[str],
     *,
     policy: dict[str, Any],
     operation: str,
     file_size_limit_bytes: int | None = None,
+    temporary_directory: Path | None = None,
+    directory_size_limit_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     timeout = int(policy["limits"]["process_timeout_seconds"])
+    stdout_limit = int(policy["limits"]["max_output_bytes"])
+    stderr_limit = int(policy["limits"]["max_stderr_bytes"])
+    if timeout <= 0 or stdout_limit <= 0 or stderr_limit <= 0:
+        raise ValueError("process limits must be positive")
+    if directory_size_limit_bytes is not None and directory_size_limit_bytes <= 0:
+        raise ValueError("process directory-size limit must be positive")
+    if directory_size_limit_bytes is not None and temporary_directory is None:
+        raise ValueError("process directory-size limit requires a temporary directory")
+
     preexec_fn: Any = None
     if file_size_limit_bytes is not None:
         if file_size_limit_bytes <= 0:
@@ -187,23 +242,25 @@ def _run(
             )
 
         preexec_fn = _apply_file_size_limit
+
+    environment = {**os.environ, "LC_ALL": "C.UTF-8"}
+    monitored_directory: Path | None = None
+    if temporary_directory is not None:
+        monitored_directory = temporary_directory.resolve()
+        if not monitored_directory.is_dir():
+            raise ValueError("process temporary directory must exist")
+        environment["TMPDIR"] = str(monitored_directory)
+
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(argv),
-            check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout,
-            env={**os.environ, "LC_ALL": "C.UTF-8"},
+            env=environment,
             preexec_fn=preexec_fn,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise DocumentTextError(
-            "extraction_failed",
-            f"{operation} exceeded the bounded process timeout",
-            details={"timeout_seconds": timeout},
-        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         details: dict[str, Any] = {"error_type": type(exc).__name__}
         if isinstance(exc, OSError):
@@ -213,8 +270,112 @@ def _run(
             f"{operation} could not start the required local process",
             details=details,
         ) from exc
-    return completed
 
+    stdout_state: dict[str, Any] = {
+        "data": bytearray(),
+        "total": 0,
+        "digest": hashlib.sha256(),
+        "limit": stdout_limit,
+    }
+    stderr_state: dict[str, Any] = {
+        "data": bytearray(),
+        "total": 0,
+        "digest": hashlib.sha256(),
+        "limit": stderr_limit,
+    }
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stderr is not None
+    streams = ((process.stdout, "stdout", stdout_state), (process.stderr, "stderr", stderr_state))
+    for stream, name, state in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, (name, state))
+
+    deadline = time.monotonic() + timeout
+    next_directory_check = 0.0
+    termination_reason: str | None = None
+    observed_directory_bytes: int | None = None
+    try:
+        while selector.get_map() or process.poll() is None:
+            now = time.monotonic()
+            if termination_reason is None and now >= deadline:
+                termination_reason = "timeout"
+                _kill_process_group(process)
+            if (
+                termination_reason is None
+                and monitored_directory is not None
+                and directory_size_limit_bytes is not None
+                and now >= next_directory_check
+            ):
+                observed_directory_bytes = _directory_size(monitored_directory)
+                next_directory_check = now + 0.05
+                if observed_directory_bytes > directory_size_limit_bytes:
+                    termination_reason = "directory_limit"
+                    _kill_process_group(process)
+
+            select_timeout = 0.05
+            if termination_reason is None:
+                select_timeout = min(select_timeout, max(0.0, deadline - now))
+            for key, _mask in selector.select(select_timeout):
+                name, state = key.data
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                state["total"] += len(chunk)
+                state["digest"].update(chunk)
+                remaining = max(0, int(state["limit"]) - len(state["data"]))
+                if remaining:
+                    state["data"].extend(chunk[:remaining])
+
+        try:
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group(process)
+            process.kill()
+            process.wait(timeout=5)
+            raise DocumentTextError(
+                "extraction_failed",
+                f"{operation} did not terminate after bounded process shutdown",
+                details={"timeout_seconds": timeout},
+            ) from exc
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+
+    if termination_reason == "timeout":
+        raise DocumentTextError(
+            "extraction_failed",
+            f"{operation} exceeded the bounded process timeout",
+            details={"timeout_seconds": timeout},
+        )
+    if termination_reason == "directory_limit":
+        raise DocumentTextError(
+            "extraction_failed",
+            f"{operation} exceeded the bounded temporary-storage limit",
+            details={
+                "max_temporary_bytes": directory_size_limit_bytes,
+                "observed_temporary_bytes": observed_directory_bytes,
+            },
+        )
+
+    stdout = bytes(stdout_state["data"])
+    stderr = bytes(stderr_state["data"])
+    completed = subprocess.CompletedProcess(list(argv), returncode, stdout=stdout, stderr=stderr)
+    setattr(
+        completed,
+        "_bounded_stderr_evidence",
+        {
+            "bytes": int(stderr_state["total"]),
+            "sha256": stderr_state["digest"].hexdigest(),
+            "bounded_bytes": len(stderr),
+            "truncated": int(stderr_state["total"]) > len(stderr),
+        },
+    )
+    return completed
 
 def _require_tool(policy: dict[str, Any], role: str) -> str:
     name = _tool_name(policy, role)
@@ -261,6 +422,62 @@ def _path_contains_sequence(parts: tuple[str, ...], sequence: tuple[str, ...]) -
     )
 
 
+def _configured_exclude_patterns() -> tuple[str, ...]:
+    try:
+        config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise DocumentTextError(
+            "source_not_authorized",
+            "configured source exclusions could not be verified",
+            details={"error_type": type(exc).__name__},
+        ) from exc
+    if not isinstance(config, dict):
+        raise DocumentTextError(
+            "source_not_authorized",
+            "configured source exclusions are invalid",
+        )
+    excludes = config.get("excludes", [])
+    if excludes is None:
+        return ()
+    if not isinstance(excludes, list):
+        raise DocumentTextError(
+            "source_not_authorized",
+            "configured source exclusions are invalid",
+        )
+    patterns: list[str] = []
+    for entry in excludes:
+        if not isinstance(entry, dict):
+            raise DocumentTextError(
+                "source_not_authorized",
+                "configured source exclusions are invalid",
+            )
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise DocumentTextError(
+                "source_not_authorized",
+                "configured source exclusions are invalid",
+            )
+        patterns.append(pattern.strip())
+    return tuple(patterns)
+
+
+def _path_matches_configured_exclude(path: Path, pattern: str) -> bool:
+    current = path
+    while True:
+        try:
+            if current.match(pattern):
+                return True
+        except ValueError as exc:
+            raise DocumentTextError(
+                "source_not_authorized",
+                "configured source exclusions are invalid",
+                details={"error_type": type(exc).__name__},
+            ) from exc
+        if current == SOURCE_ROOT:
+            return False
+        current = current.parent
+
+
 def _enforce_source_path_policy(path: Path) -> None:
     try:
         relative = path.relative_to(SOURCE_ROOT)
@@ -279,6 +496,14 @@ def _enforce_source_path_policy(path: Path) -> None:
         raise DocumentTextError(
             "source_not_authorized",
             "source is inside a protected filesystem area",
+        )
+    if any(
+        _path_matches_configured_exclude(path, pattern)
+        for pattern in _configured_exclude_patterns()
+    ):
+        raise DocumentTextError(
+            "source_not_authorized",
+            "source is excluded by the configured filesystem policy",
         )
     if path.suffix.casefold() in SENSITIVE_SUFFIXES:
         raise DocumentTextError(
@@ -305,6 +530,8 @@ def _open_source(raw_path: str, policy: dict[str, Any]) -> tuple[int, str, os.st
     _enforce_source_path_policy(candidate)
     input_type = _source_kind(candidate)
     flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -748,8 +975,8 @@ def _extract_pdftotext(source: Path, policy: dict[str, Any]) -> tuple[str, int, 
                 "pdftotext failed",
                 details={
                     "returncode": completed.returncode,
-                    "stderr_evidence": _stderr_evidence(
-                        completed.stderr, int(policy["limits"]["max_stderr_bytes"])
+                    "stderr_evidence": _process_stderr_evidence(
+                        completed, int(policy["limits"]["max_stderr_bytes"])
                     ),
                 },
             )
@@ -763,6 +990,7 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
     _require_tool(policy, "pdf_text")
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-ocrpdf-") as directory:
         rendered = Path(directory) / "ocr.pdf"
+        intermediate_limit = int(policy["limits"]["max_source_bytes"])
         completed = _run(
             [
                 ocrmypdf,
@@ -782,6 +1010,9 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
             ],
             policy=policy,
             operation="ocrmypdf",
+            file_size_limit_bytes=intermediate_limit,
+            temporary_directory=Path(directory),
+            directory_size_limit_bytes=intermediate_limit,
         )
         if completed.returncode != 0 or not rendered.exists():
             raise DocumentTextError(
@@ -789,8 +1020,8 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
                 "OCRmyPDF failed",
                 details={
                     "returncode": completed.returncode,
-                    "stderr_evidence": _stderr_evidence(
-                        completed.stderr, int(policy["limits"]["max_stderr_bytes"])
+                    "stderr_evidence": _process_stderr_evidence(
+                        completed, int(policy["limits"]["max_stderr_bytes"])
                     ),
                 },
             )
@@ -821,8 +1052,8 @@ def _extract_tesseract(source: Path, policy: dict[str, Any], language: str) -> t
                 "Tesseract failed",
                 details={
                     "returncode": completed.returncode,
-                    "stderr_evidence": _stderr_evidence(
-                        completed.stderr, int(policy["limits"]["max_stderr_bytes"])
+                    "stderr_evidence": _process_stderr_evidence(
+                        completed, int(policy["limits"]["max_stderr_bytes"])
                     ),
                 },
             )

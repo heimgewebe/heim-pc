@@ -8,6 +8,7 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 from contextlib import redirect_stdout
 import unittest
 from pathlib import Path
@@ -111,6 +112,34 @@ class DocumentTextEngineTests(unittest.TestCase):
                         engine.inspect_source(str(Path(directory) / relative), self.policy)
                     self.assertEqual(caught.exception.code, "source_not_authorized")
 
+    def test_configured_source_excludes_are_enforced_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            engine.SOURCE_ROOT = root
+            secret = root / "secret" / "document.pdf"
+            backup = root / "personal-backup" / "document.pdf"
+            secret.parent.mkdir()
+            backup.parent.mkdir()
+            secret.write_bytes(b"secret")
+            backup.write_bytes(b"backup")
+            config = root / "heim-pc.yml"
+            config.write_text(
+                "excludes:\n"
+                "  - pattern: '*/secret/*'\n"
+                + f"  - pattern: '{root}/personal-backup/*'\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(engine, "CONFIG_PATH", config),
+                mock.patch.object(engine.os, "open", wraps=os.open) as tracked_open,
+            ):
+                for source in (secret, backup):
+                    with self.subTest(source=source.name):
+                        with self.assertRaises(engine.DocumentTextError) as caught:
+                            engine._open_source(str(source), self.policy)
+                        self.assertEqual(caught.exception.code, "source_not_authorized")
+            tracked_open.assert_not_called()
+
     def test_parent_symlink_cannot_escape_approved_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -133,6 +162,18 @@ class DocumentTextEngineTests(unittest.TestCase):
             with self.assertRaises(engine.DocumentTextError) as caught:
                 engine.inspect_source(str(link), self.policy)
         self.assertEqual(caught.exception.code, "input_invalid")
+
+    def test_fifo_source_is_rejected_without_blocking_for_a_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine.SOURCE_ROOT = Path(directory).resolve()
+            source = Path(directory) / "blocked.pdf"
+            os.mkfifo(source)
+            started = time.monotonic()
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine._open_source(str(source), self.policy)
+            elapsed = time.monotonic() - started
+        self.assertEqual(caught.exception.code, "input_invalid")
+        self.assertLess(elapsed, 1.0)
 
     def test_pdf_with_text_layer_selects_pdftotext(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -473,6 +514,75 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertIs(evidence["truncated"], True)
         self.assertNotIn("/private", json.dumps(evidence))
 
+    def test_run_discards_excess_stderr_while_preserving_evidence(self) -> None:
+        policy = json.loads(json.dumps(self.policy))
+        policy["limits"]["max_stderr_bytes"] = 128
+        payload_size = 65536
+        completed = engine._run(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.stderr.buffer.write(b'x' * {payload_size}); sys.exit(7)",
+            ],
+            policy=policy,
+            operation="stderr-bound-test",
+        )
+        evidence = engine._process_stderr_evidence(completed, 128)
+        self.assertEqual(completed.returncode, 7)
+        self.assertEqual(len(completed.stderr), 128)
+        self.assertEqual(evidence["bytes"], payload_size)
+        self.assertEqual(evidence["bounded_bytes"], 128)
+        self.assertIs(evidence["truncated"], True)
+        self.assertEqual(len(evidence["sha256"]), 64)
+
+    def test_run_kills_descendant_processes_on_timeout(self) -> None:
+        policy = json.loads(json.dumps(self.policy))
+        policy["limits"]["process_timeout_seconds"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "descendant-survived.txt"
+            grandchild = (
+                "import pathlib,sys,time; "
+                "time.sleep(2); "
+                "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]]); "
+                "time.sleep(10)"
+            )
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine._run(
+                    [sys.executable, "-c", parent, str(marker), grandchild],
+                    policy=policy,
+                    operation="process-tree-timeout-test",
+                )
+            time.sleep(1.5)
+            survived = marker.exists()
+        self.assertEqual(caught.exception.code, "extraction_failed")
+        self.assertFalse(survived)
+
+    def test_run_kills_process_when_temporary_directory_exceeds_budget(self) -> None:
+        policy = json.loads(json.dumps(self.policy))
+        policy["limits"]["process_timeout_seconds"] = 5
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            script = (
+                "from pathlib import Path; import os,time; "
+                "Path(os.environ['TMPDIR'], 'growth.bin').write_bytes(b'x' * 65536); "
+                "time.sleep(10)"
+            )
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine._run(
+                    [sys.executable, "-c", script],
+                    policy=policy,
+                    operation="temporary-storage-test",
+                    temporary_directory=work,
+                    directory_size_limit_bytes=4096,
+                )
+        self.assertEqual(caught.exception.code, "extraction_failed")
+        self.assertEqual(caught.exception.details["max_temporary_bytes"], 4096)
+        self.assertGreater(caught.exception.details["observed_temporary_bytes"], 4096)
+
     def test_output_reader_truncates_at_policy_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._file(directory, "text.txt", b"abcdef")
@@ -548,6 +658,42 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(len(text.encode("utf-8")), maximum)
         self.assertEqual(output_bytes, maximum)
         self.assertIs(truncated, True)
+
+    def test_ocrmypdf_bounds_each_file_and_aggregate_temporary_storage(self) -> None:
+        maximum = int(self.policy["limits"]["max_source_bytes"])
+        observed: list[tuple[int | None, Path | None, int | None]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "scan.pdf")
+
+            def fake_run(
+                argv,
+                *,
+                policy,
+                operation,
+                file_size_limit_bytes=None,
+                temporary_directory=None,
+                directory_size_limit_bytes=None,
+            ):
+                observed.append(
+                    (file_size_limit_bytes, temporary_directory, directory_size_limit_bytes)
+                )
+                Path(argv[-1]).write_bytes(b"%PDF-bounded")
+                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine, "_require_tool", return_value="/usr/bin/tool"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    engine, "_extract_pdftotext", return_value=("ocr text", 8, False)
+                ),
+            ):
+                result = engine._extract_ocr_pdf(source, self.policy, "deu+eng")
+        self.assertEqual(result, ("ocr text", 8, False))
+        self.assertEqual(len(observed), 1)
+        file_limit, temporary_directory, directory_limit = observed[0]
+        self.assertEqual(file_limit, maximum)
+        self.assertEqual(directory_limit, maximum)
+        self.assertIsNotNone(temporary_directory)
 
     def test_tesseract_applies_process_time_output_bound(self) -> None:
         maximum = int(self.policy["limits"]["max_output_bytes"])
@@ -639,7 +785,7 @@ class DocumentTextEngineTests(unittest.TestCase):
         sensitive = "/private/tool/secret-name"
         with mock.patch.object(
             engine.subprocess,
-            "run",
+            "Popen",
             side_effect=FileNotFoundError(2, "No such file", sensitive),
         ):
             with self.assertRaises(engine.DocumentTextError) as caught:
