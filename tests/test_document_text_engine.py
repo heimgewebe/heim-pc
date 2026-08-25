@@ -296,7 +296,7 @@ class DocumentTextEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "short.pdf")
 
-            def fake_run(argv, *, policy, operation):
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
                 Path(argv[-1]).write_text("X\n", encoding="utf-8")
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
@@ -305,6 +305,42 @@ class DocumentTextEngineTests(unittest.TestCase):
                 mock.patch.object(engine, "_run", side_effect=fake_run),
             ):
                 self.assertIs(engine._probe_pdf_text_layer(source, self.policy), True)
+
+    def test_text_layer_probe_applies_process_time_output_bound(self) -> None:
+        maximum = int(self.policy["limits"]["max_output_bytes"])
+        observed: list[int | None] = []
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "bounded-probe.pdf")
+
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
+                observed.append(file_size_limit_bytes)
+                Path(argv[-1]).write_text("text layer", encoding="utf-8")
+                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine.shutil, "which", return_value="/usr/bin/pdftotext"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+            ):
+                result = engine._probe_pdf_text_layer(source, self.policy)
+        self.assertEqual(observed, [maximum])
+        self.assertIs(result, True)
+
+    def test_text_layer_probe_treats_output_cap_as_unknown(self) -> None:
+        maximum = int(self.policy["limits"]["max_output_bytes"])
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "capped-probe.pdf")
+
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
+                self.assertEqual(file_size_limit_bytes, maximum)
+                Path(argv[-1]).write_bytes(b"x" * maximum)
+                return mock.Mock(returncode=-25, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine.shutil, "which", return_value="/usr/bin/pdftotext"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+            ):
+                result = engine._probe_pdf_text_layer(source, self.policy)
+        self.assertIsNone(result)
 
     def test_extract_uses_private_snapshot_across_a_b_a_path_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -378,7 +414,7 @@ class DocumentTextEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "mixed.pdf")
 
-            def fake_run(argv, *, policy, operation):
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
                 Path(argv[-1]).write_text("text page\f\f", encoding="utf-8")
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
 

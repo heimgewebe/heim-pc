@@ -483,6 +483,7 @@ def _probe_pdf_text_layer(path: Path, policy: dict[str, Any]) -> bool | None:
     if executable is None:
         return None
     max_pages = int(policy["limits"]["max_pages"])
+    maximum = int(policy["limits"]["max_output_bytes"])
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-probe-") as directory:
         output = Path(directory) / "probe.txt"
         completed = _run(
@@ -498,8 +499,14 @@ def _probe_pdf_text_layer(path: Path, policy: dict[str, Any]) -> bool | None:
             ],
             policy=policy,
             operation="pdftotext-probe",
+            file_size_limit_bytes=maximum,
         )
-        if completed.returncode != 0 or not output.exists():
+        cap_reached = (
+            completed.returncode != 0
+            and output.exists()
+            and output.stat().st_size >= maximum
+        )
+        if (completed.returncode != 0 and not cap_reached) or not output.exists():
             return None
         minimum = int(policy["routing"]["text_layer_probe_min_non_whitespace_chars"])
         current_non_whitespace = 0
@@ -514,6 +521,8 @@ def _probe_pdf_text_layer(path: Path, policy: dict[str, Any]) -> bool | None:
                         current_non_whitespace = 0
                     elif not character.isspace():
                         current_non_whitespace += 1
+        if cap_reached:
+            return None
         if current_non_whitespace:
             return current_non_whitespace >= minimum
         return True if saw_page_boundary else False
