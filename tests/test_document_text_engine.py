@@ -583,6 +583,27 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(caught.exception.details["max_temporary_bytes"], 4096)
         self.assertGreater(caught.exception.details["observed_temporary_bytes"], 4096)
 
+    def test_run_rechecks_temporary_directory_after_fast_child_exit(self) -> None:
+        policy = json.loads(json.dumps(self.policy))
+        policy["limits"]["process_timeout_seconds"] = 5
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            script = (
+                "from pathlib import Path; import os; "
+                "Path(os.environ['TMPDIR'], 'burst.bin').write_bytes(b'x' * 65536)"
+            )
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine._run(
+                    [sys.executable, "-c", script],
+                    policy=policy,
+                    operation="temporary-storage-fast-exit-test",
+                    temporary_directory=work,
+                    directory_size_limit_bytes=4096,
+                )
+        self.assertEqual(caught.exception.code, "extraction_failed")
+        self.assertEqual(caught.exception.details["max_temporary_bytes"], 4096)
+        self.assertGreater(caught.exception.details["observed_temporary_bytes"], 4096)
+
     def test_output_reader_truncates_at_policy_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._file(directory, "text.txt", b"abcdef")

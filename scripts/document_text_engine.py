@@ -341,6 +341,14 @@ def _run(
                 f"{operation} did not terminate after bounded process shutdown",
                 details={"timeout_seconds": timeout},
             ) from exc
+        if (
+            termination_reason is None
+            and monitored_directory is not None
+            and directory_size_limit_bytes is not None
+        ):
+            observed_directory_bytes = _directory_size(monitored_directory)
+            if observed_directory_bytes > directory_size_limit_bytes:
+                termination_reason = "directory_limit"
     finally:
         selector.close()
         process.stdout.close()
