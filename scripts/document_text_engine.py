@@ -22,6 +22,19 @@ DOCLING_READINESS_PATH = (
     Path.home() / ".local" / "state" / "heim-pc" / "document-text-engine" / "docling-readiness.v1.json"
 )
 
+SOURCE_ROOT = Path.home().resolve()
+SENSITIVE_COMPONENTS = frozenset({".ssh", ".gnupg", ".password-store", "keyrings"})
+SENSITIVE_PATH_SEQUENCES = (
+    (".mozilla", "firefox"),
+    (".config", "google-chrome"),
+    (".config", "chromium"),
+    (".config", "bravesoftware"),
+    (".local", "share", "keyrings"),
+    (".config", "kwallet"),
+    (".config", "kwalletd5"),
+)
+SENSITIVE_SUFFIXES = frozenset({".key", ".pem", ".p12"})
+
 
 class DocumentTextError(RuntimeError):
     """A bounded document-text operation could not be completed safely."""
@@ -199,11 +212,60 @@ def _source_candidate(raw_path: str) -> Path:
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
-    return candidate
+    return Path(os.path.abspath(candidate))
+
+
+def _path_contains_sequence(parts: tuple[str, ...], sequence: tuple[str, ...]) -> bool:
+    if len(sequence) > len(parts):
+        return False
+    return any(
+        parts[index : index + len(sequence)] == sequence
+        for index in range(len(parts) - len(sequence) + 1)
+    )
+
+
+def _enforce_source_path_policy(path: Path) -> None:
+    try:
+        relative = path.relative_to(SOURCE_ROOT)
+    except ValueError as exc:
+        raise DocumentTextError(
+            "source_not_authorized",
+            "source is outside the approved user-home root",
+        ) from exc
+    parts = tuple(part.casefold() for part in relative.parts)
+    if any(part in SENSITIVE_COMPONENTS for part in parts):
+        raise DocumentTextError(
+            "source_not_authorized",
+            "source is inside a protected filesystem area",
+        )
+    if any(_path_contains_sequence(parts, sequence) for sequence in SENSITIVE_PATH_SEQUENCES):
+        raise DocumentTextError(
+            "source_not_authorized",
+            "source is inside a protected filesystem area",
+        )
+    if path.suffix.casefold() in SENSITIVE_SUFFIXES:
+        raise DocumentTextError(
+            "source_not_authorized",
+            "source type is excluded by the sensitive-file policy",
+        )
+
+
+def _opened_source_path(descriptor: int) -> Path:
+    try:
+        resolved = Path(f"/proc/self/fd/{descriptor}").resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise DocumentTextError(
+            "source_not_authorized",
+            "opened source root cannot be verified",
+            details={"error_type": type(exc).__name__},
+        ) from exc
+    _enforce_source_path_policy(resolved)
+    return resolved
 
 
 def _open_source(raw_path: str, policy: dict[str, Any]) -> tuple[int, str, os.stat_result, str]:
     candidate = _source_candidate(raw_path)
+    _enforce_source_path_policy(candidate)
     input_type = _source_kind(candidate)
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -219,6 +281,7 @@ def _open_source(raw_path: str, policy: dict[str, Any]) -> tuple[int, str, os.st
             details={"error_type": type(exc).__name__, "errno": exc.errno},
         ) from exc
     try:
+        _opened_source_path(descriptor)
         source_stat = os.fstat(descriptor)
         if not stat.S_ISREG(source_stat.st_mode):
             raise DocumentTextError("input_invalid", "source must be a regular file")
@@ -490,7 +553,9 @@ def _inspect_snapshot(
     else:
         method = "tesseract"
     readiness = doctor(policy)
-    if method == "pdftotext":
+    if input_type == "pdf" and pages is None:
+        route_ready = False
+    elif method == "pdftotext":
         route_ready = bool(readiness["routes"]["pdf_text_layer"])
     elif method == "ocrmypdf_then_pdftotext":
         route_ready = bool(readiness["routes"]["pdf_ocr"])
@@ -505,6 +570,7 @@ def _inspect_snapshot(
         "source_bytes": source_stat.st_size,
         "input_type": input_type,
         "pages": pages,
+        "page_bound_established": input_type != "pdf" or pages is not None,
         "text_layer_detected": text_layer,
         "recommended_method": method,
         "route_ready": route_ready,

@@ -22,8 +22,13 @@ SPEC.loader.exec_module(engine)
 class DocumentTextEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = engine.load_policy()
+        self.original_source_root = engine.SOURCE_ROOT
+
+    def tearDown(self) -> None:
+        engine.SOURCE_ROOT = self.original_source_root
 
     def _file(self, directory: str, name: str, payload: bytes = b"payload") -> Path:
+        engine.SOURCE_ROOT = Path(directory).resolve()
         path = Path(directory) / name
         path.write_bytes(payload)
         return path
@@ -52,6 +57,51 @@ class DocumentTextEngineTests(unittest.TestCase):
             with self.assertRaises(engine.DocumentTextError) as caught:
                 engine.inspect_source(str(path), self.policy)
         self.assertEqual(caught.exception.code, "unsupported_input")
+
+    def test_source_outside_approved_root_is_rejected_without_path_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            approved = base / "approved"
+            approved.mkdir()
+            outside = base / "outside.png"
+            outside.write_bytes(b"outside")
+            engine.SOURCE_ROOT = approved.resolve()
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine.inspect_source(str(outside), self.policy)
+        self.assertEqual(caught.exception.code, "source_not_authorized")
+        self.assertNotIn(str(outside), str(caught.exception))
+
+    def test_sensitive_source_areas_are_rejected(self) -> None:
+        protected = (
+            ".ssh/document.pdf",
+            ".gnupg/document.pdf",
+            ".password-store/document.pdf",
+            ".mozilla/firefox/profile/document.pdf",
+            ".config/google-chrome/Default/document.pdf",
+            ".config/BraveSoftware/Brave-Browser/Default/document.pdf",
+            ".local/share/keyrings/document.pdf",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            engine.SOURCE_ROOT = Path(directory).resolve()
+            for relative in protected:
+                with self.subTest(relative=relative):
+                    with self.assertRaises(engine.DocumentTextError) as caught:
+                        engine.inspect_source(str(Path(directory) / relative), self.policy)
+                    self.assertEqual(caught.exception.code, "source_not_authorized")
+
+    def test_parent_symlink_cannot_escape_approved_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            approved = base / "approved"
+            outside = base / "outside"
+            approved.mkdir()
+            outside.mkdir()
+            (outside / "page.png").write_bytes(b"outside")
+            (approved / "escape").symlink_to(outside, target_is_directory=True)
+            engine.SOURCE_ROOT = approved.resolve()
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine.inspect_source(str(approved / "escape" / "page.png"), self.policy)
+        self.assertEqual(caught.exception.code, "source_not_authorized")
 
     def test_symlink_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -305,7 +355,7 @@ class DocumentTextEngineTests(unittest.TestCase):
                     engine,
                     "doctor",
                     return_value={
-                        "routes": {"pdf_text_layer": False, "pdf_ocr": False, "image_ocr": True},
+                        "routes": {"pdf_text_layer": True, "pdf_ocr": True, "image_ocr": True},
                         "docling": {"status": "unattested"},
                     },
                 ),
@@ -314,6 +364,7 @@ class DocumentTextEngineTests(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(result["status"], "route_unavailable")
         self.assertIsNone(result["pages"] )
+        self.assertIs(result["page_bound_established"], False)
 
     def test_stderr_evidence_never_returns_raw_stderr(self) -> None:
         evidence = engine._stderr_evidence(b"/private/example/secret-path", 8)
