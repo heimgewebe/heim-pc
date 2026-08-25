@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import ctypes
 from datetime import datetime, timezone
 import errno
@@ -98,6 +99,8 @@ COMMIT_POINT = (
 )
 RESIDUE_TOKEN = re.compile(r"^[0-9a-f]{16}$")
 RSYSLOG_CONFIG_SOURCE = "systemd/logrotate.d/rsyslog"
+RSYSLOG_CONFIG_TARGET = "etc/logrotate.d/rsyslog"
+LOGROTATE_STATE_RELATIVE = "var/lib/logrotate/status"
 RSYSLOG_LEGACY_DATEFORMAT = "-%Y%m%d"
 RSYSLOG_TIMESTAMP_DATEFORMAT = "-%Y%m%d-%H%M%S"
 RSYSLOG_LEGACY_ARCHIVE_LIMIT = 256
@@ -874,6 +877,99 @@ def _rsyslog_log_relatives(source_data: dict[str, bytes]) -> tuple[str, ...]:
             "committed rsyslog logrotate configuration differs from the timestamp transition contract"
         )
     return tuple(paths)
+
+
+def _rsyslog_transition_lock_required(
+    root_fd: int,
+    source_data: dict[str, bytes],
+) -> bool:
+    # Validate that the commit-bound source really is the timestamped target
+    # before using the installed configuration to decide whether coordination
+    # with the currently active logrotate generation is required.
+    _rsyslog_log_relatives(source_data)
+    installed = _snapshot(root_fd, RSYSLOG_CONFIG_TARGET)
+    if not installed["exists"]:
+        return False
+    try:
+        text = installed["data"].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstallError(
+            "installed rsyslog logrotate configuration is not valid UTF-8"
+        ) from exc
+    _header, separator, body = text.partition("{")
+    if separator != "{":
+        raise InstallError("installed rsyslog logrotate configuration lacks a block")
+    directives = [
+        raw_line.strip()
+        for raw_line in body.splitlines()
+        if raw_line.strip() and not raw_line.lstrip().startswith("#")
+    ]
+    if "dateext" not in directives:
+        return False
+    dateformats = [
+        parts[1]
+        for line in directives
+        if (parts := line.split()) and parts[0] == "dateformat" and len(parts) == 2
+    ]
+    return dateformats != [RSYSLOG_TIMESTAMP_DATEFORMAT]
+
+
+@contextmanager
+def _logrotate_transition_lock(root_fd: int, *, required: bool):
+    if not required:
+        yield False
+        return
+
+    parent_fd, name = _open_parent(
+        root_fd,
+        LOGROTATE_STATE_RELATIVE,
+        create=False,
+    )
+    if parent_fd is None:
+        raise InstallError(
+            "logrotate state directory is missing during the rsyslog dateformat transition"
+        )
+
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                _nofollow_flags(os.O_RDWR),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError as exc:
+            raise InstallError(
+                "logrotate state file is missing during the rsyslog dateformat transition"
+            ) from exc
+        except OSError as exc:
+            raise InstallError(
+                f"cannot safely open logrotate state file: {exc}"
+            ) from exc
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InstallError("logrotate state must be a regular file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise InstallError(
+                "logrotate state is locked by an active rotation; retry after it completes"
+            ) from exc
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(parent_fd)
+
+    assert descriptor is not None
+    try:
+        yield True
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _legacy_rsyslog_archive_suffix(
@@ -2840,92 +2936,100 @@ def install(
                 source_data, source_object_ids, source_object_format = (
                     _committed_sources(source_root, expected_head)
                 )
-                residue_recovery = _recover_receipted_residue(
+                transition_lock_required = _rsyslog_transition_lock_required(
                     root_fd,
-                    target_root=target_root,
+                    source_data,
                 )
-                legacy_archive_migration_plan = (
-                    _plan_rsyslog_legacy_archive_migration(
+                with _logrotate_transition_lock(
+                    root_fd,
+                    required=transition_lock_required,
+                ):
+                    residue_recovery = _recover_receipted_residue(
                         root_fd,
-                        source_data,
                         target_root=target_root,
                     )
-                )
-                entries, _overlay, composition = _build_plan(
-                    root_fd=root_fd,
-                    source_data=source_data,
-                    target_root=target_root,
-                    user_unit_dirs=user_unit_dirs,
-                    user_unit_path_evidence=user_unit_path_evidence,
-                    uid=uid,
-                    gid=gid,
-                    inspect_apply_state=True,
-                )
-                installed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                operations = _transaction_operations(
-                    root_fd=root_fd,
-                    entries=entries,
-                    uid=uid,
-                    gid=gid,
-                )
-                created: list[str] = []
-                completed_legacy_archives = (
-                    _commit_rsyslog_legacy_archive_migration(
-                        root_fd,
-                        legacy_archive_migration_plan,
-                    )
-                )
-                try:
-                    target_readback, committed_composition, cleanup = _apply_operations(
-                        root_fd,
-                        operations,
-                        entries=entries,
-                        target_root=target_root,
-                        expected_user_unit_dirs=user_unit_dirs,
-                        created=created,
-                    )
-                except Exception as exc:
-                    migration_rollback_errors = (
-                        _rollback_rsyslog_legacy_archive_migration(
+                    legacy_archive_migration_plan = (
+                        _plan_rsyslog_legacy_archive_migration(
                             root_fd,
-                            completed_legacy_archives,
+                            source_data,
+                            target_root=target_root,
                         )
                     )
-                    if migration_rollback_errors:
-                        raise InstallError(
-                            f"{exc}; legacy rsyslog archive rollback failures: "
-                            + ", ".join(migration_rollback_errors)
-                        ) from exc
-                    raise
-                legacy_rsyslog_archive_migration = (
-                    _public_rsyslog_legacy_archive_migration(
-                        legacy_archive_migration_plan,
-                        applied=True,
+                    entries, _overlay, composition = _build_plan(
+                        root_fd=root_fd,
+                        source_data=source_data,
+                        target_root=target_root,
+                        user_unit_dirs=user_unit_dirs,
+                        user_unit_path_evidence=user_unit_path_evidence,
+                        uid=uid,
+                        gid=gid,
+                        inspect_apply_state=True,
                     )
-                )
-                receipt = _base_receipt(
-                    apply=True,
-                    head=head,
-                    dirty=dirty,
-                    target_root=target_root,
-                    entries=entries,
-                    composition=committed_composition,
-                    source_object_ids=source_object_ids,
-                    source_object_format=source_object_format,
-                    legacy_rsyslog_archive_migration=legacy_rsyslog_archive_migration,
-                    installed_at=installed_at,
-                    target_readback=target_readback,
-                    cleanup=cleanup,
-                    residue_recovery=residue_recovery,
-                )
-                return _publish_receipt(
-                    root_fd,
-                    target_root=target_root,
-                    receipt=receipt,
-                    uid=uid,
-                    gid=gid,
-                    created=created,
-                )
+                    installed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    operations = _transaction_operations(
+                        root_fd=root_fd,
+                        entries=entries,
+                        uid=uid,
+                        gid=gid,
+                    )
+                    created: list[str] = []
+                    completed_legacy_archives = (
+                        _commit_rsyslog_legacy_archive_migration(
+                            root_fd,
+                            legacy_archive_migration_plan,
+                        )
+                    )
+                    try:
+                        target_readback, committed_composition, cleanup = _apply_operations(
+                            root_fd,
+                            operations,
+                            entries=entries,
+                            target_root=target_root,
+                            expected_user_unit_dirs=user_unit_dirs,
+                            created=created,
+                        )
+                    except Exception as exc:
+                        migration_rollback_errors = (
+                            _rollback_rsyslog_legacy_archive_migration(
+                                root_fd,
+                                completed_legacy_archives,
+                            )
+                        )
+                        if migration_rollback_errors:
+                            raise InstallError(
+                                f"{exc}; legacy rsyslog archive rollback failures: "
+                                + ", ".join(migration_rollback_errors)
+                            ) from exc
+                        raise
+                    legacy_rsyslog_archive_migration = (
+                        _public_rsyslog_legacy_archive_migration(
+                            legacy_archive_migration_plan,
+                            applied=True,
+                        )
+                    )
+                    receipt = _base_receipt(
+                        apply=True,
+                        head=head,
+                        dirty=dirty,
+                        target_root=target_root,
+                        entries=entries,
+                        composition=committed_composition,
+                        source_object_ids=source_object_ids,
+                        source_object_format=source_object_format,
+                        legacy_rsyslog_archive_migration=legacy_rsyslog_archive_migration,
+                        installed_at=installed_at,
+                        target_readback=target_readback,
+                        cleanup=cleanup,
+                        residue_recovery=residue_recovery,
+                    )
+                    return _publish_receipt(
+                        root_fd,
+                        target_root=target_root,
+                        receipt=receipt,
+                        uid=uid,
+                        gid=gid,
+                        created=created,
+                    )
 
         user_unit_dirs, user_unit_path_evidence = _resolve_user_unit_dirs(
             target_root

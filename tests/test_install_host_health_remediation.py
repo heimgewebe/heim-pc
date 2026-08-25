@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import fcntl
 import importlib.util
 import json
 import os
@@ -90,6 +91,23 @@ def install_fixture(
             apply=apply,
             expected_head=head,
         )
+
+
+def seed_legacy_rsyslog_transition(target: Path) -> tuple[Path, Path]:
+    current = (ROOT / installer.RSYSLOG_CONFIG_SOURCE).read_text(encoding="utf-8")
+    timestamp_directive = f"\tdateformat {installer.RSYSLOG_TIMESTAMP_DATEFORMAT}\n"
+    if timestamp_directive not in current:
+        raise AssertionError("fixture source lacks timestamp dateformat directive")
+    legacy = current.replace(timestamp_directive, "", 1)
+    config = target / installer.RSYSLOG_CONFIG_TARGET
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(legacy, encoding="utf-8")
+
+    state = target / installer.LOGROTATE_STATE_RELATIVE
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("logrotate state -- version 2\n", encoding="utf-8")
+    state.chmod(0o640)
+    return config, state
 
 
 def merged_journald_values(cat_config: str) -> dict[str, str]:
@@ -2045,6 +2063,7 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
     ) -> None:
         with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
+            legacy_config, _state = seed_legacy_rsyslog_transition(target)
             log_dir = target / "var/log"
             log_dir.mkdir(parents=True)
             legacy_syslog = log_dir / "syslog-20260824.gz"
@@ -2081,9 +2100,82 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
             self.assertEqual(migrated_syslog.stat().st_ino, syslog_inode)
             self.assertEqual(migrated_auth.stat().st_ino, auth_inode)
             self.assertEqual(occupied.read_bytes(), b"existing timestamped archive\n")
+            self.assertIn(
+                f"dateformat {installer.RSYSLOG_TIMESTAMP_DATEFORMAT}",
+                legacy_config.read_text(encoding="utf-8"),
+            )
 
             second = install_fixture(source, head, target, apply=True)
             self.assertEqual(second["legacy_rsyslog_archive_migration"]["count"], 0)
+
+    def test_rsyslog_dateformat_transition_holds_logrotate_state_lock_through_config_commit(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            _legacy_config, state = seed_legacy_rsyslog_transition(target)
+            legacy = target / "var/log/syslog-20260824.gz"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"legacy syslog\n")
+            observed_locked_commit = False
+
+            def assert_lock_held(_index: int, relative: str) -> None:
+                nonlocal observed_locked_commit
+                if relative != installer.RSYSLOG_CONFIG_TARGET:
+                    return
+                descriptor = os.open(state, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(
+                            descriptor,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                    observed_locked_commit = True
+                finally:
+                    os.close(descriptor)
+
+            installer.TRANSACTION_FAULT_HOOK = assert_lock_held
+            receipt = install_fixture(source, head, target, apply=True)
+
+            self.assertTrue(observed_locked_commit)
+            self.assertTrue(receipt["legacy_rsyslog_archive_migration"]["applied"])
+            self.assertFalse(legacy.exists())
+
+            descriptor = os.open(state, os.O_RDWR)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_rsyslog_dateformat_transition_fails_before_mutation_when_logrotate_is_active(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            legacy_config, state = seed_legacy_rsyslog_transition(target)
+            legacy_config_before = legacy_config.read_bytes()
+            legacy = target / "var/log/syslog-20260824.gz"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"legacy syslog\n")
+            legacy_inode = legacy.stat().st_ino
+
+            descriptor = os.open(state, os.O_RDWR)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    installer.InstallError,
+                    "locked by an active rotation",
+                ):
+                    install_fixture(source, head, target, apply=True)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+            self.assertEqual(legacy_config.read_bytes(), legacy_config_before)
+            self.assertEqual(legacy.read_bytes(), b"legacy syslog\n")
+            self.assertEqual(legacy.stat().st_ino, legacy_inode)
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
 
     def test_rsyslog_archive_migration_never_overwrites_racing_destination(
         self,
