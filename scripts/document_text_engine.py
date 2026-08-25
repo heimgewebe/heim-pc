@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
 import re
+import resource
 import shutil
 import stat
 import struct
@@ -169,8 +171,22 @@ def _run(
     *,
     policy: dict[str, Any],
     operation: str,
+    file_size_limit_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     timeout = int(policy["limits"]["process_timeout_seconds"])
+    preexec_fn: Any = None
+    if file_size_limit_bytes is not None:
+        if file_size_limit_bytes <= 0:
+            raise ValueError("process file-size limit must be positive")
+        file_size_limit = file_size_limit_bytes
+
+        def _apply_file_size_limit() -> None:
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE,
+                (file_size_limit, file_size_limit),
+            )
+
+        preexec_fn = _apply_file_size_limit
     try:
         completed = subprocess.run(
             list(argv),
@@ -180,6 +196,7 @@ def _run(
             stderr=subprocess.PIPE,
             timeout=timeout,
             env={**os.environ, "LC_ALL": "C.UTF-8"},
+            preexec_fn=preexec_fn,
         )
     except subprocess.TimeoutExpired as exc:
         raise DocumentTextError(
@@ -187,14 +204,14 @@ def _run(
             f"{operation} exceeded the bounded process timeout",
             details={"timeout_seconds": timeout},
         ) from exc
-    except OSError as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        details: dict[str, Any] = {"error_type": type(exc).__name__}
+        if isinstance(exc, OSError):
+            details["errno"] = exc.errno
         raise DocumentTextError(
             "route_unavailable",
             f"{operation} could not start the required local process",
-            details={
-                "error_type": type(exc).__name__,
-                "errno": exc.errno,
-            },
+            details=details,
         ) from exc
     return completed
 
@@ -393,7 +410,12 @@ def _read_output(path: Path, maximum: int) -> tuple[str, int, bool]:
         payload = handle.read(maximum + 1)
     truncated = len(payload) > maximum or size > maximum
     emitted = payload[:maximum]
-    return emitted.decode("utf-8", errors="replace"), size, truncated
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(emitted, final=False)
+    encoded = text.encode("utf-8")
+    if len(encoded) > maximum:
+        text = encoded[:maximum].decode("utf-8", errors="ignore")
+    return text, size, truncated
 
 
 def _pdf_page_count(path: Path, policy: dict[str, Any]) -> int | None:
@@ -689,6 +711,8 @@ def _extract_pdftotext(source: Path, policy: dict[str, Any]) -> tuple[str, int, 
     executable = _require_tool(policy, "pdf_text")
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-pdf-") as directory:
         output = Path(directory) / "text.txt"
+        maximum = int(policy["limits"]["max_output_bytes"])
+        file_size_limit = maximum
         completed = _run(
             [
                 executable,
@@ -702,8 +726,14 @@ def _extract_pdftotext(source: Path, policy: dict[str, Any]) -> tuple[str, int, 
             ],
             policy=policy,
             operation="pdftotext",
+            file_size_limit_bytes=file_size_limit,
         )
-        if completed.returncode != 0 or not output.exists():
+        cap_reached = (
+            completed.returncode != 0
+            and output.exists()
+            and output.stat().st_size >= file_size_limit
+        )
+        if (completed.returncode != 0 and not cap_reached) or not output.exists():
             raise DocumentTextError(
                 "extraction_failed",
                 "pdftotext failed",
@@ -714,7 +744,8 @@ def _extract_pdftotext(source: Path, policy: dict[str, Any]) -> tuple[str, int, 
                     ),
                 },
             )
-        return _read_output(output, int(policy["limits"]["max_output_bytes"]))
+        text, output_bytes, truncated = _read_output(output, maximum)
+        return text, output_bytes, truncated or cap_reached
 
 
 def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tuple[str, int, bool]:
@@ -761,13 +792,21 @@ def _extract_tesseract(source: Path, policy: dict[str, Any], language: str) -> t
     executable = _require_tool(policy, "image_ocr")
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-image-") as directory:
         output_base = Path(directory) / "ocr"
+        output = output_base.with_suffix(".txt")
+        maximum = int(policy["limits"]["max_output_bytes"])
+        file_size_limit = maximum
         completed = _run(
             [executable, str(source), str(output_base), "-l", language, "txt"],
             policy=policy,
             operation="tesseract",
+            file_size_limit_bytes=file_size_limit,
         )
-        output = output_base.with_suffix(".txt")
-        if completed.returncode != 0 or not output.exists():
+        cap_reached = (
+            completed.returncode != 0
+            and output.exists()
+            and output.stat().st_size >= file_size_limit
+        )
+        if (completed.returncode != 0 and not cap_reached) or not output.exists():
             raise DocumentTextError(
                 "extraction_failed",
                 "Tesseract failed",
@@ -778,7 +817,8 @@ def _extract_tesseract(source: Path, policy: dict[str, Any], language: str) -> t
                     ),
                 },
             )
-        return _read_output(output, int(policy["limits"]["max_output_bytes"]))
+        text, output_bytes, truncated = _read_output(output, maximum)
+        return text, output_bytes, truncated or cap_reached
 
 
 def _validate_language(language: str, policy: dict[str, Any]) -> str:

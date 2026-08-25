@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import struct
+import sys
 import tempfile
 from contextlib import redirect_stdout
 import unittest
@@ -443,6 +444,94 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(text, "abc")
         self.assertEqual(original_bytes, 6)
         self.assertIs(truncated, True)
+
+    def test_output_reader_truncates_at_valid_utf8_boundary(self) -> None:
+        payload = "abéZ".encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._file(directory, "text.txt", payload)
+            text, original_bytes, truncated = engine._read_output(path, 3)
+        self.assertEqual(text, "ab")
+        self.assertNotIn("\ufffd", text)
+        self.assertLessEqual(len(text.encode("utf-8")), 3)
+        self.assertEqual(original_bytes, len(payload))
+        self.assertIs(truncated, True)
+
+    def test_run_enforces_file_size_limit_during_child_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "child-output.txt"
+            completed = engine._run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'x' * 4096)",
+                    str(output),
+                ],
+                policy=self.policy,
+                operation="bounded-output-test",
+                file_size_limit_bytes=65,
+            )
+            size = output.stat().st_size
+        self.assertEqual(size, 65)
+        self.assertNotEqual(completed.returncode, 0)
+
+    def test_pdftotext_applies_process_time_output_bound(self) -> None:
+        maximum = int(self.policy["limits"]["max_output_bytes"])
+        observed: list[int | None] = []
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "text.pdf")
+
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
+                observed.append(file_size_limit_bytes)
+                Path(argv[-1]).write_text("bounded", encoding="utf-8")
+                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine, "_require_tool", return_value="/usr/bin/pdftotext"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+            ):
+                text, _size, truncated = engine._extract_pdftotext(source, self.policy)
+        self.assertEqual(observed, [maximum])
+        self.assertEqual(text, "bounded")
+        self.assertIs(truncated, False)
+
+    def test_pdftotext_marks_limit_termination_as_truncated(self) -> None:
+        maximum = int(self.policy["limits"]["max_output_bytes"])
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "text.pdf")
+
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
+                self.assertEqual(file_size_limit_bytes, maximum)
+                Path(argv[-1]).write_bytes(b"x" * maximum)
+                return mock.Mock(returncode=-25, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine, "_require_tool", return_value="/usr/bin/pdftotext"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+            ):
+                text, output_bytes, truncated = engine._extract_pdftotext(source, self.policy)
+        self.assertEqual(len(text.encode("utf-8")), maximum)
+        self.assertEqual(output_bytes, maximum)
+        self.assertIs(truncated, True)
+
+    def test_tesseract_applies_process_time_output_bound(self) -> None:
+        maximum = int(self.policy["limits"]["max_output_bytes"])
+        observed: list[int | None] = []
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "page.png")
+
+            def fake_run(argv, *, policy, operation, file_size_limit_bytes=None):
+                observed.append(file_size_limit_bytes)
+                Path(str(argv[2]) + ".txt").write_text("bounded", encoding="utf-8")
+                return mock.Mock(returncode=0, stdout=b"", stderr=b"")
+
+            with (
+                mock.patch.object(engine, "_require_tool", return_value="/usr/bin/tesseract"),
+                mock.patch.object(engine, "_run", side_effect=fake_run),
+            ):
+                text, _size, truncated = engine._extract_tesseract(source, self.policy, "deu+eng")
+        self.assertEqual(observed, [maximum])
+        self.assertEqual(text, "bounded")
+        self.assertIs(truncated, False)
 
     def test_doctor_isolates_tesseract_readiness_failure_from_text_pdf_route(self) -> None:
         fake_which = {
