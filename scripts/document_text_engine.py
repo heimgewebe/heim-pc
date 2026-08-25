@@ -154,6 +154,15 @@ def _run(
             f"{operation} exceeded the bounded process timeout",
             details={"timeout_seconds": timeout},
         ) from exc
+    except OSError as exc:
+        raise DocumentTextError(
+            "route_unavailable",
+            f"{operation} could not start the required local process",
+            details={
+                "error_type": type(exc).__name__,
+                "errno": exc.errno,
+            },
+        ) from exc
     return completed
 
 
@@ -186,37 +195,113 @@ def _source_kind(path: Path) -> str:
     )
 
 
-def _validate_source(raw_path: str, policy: dict[str, Any]) -> tuple[Path, str, os.stat_result]:
+def _source_candidate(raw_path: str) -> Path:
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
+    return candidate
+
+
+def _open_source(raw_path: str, policy: dict[str, Any]) -> tuple[int, str, os.stat_result, str]:
+    candidate = _source_candidate(raw_path)
+    input_type = _source_kind(candidate)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        pre = candidate.lstat()
+        descriptor = os.open(candidate, flags)
     except FileNotFoundError as exc:
         raise DocumentTextError("input_invalid", "source file does not exist") from exc
-    if stat.S_ISLNK(pre.st_mode):
-        raise DocumentTextError("input_invalid", "source symlinks are not accepted by the v1 engine")
-    if not stat.S_ISREG(pre.st_mode):
-        raise DocumentTextError("input_invalid", "source must be a regular file")
-    maximum = int(policy["limits"]["max_source_bytes"])
-    if pre.st_size <= 0:
-        raise DocumentTextError("input_invalid", "source file is empty")
-    if pre.st_size > maximum:
+    except OSError as exc:
         raise DocumentTextError(
-            "input_too_large",
-            "source file exceeds the bounded v1 size limit",
-            details={"source_bytes": pre.st_size, "max_source_bytes": maximum},
+            "input_invalid",
+            "source file cannot be opened safely",
+            details={"error_type": type(exc).__name__, "errno": exc.errno},
+        ) from exc
+    try:
+        source_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise DocumentTextError("input_invalid", "source must be a regular file")
+        maximum = int(policy["limits"]["max_source_bytes"])
+        if source_stat.st_size <= 0:
+            raise DocumentTextError("input_invalid", "source file is empty")
+        if source_stat.st_size > maximum:
+            raise DocumentTextError(
+                "input_too_large",
+                "source file exceeds the bounded v1 size limit",
+                details={"source_bytes": source_stat.st_size, "max_source_bytes": maximum},
+            )
+        return descriptor, input_type, source_stat, candidate.suffix.casefold()
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _snapshot_source(
+    raw_path: str,
+    policy: dict[str, Any],
+    directory: Path,
+) -> tuple[Path, str, os.stat_result, str]:
+    descriptor, input_type, before, suffix = _open_source(raw_path, policy)
+    snapshot = directory / f"source{suffix}"
+    digest = hashlib.sha256()
+    destination = -1
+    copied = 0
+    maximum = int(policy["limits"]["max_source_bytes"])
+    try:
+        destination = os.open(
+            snapshot,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            0o600,
         )
-    resolved = candidate.resolve(strict=True)
-    post = resolved.stat()
-    if (
-        pre.st_dev != post.st_dev
-        or pre.st_ino != post.st_ino
-        or pre.st_size != post.st_size
-        or pre.st_mtime_ns != post.st_mtime_ns
-    ):
-        raise DocumentTextError("input_invalid", "source identity changed during validation")
-    return resolved, _source_kind(resolved), post
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            copied += len(chunk)
+            if copied > maximum:
+                raise DocumentTextError(
+                    "input_too_large",
+                    "source file exceeded the bounded v1 size limit while snapshotting",
+                    details={"max_source_bytes": maximum},
+                )
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination, view)
+                if written <= 0:
+                    raise DocumentTextError(
+                        "input_invalid",
+                        "private source snapshot write made no progress",
+                    )
+                view = view[written:]
+        os.fsync(destination)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+            or copied != before.st_size
+        ):
+            raise DocumentTextError(
+                "input_invalid",
+                "source content changed while the private snapshot was captured",
+            )
+    except DocumentTextError:
+        raise
+    except OSError as exc:
+        raise DocumentTextError(
+            "input_invalid",
+            "private source snapshot could not be created safely",
+            details={"error_type": type(exc).__name__, "errno": exc.errno},
+        ) from exc
+    finally:
+        if destination >= 0:
+            os.close(destination)
+        os.close(descriptor)
+    return snapshot, input_type, before, digest.hexdigest()
 
 
 def _read_output(path: Path, maximum: int) -> tuple[str, int, bool]:
@@ -382,9 +467,13 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def inspect_source(raw_path: str, policy: dict[str, Any]) -> dict[str, Any]:
-    source, input_type, source_stat = _validate_source(raw_path, policy)
-    source_sha256 = file_sha256(source)
+def _inspect_snapshot(
+    source: Path,
+    input_type: str,
+    source_stat: os.stat_result,
+    source_sha256: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
     pages: int | None = None
     text_layer: bool | None = None
     if input_type == "pdf":
@@ -426,6 +515,14 @@ def inspect_source(raw_path: str, policy: dict[str, Any]) -> dict[str, Any]:
             "document_authenticity",
         ],
     }
+
+
+def inspect_source(raw_path: str, policy: dict[str, Any]) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="heim-doc-text-source-") as directory:
+        source, input_type, source_stat, source_sha256 = _snapshot_source(
+            raw_path, policy, Path(directory)
+        )
+        return _inspect_snapshot(source, input_type, source_stat, source_sha256, policy)
 
 
 def _extract_pdftotext(source: Path, policy: dict[str, Any]) -> tuple[str, int, bool]:
@@ -553,46 +650,49 @@ def validate_extract_result(result: dict[str, Any]) -> None:
 
 def extract_source(raw_path: str, policy: dict[str, Any], *, language: str) -> dict[str, Any]:
     language = _validate_language(language, policy)
-    source, input_type, _source_stat = _validate_source(raw_path, policy)
-    inspection = inspect_source(raw_path, policy)
-    if inspection["status"] != "ready":
-        raise DocumentTextError(
-            "route_unavailable",
-            "recommended local extraction route is not currently ready",
-            details={"method": inspection["recommended_method"]},
+    with tempfile.TemporaryDirectory(prefix="heim-doc-text-source-") as directory:
+        source, input_type, source_stat, source_sha256 = _snapshot_source(
+            raw_path, policy, Path(directory)
         )
-    method = str(inspection["recommended_method"])
-    if method == "pdftotext":
-        text, text_bytes, truncated = _extract_pdftotext(source, policy)
-        result_language: str | None = None
-    elif method == "ocrmypdf_then_pdftotext":
-        text, text_bytes, truncated = _extract_ocr_pdf(source, policy, language)
-        result_language = language
-    elif method == "tesseract":
-        text, text_bytes, truncated = _extract_tesseract(source, policy, language)
-        result_language = language
-    else:
-        raise DocumentTextError("route_unavailable", "inspection selected an unsupported extraction route")
-    if file_sha256(source) != inspection["source_sha256"]:
-        raise DocumentTextError(
-            "input_invalid",
-            "source content changed while extraction was in progress",
+        inspection = _inspect_snapshot(
+            source, input_type, source_stat, source_sha256, policy
         )
-    result = {
-        "schema_version": 1,
-        "kind": "heim-pc.document-text",
-        "source_sha256": inspection["source_sha256"],
-        "input_type": input_type,
-        "method": method,
-        "language": result_language,
-        "pages": inspection["pages"],
-        "text": text,
-        "text_bytes": text_bytes,
-        "truncated": truncated,
-        "warnings": ["output_truncated_to_policy_limit"] if truncated else [],
-    }
-    validate_extract_result(result)
-    return result
+        if inspection["status"] != "ready":
+            raise DocumentTextError(
+                "route_unavailable",
+                "recommended local extraction route is not currently ready",
+                details={"method": inspection["recommended_method"]},
+            )
+        method = str(inspection["recommended_method"])
+        if method == "pdftotext":
+            text, text_bytes, truncated = _extract_pdftotext(source, policy)
+            result_language: str | None = None
+        elif method == "ocrmypdf_then_pdftotext":
+            text, text_bytes, truncated = _extract_ocr_pdf(source, policy, language)
+            result_language = language
+        elif method == "tesseract":
+            text, text_bytes, truncated = _extract_tesseract(source, policy, language)
+            result_language = language
+        else:
+            raise DocumentTextError(
+                "route_unavailable",
+                "inspection selected an unsupported extraction route",
+            )
+        result = {
+            "schema_version": 1,
+            "kind": "heim-pc.document-text",
+            "source_sha256": source_sha256,
+            "input_type": input_type,
+            "method": method,
+            "language": result_language,
+            "pages": inspection["pages"],
+            "text": text,
+            "text_bytes": text_bytes,
+            "truncated": truncated,
+            "warnings": ["output_truncated_to_policy_limit"] if truncated else [],
+        }
+        validate_extract_result(result)
+        return result
 
 
 def _error_payload(operation: str, error: DocumentTextError) -> dict[str, Any]:
@@ -635,10 +735,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DocumentTextError as exc:
         print(json.dumps(_error_payload(args.operation, exc), ensure_ascii=False, sort_keys=True))
         return 2
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         payload = _error_payload(
             args.operation,
-            DocumentTextError("contract_invalid", str(exc)),
+            DocumentTextError(
+                "local_io_error",
+                "local filesystem or process operation failed",
+                details={"error_type": type(exc).__name__, "errno": exc.errno},
+            ),
+        )
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 3
+    except (ValueError, json.JSONDecodeError) as exc:
+        payload = _error_payload(
+            args.operation,
+            DocumentTextError(
+                "contract_invalid",
+                "document text contract or local runtime state is invalid",
+                details={"error_type": type(exc).__name__},
+            ),
         )
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 3

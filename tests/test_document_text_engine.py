@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import os
+import stat
 import tempfile
+from contextlib import redirect_stdout
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -129,19 +133,28 @@ class DocumentTextEngineTests(unittest.TestCase):
     def test_extract_binds_exact_source_hash_and_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "page.png", b"exact-source")
-            inspection = {
-                "status": "ready",
-                "source_sha256": engine.file_sha256(source),
-                "recommended_method": "tesseract",
-                "pages": None,
-            }
+            expected_sha256 = engine.file_sha256(source)
+
+            def fake_inspect(snapshot, input_type, source_stat, source_sha256, policy):
+                self.assertNotEqual(snapshot, source)
+                self.assertEqual(snapshot.read_bytes(), b"exact-source")
+                self.assertEqual(input_type, "png")
+                self.assertEqual(source_stat.st_size, len(b"exact-source"))
+                self.assertEqual(source_sha256, expected_sha256)
+                return {
+                    "status": "ready",
+                    "source_sha256": source_sha256,
+                    "recommended_method": "tesseract",
+                    "pages": None,
+                }
+
             with (
-                mock.patch.object(engine, "inspect_source", return_value=inspection),
+                mock.patch.object(engine, "_inspect_snapshot", side_effect=fake_inspect),
                 mock.patch.object(engine, "_extract_tesseract", return_value=("hello", 5, False)),
             ):
                 result = engine.extract_source(str(source), self.policy, language="deu+eng")
         self.assertEqual(result["kind"], "heim-pc.document-text")
-        self.assertEqual(result["source_sha256"], inspection["source_sha256"])
+        self.assertEqual(result["source_sha256"], expected_sha256)
         self.assertEqual(result["method"], "tesseract")
         self.assertEqual(result["text"], "hello")
         self.assertEqual(result["text_bytes"], 5)
@@ -152,10 +165,10 @@ class DocumentTextEngineTests(unittest.TestCase):
             source = self._file(directory, "page.png")
             with mock.patch.object(
                 engine,
-                "inspect_source",
+                "_inspect_snapshot",
                 return_value={
                     "status": "route_unavailable",
-                    "source_sha256": "x",
+                    "source_sha256": engine.file_sha256(source),
                     "recommended_method": "tesseract",
                     "pages": None,
                 },
@@ -163,6 +176,7 @@ class DocumentTextEngineTests(unittest.TestCase):
                 with self.assertRaises(engine.DocumentTextError) as caught:
                     engine.extract_source(str(source), self.policy, language="deu+eng")
         self.assertEqual(caught.exception.code, "route_unavailable")
+
 
     def test_text_layer_probe_accepts_even_short_real_text_layer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -178,27 +192,66 @@ class DocumentTextEngineTests(unittest.TestCase):
             ):
                 self.assertIs(engine._probe_pdf_text_layer(source, self.policy), True)
 
-    def test_extract_blocks_when_source_changes_after_route_selection(self) -> None:
+    def test_extract_uses_private_snapshot_across_a_b_a_path_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            source = self._file(directory, "page.png", b"before")
-            inspection = {
-                "status": "ready",
-                "source_sha256": engine.file_sha256(source),
-                "recommended_method": "tesseract",
-                "pages": None,
-            }
+            source = self._file(directory, "page.png", b"A-content")
+            expected_sha256 = engine.file_sha256(source)
 
-            def mutate_then_return(*_args, **_kwargs):
-                source.write_bytes(b"after")
-                return "text", 4, False
+            def fake_inspect(snapshot, input_type, source_stat, source_sha256, policy):
+                self.assertNotEqual(snapshot, source)
+                self.assertEqual(snapshot.read_bytes(), b"A-content")
+                return {
+                    "status": "ready",
+                    "source_sha256": source_sha256,
+                    "recommended_method": "tesseract",
+                    "pages": None,
+                }
+
+            def replace_path_a_b_a(snapshot, *_args, **_kwargs):
+                replacement_b = Path(directory) / "replacement-b.png"
+                replacement_a = Path(directory) / "replacement-a.png"
+                replacement_b.write_bytes(b"B-content")
+                replacement_a.write_bytes(b"A-content")
+                os.replace(replacement_b, source)
+                os.replace(replacement_a, source)
+                return snapshot.read_text(encoding="utf-8"), len(b"A-content"), False
 
             with (
-                mock.patch.object(engine, "inspect_source", return_value=inspection),
-                mock.patch.object(engine, "_extract_tesseract", side_effect=mutate_then_return),
+                mock.patch.object(engine, "_inspect_snapshot", side_effect=fake_inspect),
+                mock.patch.object(engine, "_extract_tesseract", side_effect=replace_path_a_b_a),
             ):
+                result = engine.extract_source(str(source), self.policy, language="deu+eng")
+            self.assertEqual(source.read_bytes(), b"A-content")
+        self.assertEqual(result["source_sha256"], expected_sha256)
+        self.assertEqual(result["text"], "A-content")
+
+    def test_private_snapshot_is_mode_0600_and_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "page.png", b"snapshot-bytes")
+            snapshot_dir = Path(directory) / "snapshot"
+            snapshot_dir.mkdir()
+            snapshot, input_type, source_stat, source_sha256 = engine._snapshot_source(
+                str(source), self.policy, snapshot_dir
+            )
+            self.assertEqual(input_type, "png")
+            self.assertEqual(source_stat.st_size, len(b"snapshot-bytes"))
+            self.assertEqual(source_sha256, engine.file_sha256(source))
+            self.assertEqual(snapshot.read_bytes(), b"snapshot-bytes")
+            self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o600)
+
+
+    def test_snapshot_blocks_growth_past_source_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "page.png", b"A")
+            snapshot_dir = Path(directory) / "snapshot"
+            snapshot_dir.mkdir()
+            policy = json.loads(json.dumps(self.policy))
+            policy["limits"]["max_source_bytes"] = 5
+            with mock.patch.object(engine.os, "read", side_effect=[b"1234", b"5678"]):
                 with self.assertRaises(engine.DocumentTextError) as caught:
-                    engine.extract_source(str(source), self.policy, language="deu+eng")
-        self.assertEqual(caught.exception.code, "input_invalid")
+                    engine._snapshot_source(str(source), policy, snapshot_dir)
+        self.assertEqual(caught.exception.code, "input_too_large")
+        self.assertEqual(caught.exception.details["max_source_bytes"], 5)
 
     def test_undeclared_webp_input_is_not_silently_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -299,6 +352,42 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertIs(result["network_access_authorized"], False)
         self.assertIs(result["cloud_or_metered_use_authorized"], False)
         self.assertIs(result["docling"]["automatic_use"], False)
+
+    def test_spawn_os_error_redacts_executable_path(self) -> None:
+        sensitive = "/private/tool/secret-name"
+        with mock.patch.object(
+            engine.subprocess,
+            "run",
+            side_effect=FileNotFoundError(2, "No such file", sensitive),
+        ):
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine._run([sensitive], policy=self.policy, operation="probe")
+        rendered = json.dumps(
+            {"message": str(caught.exception), "details": caught.exception.details}
+        )
+        self.assertNotIn(sensitive, rendered)
+        self.assertEqual(caught.exception.details["error_type"], "FileNotFoundError")
+        self.assertEqual(caught.exception.details["errno"], 2)
+
+    def test_main_redacts_raw_os_error_path(self) -> None:
+        sensitive = "/private/customer/secret-document.png"
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                engine,
+                "inspect_source",
+                side_effect=PermissionError(13, "Permission denied", sensitive),
+            ),
+            redirect_stdout(output),
+        ):
+            returncode = engine.main(["inspect", sensitive])
+        rendered = output.getvalue()
+        payload = json.loads(rendered)
+        self.assertEqual(returncode, 3)
+        self.assertNotIn(sensitive, rendered)
+        self.assertEqual(payload["error"]["code"], "local_io_error")
+        self.assertEqual(payload["error"]["details"]["error_type"], "PermissionError")
+        self.assertEqual(payload["error"]["details"]["errno"], 13)
 
     def test_cli_error_is_machine_readable(self) -> None:
         payload = engine._error_payload(
