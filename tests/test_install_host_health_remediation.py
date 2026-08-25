@@ -2040,6 +2040,74 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
                 install_fixture(source, head, target, apply=True)
             self.assertEqual(outside.read_bytes(), b"outside")
 
+    def test_rsyslog_dateformat_transition_migrates_day_only_archives_without_overwrite(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            log_dir = target / "var/log"
+            log_dir.mkdir(parents=True)
+            legacy_syslog = log_dir / "syslog-20260824.gz"
+            legacy_auth = log_dir / "auth.log-20260824"
+            occupied = log_dir / "syslog-20260824-000000.gz"
+            legacy_syslog.write_bytes(b"legacy syslog\n")
+            legacy_auth.write_bytes(b"legacy auth\n")
+            occupied.write_bytes(b"existing timestamped archive\n")
+            syslog_inode = legacy_syslog.stat().st_ino
+            auth_inode = legacy_auth.stat().st_ino
+
+            plan = install_fixture(source, head, target, apply=False)
+            migration = plan["legacy_rsyslog_archive_migration"]
+            self.assertFalse(migration["applied"])
+            self.assertEqual(migration["count"], 2)
+            self.assertTrue(legacy_syslog.exists())
+            self.assertTrue(legacy_auth.exists())
+            self.assertEqual(occupied.read_bytes(), b"existing timestamped archive\n")
+            self.assertEqual(
+                {Path(item["destination"]).name for item in migration["files"]},
+                {"syslog-20260824-000001.gz", "auth.log-20260824-000000"},
+            )
+
+            receipt = install_fixture(source, head, target, apply=True)
+            applied = receipt["legacy_rsyslog_archive_migration"]
+            migrated_syslog = log_dir / "syslog-20260824-000001.gz"
+            migrated_auth = log_dir / "auth.log-20260824-000000"
+            self.assertTrue(applied["applied"])
+            self.assertEqual(applied["count"], 2)
+            self.assertFalse(legacy_syslog.exists())
+            self.assertFalse(legacy_auth.exists())
+            self.assertEqual(migrated_syslog.read_bytes(), b"legacy syslog\n")
+            self.assertEqual(migrated_auth.read_bytes(), b"legacy auth\n")
+            self.assertEqual(migrated_syslog.stat().st_ino, syslog_inode)
+            self.assertEqual(migrated_auth.stat().st_ino, auth_inode)
+            self.assertEqual(occupied.read_bytes(), b"existing timestamped archive\n")
+
+            second = install_fixture(source, head, target, apply=True)
+            self.assertEqual(second["legacy_rsyslog_archive_migration"]["count"], 0)
+
+    def test_rsyslog_archive_migration_rolls_back_if_install_fails(
+        self,
+    ) -> None:
+        with committed_source() as (source, head), tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            legacy = target / "var/log/syslog-20260824.gz"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"legacy syslog\n")
+            legacy_inode = legacy.stat().st_ino
+
+            def fail_after_first(index: int, _relative: str) -> None:
+                if index == 1:
+                    raise RuntimeError("injected commit failure after archive migration")
+
+            installer.TRANSACTION_FAULT_HOOK = fail_after_first
+            with self.assertRaisesRegex(installer.InstallError, "before commit point"):
+                install_fixture(source, head, target, apply=True)
+
+            self.assertEqual(legacy.read_bytes(), b"legacy syslog\n")
+            self.assertEqual(legacy.stat().st_ino, legacy_inode)
+            self.assertFalse((target / "var/log/syslog-20260824-000000.gz").exists())
+            self.assertFalse((target / installer.RECEIPT_RELATIVE).exists())
+
     def test_rsyslog_rotation_uses_unique_same_day_timestamp_names(self) -> None:
         config = (ROOT / "systemd/logrotate.d/rsyslog").read_text(encoding="utf-8")
         lines = [line.strip() for line in config.splitlines()]

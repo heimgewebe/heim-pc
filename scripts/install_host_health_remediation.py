@@ -96,6 +96,11 @@ COMMIT_POINT = (
     "effective_systemd_composition_verified"
 )
 RESIDUE_TOKEN = re.compile(r"^[0-9a-f]{16}$")
+RSYSLOG_CONFIG_SOURCE = "systemd/logrotate.d/rsyslog"
+RSYSLOG_LEGACY_DATEFORMAT = "-%Y%m%d"
+RSYSLOG_TIMESTAMP_DATEFORMAT = "-%Y%m%d-%H%M%S"
+RSYSLOG_LEGACY_ARCHIVE_LIMIT = 256
+RSYSLOG_MIGRATION_SLOT_LIMIT = 3600
 
 FILES = (
     ("config/host-health-remediation.v1.json", "etc/heim-pc/host-health-remediation.v1.json", 0o644),
@@ -743,6 +748,315 @@ def _snapshot(root_fd: int, relative: str) -> dict[str, Any]:
                 os.close(parent_fd)
             except OSError:
                 pass
+
+
+def _metadata_snapshot_at(parent_fd: int, name: str) -> dict[str, Any]:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"exists": False}
+    except OSError as exc:
+        raise InstallError(f"cannot inspect legacy archive {name}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise InstallError(f"legacy archive must be a regular file: {name}")
+    return {
+        "exists": True,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+    }
+
+
+def _same_metadata_snapshot(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if left.get("exists") != right.get("exists"):
+        return False
+    if not left.get("exists"):
+        return True
+    return all(
+        left.get(key) == right.get(key)
+        for key in (
+            "mode",
+            "uid",
+            "gid",
+            "device",
+            "inode",
+            "size",
+            "mtime_ns",
+        )
+    )
+
+
+def _rsyslog_log_relatives(source_data: dict[str, bytes]) -> tuple[str, ...]:
+    try:
+        text = source_data[RSYSLOG_CONFIG_SOURCE].decode("utf-8")
+    except (KeyError, UnicodeDecodeError) as exc:
+        raise InstallError("committed rsyslog logrotate configuration is invalid") from exc
+    header, separator, body = text.partition("{")
+    if separator != "{":
+        raise InstallError("committed rsyslog logrotate configuration lacks a block")
+    paths: list[str] = []
+    for raw_line in header.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        absolute = PurePosixPath(line)
+        if not absolute.is_absolute() or ".." in absolute.parts:
+            raise InstallError("committed rsyslog log path is invalid")
+        relative = str(absolute.relative_to("/"))
+        if not relative.startswith("var/log/"):
+            raise InstallError("committed rsyslog log path escapes /var/log")
+        paths.append(relative)
+    directives = {
+        raw_line.strip()
+        for raw_line in body.splitlines()
+        if raw_line.strip() and not raw_line.lstrip().startswith("#")
+    }
+    if (
+        not paths
+        or len(paths) != len(set(paths))
+        or "dateext" not in directives
+        or f"dateformat {RSYSLOG_TIMESTAMP_DATEFORMAT}" not in directives
+    ):
+        raise InstallError(
+            "committed rsyslog logrotate configuration differs from the timestamp transition contract"
+        )
+    return tuple(paths)
+
+
+def _legacy_rsyslog_archive_suffix(
+    name: str,
+    base_name: str,
+) -> tuple[str, str] | None:
+    prefix = f"{base_name}-"
+    if not name.startswith(prefix):
+        return None
+    suffix = name[len(prefix) :]
+    compression = ""
+    if suffix.endswith(".gz"):
+        suffix = suffix[:-3]
+        compression = ".gz"
+    if len(suffix) != 8 or not suffix.isdigit():
+        return None
+    try:
+        datetime.strptime(suffix, "%Y%m%d")
+    except ValueError:
+        return None
+    return suffix, compression
+
+
+def _plan_rsyslog_legacy_archive_migration(
+    root_fd: int,
+    source_data: dict[str, bytes],
+    *,
+    target_root: Path,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[str]] = {}
+    for relative in _rsyslog_log_relatives(source_data):
+        path = PurePosixPath(relative)
+        grouped.setdefault(str(path.parent), []).append(path.name)
+
+    planned: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for parent_relative, base_names in sorted(grouped.items()):
+        parent_fd = _open_directory(
+            root_fd,
+            _relative_parts(parent_relative),
+            create=False,
+        )
+        if parent_fd is None:
+            continue
+        try:
+            try:
+                names = set(os.listdir(parent_fd))
+            except OSError as exc:
+                raise InstallError(
+                    f"cannot inspect legacy rsyslog archives in {parent_relative}: {exc}"
+                ) from exc
+            reserved_names = set(names)
+            for base_name in base_names:
+                for name in sorted(names):
+                    parsed = _legacy_rsyslog_archive_suffix(name, base_name)
+                    if parsed is None:
+                        continue
+                    day, compression = parsed
+                    source_relative = f"{parent_relative}/{name}"
+                    if source_relative in seen_sources:
+                        continue
+                    before = _metadata_snapshot_at(parent_fd, name)
+                    if not before["exists"]:
+                        continue
+                    if len(planned) >= RSYSLOG_LEGACY_ARCHIVE_LIMIT:
+                        raise InstallError(
+                            "legacy rsyslog archive migration exceeds its bounded file limit"
+                        )
+                    destination_name = None
+                    for slot in range(RSYSLOG_MIGRATION_SLOT_LIMIT):
+                        minute, second = divmod(slot, 60)
+                        timestamp = f"00{minute:02d}{second:02d}"
+                        candidate = f"{base_name}-{day}-{timestamp}{compression}"
+                        if candidate not in reserved_names:
+                            destination_name = candidate
+                            break
+                    if destination_name is None:
+                        raise InstallError(
+                            f"no bounded timestamp slot is free for legacy archive {name}"
+                        )
+                    destination_relative = f"{parent_relative}/{destination_name}"
+                    reserved_names.add(destination_name)
+                    seen_sources.add(source_relative)
+                    planned.append(
+                        {
+                            "source_relative": source_relative,
+                            "destination_relative": destination_relative,
+                            "source": _target_display(target_root, source_relative),
+                            "destination": _target_display(
+                                target_root,
+                                destination_relative,
+                            ),
+                            "before": before,
+                        }
+                    )
+        finally:
+            os.close(parent_fd)
+    return planned
+
+
+def _rollback_rsyslog_legacy_archive_migration(
+    root_fd: int,
+    completed: list[dict[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    for item in reversed(completed):
+        source = PurePosixPath(item["source_relative"])
+        destination = PurePosixPath(item["destination_relative"])
+        if source.parent != destination.parent:
+            errors.append(f"{item['source_relative']}: migration parent changed")
+            continue
+        parent_fd = _open_directory(
+            root_fd,
+            _relative_parts(str(source.parent)),
+            create=False,
+        )
+        if parent_fd is None:
+            errors.append(f"{source.parent}: migration parent disappeared")
+            continue
+        try:
+            source_now = _metadata_snapshot_at(parent_fd, source.name)
+            destination_now = _metadata_snapshot_at(parent_fd, destination.name)
+            if source_now["exists"]:
+                raise InstallError("legacy archive source was replaced before rollback")
+            if not _same_metadata_snapshot(destination_now, item["before"]):
+                raise InstallError("migrated archive identity changed before rollback")
+            os.rename(
+                destination.name,
+                source.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.fsync(parent_fd)
+        except Exception as exc:
+            errors.append(f"{item['source_relative']}: {exc}")
+        finally:
+            os.close(parent_fd)
+    return errors
+
+
+def _commit_rsyslog_legacy_archive_migration(
+    root_fd: int,
+    planned: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    completed: list[dict[str, Any]] = []
+    try:
+        for item in planned:
+            source = PurePosixPath(item["source_relative"])
+            destination = PurePosixPath(item["destination_relative"])
+            if source.parent != destination.parent:
+                raise InstallError("legacy archive migration must stay within one directory")
+            parent_fd = _open_directory(
+                root_fd,
+                _relative_parts(str(source.parent)),
+                create=False,
+            )
+            if parent_fd is None:
+                raise InstallError(f"legacy archive parent disappeared: {source.parent}")
+            try:
+                source_now = _metadata_snapshot_at(parent_fd, source.name)
+                destination_now = _metadata_snapshot_at(parent_fd, destination.name)
+                if not _same_metadata_snapshot(source_now, item["before"]):
+                    raise InstallError(
+                        f"legacy archive changed before migration: {item['source_relative']}"
+                    )
+                if destination_now["exists"]:
+                    raise InstallError(
+                        f"legacy archive migration destination appeared: {item['destination_relative']}"
+                    )
+                os.rename(
+                    source.name,
+                    destination.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                completed.append(item)
+                os.fsync(parent_fd)
+                source_final = _metadata_snapshot_at(parent_fd, source.name)
+                destination_final = _metadata_snapshot_at(parent_fd, destination.name)
+                if source_final["exists"] or not _same_metadata_snapshot(
+                    destination_final,
+                    item["before"],
+                ):
+                    raise InstallError(
+                        f"legacy archive migration readback failed: {item['source_relative']}"
+                    )
+            finally:
+                os.close(parent_fd)
+    except Exception as exc:
+        rollback_errors = _rollback_rsyslog_legacy_archive_migration(root_fd, completed)
+        rollback_detail = (
+            f"; rollback failures: {', '.join(rollback_errors)}"
+            if rollback_errors
+            else ""
+        )
+        raise InstallError(
+            "legacy rsyslog archive migration failed before the dateformat transition: "
+            f"{exc}{rollback_detail}"
+        ) from exc
+    return completed
+
+
+def _public_rsyslog_legacy_archive_migration(
+    planned: list[dict[str, Any]],
+    *,
+    applied: bool,
+) -> dict[str, Any]:
+    return {
+        "policy": "rename_day_only_archives_before_timestamp_dateformat_commit",
+        "legacy_dateformat": RSYSLOG_LEGACY_DATEFORMAT,
+        "target_dateformat": RSYSLOG_TIMESTAMP_DATEFORMAT,
+        "bounded_file_limit": RSYSLOG_LEGACY_ARCHIVE_LIMIT,
+        "bounded_destination_slots": RSYSLOG_MIGRATION_SLOT_LIMIT,
+        "applied": applied,
+        "count": len(planned),
+        "files": [
+            {
+                "source": item["source"],
+                "destination": item["destination"],
+                "identity": {
+                    "mode": oct(item["before"]["mode"]),
+                    "uid": item["before"]["uid"],
+                    "gid": item["before"]["gid"],
+                    "device": item["before"]["device"],
+                    "inode": item["before"]["inode"],
+                    "size": item["before"]["size"],
+                    "mtime_ns": item["before"]["mtime_ns"],
+                },
+            }
+            for item in planned
+        ],
+    }
 
 
 def _same_snapshot(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -2319,6 +2633,7 @@ def _base_receipt(
     composition: dict[str, Any],
     source_object_ids: dict[str, str],
     source_object_format: str,
+    legacy_rsyslog_archive_migration: dict[str, Any],
     installed_at: str | None = None,
     target_readback: list[dict[str, Any]] | None = None,
     cleanup: dict[str, Any] | None = None,
@@ -2364,6 +2679,7 @@ def _base_receipt(
         "target_root": str(Path(os.path.abspath(os.fspath(target_root)))),
         "installed_at": installed_at,
         "files": [_public_entry(item, applied=apply) for item in entries],
+        "legacy_rsyslog_archive_migration": legacy_rsyslog_archive_migration,
         "effective_systemd_composition": composition,
         "transaction": {
             "exclusive_lock": (
@@ -2479,6 +2795,13 @@ def install(
                     root_fd,
                     target_root=target_root,
                 )
+                legacy_archive_migration_plan = (
+                    _plan_rsyslog_legacy_archive_migration(
+                        root_fd,
+                        source_data,
+                        target_root=target_root,
+                    )
+                )
                 entries, _overlay, composition = _build_plan(
                     root_fd=root_fd,
                     source_data=source_data,
@@ -2497,13 +2820,39 @@ def install(
                     gid=gid,
                 )
                 created: list[str] = []
-                target_readback, committed_composition, cleanup = _apply_operations(
-                    root_fd,
-                    operations,
-                    entries=entries,
-                    target_root=target_root,
-                    expected_user_unit_dirs=user_unit_dirs,
-                    created=created,
+                completed_legacy_archives = (
+                    _commit_rsyslog_legacy_archive_migration(
+                        root_fd,
+                        legacy_archive_migration_plan,
+                    )
+                )
+                try:
+                    target_readback, committed_composition, cleanup = _apply_operations(
+                        root_fd,
+                        operations,
+                        entries=entries,
+                        target_root=target_root,
+                        expected_user_unit_dirs=user_unit_dirs,
+                        created=created,
+                    )
+                except Exception as exc:
+                    migration_rollback_errors = (
+                        _rollback_rsyslog_legacy_archive_migration(
+                            root_fd,
+                            completed_legacy_archives,
+                        )
+                    )
+                    if migration_rollback_errors:
+                        raise InstallError(
+                            f"{exc}; legacy rsyslog archive rollback failures: "
+                            + ", ".join(migration_rollback_errors)
+                        ) from exc
+                    raise
+                legacy_rsyslog_archive_migration = (
+                    _public_rsyslog_legacy_archive_migration(
+                        legacy_archive_migration_plan,
+                        applied=True,
+                    )
                 )
                 receipt = _base_receipt(
                     apply=True,
@@ -2514,6 +2863,7 @@ def install(
                     composition=committed_composition,
                     source_object_ids=source_object_ids,
                     source_object_format=source_object_format,
+                    legacy_rsyslog_archive_migration=legacy_rsyslog_archive_migration,
                     installed_at=installed_at,
                     target_readback=target_readback,
                     cleanup=cleanup,
@@ -2538,6 +2888,11 @@ def install(
             source_root,
             head,
         )
+        legacy_archive_migration_plan = _plan_rsyslog_legacy_archive_migration(
+            root_fd,
+            source_data,
+            target_root=target_root,
+        )
         entries, _overlay, composition = _build_plan(
             root_fd=root_fd,
             source_data=source_data,
@@ -2557,6 +2912,12 @@ def install(
             composition=composition,
             source_object_ids=source_object_ids,
             source_object_format=source_object_format,
+            legacy_rsyslog_archive_migration=(
+                _public_rsyslog_legacy_archive_migration(
+                    legacy_archive_migration_plan,
+                    applied=False,
+                )
+            ),
         )
     finally:
         try:
