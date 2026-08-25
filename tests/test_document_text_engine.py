@@ -5,6 +5,7 @@ import io
 import json
 import os
 import stat
+import struct
 import tempfile
 from contextlib import redirect_stdout
 import unittest
@@ -32,6 +33,14 @@ class DocumentTextEngineTests(unittest.TestCase):
         path = Path(directory) / name
         path.write_bytes(payload)
         return path
+
+    def _classic_tiff(self, pages: int) -> bytes:
+        self.assertGreater(pages, 0)
+        payload = bytearray(b"II*\x00" + struct.pack("<I", 8))
+        for index in range(pages):
+            next_offset = 8 + (index + 1) * 6 if index + 1 < pages else 0
+            payload.extend(struct.pack("<HI", 0, next_offset))
+        return bytes(payload)
 
     def test_policy_is_local_zero_cost_and_bounded(self) -> None:
         invariants = self.policy["invariants"]
@@ -168,6 +177,48 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(result["recommended_method"], "tesseract")
         self.assertEqual(result["status"], "ready")
         self.assertIsNone(result["pages"])
+
+    def test_single_page_tiff_establishes_page_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "page.tiff", self._classic_tiff(1))
+            with mock.patch.object(
+                engine,
+                "doctor",
+                return_value={
+                    "routes": {"pdf_text_layer": True, "pdf_ocr": True, "image_ocr": True},
+                    "docling": {"status": "unattested"},
+                },
+            ):
+                result = engine.inspect_source(str(source), self.policy)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["recommended_method"], "tesseract")
+        self.assertEqual(result["pages"], 1)
+        self.assertIs(result["page_bound_established"], True)
+
+    def test_tiff_page_limit_blocks_before_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pages = self.policy["limits"]["max_pages"] + 1
+            source = self._file(directory, "many-pages.tiff", self._classic_tiff(pages))
+            with self.assertRaises(engine.DocumentTextError) as caught:
+                engine.inspect_source(str(source), self.policy)
+        self.assertEqual(caught.exception.code, "input_too_large")
+        self.assertEqual(caught.exception.details["pages"], pages)
+
+    def test_unparseable_tiff_page_bound_is_unready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._file(directory, "unbounded.tiff", b"II+\x00" + b"\x00" * 12)
+            with mock.patch.object(
+                engine,
+                "doctor",
+                return_value={
+                    "routes": {"pdf_text_layer": True, "pdf_ocr": True, "image_ocr": True},
+                    "docling": {"status": "unattested"},
+                },
+            ):
+                result = engine.inspect_source(str(source), self.policy)
+        self.assertEqual(result["status"], "route_unavailable")
+        self.assertIsNone(result["pages"] )
+        self.assertIs(result["page_bound_established"], False)
 
     def test_page_limit_blocks_before_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

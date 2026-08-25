@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -390,6 +391,52 @@ def _pdf_page_count(path: Path, policy: dict[str, Any]) -> int | None:
     return int(match.group(1))
 
 
+def _tiff_page_count(path: Path, policy: dict[str, Any]) -> int | None:
+    maximum_pages = int(policy["limits"]["max_pages"])
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            header = handle.read(8)
+            if len(header) != 8:
+                return None
+            if header[:2] == b"II":
+                byte_order = "<"
+            elif header[:2] == b"MM":
+                byte_order = ">"
+            else:
+                return None
+            if struct.unpack(f"{byte_order}H", header[2:4])[0] != 42:
+                return None
+            offset = struct.unpack(f"{byte_order}I", header[4:8])[0]
+            if offset == 0:
+                return None
+            seen_offsets: set[int] = set()
+            pages = 0
+            while offset != 0:
+                if offset in seen_offsets or offset < 8 or offset + 2 > size:
+                    return None
+                seen_offsets.add(offset)
+                handle.seek(offset)
+                entry_count_raw = handle.read(2)
+                if len(entry_count_raw) != 2:
+                    return None
+                entry_count = struct.unpack(f"{byte_order}H", entry_count_raw)[0]
+                next_offset_position = offset + 2 + entry_count * 12
+                if next_offset_position + 4 > size:
+                    return None
+                handle.seek(next_offset_position)
+                next_offset_raw = handle.read(4)
+                if len(next_offset_raw) != 4:
+                    return None
+                offset = struct.unpack(f"{byte_order}I", next_offset_raw)[0]
+                pages += 1
+                if pages > maximum_pages:
+                    return pages
+            return pages if pages > 0 else None
+    except (OSError, OverflowError, struct.error):
+        return None
+
+
 def _probe_pdf_text_layer(path: Path, policy: dict[str, Any]) -> bool | None:
     executable = shutil.which(_tool_name(policy, "pdf_text"))
     if executable is None:
@@ -550,10 +597,20 @@ def _inspect_snapshot(
             )
         text_layer = _probe_pdf_text_layer(source, policy) if pages is not None else None
         method = "pdftotext" if text_layer is True else "ocrmypdf_then_pdftotext"
+    elif input_type == "tiff":
+        pages = _tiff_page_count(source, policy)
+        maximum_pages = int(policy["limits"]["max_pages"])
+        if pages is not None and pages > maximum_pages:
+            raise DocumentTextError(
+                "input_too_large",
+                "TIFF exceeds the bounded v1 page limit",
+                details={"pages": pages, "max_pages": maximum_pages},
+            )
+        method = "tesseract"
     else:
         method = "tesseract"
     readiness = doctor(policy)
-    if input_type == "pdf" and pages is None:
+    if input_type in {"pdf", "tiff"} and pages is None:
         route_ready = False
     elif method == "pdftotext":
         route_ready = bool(readiness["routes"]["pdf_text_layer"])
@@ -570,7 +627,7 @@ def _inspect_snapshot(
         "source_bytes": source_stat.st_size,
         "input_type": input_type,
         "pages": pages,
-        "page_bound_established": input_type != "pdf" or pages is not None,
+        "page_bound_established": input_type not in {"pdf", "tiff"} or pages is not None,
         "text_layer_detected": text_layer,
         "recommended_method": method,
         "route_ready": route_ready,
