@@ -102,6 +102,88 @@ def test_apt_update_fails_closed_on_any_index_error(tmp_path: Path, monkeypatch:
     assert calls[0][-3:] == ["-o", "APT::Update::Error-Mode=any", "update"]
 
 
+def test_parse_apt_print_uris_requires_sha512() -> None:
+    digest = "a" * 128
+    text = f"'https://example.invalid/pkg.deb' pkg.deb 123 SHA512:{digest}\n"
+    assert spu.parse_apt_print_uris(text) == [{
+        "repository_uri_sha256": spu._sha256_bytes(b"https://example.invalid/pkg.deb"),
+        "repository_filename": "pkg.deb",
+        "repository_size": 123,
+        "repository_sha512": digest,
+    }]
+    with pytest.raises(spu.PlanError, match="strong SHA512"):
+        spu.parse_apt_print_uris("'https://example.invalid/pkg.deb' pkg.deb 123 MD5Sum:deadbeef")
+
+
+def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    simulation = "Inst curl [old] (new Repo [amd64])\n"
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        calls.append(argv)
+        if argv[-1] == "update":
+            return {"argv": argv, "returncode": 0, "stdout": "", "stderr": ""}
+        if "-s" in argv:
+            return {"argv": argv, "returncode": 0, "stdout": simulation, "stderr": ""}
+        if "--print-uris" in argv:
+            return {"argv": argv, "returncode": 0, "stdout": "'https://example.invalid/curl.deb' curl.deb 2048 SHA512:" + "a" * 128 + "\n", "stderr": ""}
+        raise AssertionError(f"unexpected actual download: {argv}")
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    policy = {"apt": {"enabled": True, "max_packages": 10, "max_download_bytes": 1024, "sensitive_prefixes": []}}
+    with pytest.raises(spu.PlanError, match="before download"):
+        spu._stage_apt(tmp_path / "stage", policy, os.geteuid())
+    assert any("--print-uris" in argv for argv in calls)
+    assert not any("download" in argv and "--print-uris" not in argv for argv in calls)
+
+
+def test_stage_artifact_path_rejects_absolute_and_parent_escape(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    parent = stage / "apt" / "debs"
+    with pytest.raises(spu.PlanError, match="escapes"):
+        spu._stage_artifact_path(stage, "/tmp/evil.deb", parent)
+    with pytest.raises(spu.PlanError, match="escapes"):
+        spu._stage_artifact_path(stage, "apt/debs/../../evil.deb", parent)
+
+
+def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage = tmp_path / "stage"
+    deb_dir = stage / "apt" / "debs"
+    deb_dir.mkdir(parents=True)
+    artifact = deb_dir / "curl.deb"
+    artifact.write_bytes(b"forged")
+    digest = "a" * 128
+    item = {
+        "name": "curl", "version": "new", "arch": "amd64", "package": "curl",
+        "relative_path": "apt/debs/curl.deb", "size": len(b"forged"),
+        "sha256": spu._sha256_file(artifact),
+        "repository_size": 123, "repository_sha512": digest,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+    }
+    plan = {"apt": {"enabled": True, "packages": [item]}}
+    policy = {"apt": {"enabled": True, "max_packages": 10}}
+    monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
+    monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
+        "repository_size": 123, "repository_sha512": digest,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+        "repository_filename": "curl.deb",
+    })
+    monkeypatch.setattr(spu, "_deb_field", lambda path, field: {"Package": "curl", "Version": "new", "Architecture": "amd64"}[field])
+    with pytest.raises(spu.PlanError, match="freshly authenticated repository metadata"):
+        spu._revalidate_apt_provenance(stage, plan, policy, os.geteuid())
+
+
+def test_snap_provenance_requires_current_pending_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan = {"snap": {"enabled": True, "packages": [{"name": "core22", "version": "new", "revision": "2"}]}}
+    policy = {"snap": {"enabled": True}}
+    monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {
+        "argv": argv, "returncode": 0,
+        "stdout": "Name Version Rev Size Publisher Notes\ncore22 newer 3 1MB canonical** base\n", "stderr": "",
+    })
+    with pytest.raises(spu.PlanError, match="pending refresh set changed"):
+        spu._revalidate_snap_provenance(plan, policy)
+
+
 def test_parse_apt_simulation_keeps_exact_identity() -> None:
     text = "\n".join(
         [
@@ -246,6 +328,17 @@ def test_policy_requires_read_only_handoff_guard(tmp_path: Path) -> None:
     path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="require_broker_read_only_handoff"):
         spu.load_policy(path)
+
+
+def test_policy_requires_signed_apt_provenance_and_pre_download_cap(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    for key in ("require_signed_apt_artifact_provenance", "require_pre_download_byte_cap"):
+        mutated = json.loads(json.dumps(policy))
+        mutated["safety"][key] = False
+        path = tmp_path / f"{key}.json"
+        path.write_text(json.dumps(mutated))
+        with pytest.raises(spu.PolicyError, match=key):
+            spu.load_policy(path)
 
 
 def test_policy_requires_recursive_dpkg_apply_guard(tmp_path: Path) -> None:

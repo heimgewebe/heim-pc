@@ -37,6 +37,8 @@
     "require_exact_plan_hash": true,
     "require_fresh_apt_indexes": true,
     "require_apt_signature_verification": true,
+    "require_signed_apt_artifact_provenance": true,
+    "require_pre_download_byte_cap": true,
     "require_dpkg_status_precondition": true,
     "require_source_config_precondition": true,
     "require_root_owned_copy_before_apply": true,

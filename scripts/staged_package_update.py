@@ -149,6 +149,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_exact_plan_hash",
         "require_fresh_apt_indexes",
         "require_apt_signature_verification",
+        "require_signed_apt_artifact_provenance",
+        "require_pre_download_byte_cap",
         "require_dpkg_status_precondition",
         "require_source_config_precondition",
         "require_root_owned_copy_before_apply",
@@ -405,6 +407,84 @@ def parse_apt_simulation(text: str) -> list[dict[str, str]]:
     return packages
 
 
+def parse_apt_print_uris(text: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = shlex.split(line)
+        if len(parts) != 4 or not parts[2].isdigit():
+            raise PlanError(f"unexpected apt --print-uris output: {line}")
+        hash_kind, separator, digest = parts[3].partition(":")
+        if separator != ":" or hash_kind.upper() != "SHA512" or re.fullmatch(r"[0-9a-fA-F]{128}", digest) is None:
+            raise PlanError("APT repository metadata did not provide a strong SHA512 artifact hash")
+        records.append({
+            "repository_uri_sha256": _sha256_bytes(parts[0].encode("utf-8")),
+            "repository_filename": parts[1],
+            "repository_size": int(parts[2]),
+            "repository_sha512": digest.lower(),
+        })
+    return records
+
+
+def _sha512_file(path: Path) -> str:
+    digest = hashlib.sha512()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _candidate_identity(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(item["name"]), str(item["version"]), str(item["arch"]))
+
+
+def _apt_repository_record(options: list[str], candidate: dict[str, str]) -> dict[str, Any]:
+    spec = f"{candidate['name']}={candidate['version']}"
+    result = _run(["/usr/bin/apt-get", *options, "--print-uris", "download", spec])
+    records = parse_apt_print_uris(result["stdout"])
+    if len(records) != 1:
+        raise PlanError(f"APT repository metadata did not resolve exactly one artifact for {spec}")
+    return {**records[0], "repository_manifest_sha256": _sha256_bytes(result["stdout"].encode())}
+
+
+def _available_bytes(path: Path) -> int:
+    info = os.statvfs(path)
+    return int(info.f_bavail) * int(info.f_frsize)
+
+
+def _stage_artifact_path(stage: Path, relative_value: Any, expected_parent: Path) -> Path:
+    if not isinstance(relative_value, str) or not relative_value:
+        raise PlanError("stage artifact relative path must be a non-empty string")
+    relative = Path(relative_value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise PlanError(f"stage artifact path escapes its bounded directory: {relative_value}")
+    path = stage / relative
+    try:
+        child = path.relative_to(expected_parent)
+    except ValueError as exc:
+        raise PlanError(f"stage artifact path escapes its bounded directory: {relative_value}") from exc
+    if not child.parts:
+        raise PlanError("stage artifact path may not name the artifact directory itself")
+    return path
+
+
+def _apt_update_and_candidates(stage: Path, policy: dict[str, Any], uid: int) -> tuple[list[str], dict[str, Any], dict[str, Any], list[dict[str, str]]]:
+    _prepare_apt_dirs(stage, uid)
+    options = _apt_options(stage)
+    update = _run(["/usr/bin/apt-get", *options, "-o", "APT::Update::Error-Mode=any", "update"])
+    if re.search(r"^(W:|E:).*signature|NO_PUBKEY|not signed", update["stderr"], flags=re.I | re.M):
+        raise PlanError("APT update reported a repository signature problem")
+    simulation = _run([
+        "/usr/bin/apt-get", "-s", *options, "--no-remove", "upgrade", "--with-new-pkgs"
+    ])
+    candidates = parse_apt_simulation(simulation["stdout"])
+    if len(candidates) > policy["apt"]["max_packages"]:
+        raise PlanError(f"APT candidate count {len(candidates)} exceeds policy limit")
+    return options, update, simulation, candidates
+
+
 def _deb_field(path: Path, field: str) -> str:
     result = _run(["/usr/bin/dpkg-deb", "-f", str(path), field])
     return result["stdout"].strip()
@@ -421,17 +501,7 @@ def _is_sensitive_package(name: str, policy: dict[str, Any]) -> bool:
 def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
     if policy["apt"].get("enabled") is not True:
         return {"enabled": False, "packages": []}
-    _prepare_apt_dirs(stage, uid)
-    options = _apt_options(stage)
-    update = _run(["/usr/bin/apt-get", *options, "-o", "APT::Update::Error-Mode=any", "update"])
-    if re.search(r"^(W:|E:).*signature|NO_PUBKEY|not signed", update["stderr"], flags=re.I | re.M):
-        raise PlanError("APT update reported a repository signature problem")
-    simulation = _run([
-        "/usr/bin/apt-get", "-s", *options, "--no-remove", "upgrade", "--with-new-pkgs"
-    ])
-    candidates = parse_apt_simulation(simulation["stdout"])
-    if len(candidates) > policy["apt"]["max_packages"]:
-        raise PlanError(f"APT candidate count {len(candidates)} exceeds policy limit")
+    options, update, simulation, candidates = _apt_update_and_candidates(stage, policy, uid)
     if not candidates:
         return {
             "enabled": True,
@@ -440,8 +510,23 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
             "simulation_sha256": _sha256_bytes(simulation["stdout"].encode()),
             "packages": [],
             "download_bytes": 0,
+            "authenticated_download_bytes": 0,
         }
     deb_dir = stage / "apt" / "debs"
+    authenticated: dict[tuple[str, str, str], dict[str, Any]] = {}
+    authenticated_bytes = 0
+    for candidate in candidates:
+        key = _candidate_identity(candidate)
+        if key in authenticated:
+            raise PlanError(f"duplicate APT candidate identity: {key}")
+        record = _apt_repository_record(options, candidate)
+        authenticated[key] = record
+        authenticated_bytes += int(record["repository_size"])
+    if authenticated_bytes > policy["apt"]["max_download_bytes"]:
+        raise PlanError(f"APT authenticated download bytes {authenticated_bytes} exceed policy limit before download")
+    available = _available_bytes(deb_dir)
+    if authenticated_bytes > available:
+        raise PlanError(f"APT authenticated download bytes {authenticated_bytes} exceed available staging bytes {available}")
     specs = [f"{item['name']}={item['version']}" for item in candidates]
     _run(["/usr/bin/apt-get", *options, "download", *specs], cwd=deb_dir)
     downloaded = sorted(deb_dir.glob("*.deb"), key=str)
@@ -456,7 +541,7 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
     seen: set[tuple[str, str, str]] = set()
     total_bytes = 0
     for index, path in enumerate(downloaded):
-        _regular_owned_file(path, uid)
+        info_before = _regular_owned_file(path, uid)
         package = _deb_field(path, "Package")
         version = _deb_field(path, "Version")
         arch = _deb_field(path, "Architecture")
@@ -467,6 +552,10 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
         if key in seen:
             raise PlanError(f"multiple DEBs satisfy candidate identity: {key}")
         seen.add(key)
+        auth_key = _candidate_identity(candidate)
+        repository = authenticated[auth_key]
+        if info_before.st_size != repository["repository_size"] or _sha512_file(path) != repository["repository_sha512"]:
+            raise PlanError(f"downloaded DEB does not match authenticated repository metadata: {key}")
         digest = _sha256_file(path)
         safe_package = SAFE_NAME_RE.sub("_", candidate["name"])
         root_name = f"{index:03d}-{safe_package}-{arch}-{digest[:16]}.deb"
@@ -481,13 +570,14 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
             "relative_path": str(renamed.relative_to(stage)),
             "sha256": digest,
             "size": info.st_size,
+            **repository,
             "sensitive": _is_sensitive_package(candidate["name"], policy),
         })
     missing = sorted(set(expected) - seen)
     if missing:
         raise PlanError(f"missing exact DEB artifacts for {len(missing)} candidates")
-    if total_bytes > policy["apt"]["max_download_bytes"]:
-        raise PlanError(f"APT download bytes {total_bytes} exceed policy limit")
+    if total_bytes != authenticated_bytes:
+        raise PlanError("downloaded APT bytes differ from authenticated pre-download manifest")
     return {
         "enabled": True,
         "update_stdout_sha256": _sha256_bytes(update["stdout"].encode()),
@@ -495,6 +585,7 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
         "simulation_sha256": _sha256_bytes(simulation["stdout"].encode()),
         "packages": artifacts,
         "download_bytes": total_bytes,
+        "authenticated_download_bytes": authenticated_bytes,
     }
 
 
@@ -569,6 +660,60 @@ def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]
     }
 
 
+def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[str, Any], uid: int) -> None:
+    apt = plan.get("apt")
+    if not isinstance(apt, dict) or apt.get("enabled") is not (policy["apt"].get("enabled") is True):
+        raise PlanError("APT plan enabled state is inconsistent with policy")
+    if apt.get("enabled") is not True:
+        if apt.get("packages"):
+            raise PlanError("disabled APT plan may not contain packages")
+        return
+    options, _update, _simulation, candidates = _apt_update_and_candidates(stage, policy, uid)
+    planned_packages = apt.get("packages", [])
+    if not isinstance(planned_packages, list):
+        raise PlanError("APT plan packages must be a list")
+    current_identities = sorted(_candidate_identity(item) for item in candidates)
+    planned_identities = sorted(_candidate_identity(item) for item in planned_packages)
+    if current_identities != planned_identities:
+        raise PlanError("APT signed upgrade candidate set changed or plan was not derived from the current signed candidate set")
+    for item in planned_packages:
+        repository = _apt_repository_record(options, item)
+        for key in ("repository_size", "repository_sha512", "repository_manifest_sha256", "repository_uri_sha256"):
+            if item.get(key) != repository.get(key):
+                raise PlanError(f"APT authenticated repository provenance changed for {item['name']}")
+        path = _stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")
+        info = _regular_owned_file(path, uid)
+        package = _deb_field(path, "Package")
+        version = _deb_field(path, "Version")
+        arch = _deb_field(path, "Architecture")
+        expected_package = str(item["name"]).split(":", 1)[0]
+        if (package, version, arch) != (expected_package, item["version"], item["arch"]):
+            raise PlanError(f"APT artifact package identity does not match signed plan candidate: {path}")
+        if info.st_size != repository["repository_size"] or _sha512_file(path) != repository["repository_sha512"]:
+            raise PlanError(f"APT artifact bytes do not match freshly authenticated repository metadata: {path}")
+
+
+def _revalidate_snap_provenance(plan: dict[str, Any], policy: dict[str, Any]) -> None:
+    snap = plan.get("snap")
+    if not isinstance(snap, dict) or snap.get("enabled") is not (policy["snap"].get("enabled") is True):
+        raise PlanError("Snap plan enabled state is inconsistent with policy")
+    if snap.get("enabled") is not True:
+        if snap.get("packages"):
+            raise PlanError("disabled Snap plan may not contain packages")
+        return
+    listed = _run(["/usr/bin/snap", "refresh", "--list"], check=False)
+    if listed["returncode"] != 0:
+        raise PlanError(f"snap refresh --list failed during verification: {listed['stderr'].strip()}")
+    pending = parse_snap_refresh_list(listed["stdout"])
+    planned_packages = snap.get("packages", [])
+    if not isinstance(planned_packages, list):
+        raise PlanError("Snap plan packages must be a list")
+    current = sorted((item["name"], item["version"], item["revision"]) for item in pending)
+    planned = sorted((item["name"], item["version"], item["revision"]) for item in planned_packages)
+    if current != planned:
+        raise PlanError("Snap pending refresh set changed or plan was not derived from the current Store refresh set")
+
+
 def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
     unit_name = f"heim-pc-package-update-{SAFE_NAME_RE.sub('_', plan_id)}.service"
     return [
@@ -598,13 +743,13 @@ def _root_commands(plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[
     root_debs = root_stage / "debs"
     root_snaps = root_stage / "snaps"
     prepare = ["/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0700", str(root_debs), str(root_snaps)]
-    apt_sources = [str(stage / item["relative_path"]) for item in apt.get("packages", [])]
+    apt_sources = [str(_stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")) for item in apt.get("packages", [])]
     apt_destinations = [str(root_debs / Path(item["relative_path"]).name) for item in apt.get("packages", [])]
     snap_sources: list[str] = []
     snap_destinations: list[str] = []
     for item in snap.get("packages", []):
         for key in ("assert_relative_path", "snap_relative_path"):
-            source = stage / item[key]
+            source = _stage_artifact_path(stage, item.get(key), stage / "snap")
             snap_sources.append(str(source))
             snap_destinations.append(str(root_snaps / source.name))
     copy_apt = ["/usr/bin/install", "-o", "root", "-g", "root", "-m", "0600", *apt_sources, str(root_debs)] if apt_sources else None
@@ -750,7 +895,7 @@ def _validate_stage_artifacts(plan: dict[str, Any], uid: int, policy: dict[str, 
     if stage.is_symlink() or stage.stat().st_uid != uid:
         raise PlanError("plan stage is not owned private handoff state")
     for item in plan["apt"].get("packages", []):
-        path = stage / item["relative_path"]
+        path = _stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")
         info = _regular_owned_file(path, uid)
         if info.st_size != item["size"] or _sha256_file(path) != item["sha256"]:
             raise PlanError(f"APT artifact changed: {path}")
@@ -759,7 +904,7 @@ def _validate_stage_artifacts(plan: dict[str, Any], uid: int, policy: dict[str, 
             ("assert_relative_path", "assert_sha256", "assert_size"),
             ("snap_relative_path", "snap_sha256", "snap_size"),
         ):
-            path = stage / item[rel_key]
+            path = _stage_artifact_path(stage, item.get(rel_key), stage / "snap")
             info = _regular_owned_file(path, uid)
             if info.st_size != item[size_key] or _sha256_file(path) != item[hash_key]:
                 raise PlanError(f"snap artifact changed: {path}")
@@ -770,6 +915,9 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
         raise PlanError("plan schema or kind mismatch")
     _validate_confirmation(plan, confirmation)
+    stage = Path(plan.get("stage_path", ""))
+    if plan_path != stage / "plan.json":
+        raise PlanError("plan must be verified from its canonical stage plan.json path")
     policy_path = Path(plan["policy_path"])
     policy = load_policy(policy_path)
     if _sha256_file(policy_path) != plan.get("policy_sha256"):
@@ -785,6 +933,8 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         raise PlanError("verification uid differs from plan uid")
     _require_broker_handoff_binding(policy)
     _validate_stage_artifacts(plan, uid, policy)
+    _revalidate_apt_provenance(stage, plan, policy, uid)
+    _revalidate_snap_provenance(plan, policy)
     for item in plan["snap"].get("packages", []):
         if _snap_installed_revision(item["name"]) != item["baseline_revision"]:
             raise PlanError(f"installed snap revision changed after planning: {item['name']}")

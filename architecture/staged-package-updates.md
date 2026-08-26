@@ -38,7 +38,9 @@ Der unprivilegierte Stage verwendet eigene `lists`, `archives` und Cachedateien 
 
 `upgrade --with-new-pkgs --no-remove`
 
-simuliert. Der exakte `Inst`-Kandidatensatz wird heruntergeladen und jedes DEB über Paketname, Version, Architektur, Größe und SHA-256 gebunden.
+simuliert. Vor dem ersten Download löst APT für jeden Kandidaten über die authentifizierten Indizes URI-Identität, Größe und SHA-512 auf. Die Summe dieser signierten Größen muss **vor** dem Download sowohl unter `max_download_bytes` als auch unter dem freien Staging-Speicher liegen. Erst danach wird heruntergeladen; jedes DEB muss bytegenau dem authentifizierten SHA-512/Size-Eintrag entsprechen und wird zusätzlich über Paketname, Version, Architektur, Größe und SHA-256 gebunden.
+
+`verify` vertraut weder dem unkeyed Plan-Digest noch vom Caller gelieferten Paketmetadaten als Provenienz. Es aktualisiert die kanonischen APT-Quellen erneut fail-closed, verlangt denselben signierten Upgrade-Kandidatensatz, löst die Repository-Hashes erneut auf und liest Paketidentität und Bytes jedes DEB zurück. Absolute oder aus dem jeweiligen Stage-Unterbaum ausbrechende Artefaktpfade sind verboten. Snap-Pläne müssen analog exakt der aktuell vom Store gemeldeten Pending-Refresh-Menge entsprechen.
 
 Der privilegierte Schritt führt **kein `apt-get update` und überhaupt keinen APT-Netzpfad** aus. Nach Root-Copy und vollständigem Hash-Readback wird zuerst exakt derselbe root-eigene DEB-Baum simuliert:
 
