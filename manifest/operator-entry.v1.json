@@ -368,13 +368,13 @@
       "rule": "bind results to the exact head and diff"
     },
     "repositoryContext": {
-      "repository": "${HOME}/repos/lenskit",
-      "publicName": "RepoBrief",
+      "repository": "${HOME}/repos/repoground",
+      "publicName": "RepoGround",
       "preferredReads": [
-        "rlens_freshness_check",
-        "rlens_context_pack",
-        "rlens_query",
-        "rlens_range_get"
+        "repoground_freshness_check",
+        "repoground_context_pack",
+        "repoground_query",
+        "repoground_range_get"
       ],
       "rule": "unknown or stale provenance is not current repository truth"
     },
