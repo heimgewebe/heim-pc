@@ -22,14 +22,21 @@ RECEIPT_KIND = "heim_pc.staged_package_update_receipt"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?: .*)?$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
-APT_SOURCE_PATTERNS = (
+APT_SOURCE_FILE_PATTERNS = (
     "/etc/apt/sources.list",
     "/etc/apt/sources.list.d/*.list",
     "/etc/apt/sources.list.d/*.sources",
+)
+APT_KEYRING_PATTERNS = (
     "/etc/apt/trusted.gpg",
     "/etc/apt/trusted.gpg.d/*.gpg",
+    "/etc/apt/trusted.gpg.d/*.asc",
+    "/etc/apt/keyrings/*.gpg",
+    "/etc/apt/keyrings/*.asc",
     "/usr/share/keyrings/*.gpg",
+    "/usr/share/keyrings/*.asc",
 )
+APT_SOURCE_PATTERNS = APT_SOURCE_FILE_PATTERNS + APT_KEYRING_PATTERNS
 
 
 class PolicyError(ValueError):
@@ -62,6 +69,7 @@ def _sha256_file(path: Path) -> str:
 
 def _run(argv: list[str], *, cwd: Path | None = None, check: bool = True) -> dict[str, Any]:
     env = os.environ.copy()
+    env.pop("APT_CONFIG", None)
     env.update({"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"})
     completed = subprocess.run(
         argv,
@@ -257,16 +265,95 @@ def _expand_patterns(patterns: Iterable[str]) -> list[Path]:
     return sorted(paths, key=str)
 
 
+def _apt_source_text(path: Path) -> str:
+    target = path.resolve(strict=True) if path.is_symlink() else path
+    if not target.is_file():
+        raise PlanError(f"APT source path is not a regular file: {path}")
+    try:
+        return target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise PlanError(f"APT source file is not UTF-8 text: {path}") from exc
+
+
+def _signed_by_paths_from_source(path: Path) -> set[Path]:
+    text = _apt_source_text(path)
+    signed_by: set[Path] = set()
+    if path.name == "sources.list" or path.suffix == ".list":
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or re.match(r"^deb(?:-src)?\s", line, flags=re.I) is None:
+                continue
+            option_match = re.match(r"^deb(?:-src)?\s+\[([^]]+)\]", line, flags=re.I)
+            if option_match is None:
+                continue
+            options = option_match.group(1)
+            if re.search(r"(?:^|\s)trusted\s*=\s*(?:yes|true|1)(?=\s|$)", options, flags=re.I):
+                raise PlanError(f"active APT source bypasses authentication with trusted=yes: {path}")
+            for match in re.finditer(r"(?:^|\s)signed-by\s*=\s*([^\s]+)", options, flags=re.I):
+                for token in match.group(1).split(","):
+                    if token.startswith("/"):
+                        signed_by.add(Path(token))
+        return signed_by
+
+    if path.suffix != ".sources":
+        return signed_by
+    for paragraph in re.split(r"\n\s*\n", text):
+        fields: dict[str, str] = {}
+        current: str | None = None
+        for raw_line in paragraph.splitlines():
+            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                continue
+            if raw_line[:1].isspace() and current is not None:
+                fields[current] += "\n" + raw_line.strip()
+                continue
+            match = re.match(r"^([A-Za-z][A-Za-z0-9-]*):\s*(.*)$", raw_line)
+            if match is None:
+                current = None
+                continue
+            current = match.group(1).lower()
+            fields[current] = match.group(2).strip()
+        if fields.get("enabled", "yes").strip().lower() in {"no", "false", "0"}:
+            continue
+        types = {token.lower() for token in fields.get("types", "").split()}
+        if not types.intersection({"deb", "deb-src"}):
+            continue
+        if fields.get("trusted", "").strip().lower() in {"yes", "true", "1"}:
+            raise PlanError(f"active APT source bypasses authentication with Trusted: yes: {path}")
+        signed_value = fields.get("signed-by", "")
+        signed_value = signed_value.split("-----BEGIN PGP PUBLIC KEY BLOCK-----", 1)[0]
+        for token in re.split(r"[,\s]+", signed_value):
+            if token.startswith("/"):
+                signed_by.add(Path(token))
+    return signed_by
+
+
+def _active_signed_by_keyrings() -> list[Path]:
+    keyrings: set[Path] = set()
+    for source in _expand_patterns(APT_SOURCE_FILE_PATTERNS):
+        keyrings.update(_signed_by_paths_from_source(source))
+    resolved: set[Path] = set()
+    for keyring in keyrings:
+        target = keyring.resolve(strict=True) if keyring.is_symlink() else keyring
+        if not target.is_file():
+            raise PlanError(f"active APT Signed-By keyring is missing or not regular: {keyring}")
+        resolved.add(target)
+    return sorted(resolved, key=str)
+
+
 def _source_config_records() -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for path in _expand_patterns(APT_SOURCE_PATTERNS):
+    candidates = set(_expand_patterns(APT_SOURCE_PATTERNS))
+    candidates.update(_active_signed_by_keyrings())
+    resolved: set[Path] = set()
+    for path in candidates:
         if path.is_symlink():
             target = path.resolve(strict=True)
             if not target.is_file():
                 raise PlanError(f"APT source/key symlink does not resolve to regular file: {path}")
             path = target
-        if not path.is_file():
-            continue
+        if path.is_file():
+            resolved.add(path)
+    records: list[dict[str, Any]] = []
+    for path in sorted(resolved, key=str):
         info = path.stat()
         records.append({"path": str(path), "size": info.st_size, "sha256": _sha256_file(path)})
     return records
@@ -283,6 +370,14 @@ def _apt_options(stage: Path) -> list[str]:
         "-o", f"Dir::Cache::archives={apt / 'archives'}",
         "-o", f"Dir::Cache::pkgcache={apt / 'pkgcache.bin'}",
         "-o", f"Dir::Cache::srcpkgcache={apt / 'srcpkgcache.bin'}",
+        "-o", "Dir::Etc::sourcelist=/etc/apt/sources.list",
+        "-o", "Dir::Etc::sourceparts=/etc/apt/sources.list.d",
+        "-o", "Dir::Etc::trusted=/etc/apt/trusted.gpg",
+        "-o", "Dir::Etc::trustedparts=/etc/apt/trusted.gpg.d",
+        "-o", "APT::Get::AllowUnauthenticated=false",
+        "-o", "Acquire::AllowInsecureRepositories=false",
+        "-o", "Acquire::AllowDowngradeToInsecureRepositories=false",
+        "-o", "Acquire::AllowWeakRepositories=false",
         "-o", "Debug::NoLocking=1",
     ]
 

@@ -16,6 +16,71 @@ spu = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(spu)
 
 
+def test_run_strips_caller_apt_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> Completed:
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setenv("APT_CONFIG", "/tmp/untrusted-apt.conf")
+    monkeypatch.setattr(spu.subprocess, "run", fake_run)
+    spu._run(["/usr/bin/true"])
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "APT_CONFIG" not in env
+
+
+def test_apt_options_pin_system_sources_and_authenticated_repositories(tmp_path: Path) -> None:
+    values = spu._apt_options(tmp_path)[1::2]
+    assert "Dir::Etc::sourcelist=/etc/apt/sources.list" in values
+    assert "Dir::Etc::sourceparts=/etc/apt/sources.list.d" in values
+    assert "APT::Get::AllowUnauthenticated=false" in values
+    assert "Acquire::AllowInsecureRepositories=false" in values
+    assert "Acquire::AllowDowngradeToInsecureRepositories=false" in values
+    assert "Acquire::AllowWeakRepositories=false" in values
+
+
+def test_source_baseline_includes_active_signed_by_keyrings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gpg = tmp_path / "vendor.gpg"
+    asc = tmp_path / "vendor.asc"
+    gpg.write_bytes(b"gpg-key")
+    asc.write_text("armored-key")
+    list_source = tmp_path / "vendor.list"
+    list_source.write_text(f"deb [signed-by={gpg}] https://example.invalid stable main\n")
+    deb822_source = tmp_path / "vendor.sources"
+    deb822_source.write_text(
+        "Types: deb\nURIs: https://example.invalid/other\nSuites: stable\n"
+        f"Signed-By: {asc}\n"
+    )
+    patterns = (str(list_source), str(deb822_source))
+    monkeypatch.setattr(spu, "APT_SOURCE_FILE_PATTERNS", patterns)
+    monkeypatch.setattr(spu, "APT_SOURCE_PATTERNS", patterns)
+    records = spu._source_config_records()
+    record_paths = {item["path"] for item in records}
+    assert str(gpg) in record_paths
+    assert str(asc) in record_paths
+    baseline = records
+    asc.write_text("rotated-armored-key")
+    with pytest.raises(spu.PlanError, match="source/key configuration changed"):
+        spu._validate_source_config(baseline)
+
+
+def test_source_baseline_rejects_trusted_yes_bypass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "untrusted.list"
+    source.write_text("deb [trusted=yes] https://example.invalid stable main\n")
+    patterns = (str(source),)
+    monkeypatch.setattr(spu, "APT_SOURCE_FILE_PATTERNS", patterns)
+    monkeypatch.setattr(spu, "APT_SOURCE_PATTERNS", patterns)
+    with pytest.raises(spu.PlanError, match="trusted=yes"):
+        spu._source_config_records()
+
+
 def test_apt_update_fails_closed_on_any_index_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
