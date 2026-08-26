@@ -188,9 +188,41 @@ def _tmpfs_sandbox_tools() -> dict[str, str | None]:
     return {name: shutil.which(name) for name in ("unshare", "mount")}
 
 
+def _validate_sandbox_export(
+    temporary_directory: Path,
+    relative_path: str,
+    destination: Path,
+) -> tuple[Path, Path]:
+    relative = Path(relative_path)
+    if (
+        not relative_path
+        or relative.is_absolute()
+        or relative == Path(".")
+        or ".." in relative.parts
+        or not destination.is_absolute()
+    ):
+        raise ValueError("sandbox export path is invalid")
+    resolved_temporary = temporary_directory.resolve()
+    resolved_destination = destination.resolve()
+    try:
+        resolved_destination.relative_to(resolved_temporary)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("sandbox export destination must be outside the mounted quota")
+    return relative, resolved_destination
+
+
 def _tmpfs_sandbox_command(
-    argv: Sequence[str], temporary_directory: Path, maximum: int
+    argv: Sequence[str],
+    temporary_directory: Path,
+    maximum: int,
+    *,
+    export_relative_path: str | None = None,
+    export_path: Path | None = None,
 ) -> list[str]:
+    if (export_relative_path is None) != (export_path is None):
+        raise ValueError("sandbox export requires both relative source and destination")
     tools = _tmpfs_sandbox_tools()
     unshare = tools["unshare"]
     mount = tools["mount"]
@@ -202,6 +234,14 @@ def _tmpfs_sandbox_command(
             details={"missing_tools": missing},
         )
     assert unshare is not None and mount is not None
+    internal = [str(temporary_directory), str(maximum), mount]
+    if export_relative_path is not None and export_path is not None:
+        relative, destination = _validate_sandbox_export(
+            temporary_directory, export_relative_path, export_path
+        )
+        internal.extend(["--export", str(relative), str(destination)])
+    internal.append("--")
+    internal.extend(argv)
     return [
         unshare,
         "--user",
@@ -213,16 +253,52 @@ def _tmpfs_sandbox_command(
         sys.executable,
         str(Path(__file__).resolve()),
         INTERNAL_TMPFS_EXEC_OPERATION,
-        str(temporary_directory),
-        str(maximum),
-        mount,
-        "--",
-        *argv,
+        *internal,
     ]
 
 
+def _export_file_releasing_source(source: Path, destination: Path, maximum: int) -> None:
+    source_flags = os.O_RDWR | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        source_flags |= os.O_NOFOLLOW
+    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        destination_flags |= os.O_NOFOLLOW
+    source_fd = os.open(source, source_flags)
+    destination_fd = -1
+    try:
+        source_stat = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or source_stat.st_size <= 0
+            or source_stat.st_size > maximum
+        ):
+            raise OSError("sandbox export source violates its file bound")
+        destination_fd = os.open(destination, destination_flags, 0o600)
+        remaining = source_stat.st_size
+        while remaining:
+            chunk_size = min(1024 * 1024, remaining)
+            offset = remaining - chunk_size
+            chunk = os.pread(source_fd, chunk_size, offset)
+            if len(chunk) != chunk_size:
+                raise OSError("sandbox export source changed during copy")
+            os.ftruncate(source_fd, offset)
+            written = 0
+            while written < len(chunk):
+                count = os.pwrite(destination_fd, chunk[written:], offset + written)
+                if count <= 0:
+                    raise OSError("sandbox export write made no progress")
+                written += count
+            remaining = offset
+        os.fsync(destination_fd)
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        os.close(source_fd)
+
+
 def _exec_bounded_tmpfs(argv: Sequence[str]) -> int:
-    if len(argv) < 5 or argv[3] != "--":
+    if len(argv) < 5:
         return 125
     temporary_directory = Path(argv[0])
     try:
@@ -230,12 +306,28 @@ def _exec_bounded_tmpfs(argv: Sequence[str]) -> int:
     except ValueError:
         return 125
     mount = argv[2]
-    command = list(argv[4:])
+    export_relative_path: str | None = None
+    export_destination: Path | None = None
+    if argv[3] == "--":
+        command = list(argv[4:])
+    elif len(argv) >= 8 and argv[3] == "--export" and argv[6] == "--":
+        export_relative_path = argv[4]
+        export_destination = Path(argv[5])
+        command = list(argv[7:])
+    else:
+        return 125
     if maximum <= 0 or not command or not temporary_directory.is_absolute():
         return 125
     try:
         if not temporary_directory.is_dir():
             return 125
+        export_relative: Path | None = None
+        if export_relative_path is not None and export_destination is not None:
+            export_relative, export_destination = _validate_sandbox_export(
+                temporary_directory,
+                export_relative_path,
+                export_destination,
+            )
         mounted = subprocess.run(
             [
                 mount,
@@ -252,8 +344,23 @@ def _exec_bounded_tmpfs(argv: Sequence[str]) -> int:
         if mounted.returncode != 0:
             return 126
         environment = {**os.environ, "TMPDIR": str(temporary_directory)}
-        os.execvpe(command[0], command, environment)
-    except OSError:
+        if export_relative is None or export_destination is None:
+            os.execvpe(command[0], command, environment)
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            env=environment,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return completed.returncode
+        _export_file_releasing_source(
+            temporary_directory / export_relative,
+            export_destination,
+            maximum,
+        )
+        return 0
+    except (OSError, ValueError):
         return 127
     return 127
 
@@ -273,6 +380,8 @@ def _run(
     file_size_limit_bytes: int | None = None,
     temporary_directory: Path | None = None,
     temporary_storage_limit_bytes: int | None = None,
+    sandbox_export_relative_path: str | None = None,
+    sandbox_export_path: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     timeout = int(policy["limits"]["process_timeout_seconds"])
     stdout_limit = int(policy["limits"]["max_output_bytes"])
@@ -283,6 +392,10 @@ def _run(
         raise ValueError("process temporary-storage limit must be positive")
     if temporary_storage_limit_bytes is not None and temporary_directory is None:
         raise ValueError("process temporary-storage limit requires a temporary directory")
+    if (sandbox_export_relative_path is None) != (sandbox_export_path is None):
+        raise ValueError("sandbox export requires both relative source and destination")
+    if sandbox_export_relative_path is not None and temporary_storage_limit_bytes is None:
+        raise ValueError("sandbox export requires a temporary-storage limit")
 
     preexec_fn: Any = None
     if file_size_limit_bytes is not None:
@@ -310,7 +423,11 @@ def _run(
     if temporary_storage_limit_bytes is not None:
         assert resolved_temporary_directory is not None
         process_argv = _tmpfs_sandbox_command(
-            process_argv, resolved_temporary_directory, temporary_storage_limit_bytes
+            process_argv,
+            resolved_temporary_directory,
+            temporary_storage_limit_bytes,
+            export_relative_path=sandbox_export_relative_path,
+            export_path=sandbox_export_path,
         )
 
     try:
@@ -415,6 +532,61 @@ def _run(
         },
     )
     return completed
+
+
+def _tmpfs_sandbox_readiness(policy: dict[str, Any]) -> dict[str, Any]:
+    tools = _tmpfs_sandbox_tools()
+    missing = [name for name, executable in tools.items() if executable is None]
+    base = {
+        "tools": tools,
+        "enforcement": "private_tmpfs_quota",
+        "probe": "user_mount_namespace",
+    }
+    if missing:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "helper_missing",
+            "missing_tools": missing,
+        }
+    probe_policy = dict(policy)
+    probe_limits = dict(policy["limits"])
+    probe_limits["process_timeout_seconds"] = min(
+        5, int(policy["limits"]["process_timeout_seconds"])
+    )
+    probe_policy["limits"] = probe_limits
+    with tempfile.TemporaryDirectory(prefix="heim-doc-text-sandbox-probe-") as directory:
+        probe_code = (
+            "from pathlib import Path; import os; "
+            "Path(os.environ['TMPDIR'], 'probe').write_bytes(b'x')"
+        )
+        try:
+            command = _tmpfs_sandbox_command(
+                [sys.executable, "-c", probe_code],
+                Path(directory),
+                1024 * 1024,
+            )
+            completed = _run(
+                command,
+                policy=probe_policy,
+                operation="tmpfs-sandbox-readiness",
+            )
+        except DocumentTextError as exc:
+            return {
+                **base,
+                "status": "unavailable",
+                "reason": "runtime_probe_failed",
+                "error_code": exc.code,
+            }
+    if completed.returncode != 0:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "runtime_probe_failed",
+            "returncode": completed.returncode,
+        }
+    return {**base, "status": "ready", "reason": None}
+
 
 def _require_tool(policy: dict[str, Any], role: str) -> str:
     name = _tool_name(policy, role)
@@ -878,8 +1050,8 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
             "executable": executable,
         }
     languages = _tesseract_languages(policy)
-    sandbox_tools = _tmpfs_sandbox_tools()
-    sandbox_ready = all(executable is not None for executable in sandbox_tools.values())
+    sandbox = _tmpfs_sandbox_readiness(policy)
+    sandbox_ready = sandbox["status"] == "ready"
     routes = {
         "pdf_text_layer": (
             tools["pdf_text"]["available"] and tools["pdf_info"]["available"]
@@ -902,11 +1074,7 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
         "routes": routes,
         "tools": tools,
         "languages": languages,
-        "temporary_storage_sandbox": {
-            "status": "ready" if sandbox_ready else "unavailable",
-            "tools": sandbox_tools,
-            "enforcement": "private_tmpfs_quota",
-        },
+        "temporary_storage_sandbox": sandbox,
         "docling": _docling_readiness(policy),
         "network_access_authorized": False,
         "cloud_or_metered_use_authorized": False,
@@ -1036,9 +1204,11 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
     _require_tool(policy, "image_ocr")
     _require_tool(policy, "pdf_text")
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-ocrpdf-") as directory:
-        rendered = Path(directory) / "ocr.pdf"
-        scratch = Path(directory) / "scratch"
-        scratch.mkdir(mode=0o700)
+        root = Path(directory)
+        budget = root / "budget"
+        budget.mkdir(mode=0o700)
+        sandbox_rendered = budget / "ocr.pdf"
+        rendered = root / "ocr.pdf"
         intermediate_limit = int(policy["limits"]["max_source_bytes"])
         completed = _run(
             [
@@ -1055,13 +1225,15 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
                 "-l",
                 language,
                 str(source),
-                str(rendered),
+                str(sandbox_rendered),
             ],
             policy=policy,
             operation="ocrmypdf",
             file_size_limit_bytes=intermediate_limit,
-            temporary_directory=scratch,
+            temporary_directory=budget,
             temporary_storage_limit_bytes=intermediate_limit,
+            sandbox_export_relative_path="ocr.pdf",
+            sandbox_export_path=rendered,
         )
         if completed.returncode != 0 or not rendered.exists():
             raise DocumentTextError(

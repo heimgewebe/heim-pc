@@ -332,7 +332,6 @@ class DocumentTextEngineTests(unittest.TestCase):
                     engine.extract_source(str(source), self.policy, language="deu+eng")
         self.assertEqual(caught.exception.code, "route_unavailable")
 
-
     def test_text_layer_probe_accepts_even_short_real_text_layer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "short.pdf")
@@ -430,7 +429,6 @@ class DocumentTextEngineTests(unittest.TestCase):
             self.assertEqual(snapshot.read_bytes(), b"snapshot-bytes")
             self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o600)
 
-
     def test_snapshot_blocks_growth_past_source_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "page.png", b"A")
@@ -478,7 +476,11 @@ class DocumentTextEngineTests(unittest.TestCase):
                 "_tesseract_languages",
                 return_value={"status": "ready", "installed": ["deu", "eng"]},
             ),
-            mock.patch.object(engine, "_docling_readiness", return_value={"status": "unattested", "automatic_use": False}),
+            mock.patch.object(
+                engine,
+                "_docling_readiness",
+                return_value={"status": "unattested", "automatic_use": False},
+            ),
         ):
             result = engine.doctor(self.policy)
         self.assertIs(result["routes"]["pdf_text_layer"], False)
@@ -577,6 +579,29 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertIn("4096", command)
         self.assertIn("/usr/bin/mount", command)
 
+    def test_tmpfs_sandbox_command_keeps_rendered_pdf_inside_quota_until_export(self) -> None:
+        fake_which = {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            budget = root / "budget"
+            budget.mkdir()
+            exported = root / "ocr.pdf"
+            with mock.patch.object(
+                engine.shutil, "which", side_effect=lambda name: fake_which.get(name)
+            ):
+                command = engine._tmpfs_sandbox_command(
+                    ["/usr/bin/tool", str(budget / "ocr.pdf")],
+                    budget,
+                    4096,
+                    export_relative_path="ocr.pdf",
+                    export_path=exported,
+                )
+        self.assertIn("--export", command)
+        export_index = command.index("--export")
+        self.assertEqual(command[export_index + 1], "ocr.pdf")
+        self.assertEqual(command[export_index + 2], str(exported))
+        self.assertEqual(command[-1], str(budget / "ocr.pdf"))
+
     def test_internal_tmpfs_exec_mounts_exact_quota_before_exec(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -593,6 +618,56 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(mount_argv[0], "/usr/bin/mount")
         self.assertIn("size=4096,mode=700,nosuid,nodev", mount_argv)
         execvpe.assert_called_once()
+
+    def test_export_file_releases_quota_source_before_destination_growth(self) -> None:
+        payload = b"0123456789"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            budget = root / "budget"
+            budget.mkdir()
+            source = budget / "ocr.pdf"
+            destination = root / "exported.pdf"
+            source.write_bytes(payload)
+            source_sizes_at_write: list[int] = []
+            real_pwrite = os.pwrite
+
+            def tracked_pwrite(fd, data, offset):
+                source_sizes_at_write.append(source.stat().st_size)
+                return real_pwrite(fd, data, offset)
+
+            with mock.patch.object(engine.os, "pwrite", side_effect=tracked_pwrite):
+                engine._export_file_releasing_source(source, destination, 4096)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(source_sizes_at_write, [0])
+            self.assertEqual(source.stat().st_size, 0)
+
+    def test_internal_tmpfs_exec_exports_rendered_pdf_after_success(self) -> None:
+        payload = b"%PDF-exported"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "budget"
+            work.mkdir()
+            source = work / "ocr.pdf"
+            source.write_bytes(payload)
+            destination = root / "ocr.pdf"
+            calls = [mock.Mock(returncode=0), mock.Mock(returncode=0)]
+            with mock.patch.object(engine.subprocess, "run", side_effect=calls) as run:
+                result = engine._exec_bounded_tmpfs(
+                    [
+                        str(work),
+                        "4096",
+                        "/usr/bin/mount",
+                        "--export",
+                        "ocr.pdf",
+                        str(destination),
+                        "--",
+                        "/usr/bin/tool",
+                    ]
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(source.stat().st_size, 0)
+            self.assertEqual(run.call_count, 2)
 
     def test_run_rejects_transient_create_unlink_burst_under_tmpfs_quota(self) -> None:
         policy = json.loads(json.dumps(self.policy))
@@ -613,6 +688,27 @@ class DocumentTextEngineTests(unittest.TestCase):
                 operation="temporary-storage-burst-test",
                 temporary_directory=work,
                 temporary_storage_limit_bytes=4096,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+
+    def test_run_charges_scratch_and_rendered_output_to_one_tmpfs_quota(self) -> None:
+        policy = json.loads(json.dumps(self.policy))
+        policy["limits"]["process_timeout_seconds"] = 5
+        quota = 1024 * 1024
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            script = (
+                "from pathlib import Path; import os; "
+                "root=Path(os.environ['TMPDIR']); "
+                "(root/'scratch.bin').write_bytes(b'x' * 614400); "
+                "(root/'ocr.pdf').write_bytes(b'y' * 614400)"
+            )
+            completed = engine._run(
+                [sys.executable, "-c", script],
+                policy=policy,
+                operation="temporary-storage-rendered-test",
+                temporary_directory=work,
+                temporary_storage_limit_bytes=quota,
             )
         self.assertNotEqual(completed.returncode, 0)
 
@@ -692,9 +788,9 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(output_bytes, maximum)
         self.assertIs(truncated, True)
 
-    def test_ocrmypdf_bounds_each_file_and_aggregate_temporary_storage(self) -> None:
+    def test_ocrmypdf_bounds_rendered_pdf_and_scratch_with_one_aggregate_quota(self) -> None:
         maximum = int(self.policy["limits"]["max_source_bytes"])
-        observed: list[tuple[int | None, Path | None, int | None]] = []
+        observed: list[tuple[object, ...]] = []
         with tempfile.TemporaryDirectory() as directory:
             source = self._file(directory, "scan.pdf")
 
@@ -706,11 +802,20 @@ class DocumentTextEngineTests(unittest.TestCase):
                 file_size_limit_bytes=None,
                 temporary_directory=None,
                 temporary_storage_limit_bytes=None,
+                sandbox_export_relative_path=None,
+                sandbox_export_path=None,
             ):
                 observed.append(
-                    (file_size_limit_bytes, temporary_directory, temporary_storage_limit_bytes)
+                    (
+                        file_size_limit_bytes,
+                        temporary_directory,
+                        temporary_storage_limit_bytes,
+                        sandbox_export_relative_path,
+                        sandbox_export_path,
+                        Path(argv[-1]),
+                    )
                 )
-                Path(argv[-1]).write_bytes(b"%PDF-bounded")
+                Path(sandbox_export_path).write_bytes(b"%PDF-bounded")
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
 
             with (
@@ -723,10 +828,24 @@ class DocumentTextEngineTests(unittest.TestCase):
                 result = engine._extract_ocr_pdf(source, self.policy, "deu+eng")
         self.assertEqual(result, ("ocr text", 8, False))
         self.assertEqual(len(observed), 1)
-        file_limit, temporary_directory, directory_limit = observed[0]
+        (
+            file_limit,
+            temporary_directory,
+            directory_limit,
+            export_relative,
+            export_path,
+            command_output,
+        ) = observed[0]
         self.assertEqual(file_limit, maximum)
         self.assertEqual(directory_limit, maximum)
         self.assertIsNotNone(temporary_directory)
+        assert isinstance(temporary_directory, Path)
+        self.assertEqual(command_output, temporary_directory / "ocr.pdf")
+        self.assertEqual(export_relative, "ocr.pdf")
+        self.assertIsNotNone(export_path)
+        assert isinstance(export_path, Path)
+        with self.assertRaises(ValueError):
+            export_path.relative_to(temporary_directory)
 
     def test_tesseract_applies_process_time_output_bound(self) -> None:
         maximum = int(self.policy["limits"]["max_output_bytes"])
@@ -747,6 +866,52 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(observed, [maximum])
         self.assertEqual(text, "bounded")
         self.assertIs(truncated, False)
+
+    def test_tmpfs_sandbox_readiness_rejects_failed_runtime_probe(self) -> None:
+        tools = {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"}
+        with (
+            mock.patch.object(engine, "_tmpfs_sandbox_tools", return_value=tools),
+            mock.patch.object(
+                engine,
+                "_tmpfs_sandbox_command",
+                return_value=["/usr/bin/unshare", "probe"],
+            ),
+            mock.patch.object(
+                engine,
+                "_run",
+                return_value=mock.Mock(returncode=1, stdout=b"", stderr=b""),
+            ) as run,
+        ):
+            readiness = engine._tmpfs_sandbox_readiness(self.policy)
+        self.assertEqual(readiness["status"], "unavailable")
+        self.assertEqual(readiness["reason"], "runtime_probe_failed")
+        self.assertEqual(readiness["returncode"], 1)
+        self.assertLessEqual(
+            run.call_args.kwargs["policy"]["limits"]["process_timeout_seconds"], 5
+        )
+
+    def test_tmpfs_sandbox_readiness_accepts_successful_runtime_probe(self) -> None:
+        tools = {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"}
+        with (
+            mock.patch.object(engine, "_tmpfs_sandbox_tools", return_value=tools),
+            mock.patch.object(
+                engine,
+                "_tmpfs_sandbox_command",
+                return_value=["/usr/bin/unshare", "probe"],
+            ),
+            mock.patch.object(
+                engine,
+                "_run",
+                return_value=mock.Mock(returncode=0, stdout=b"", stderr=b""),
+            ) as run,
+        ):
+            readiness = engine._tmpfs_sandbox_readiness(self.policy)
+        self.assertEqual(readiness["status"], "ready")
+        self.assertIsNone(readiness["reason"])
+        self.assertEqual(readiness["probe"], "user_mount_namespace")
+        self.assertLessEqual(
+            run.call_args.kwargs["policy"]["limits"]["process_timeout_seconds"], 5
+        )
 
     def test_doctor_isolates_tesseract_readiness_failure_from_text_pdf_route(self) -> None:
         fake_which = {
@@ -791,15 +956,19 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(inspection["status"], "ready")
         self.assertEqual(inspection["recommended_method"], "pdftotext")
 
-    def test_doctor_does_not_authorize_docling_or_cloud(self) -> None:
+    def test_doctor_does_not_mark_pdf_ocr_ready_when_sandbox_probe_fails(self) -> None:
         fake_which = {
             "pdftotext": "/usr/bin/pdftotext",
             "pdfinfo": "/usr/bin/pdfinfo",
             "ocrmypdf": "/usr/bin/ocrmypdf",
             "tesseract": "/usr/bin/tesseract",
-            "docling": "/usr/bin/docling",
-            "unshare": "/usr/bin/unshare",
-            "mount": "/usr/bin/mount",
+        }
+        sandbox = {
+            "status": "unavailable",
+            "reason": "runtime_probe_failed",
+            "tools": {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"},
+            "enforcement": "private_tmpfs_quota",
+            "probe": "user_mount_namespace",
         }
         with (
             mock.patch.object(engine.shutil, "which", side_effect=lambda name: fake_which.get(name)),
@@ -808,7 +977,48 @@ class DocumentTextEngineTests(unittest.TestCase):
                 "_tesseract_languages",
                 return_value={"status": "ready", "installed": ["deu", "eng"]},
             ),
-            mock.patch.object(engine, "_docling_readiness", return_value={"status": "unattested", "automatic_use": False}),
+            mock.patch.object(engine, "_tmpfs_sandbox_readiness", return_value=sandbox),
+            mock.patch.object(
+                engine,
+                "_docling_readiness",
+                return_value={"status": "unattested", "automatic_use": False},
+            ),
+        ):
+            result = engine.doctor(self.policy)
+        self.assertEqual(result["status"], "degraded")
+        self.assertIs(result["routes"]["pdf_text_layer"], True)
+        self.assertIs(result["routes"]["pdf_ocr"], False)
+        self.assertIs(result["routes"]["image_ocr"], True)
+        self.assertEqual(result["temporary_storage_sandbox"]["reason"], "runtime_probe_failed")
+
+    def test_doctor_does_not_authorize_docling_or_cloud(self) -> None:
+        fake_which = {
+            "pdftotext": "/usr/bin/pdftotext",
+            "pdfinfo": "/usr/bin/pdfinfo",
+            "ocrmypdf": "/usr/bin/ocrmypdf",
+            "tesseract": "/usr/bin/tesseract",
+            "docling": "/usr/bin/docling",
+        }
+        sandbox = {
+            "status": "ready",
+            "reason": None,
+            "tools": {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"},
+            "enforcement": "private_tmpfs_quota",
+            "probe": "user_mount_namespace",
+        }
+        with (
+            mock.patch.object(engine.shutil, "which", side_effect=lambda name: fake_which.get(name)),
+            mock.patch.object(
+                engine,
+                "_tesseract_languages",
+                return_value={"status": "ready", "installed": ["deu", "eng"]},
+            ),
+            mock.patch.object(engine, "_tmpfs_sandbox_readiness", return_value=sandbox),
+            mock.patch.object(
+                engine,
+                "_docling_readiness",
+                return_value={"status": "unattested", "automatic_use": False},
+            ),
         ):
             result = engine.doctor(self.policy)
         self.assertEqual(result["status"], "ready")
