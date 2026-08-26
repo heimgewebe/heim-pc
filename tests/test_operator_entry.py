@@ -205,6 +205,24 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertIn("target_specific_live_state", entry_ids)
         self.assertIn("stableEcosystemSemantics", contract["truthSources"])
         self.assertIn("executionRuntimeLeases", contract["truthSources"])
+        repository_context = contract["truthSources"]["repositoryContext"]
+        self.assertEqual(repository_context["repository"], "${HOME}/repos/repoground")
+        self.assertEqual(repository_context["publicName"], "RepoGround")
+        self.assertEqual(
+            repository_context["preferredReads"],
+            [
+                "repoground_freshness_check",
+                "repoground_context_pack",
+                "repoground_query",
+                "repoground_range_get",
+            ],
+        )
+        serialized_repository_context = json.dumps(repository_context, ensure_ascii=False).lower()
+        self.assertNotIn("lenskit", serialized_repository_context)
+        self.assertNotIn("repobrief", serialized_repository_context)
+        self.assertTrue(
+            all(not item.startswith("rlens_") for item in repository_context["preferredReads"])
+        )
         excluded = {item["path"] for item in contract["sourcePolicy"]["excludedAsCurrentTruth"]}
         self.assertIn("${HOME}/repos/heim-pc/state/index.json", excluded)
         self.assertIn("${HOME}/repos/heim-pc/state/repos.json", excluded)
