@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.staged_package_update_policy",
+  "policy_id": "heim-pc-staged-package-update-v1",
+  "automatic_apply": false,
+  "staging": {
+    "runtime_root": "/home/alex/repos/.heim-pc-worktrees/.package-update-handoff",
+    "broker_bind_root": "/home/alex/repos/.heim-pc-worktrees",
+    "root_root": "/var/lib/heim-pc/package-update-stages",
+    "max_plan_age_seconds": 3600
+  },
+  "apt": {
+    "enabled": true,
+    "selection_mode": "upgrade-with-new-pkgs-no-remove",
+    "apply_mode": "dpkg-recursive-root-stage",
+    "max_packages": 200,
+    "max_download_bytes": 6442450944,
+    "sensitive_prefixes": [
+      "linux-",
+      "kernel",
+      "nvidia-",
+      "libnvidia-",
+      "system76-driver",
+      "system76-firmware",
+      "systemd",
+      "grub",
+      "initramfs",
+      "snapd"
+    ]
+  },
+  "snap": {
+    "enabled": true,
+    "max_snaps": 32,
+    "allow_dangerous": false
+  },
+  "safety": {
+    "require_exact_plan_hash": true,
+    "require_fresh_apt_indexes": true,
+    "require_apt_signature_verification": true,
+    "require_dpkg_status_precondition": true,
+    "require_source_config_precondition": true,
+    "require_root_owned_copy_before_apply": true,
+    "require_root_copy_hash_readback": true,
+    "require_broker_read_only_handoff": true,
+    "require_dpkg_recursive_apply": true,
+    "require_no_remove_selection": true,
+    "require_signed_snap_assertion": true,
+    "privileged_broker_network_must_remain_blocked": true
+  },
+  "postflight": {
+    "system_services": [
+      "grabowski-operator.service",
+      "tailscaled.service",
+      "docker.service",
+      "libvirtd.service"
+    ],
+    "user_services": [
+      "pipewire.service",
+      "wireplumber.service"
+    ]
+  }
+}

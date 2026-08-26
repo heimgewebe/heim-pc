@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "staged_package_update.py"
+SPEC = importlib.util.spec_from_file_location("staged_package_update", SCRIPT)
+assert SPEC and SPEC.loader
+spu = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(spu)
+
+
+def test_parse_apt_simulation_keeps_exact_identity() -> None:
+    text = "\n".join(
+        [
+            "Inst curl [7.81.0-1ubuntu1.25] (7.81.0-1ubuntu1.27 Ubuntu:22.04/jammy-security [amd64])",
+            "Inst libssl3:i386 [3.0.2-0ubuntu1.26] (3.0.2-0ubuntu1.29 Ubuntu:22.04/jammy-security [i386])",
+            "Conf curl (7.81.0-1ubuntu1.27 Ubuntu:22.04/jammy-security [amd64])",
+        ]
+    )
+    assert spu.parse_apt_simulation(text) == [
+        {"name": "curl", "version": "7.81.0-1ubuntu1.27", "arch": "amd64"},
+        {"name": "libssl3:i386", "version": "3.0.2-0ubuntu1.29", "arch": "i386"},
+    ]
+
+
+def test_parse_snap_refresh_list_ignores_headers_and_prose() -> None:
+    text = """Name Version Rev Size Publisher Notes
+core22 20260410 2437 77.6MB canonical** base
+gnome-46-2404 0+git.b31ceab 164 644MB canonical** -
+"""
+    assert spu.parse_snap_refresh_list(text) == [
+        {"name": "core22", "version": "20260410", "revision": "2437"},
+        {"name": "gnome-46-2404", "version": "0+git.b31ceab", "revision": "164"},
+    ]
+
+
+def test_plan_hash_excludes_only_hash_field() -> None:
+    plan = {"schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": "x", "value": 7}
+    digest = spu._plan_digest(plan)
+    plan["plan_sha256"] = digest
+    assert spu._plan_digest(plan) == digest
+    plan["value"] = 8
+    assert spu._plan_digest(plan) != digest
+
+
+def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Path) -> None:
+    policy = {
+        "staging": {"root_root": "/var/lib/heim-pc/package-update-stages"},
+    }
+    stage = tmp_path / "stage"
+    apt = {
+        "packages": [
+            {
+                "relative_path": "apt/debs/000-curl-amd64-deadbeef.deb",
+                "sha256": "a" * 64,
+            }
+        ]
+    }
+    snap = {
+        "packages": [
+            {
+                "assert_relative_path": "snap/core22_2437.assert",
+                "snap_relative_path": "snap/core22_2437.snap",
+            }
+        ]
+    }
+    commands = spu._root_commands("plan-id", stage, policy, apt, snap)
+    apt_preflight = commands["apt_apply_preflight_argv"]
+    apt_apply = commands["apt_apply_argv"]
+    root_debs = "/var/lib/heim-pc/package-update-stages/plan-id/debs"
+    assert apt_preflight == [
+        "/usr/bin/dpkg", "--simulate", "--force-confold",
+        "--install", "--recursive", root_debs,
+    ]
+    assert apt_apply == [
+        "/usr/bin/systemd-run",
+        "--system",
+        "--wait",
+        "--collect",
+        "--pipe",
+        "--unit=heim-pc-package-update-plan-id.service",
+        "--property=Type=exec",
+        "--property=NoNewPrivileges=no",
+        "--property=PrivateTmp=yes",
+        "--property=MemoryDenyWriteExecute=no",
+        "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK",
+        "--property=IPAddressDeny=any",
+        "--",
+        "/usr/bin/dpkg",
+        "--force-confold",
+        "--install",
+        "--recursive",
+        root_debs,
+    ]
+    assert all("staged_package_update.py" not in arg for arg in apt_apply)
+    assert all("apt-get" not in arg for arg in apt_apply)
+    assert apt_apply[0] == "/usr/bin/systemd-run"
+    assert "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK" in apt_apply
+    assert "--property=IPAddressDeny=any" in apt_apply
+    assert apt_apply[apt_apply.index("--") + 1] == "/usr/bin/dpkg"
+    assert commands["snap_apply_argvs"] == [
+        ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/plan-id/snaps/core22_2437.assert"],
+        ["/usr/bin/snap", "install", "/var/lib/heim-pc/package-update-stages/plan-id/snaps/core22_2437.snap"],
+    ]
+    assert all("--dangerous" not in argv for argv in commands["snap_apply_argvs"])
+
+
+def test_dpkg_version_qualifies_multiarch_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        calls.append(argv)
+        return {"argv": argv, "returncode": 0, "stdout": "3.0.2-0ubuntu1.29\n", "stderr": ""}
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    assert spu._dpkg_version("libssl3", "amd64") == "3.0.2-0ubuntu1.29"
+    assert calls[-1][-1] == "libssl3:amd64"
+    assert spu._dpkg_version("libssl3:i386", "i386") == "3.0.2-0ubuntu1.29"
+    assert calls[-1][-1] == "libssl3:i386"
+
+
+def test_dpkg_version_rejects_ambiguous_multirow_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        spu,
+        "_run",
+        lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "1.0\n1.0\n", "stderr": ""},
+    )
+    assert spu._dpkg_version("libssl3", "amd64") is None
+
+
+def test_policy_rejects_dangerous_snap(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    policy["snap"]["allow_dangerous"] = True
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="allow_dangerous"):
+        spu.load_policy(path)
+
+
+def test_policy_requires_broker_network_isolation(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    policy["safety"]["privileged_broker_network_must_remain_blocked"] = False
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="privileged_broker_network_must_remain_blocked"):
+        spu.load_policy(path)
+
+
+def test_policy_requires_read_only_handoff_guard(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    policy["safety"]["require_broker_read_only_handoff"] = False
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="require_broker_read_only_handoff"):
+        spu.load_policy(path)
+
+
+def test_policy_requires_recursive_dpkg_apply_guard(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    policy["safety"]["require_dpkg_recursive_apply"] = False
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="require_dpkg_recursive_apply"):
+        spu.load_policy(path)
+
+
+def test_handoff_root_must_be_below_declared_broker_bind() -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    assert spu._expand_runtime_root(policy, 1000) == Path(
+        "/home/alex/repos/.heim-pc-worktrees/.package-update-handoff"
+    )
+    policy["staging"]["runtime_root"] = "/run/user/1000/heim-pc-package-updates"
+    with pytest.raises(spu.PolicyError, match="broker_bind_root"):
+        spu._expand_runtime_root(policy, 1000)
+
+
+def test_effective_broker_bind_reset_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = """[Service]
+BindReadOnlyPaths=/one /stale
+[Service]
+BindReadOnlyPaths=
+BindReadOnlyPaths=-/home/alex/repos/.heim-pc-worktrees /other
+"""
+    monkeypatch.setattr(
+        spu,
+        "_run",
+        lambda argv: {"argv": argv, "returncode": 0, "stdout": output, "stderr": ""},
+    )
+    assert spu._effective_broker_read_only_bindings() == [
+        Path("/home/alex/repos/.heim-pc-worktrees"),
+        Path("/other"),
+    ]
+
+
+def test_exact_confirmation_required() -> None:
+    plan = {"schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": "x"}
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    spu._validate_confirmation(plan, plan["plan_sha256"])
+    with pytest.raises(spu.PlanError, match="confirmation"):
+        spu._validate_confirmation(plan, "0" * 64)
+
+
+def test_root_artifact_expectations_bind_destinations() -> None:
+    plan = {
+        "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/p"},
+        "apt": {"packages": [{"relative_path": "apt/debs/a.deb", "sha256": "1" * 64}]},
+        "snap": {
+            "packages": [
+                {
+                    "assert_relative_path": "snap/a.assert",
+                    "assert_sha256": "2" * 64,
+                    "snap_relative_path": "snap/a.snap",
+                    "snap_sha256": "3" * 64,
+                }
+            ]
+        },
+    }
+    assert spu._artifact_expectations(plan) == {
+        "/var/lib/heim-pc/package-update-stages/p/debs/a.deb": "1" * 64,
+        "/var/lib/heim-pc/package-update-stages/p/snaps/a.assert": "2" * 64,
+        "/var/lib/heim-pc/package-update-stages/p/snaps/a.snap": "3" * 64,
+    }
