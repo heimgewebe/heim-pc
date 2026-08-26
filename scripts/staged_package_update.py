@@ -20,6 +20,7 @@ POLICY_PATH = Path(__file__).resolve().parents[1] / "config" / "package-update-p
 PLAN_KIND = "heim_pc.staged_package_update_plan"
 RECEIPT_KIND = "heim_pc.staged_package_update_receipt"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+PLAN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?: .*)?$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
 APT_SOURCE_FILE_PATTERNS = (
@@ -221,6 +222,26 @@ def _require_broker_handoff_binding(policy: dict[str, Any]) -> None:
         if candidate == bind_root:
             return
     raise PlanError(f"privileged broker does not bind handoff root read-only: {bind_root}")
+
+
+def _canonical_policy_path() -> Path:
+    return POLICY_PATH.resolve(strict=True)
+
+
+def _validate_plan_id(value: Any) -> str:
+    if not isinstance(value, str) or PLAN_ID_RE.fullmatch(value) is None:
+        raise PlanError("plan_id is not a canonical generated package-update id")
+    return value
+
+
+def _require_canonical_policy_path(policy_path: Path) -> Path:
+    try:
+        resolved = policy_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise PlanError(f"package update policy does not exist: {policy_path}") from exc
+    if resolved != _canonical_policy_path():
+        raise PlanError("privileged package plans must use the canonical repository policy")
+    return resolved
 
 
 def _root_stage_root(policy: dict[str, Any]) -> Path:
@@ -739,6 +760,7 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
 
 
 def _root_commands(plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any]:
+    plan_id = _validate_plan_id(plan_id)
     root_stage = _root_stage_root(policy) / plan_id
     root_debs = root_stage / "debs"
     root_snaps = root_stage / "snaps"
@@ -804,12 +826,13 @@ def _plan_digest(plan: dict[str, Any]) -> str:
 def create_plan(policy_path: Path) -> dict[str, Any]:
     if os.geteuid() == 0:
         raise PlanError("plan generation must run unprivileged")
+    policy_path = _require_canonical_policy_path(policy_path)
     policy = load_policy(policy_path)
     uid = os.geteuid()
     runtime_root = _expand_runtime_root(policy, uid)
     _require_broker_handoff_binding(policy)
     _ensure_private_dir(runtime_root, uid)
-    plan_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(6)}"
+    plan_id = _validate_plan_id(f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(6)}")
     stage = runtime_root / plan_id
     _ensure_private_dir(stage, uid)
     baseline = {
@@ -915,11 +938,18 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
         raise PlanError("plan schema or kind mismatch")
     _validate_confirmation(plan, confirmation)
-    stage = Path(plan.get("stage_path", ""))
-    if plan_path != stage / "plan.json":
-        raise PlanError("plan must be verified from its canonical stage plan.json path")
-    policy_path = Path(plan["policy_path"])
+    plan_id = _validate_plan_id(plan.get("plan_id"))
+    policy_path = _require_canonical_policy_path(Path(plan["policy_path"]))
     policy = load_policy(policy_path)
+    uid = os.geteuid()
+    runtime_root = _expand_runtime_root(policy, uid)
+    expected_stage = runtime_root / plan_id
+    stage = Path(plan.get("stage_path", ""))
+    if stage != expected_stage:
+        raise PlanError("plan stage does not match canonical runtime_root/plan_id")
+    if plan_path != stage / "plan.json" or plan_path.is_symlink():
+        raise PlanError("plan must be verified from its canonical non-symlink stage plan.json path")
+    _regular_owned_file(plan_path, uid)
     if _sha256_file(policy_path) != plan.get("policy_sha256"):
         raise PlanError("policy changed after planning")
     age = int(time.time()) - int(plan["created_at_unix"])
@@ -928,7 +958,6 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     if _dpkg_status_sha256() != plan["baseline"]["dpkg_status_sha256"]:
         raise PlanError("dpkg status changed after planning")
     _validate_source_config(plan["baseline"]["apt_source_config"])
-    uid = os.geteuid()
     if uid != plan["baseline"]["uid"]:
         raise PlanError("verification uid differs from plan uid")
     _require_broker_handoff_binding(policy)

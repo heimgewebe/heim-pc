@@ -137,6 +137,21 @@ def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Pat
     assert not any("download" in argv and "--print-uris" not in argv for argv in calls)
 
 
+def test_plan_id_rejects_root_stage_escape() -> None:
+    assert spu._validate_plan_id("20260826T194332Z-1dedf2da5503") == "20260826T194332Z-1dedf2da5503"
+    for value in ("../../etc", "plan-id", "20260826T194332Z-../../etc", "/tmp/evil"):
+        with pytest.raises(spu.PlanError, match="plan_id"):
+            spu._validate_plan_id(value)
+
+
+def test_privileged_plan_policy_must_be_canonical(tmp_path: Path) -> None:
+    alternate = tmp_path / "package-update-policy.v1.json"
+    alternate.write_bytes((ROOT / "config" / "package-update-policy.v1.json").read_bytes())
+    with pytest.raises(spu.PlanError, match="canonical repository policy"):
+        spu._require_canonical_policy_path(alternate)
+    assert spu._require_canonical_policy_path(ROOT / "config" / "package-update-policy.v1.json") == (ROOT / "config" / "package-update-policy.v1.json").resolve()
+
+
 def test_stage_artifact_path_rejects_absolute_and_parent_escape(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     parent = stage / "apt" / "debs"
@@ -239,10 +254,11 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
             }
         ]
     }
-    commands = spu._root_commands("plan-id", stage, policy, apt, snap)
+    plan_id = "20260826T194332Z-1dedf2da5503"
+    commands = spu._root_commands(plan_id, stage, policy, apt, snap)
     apt_preflight = commands["apt_apply_preflight_argv"]
     apt_apply = commands["apt_apply_argv"]
-    root_debs = "/var/lib/heim-pc/package-update-stages/plan-id/debs"
+    root_debs = "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/debs"
     assert apt_preflight == [
         "/usr/bin/dpkg", "--simulate", "--force-confold",
         "--install", "--recursive", root_debs,
@@ -253,7 +269,7 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--wait",
         "--collect",
         "--pipe",
-        "--unit=heim-pc-package-update-plan-id.service",
+        "--unit=heim-pc-package-update-20260826T194332Z-1dedf2da5503.service",
         "--property=Type=exec",
         "--property=NoNewPrivileges=no",
         "--property=PrivateTmp=yes",
@@ -274,8 +290,8 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert "--property=IPAddressDeny=any" in apt_apply
     assert apt_apply[apt_apply.index("--") + 1] == "/usr/bin/dpkg"
     assert commands["snap_apply_argvs"] == [
-        ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/plan-id/snaps/core22_2437.assert"],
-        ["/usr/bin/snap", "install", "/var/lib/heim-pc/package-update-stages/plan-id/snaps/core22_2437.snap"],
+        ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.assert"],
+        ["/usr/bin/snap", "install", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.snap"],
     ]
     assert all("--dangerous" not in argv for argv in commands["snap_apply_argvs"])
 
