@@ -353,6 +353,68 @@ def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatc
     assert receipt["all_snap_matched"] is True
 
 
+def test_postflight_inactive_service_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage-service"
+    stage.mkdir()
+    plan: dict[str, object] = {
+        "schema_version": 1,
+        "kind": spu.PLAN_KIND,
+        "plan_id": "service-mismatch",
+        "policy_path": str(policy_path.resolve()),
+        "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": []},
+        "snap": {"packages": []},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    monkeypatch.setattr(
+        spu, "_service_state",
+        lambda unit, user: "inactive" if unit == "docker.service" else "active",
+    )
+    monkeypatch.setattr(
+        spu, "_run",
+        lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "gpu-ok\n", "stderr": ""},
+    )
+    with pytest.raises(spu.PlanError, match="service health mismatch"):
+        spu.postflight(plan_path, str(plan["plan_sha256"]))
+    receipt = json.loads((stage / "postflight.json").read_text())
+    assert receipt["all_system_services_active"] is False
+    assert receipt["all_user_services_active"] is True
+    assert receipt["nvidia_smi_ok"] is True
+
+
+def test_postflight_nvidia_failure_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage-nvidia"
+    stage.mkdir()
+    plan: dict[str, object] = {
+        "schema_version": 1,
+        "kind": spu.PLAN_KIND,
+        "plan_id": "nvidia-mismatch",
+        "policy_path": str(policy_path.resolve()),
+        "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": []},
+        "snap": {"packages": []},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
+    monkeypatch.setattr(
+        spu, "_run",
+        lambda argv, **kwargs: {"argv": argv, "returncode": 1, "stdout": "", "stderr": "gpu failed"},
+    )
+    with pytest.raises(spu.PlanError, match="NVIDIA health mismatch"):
+        spu.postflight(plan_path, str(plan["plan_sha256"]))
+    receipt = json.loads((stage / "postflight.json").read_text())
+    assert receipt["all_system_services_active"] is True
+    assert receipt["all_user_services_active"] is True
+    assert receipt["nvidia_smi_ok"] is False
+    assert receipt["nvidia_smi"] is None
+
+
 def test_root_artifact_expectations_bind_destinations() -> None:
     plan = {
         "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/p"},

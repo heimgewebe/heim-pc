@@ -895,6 +895,9 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     nvidia = _run([
         "/usr/bin/nvidia-smi", "--query-gpu=name,driver_version,temperature.gpu,memory.used,memory.total", "--format=csv,noheader"
     ], check=False)
+    all_system_services_active = all(state == "active" for state in system_services.values())
+    all_user_services_active = all(state == "active" for state in user_services.values())
+    nvidia_smi_ok = nvidia["returncode"] == 0 and bool(nvidia["stdout"].strip())
     receipt: dict[str, Any] = {
         "schema_version": 1,
         "kind": RECEIPT_KIND,
@@ -905,10 +908,13 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "snap": snap_results,
         "all_apt_matched": all(item["matched"] for item in apt_results),
         "all_snap_matched": all(item["matched"] for item in snap_results),
+        "all_system_services_active": all_system_services_active,
+        "all_user_services_active": all_user_services_active,
+        "nvidia_smi_ok": nvidia_smi_ok,
         "reboot_required": Path("/var/run/reboot-required").exists(),
         "system_services": system_services,
         "user_services": user_services,
-        "nvidia_smi": nvidia["stdout"].strip() if nvidia["returncode"] == 0 else None,
+        "nvidia_smi": nvidia["stdout"].strip() if nvidia_smi_ok else None,
         "does_not_establish": [
             "future package repository freshness",
             "future service health",
@@ -920,6 +926,10 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     _atomic_json(receipt_path, receipt)
     if not receipt["all_apt_matched"] or not receipt["all_snap_matched"]:
         raise PlanError(f"postflight target mismatch; receipt={receipt_path}")
+    if not receipt["all_system_services_active"] or not receipt["all_user_services_active"]:
+        raise PlanError(f"postflight service health mismatch; receipt={receipt_path}")
+    if not receipt["nvidia_smi_ok"]:
+        raise PlanError(f"postflight NVIDIA health mismatch; receipt={receipt_path}")
     return {**receipt, "receipt_path": str(receipt_path)}
 
 
