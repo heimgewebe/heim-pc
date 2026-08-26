@@ -16,6 +16,7 @@ import signal
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -62,6 +63,7 @@ ALWAYS_EXCLUDED_PATH_SEQUENCES = (
     (".config", "kwalletd5"),
 )
 SENSITIVE_SUFFIXES = frozenset({".key", ".pem", ".p12"})
+INTERNAL_TMPFS_EXEC_OPERATION = "__bounded-tmpfs-exec"
 
 
 class DocumentTextError(RuntimeError):
@@ -182,25 +184,78 @@ def _process_stderr_evidence(
     return _stderr_evidence(value, maximum)
 
 
-def _directory_size(path: Path) -> int:
-    total = 0
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    try:
-                        entry_stat = entry.stat(follow_symlinks=False)
-                    except FileNotFoundError:
-                        continue
-                    if stat.S_ISREG(entry_stat.st_mode):
-                        total += entry_stat.st_size
-                    elif stat.S_ISDIR(entry_stat.st_mode):
-                        stack.append(Path(entry.path))
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-    return total
+def _tmpfs_sandbox_tools() -> dict[str, str | None]:
+    return {name: shutil.which(name) for name in ("unshare", "mount")}
+
+
+def _tmpfs_sandbox_command(
+    argv: Sequence[str], temporary_directory: Path, maximum: int
+) -> list[str]:
+    tools = _tmpfs_sandbox_tools()
+    unshare = tools["unshare"]
+    mount = tools["mount"]
+    missing = [name for name, executable in tools.items() if executable is None]
+    if missing:
+        raise DocumentTextError(
+            "route_unavailable",
+            "bounded temporary-storage sandbox is unavailable",
+            details={"missing_tools": missing},
+        )
+    assert unshare is not None and mount is not None
+    return [
+        unshare,
+        "--user",
+        "--map-root-user",
+        "--mount",
+        "--fork",
+        "--propagation",
+        "private",
+        sys.executable,
+        str(Path(__file__).resolve()),
+        INTERNAL_TMPFS_EXEC_OPERATION,
+        str(temporary_directory),
+        str(maximum),
+        mount,
+        "--",
+        *argv,
+    ]
+
+
+def _exec_bounded_tmpfs(argv: Sequence[str]) -> int:
+    if len(argv) < 5 or argv[3] != "--":
+        return 125
+    temporary_directory = Path(argv[0])
+    try:
+        maximum = int(argv[1])
+    except ValueError:
+        return 125
+    mount = argv[2]
+    command = list(argv[4:])
+    if maximum <= 0 or not command or not temporary_directory.is_absolute():
+        return 125
+    try:
+        if not temporary_directory.is_dir():
+            return 125
+        mounted = subprocess.run(
+            [
+                mount,
+                "-t",
+                "tmpfs",
+                "-o",
+                f"size={maximum},mode=700,nosuid,nodev",
+                "tmpfs",
+                str(temporary_directory),
+            ],
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        if mounted.returncode != 0:
+            return 126
+        environment = {**os.environ, "TMPDIR": str(temporary_directory)}
+        os.execvpe(command[0], command, environment)
+    except OSError:
+        return 127
+    return 127
 
 
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -217,17 +272,17 @@ def _run(
     operation: str,
     file_size_limit_bytes: int | None = None,
     temporary_directory: Path | None = None,
-    directory_size_limit_bytes: int | None = None,
+    temporary_storage_limit_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     timeout = int(policy["limits"]["process_timeout_seconds"])
     stdout_limit = int(policy["limits"]["max_output_bytes"])
     stderr_limit = int(policy["limits"]["max_stderr_bytes"])
     if timeout <= 0 or stdout_limit <= 0 or stderr_limit <= 0:
         raise ValueError("process limits must be positive")
-    if directory_size_limit_bytes is not None and directory_size_limit_bytes <= 0:
-        raise ValueError("process directory-size limit must be positive")
-    if directory_size_limit_bytes is not None and temporary_directory is None:
-        raise ValueError("process directory-size limit requires a temporary directory")
+    if temporary_storage_limit_bytes is not None and temporary_storage_limit_bytes <= 0:
+        raise ValueError("process temporary-storage limit must be positive")
+    if temporary_storage_limit_bytes is not None and temporary_directory is None:
+        raise ValueError("process temporary-storage limit requires a temporary directory")
 
     preexec_fn: Any = None
     if file_size_limit_bytes is not None:
@@ -244,16 +299,23 @@ def _run(
         preexec_fn = _apply_file_size_limit
 
     environment = {**os.environ, "LC_ALL": "C.UTF-8"}
-    monitored_directory: Path | None = None
+    resolved_temporary_directory: Path | None = None
     if temporary_directory is not None:
-        monitored_directory = temporary_directory.resolve()
-        if not monitored_directory.is_dir():
+        resolved_temporary_directory = temporary_directory.resolve()
+        if not resolved_temporary_directory.is_dir():
             raise ValueError("process temporary directory must exist")
-        environment["TMPDIR"] = str(monitored_directory)
+        environment["TMPDIR"] = str(resolved_temporary_directory)
+
+    process_argv = list(argv)
+    if temporary_storage_limit_bytes is not None:
+        assert resolved_temporary_directory is not None
+        process_argv = _tmpfs_sandbox_command(
+            process_argv, resolved_temporary_directory, temporary_storage_limit_bytes
+        )
 
     try:
         process = subprocess.Popen(
-            list(argv),
+            process_argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -291,27 +353,13 @@ def _run(
         selector.register(stream, selectors.EVENT_READ, (name, state))
 
     deadline = time.monotonic() + timeout
-    next_directory_check = 0.0
     termination_reason: str | None = None
-    observed_directory_bytes: int | None = None
     try:
         while selector.get_map() or process.poll() is None:
             now = time.monotonic()
             if termination_reason is None and now >= deadline:
                 termination_reason = "timeout"
                 _kill_process_group(process)
-            if (
-                termination_reason is None
-                and monitored_directory is not None
-                and directory_size_limit_bytes is not None
-                and now >= next_directory_check
-            ):
-                observed_directory_bytes = _directory_size(monitored_directory)
-                next_directory_check = now + 0.05
-                if observed_directory_bytes > directory_size_limit_bytes:
-                    termination_reason = "directory_limit"
-                    _kill_process_group(process)
-
             select_timeout = 0.05
             if termination_reason is None:
                 select_timeout = min(select_timeout, max(0.0, deadline - now))
@@ -341,14 +389,6 @@ def _run(
                 f"{operation} did not terminate after bounded process shutdown",
                 details={"timeout_seconds": timeout},
             ) from exc
-        if (
-            termination_reason is None
-            and monitored_directory is not None
-            and directory_size_limit_bytes is not None
-        ):
-            observed_directory_bytes = _directory_size(monitored_directory)
-            if observed_directory_bytes > directory_size_limit_bytes:
-                termination_reason = "directory_limit"
     finally:
         selector.close()
         process.stdout.close()
@@ -359,15 +399,6 @@ def _run(
             "extraction_failed",
             f"{operation} exceeded the bounded process timeout",
             details={"timeout_seconds": timeout},
-        )
-    if termination_reason == "directory_limit":
-        raise DocumentTextError(
-            "extraction_failed",
-            f"{operation} exceeded the bounded temporary-storage limit",
-            details={
-                "max_temporary_bytes": directory_size_limit_bytes,
-                "observed_temporary_bytes": observed_directory_bytes,
-            },
         )
 
     stdout = bytes(stdout_state["data"])
@@ -847,6 +878,8 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
             "executable": executable,
         }
     languages = _tesseract_languages(policy)
+    sandbox_tools = _tmpfs_sandbox_tools()
+    sandbox_ready = all(executable is not None for executable in sandbox_tools.values())
     routes = {
         "pdf_text_layer": (
             tools["pdf_text"]["available"] and tools["pdf_info"]["available"]
@@ -857,6 +890,7 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
             and tools["pdf_ocr"]["available"]
             and tools["image_ocr"]["available"]
             and languages["status"] == "ready"
+            and sandbox_ready
         ),
         "image_ocr": tools["image_ocr"]["available"] and languages["status"] == "ready",
     }
@@ -868,6 +902,11 @@ def doctor(policy: dict[str, Any]) -> dict[str, Any]:
         "routes": routes,
         "tools": tools,
         "languages": languages,
+        "temporary_storage_sandbox": {
+            "status": "ready" if sandbox_ready else "unavailable",
+            "tools": sandbox_tools,
+            "enforcement": "private_tmpfs_quota",
+        },
         "docling": _docling_readiness(policy),
         "network_access_authorized": False,
         "cloud_or_metered_use_authorized": False,
@@ -998,6 +1037,8 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
     _require_tool(policy, "pdf_text")
     with tempfile.TemporaryDirectory(prefix="heim-doc-text-ocrpdf-") as directory:
         rendered = Path(directory) / "ocr.pdf"
+        scratch = Path(directory) / "scratch"
+        scratch.mkdir(mode=0o700)
         intermediate_limit = int(policy["limits"]["max_source_bytes"])
         completed = _run(
             [
@@ -1019,8 +1060,8 @@ def _extract_ocr_pdf(source: Path, policy: dict[str, Any], language: str) -> tup
             policy=policy,
             operation="ocrmypdf",
             file_size_limit_bytes=intermediate_limit,
-            temporary_directory=Path(directory),
-            directory_size_limit_bytes=intermediate_limit,
+            temporary_directory=scratch,
+            temporary_storage_limit_bytes=intermediate_limit,
         )
         if completed.returncode != 0 or not rendered.exists():
             raise DocumentTextError(
@@ -1170,7 +1211,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if raw_argv and raw_argv[0] == INTERNAL_TMPFS_EXEC_OPERATION:
+        return _exec_bounded_tmpfs(raw_argv[1:])
+
+    args = build_parser().parse_args(raw_argv)
     try:
         policy = load_policy()
         if args.operation == "doctor":

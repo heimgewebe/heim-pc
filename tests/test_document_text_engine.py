@@ -561,48 +561,60 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "extraction_failed")
         self.assertFalse(survived)
 
-    def test_run_kills_process_when_temporary_directory_exceeds_budget(self) -> None:
-        policy = json.loads(json.dumps(self.policy))
-        policy["limits"]["process_timeout_seconds"] = 5
+    def test_tmpfs_sandbox_command_uses_private_user_mount_namespace(self) -> None:
+        fake_which = {"unshare": "/usr/bin/unshare", "mount": "/usr/bin/mount"}
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
-            script = (
-                "from pathlib import Path; import os,time; "
-                "Path(os.environ['TMPDIR'], 'growth.bin').write_bytes(b'x' * 65536); "
-                "time.sleep(10)"
-            )
-            with self.assertRaises(engine.DocumentTextError) as caught:
-                engine._run(
-                    [sys.executable, "-c", script],
-                    policy=policy,
-                    operation="temporary-storage-test",
-                    temporary_directory=work,
-                    directory_size_limit_bytes=4096,
-                )
-        self.assertEqual(caught.exception.code, "extraction_failed")
-        self.assertEqual(caught.exception.details["max_temporary_bytes"], 4096)
-        self.assertGreater(caught.exception.details["observed_temporary_bytes"], 4096)
+            with mock.patch.object(
+                engine.shutil, "which", side_effect=lambda name: fake_which.get(name)
+            ):
+                command = engine._tmpfs_sandbox_command(["/usr/bin/tool", "arg"], work, 4096)
+        self.assertEqual(command[0], "/usr/bin/unshare")
+        self.assertIn("--map-root-user", command)
+        self.assertIn("--mount", command)
+        self.assertIn("private", command)
+        self.assertIn(engine.INTERNAL_TMPFS_EXEC_OPERATION, command)
+        self.assertIn("4096", command)
+        self.assertIn("/usr/bin/mount", command)
 
-    def test_run_rechecks_temporary_directory_after_fast_child_exit(self) -> None:
+    def test_internal_tmpfs_exec_mounts_exact_quota_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            mounted = mock.Mock(returncode=0)
+            with (
+                mock.patch.object(engine.subprocess, "run", return_value=mounted) as run,
+                mock.patch.object(engine.os, "execvpe", side_effect=OSError(2, "missing")) as execvpe,
+            ):
+                result = engine._exec_bounded_tmpfs(
+                    [str(work), "4096", "/usr/bin/mount", "--", "/usr/bin/tool", "arg"]
+                )
+        self.assertEqual(result, 127)
+        mount_argv = run.call_args.args[0]
+        self.assertEqual(mount_argv[0], "/usr/bin/mount")
+        self.assertIn("size=4096,mode=700,nosuid,nodev", mount_argv)
+        execvpe.assert_called_once()
+
+    def test_run_rejects_transient_create_unlink_burst_under_tmpfs_quota(self) -> None:
         policy = json.loads(json.dumps(self.policy))
         policy["limits"]["process_timeout_seconds"] = 5
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             script = (
                 "from pathlib import Path; import os; "
-                "Path(os.environ['TMPDIR'], 'burst.bin').write_bytes(b'x' * 65536)"
+                "root=Path(os.environ['TMPDIR']); "
+                "first=root/'first.bin'; second=root/'second.bin'; "
+                "first.write_bytes(b'x' * 4096); "
+                "second.write_bytes(b'y' * 4096); "
+                "first.unlink(); second.unlink()"
             )
-            with self.assertRaises(engine.DocumentTextError) as caught:
-                engine._run(
-                    [sys.executable, "-c", script],
-                    policy=policy,
-                    operation="temporary-storage-fast-exit-test",
-                    temporary_directory=work,
-                    directory_size_limit_bytes=4096,
-                )
-        self.assertEqual(caught.exception.code, "extraction_failed")
-        self.assertEqual(caught.exception.details["max_temporary_bytes"], 4096)
-        self.assertGreater(caught.exception.details["observed_temporary_bytes"], 4096)
+            completed = engine._run(
+                [sys.executable, "-c", script],
+                policy=policy,
+                operation="temporary-storage-burst-test",
+                temporary_directory=work,
+                temporary_storage_limit_bytes=4096,
+            )
+        self.assertNotEqual(completed.returncode, 0)
 
     def test_output_reader_truncates_at_policy_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -693,10 +705,10 @@ class DocumentTextEngineTests(unittest.TestCase):
                 operation,
                 file_size_limit_bytes=None,
                 temporary_directory=None,
-                directory_size_limit_bytes=None,
+                temporary_storage_limit_bytes=None,
             ):
                 observed.append(
-                    (file_size_limit_bytes, temporary_directory, directory_size_limit_bytes)
+                    (file_size_limit_bytes, temporary_directory, temporary_storage_limit_bytes)
                 )
                 Path(argv[-1]).write_bytes(b"%PDF-bounded")
                 return mock.Mock(returncode=0, stdout=b"", stderr=b"")
@@ -786,6 +798,8 @@ class DocumentTextEngineTests(unittest.TestCase):
             "ocrmypdf": "/usr/bin/ocrmypdf",
             "tesseract": "/usr/bin/tesseract",
             "docling": "/usr/bin/docling",
+            "unshare": "/usr/bin/unshare",
+            "mount": "/usr/bin/mount",
         }
         with (
             mock.patch.object(engine.shutil, "which", side_effect=lambda name: fake_which.get(name)),
@@ -801,6 +815,7 @@ class DocumentTextEngineTests(unittest.TestCase):
         self.assertIs(result["network_access_authorized"], False)
         self.assertIs(result["cloud_or_metered_use_authorized"], False)
         self.assertIs(result["docling"]["automatic_use"], False)
+        self.assertEqual(result["temporary_storage_sandbox"]["status"], "ready")
 
     def test_spawn_os_error_redacts_executable_path(self) -> None:
         sensitive = "/private/tool/secret-name"
