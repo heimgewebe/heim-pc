@@ -293,6 +293,66 @@ def test_exact_confirmation_required() -> None:
         spu._validate_confirmation(plan, "0" * 64)
 
 
+def test_postflight_rejects_policy_drift(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(policy, sort_keys=True))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    plan = {
+        "schema_version": 1,
+        "kind": spu.PLAN_KIND,
+        "plan_id": "policy-drift",
+        "policy_path": str(policy_path),
+        "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": []},
+        "snap": {"packages": []},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    policy["postflight"]["system_services"] = []
+    policy_path.write_text(json.dumps(policy, sort_keys=True))
+    plan_path = _write_plan(tmp_path, plan)
+    with pytest.raises(spu.PlanError, match="policy changed after planning"):
+        spu.postflight(plan_path, str(plan["plan_sha256"]))
+
+
+def _write_plan(tmp_path: Path, plan: dict[str, object]) -> Path:
+    path = tmp_path / (str(plan["plan_id"]) + ".json")
+    path.write_text(json.dumps(plan, sort_keys=True))
+    return path
+
+
+def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    plan: dict[str, object] = {
+        "schema_version": 1,
+        "kind": spu.PLAN_KIND,
+        "plan_id": "mismatch",
+        "policy_path": str(policy_path.resolve()),
+        "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": [{"name": "curl", "arch": "amd64", "version": "wanted"}]},
+        "snap": {"packages": []},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    monkeypatch.setattr(spu, "_dpkg_version", lambda name, arch=None: "actual")
+    monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
+    monkeypatch.setattr(
+        spu,
+        "_run",
+        lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "gpu-ok\n", "stderr": ""},
+    )
+    with pytest.raises(spu.PlanError, match="postflight target mismatch"):
+        spu.postflight(plan_path, str(plan["plan_sha256"]))
+    receipt = json.loads((stage / "postflight.json").read_text())
+    assert receipt["all_apt_matched"] is False
+    assert receipt["all_snap_matched"] is True
+
+
 def test_root_artifact_expectations_bind_destinations() -> None:
     plan = {
         "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/p"},

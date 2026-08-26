@@ -852,7 +852,16 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
         raise PlanError("plan schema or kind mismatch")
     _validate_confirmation(plan, confirmation)
-    policy = load_policy(Path(plan["policy_path"]))
+    policy_path = Path(plan["policy_path"])
+    expected_policy_sha256 = plan.get("policy_sha256")
+    if not isinstance(expected_policy_sha256, str) or not SHA256_RE.fullmatch(expected_policy_sha256):
+        raise PlanError("plan policy digest is missing or invalid")
+    policy_sha256_before = _sha256_file(policy_path)
+    if policy_sha256_before != expected_policy_sha256:
+        raise PlanError("package update policy changed after planning")
+    policy = load_policy(policy_path)
+    if _sha256_file(policy_path) != policy_sha256_before:
+        raise PlanError("package update policy changed while postflight loaded it")
     apt_results: list[dict[str, Any]] = []
     for item in plan["apt"].get("packages", []):
         installed = _dpkg_version(item["name"], item.get("arch"))
@@ -909,6 +918,8 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     receipt["receipt_sha256"] = _sha256_json(receipt)
     receipt_path = Path(plan["stage_path"]) / "postflight.json"
     _atomic_json(receipt_path, receipt)
+    if not receipt["all_apt_matched"] or not receipt["all_snap_matched"]:
+        raise PlanError(f"postflight target mismatch; receipt={receipt_path}")
     return {**receipt, "receipt_path": str(receipt_path)}
 
 
