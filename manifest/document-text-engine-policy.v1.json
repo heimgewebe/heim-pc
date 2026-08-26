@@ -1,0 +1,67 @@
+{
+  "id": "document-text-engine-policy.v1",
+  "schema_version": 1,
+  "kind": "heim_pc_document_text_engine_policy",
+  "default_strategy": "local-first",
+  "operations": [
+    "doctor",
+    "inspect",
+    "extract"
+  ],
+  "invariants": {
+    "default_path_zero_incremental_cost": true,
+    "default_path_local_only": true,
+    "network_access_allowed": false,
+    "metered_or_cloud_use_allowed": false,
+    "automatic_docling_use_allowed": false,
+    "source_content_persisted_by_engine": false,
+    "extracted_text_persisted_by_engine": false
+  },
+  "tools": {
+    "pdf_text": "pdftotext",
+    "pdf_info": "pdfinfo",
+    "pdf_ocr": "ocrmypdf",
+    "image_ocr": "tesseract",
+    "structured_optional": "docling"
+  },
+  "routing": {
+    "pdf_with_text_layer": "pdftotext",
+    "pdf_without_text_layer": "ocrmypdf_then_pdftotext",
+    "image": "tesseract",
+    "structured_optional": "manual_only",
+    "text_layer_probe_min_non_whitespace_chars": 1
+  },
+  "languages": {
+    "default": "deu+eng",
+    "allowed": [
+      "deu+eng",
+      "deu",
+      "eng"
+    ],
+    "required_installed": [
+      "deu",
+      "eng"
+    ]
+  },
+  "limits": {
+    "max_source_bytes": 268435456,
+    "max_output_bytes": 2097152,
+    "max_pages": 500,
+    "process_timeout_seconds": 180,
+    "max_stderr_bytes": 16384
+  },
+  "supported_inputs": [
+    "pdf",
+    "png",
+    "jpeg",
+    "tiff"
+  ],
+  "does_not_establish": [
+    "source_file_access",
+    "extraction_correctness",
+    "layout_fidelity",
+    "handwriting_recognition_quality",
+    "docling_model_readiness",
+    "cloud_or_metered_cost_authorization"
+  ]
+}

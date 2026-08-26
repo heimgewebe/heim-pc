@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import sys
 import os
 import json
@@ -11,25 +11,12 @@ scripts_path = os.path.join(repo_root, 'scripts')
 if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
 
-# Scoped mock for yaml to avoid global side effects during session if possible.
-yaml_patcher = patch.dict(sys.modules, {'yaml': MagicMock()})
-yaml_patcher.start()
-
-try:
-    from check_freshness import check_freshness
-except ImportError:
-    yaml_patcher.stop()
-    raise
+from check_freshness import check_freshness
 
 # Define a fixed time for deterministic tests
 FIXED_NOW = datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 class TestCheckFreshness(unittest.TestCase):
-
-    @classmethod
-    def tearDownClass(cls):
-        # Stop the YAML patcher after all tests in this class have run
-        yaml_patcher.stop()
 
     @patch('utils.load_json')
     @patch('utils.log_error')

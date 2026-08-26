@@ -1,0 +1,34 @@
+{
+  "id": "document-text-contract.v1",
+  "schema_version": 1,
+  "kind": "heim-pc.document-text",
+  "required_fields": [
+    "schema_version",
+    "kind",
+    "source_sha256",
+    "input_type",
+    "method",
+    "language",
+    "pages",
+    "text",
+    "text_bytes",
+    "truncated",
+    "warnings"
+  ],
+  "nullable_fields": [
+    "language",
+    "pages"
+  ],
+  "methods": [
+    "pdftotext",
+    "ocrmypdf_then_pdftotext",
+    "tesseract"
+  ],
+  "rules": [
+    "The engine MUST bind every inspect or extract result to the SHA-256 of the exact source file.",
+    "The engine MUST NOT invent page counts, language or layout fidelity when unavailable.",
+    "The engine MUST NOT persist source content or extracted text as operational state.",
+    "The engine MUST truncate model-visible text at the policy output limit and report truncated=true.",
+    "Docling is optional and manual-only in v1 and is not an automatic extraction route."
+  ]
+}

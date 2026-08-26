@@ -5,10 +5,6 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
-from unittest.mock import MagicMock
-
-# Mock yaml since it's not installed in this environment
-sys.modules["yaml"] = MagicMock()
 
 # Ensure scripts directory is in python path
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
