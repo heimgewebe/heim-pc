@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,27 @@ SPEC = importlib.util.spec_from_file_location("staged_package_update", SCRIPT)
 assert SPEC and SPEC.loader
 spu = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(spu)
+
+
+def test_apt_update_fails_closed_on_any_index_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        calls.append(argv)
+        return {"argv": argv, "returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    policy = {
+        "apt": {
+            "enabled": True,
+            "max_packages": 10,
+            "max_download_bytes": 1024,
+            "sensitive_prefixes": [],
+        }
+    }
+    result = spu._stage_apt(tmp_path / "stage", policy, os.geteuid())
+    assert result["packages"] == []
+    assert calls[0][-3:] == ["-o", "APT::Update::Error-Mode=any", "update"]
 
 
 def test_parse_apt_simulation_keeps_exact_identity() -> None:

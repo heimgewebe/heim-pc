@@ -328,7 +328,7 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
         return {"enabled": False, "packages": []}
     _prepare_apt_dirs(stage, uid)
     options = _apt_options(stage)
-    update = _run(["/usr/bin/apt-get", *options, "update"])
+    update = _run(["/usr/bin/apt-get", *options, "-o", "APT::Update::Error-Mode=any", "update"])
     if re.search(r"^(W:|E:).*signature|NO_PUBKEY|not signed", update["stderr"], flags=re.I | re.M):
         raise PlanError("APT update reported a repository signature problem")
     simulation = _run([
