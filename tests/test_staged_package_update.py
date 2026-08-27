@@ -16,6 +16,51 @@ spu = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(spu)
 
 
+def _write_broker_evidence(
+    root: Path,
+    *,
+    argv: list[str],
+    stdout: str,
+    request_id: str,
+    timestamp_unix: int,
+    peer_uid: int | None = None,
+) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o755)
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "kind": spu.BROKER_OUTPUT_EVIDENCE_KIND,
+        "request_id": request_id,
+        "reference_sha256": "1" * 64,
+        "action": spu.BROKER_POWER_ACTION,
+        "mode": "argv-json",
+        "argv_sha256": spu._sha256_json(argv),
+        "cwd_sha256": "2" * 64,
+        "peer_uid": os.geteuid() if peer_uid is None else peer_uid,
+        "peer_unit": spu.BROKER_PEER_UNIT,
+        "returncode": 0,
+        "timed_out": False,
+        "stdout_sha256": spu._sha256_bytes(stdout.encode("utf-8")),
+        "stdout_bytes": len(stdout.encode("utf-8")),
+        "stdout_truncated": False,
+        "timestamp_unix": timestamp_unix,
+    }
+    value["evidence_sha256"] = spu._sha256_json(value)
+    path = root / f"{request_id}.json"
+    path.write_text(json.dumps(value, sort_keys=True) + "\n")
+    path.chmod(0o644)
+    return path
+
+
+def _allow_test_owned_broker_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = spu._validate_broker_output_evidence
+    monkeypatch.setattr(
+        spu,
+        "_validate_broker_output_evidence",
+        lambda *args, **kwargs: original(*args, **kwargs, expected_owner_uid=os.geteuid()),
+    )
+
+
 def test_run_strips_caller_apt_config(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -394,12 +439,13 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert commands["apply_readback_required"] is True
     plan = {"plan_id": plan_id, "stage_path": str(stage), "root_commands": commands, "apt": apt, "snap": snap}
     copy_commands = spu._copy_commands(plan, policy)
-    apt_preflight = copy_commands["apt_apply_preflight_argv"]
+    apt_preflight = spu._apt_apply_preflight_argv(plan)
+    assert "apt_apply_preflight_argv" not in copy_commands
     apply_commands = spu._apply_commands(plan, policy)
     apt_apply = apply_commands["apt_apply_argv"]
     root_debs = "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/debs"
     assert apt_preflight == [
-        "/usr/bin/dpkg", "--simulate", "--force-confold",
+        "/usr/bin/dpkg", "--simulate", "--refuse-downgrade", "--force-confold",
         "--install", "--recursive", root_debs,
     ]
     assert apt_apply == [
@@ -432,6 +478,7 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--property=IPAddressDeny=any",
         "--",
         "/usr/bin/dpkg",
+        "--refuse-downgrade",
         "--force-confold",
         "--install",
         "--recursive",
@@ -456,6 +503,12 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert not any(arg.startswith("--property=InaccessiblePaths=/proc/1") for arg in apt_apply)
     assert any(arg.startswith("--property=CapabilityBoundingSet=~CAP_SYS_ADMIN") for arg in apt_apply)
     assert apt_apply[apt_apply.index("--") + 1] == "/usr/bin/dpkg"
+    assert copy_commands["hash_argv"] == [
+        "/usr/bin/sha256sum",
+        f"{root_debs}/000-curl-amd64-deadbeef.deb",
+        "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.assert",
+        "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.snap",
+    ]
     assert apply_commands["snap_apply_argvs"] == [
         ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.assert"],
         ["/usr/bin/snap", "install", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.snap"],
@@ -576,19 +629,33 @@ def test_capacity_authorization_blocks_before_copy_when_root_stage_space_is_insu
     policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
     stage = tmp_path / "capacity-block"
     stage.mkdir()
+    now = int(spu.time.time())
     apt = {"packages": [{"name": "curl", "relative_path": "apt/debs/curl.deb", "sha256": "a" * 64, "size": 10}]}
     snap = {"packages": []}
     plan = {
         "plan_id": "20260827T010203Z-123456abcdef",
         "plan_sha256": "f" * 64,
+        "created_at_unix": now - 1,
+        "baseline": {"uid": os.geteuid()},
         "stage_path": str(stage),
         "root_commands": spu._root_commands("20260827T010203Z-123456abcdef", stage, policy, apt, snap),
         "apt": apt,
         "snap": snap,
     }
     monkeypatch.setattr(spu, "_verify_plan_loaded", lambda path, confirmation: ({"age_seconds": 1}, plan, policy))
+    evidence_root = tmp_path / "broker-evidence"
+    monkeypatch.setattr(spu, "BROKER_OUTPUT_EVIDENCE_ROOT", evidence_root)
+    _allow_test_owned_broker_evidence(monkeypatch)
+    output = "0:4096"
+    evidence = _write_broker_evidence(
+        evidence_root,
+        argv=plan["root_commands"]["root_capacity_argv"],
+        stdout=output,
+        request_id="1" * 32,
+        timestamp_unix=now,
+    )
     with pytest.raises(spu.PlanError, match="destination filesystem has only 0 available"):
-        spu.root_capacity_authorize(stage / "plan.json", "f" * 64, "0:4096")
+        spu.root_capacity_authorize(stage / "plan.json", "f" * 64, output, evidence)
     assert not (stage / "root-capacity.json").exists()
 
 
@@ -617,6 +684,7 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     plan_id = "20260827T010203Z-123456abcdef"
     stage = tmp_path / "stage"
     stage.mkdir()
+    now = int(spu.time.time())
     apt = {"packages": [{
         "name": "curl", "version": "new", "arch": "amd64",
         "relative_path": "apt/debs/curl.deb", "sha256": "a" * 64, "size": 10,
@@ -627,21 +695,69 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     plan: dict[str, object] = {
         "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": plan_id,
         "plan_sha256": "f" * 64, "policy_path": str((ROOT / "config" / "package-update-policy.v1.json").resolve()),
+        "created_at_unix": now - 1,
+        "baseline": {"uid": os.geteuid()},
         "stage_path": str(stage), "root_commands": commands, "root_artifact_sha256": {root_path: "a" * 64},
         "apt": apt, "snap": snap,
     }
     plan_path = stage / "plan.json"
     plan_path.write_text(json.dumps(plan))
     monkeypatch.setattr(spu, "_verify_plan_loaded", lambda path, confirmation: ({"age_seconds": 1}, plan, policy))
-    capacity = spu.root_capacity_authorize(plan_path, "f" * 64, "1000000:4096")
+    evidence_root = tmp_path / "broker-evidence"
+    monkeypatch.setattr(spu, "BROKER_OUTPUT_EVIDENCE_ROOT", evidence_root)
+    _allow_test_owned_broker_evidence(monkeypatch)
+
+    capacity_output = "1000000:4096"
+    capacity_evidence = _write_broker_evidence(
+        evidence_root,
+        argv=commands["root_capacity_argv"],
+        stdout=capacity_output,
+        request_id="2" * 32,
+        timestamp_unix=now,
+    )
+    capacity = spu.root_capacity_authorize(
+        plan_path, "f" * 64, capacity_output, capacity_evidence
+    )
     assert capacity["status"] == "root-capacity-authorized"
     assert capacity["copy_commands"]["copy_apt_argv"] is not None
-    result = spu.root_readback_authorize(plan_path, "f" * 64, f"{'a' * 64}  {root_path}\n", "")
+
+    hash_argv = capacity["copy_commands"]["hash_argv"]
+    hash_output = f"{'a' * 64}  {root_path}\n"
+    hash_evidence = _write_broker_evidence(
+        evidence_root,
+        argv=hash_argv,
+        stdout=hash_output,
+        request_id="3" * 32,
+        timestamp_unix=now,
+    )
+    result = spu.root_readback_authorize(
+        plan_path, "f" * 64, hash_output, hash_evidence
+    )
     assert result["status"] == "root-readback-authorized"
     assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
-    with pytest.raises(spu.PlanError, match="root artifact hash readback mismatch"):
-        spu.root_readback_authorize(plan_path, "f" * 64, f"{'b' * 64}  {root_path}\n", "")
+    assert result["broker_output_evidence"]["request_id"] == "3" * 32
 
+    bad_output = f"{'b' * 64}  {root_path}\n"
+    bad_evidence = _write_broker_evidence(
+        evidence_root,
+        argv=hash_argv,
+        stdout=bad_output,
+        request_id="4" * 32,
+        timestamp_unix=now,
+    )
+    with pytest.raises(spu.PlanError, match="root artifact hash readback mismatch"):
+        spu.root_readback_authorize(plan_path, "f" * 64, bad_output, bad_evidence)
+
+    forged_output = f"{'a' * 64}  {root_path}\n"
+    wrong_argv_evidence = _write_broker_evidence(
+        evidence_root,
+        argv=["/usr/bin/sha256sum", "/wrong"],
+        stdout=forged_output,
+        request_id="5" * 32,
+        timestamp_unix=now,
+    )
+    with pytest.raises(spu.PlanError, match="different argv"):
+        spu.root_readback_authorize(plan_path, "f" * 64, forged_output, wrong_argv_evidence)
 
 def test_sha256sum_readback_rejects_duplicate_or_relative_paths() -> None:
     digest = "a" * 64
@@ -708,6 +824,8 @@ def test_policy_requires_snap_store_revalidation_and_private_apt_runtime(tmp_pat
         "require_root_staging_capacity", "require_reboot_capture",
         "require_apt_apply_kernel_device_isolation", "require_apply_readback_authorization",
         "require_snap_download_byte_cap", "require_postflight_plan_identity",
+        "require_privileged_broker_output_evidence", "require_target_downgrade_refusal",
+        "require_explicit_activation_semantics",
     ):
         mutated = json.loads(json.dumps(policy))
         mutated["safety"][key] = False

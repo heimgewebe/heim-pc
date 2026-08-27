@@ -9,6 +9,7 @@
     "root_root": "/var/lib/heim-pc/package-update-stages",
     "runtime_capture_root": "/run/heim-pc-package-update-captures",
     "root_stage_safety_margin_bytes": 268435456,
+    "privileged_readback_max_age_seconds": 600,
     "max_plan_age_seconds": 3600
   },
   "apt": {
@@ -59,7 +60,10 @@
     "require_apply_readback_authorization": true,
     "require_snap_download_byte_cap": true,
     "require_postflight_plan_identity": true,
-    "privileged_broker_network_must_remain_blocked": true
+    "privileged_broker_network_must_remain_blocked": true,
+    "require_privileged_broker_output_evidence": true,
+    "require_target_downgrade_refusal": true,
+    "require_explicit_activation_semantics": true
   },
   "postflight": {
     "system_services": [
