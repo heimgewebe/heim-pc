@@ -102,17 +102,22 @@ def test_apt_update_fails_closed_on_any_index_error(tmp_path: Path, monkeypatch:
     assert calls[0][-3:] == ["-o", "APT::Update::Error-Mode=any", "update"]
 
 
-def test_parse_apt_print_uris_requires_sha512() -> None:
-    digest = "a" * 128
-    text = f"'https://example.invalid/pkg.deb' pkg.deb 123 SHA512:{digest}\n"
-    assert spu.parse_apt_print_uris(text) == [{
-        "repository_uri_sha256": spu._sha256_bytes(b"https://example.invalid/pkg.deb"),
-        "repository_filename": "pkg.deb",
-        "repository_size": 123,
-        "repository_sha512": digest,
-    }]
-    with pytest.raises(spu.PlanError, match="strong SHA512"):
-        spu.parse_apt_print_uris("'https://example.invalid/pkg.deb' pkg.deb 123 MD5Sum:deadbeef")
+def test_parse_apt_print_uris_requires_supported_strong_hash() -> None:
+    for algorithm, length in (("SHA256", 64), ("SHA512", 128)):
+        digest = "a" * length
+        text = f"'https://example.invalid/pkg.deb' pkg.deb 123 {algorithm}:{digest}\n"
+        assert spu.parse_apt_print_uris(text) == [{
+            "repository_uri_sha256": spu._sha256_bytes(b"https://example.invalid/pkg.deb"),
+            "repository_filename": "pkg.deb",
+            "repository_size": 123,
+            "repository_hash_algorithm": algorithm,
+            "repository_hash": digest,
+        }]
+    for weak in ("MD5Sum:deadbeef", "SHA1:" + "a" * 40):
+        with pytest.raises(spu.PlanError, match="supported strong SHA256/SHA512"):
+            spu.parse_apt_print_uris(f"'https://example.invalid/pkg.deb' pkg.deb 123 {weak}")
+    with pytest.raises(spu.PlanError, match="supported strong SHA256/SHA512"):
+        spu.parse_apt_print_uris("'https://example.invalid/pkg.deb' pkg.deb 123 SHA256:deadbeef")
 
 
 def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,7 +131,7 @@ def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Pat
         if "-s" in argv:
             return {"argv": argv, "returncode": 0, "stdout": simulation, "stderr": ""}
         if "--print-uris" in argv:
-            return {"argv": argv, "returncode": 0, "stdout": "'https://example.invalid/curl.deb' curl.deb 2048 SHA512:" + "a" * 128 + "\n", "stderr": ""}
+            return {"argv": argv, "returncode": 0, "stdout": "'https://example.invalid/curl.deb' curl.deb 2048 SHA256:" + "a" * 64 + "\n", "stderr": ""}
         raise AssertionError(f"unexpected actual download: {argv}")
 
     monkeypatch.setattr(spu, "_run", fake_run)
@@ -167,19 +172,19 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
     deb_dir.mkdir(parents=True)
     artifact = deb_dir / "curl.deb"
     artifact.write_bytes(b"forged")
-    digest = "a" * 128
+    digest = "a" * 64
     item = {
         "name": "curl", "version": "new", "arch": "amd64", "package": "curl",
         "relative_path": "apt/debs/curl.deb", "size": len(b"forged"),
         "sha256": spu._sha256_file(artifact),
-        "repository_size": 123, "repository_sha512": digest,
+        "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
     }
     plan = {"apt": {"enabled": True, "packages": [item]}}
     policy = {"apt": {"enabled": True, "max_packages": 10}}
     monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
-        "repository_size": 123, "repository_sha512": digest,
+        "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
         "repository_filename": "curl.deb",
     })
@@ -188,7 +193,7 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
         spu._revalidate_apt_provenance(stage, plan, policy, os.geteuid())
 
 
-def test_snap_provenance_requires_current_pending_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snap_provenance_requires_current_pending_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plan = {"snap": {"enabled": True, "packages": [{"name": "core22", "version": "new", "revision": "2"}]}}
     policy = {"snap": {"enabled": True}}
     monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {
@@ -196,7 +201,74 @@ def test_snap_provenance_requires_current_pending_set(monkeypatch: pytest.Monkey
         "stdout": "Name Version Rev Size Publisher Notes\ncore22 newer 3 1MB canonical** base\n", "stderr": "",
     })
     with pytest.raises(spu.PlanError, match="pending refresh set changed"):
-        spu._revalidate_snap_provenance(plan, policy)
+        spu._revalidate_snap_provenance(tmp_path / "stage", plan, policy, os.geteuid())
+
+
+def test_snap_provenance_rejects_staged_bytes_not_from_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage = tmp_path / "stage"
+    snap_dir = stage / "snap"
+    snap_dir.mkdir(parents=True)
+    staged_snap = snap_dir / "core22_2.snap"
+    staged_assert = snap_dir / "core22_2.assert"
+    staged_snap.write_bytes(b"forged-snap")
+    staged_assert.write_bytes(b"forged-assertion")
+    item = {
+        "name": "core22", "version": "new", "revision": "2", "baseline_revision": "1",
+        "snap_relative_path": "snap/core22_2.snap",
+        "snap_sha256": spu._sha256_file(staged_snap), "snap_size": staged_snap.stat().st_size,
+        "assert_relative_path": "snap/core22_2.assert",
+        "assert_sha256": spu._sha256_file(staged_assert), "assert_size": staged_assert.stat().st_size,
+    }
+    plan = {"snap": {"enabled": True, "packages": [item]}}
+    policy = {"snap": {"enabled": True}}
+
+    def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
+        if argv[:3] == ["/usr/bin/snap", "refresh", "--list"]:
+            return {"argv": argv, "returncode": 0, "stdout": "Name Version Rev Size Publisher Notes\ncore22 new 2 1MB canonical** base\n", "stderr": ""}
+        if argv[:2] == ["/usr/bin/snap", "download"]:
+            basename = argv[argv.index("--basename") + 1]
+            target = Path(argv[argv.index("--target-directory") + 1])
+            (target / f"{basename}.snap").write_bytes(b"store-snap")
+            (target / f"{basename}.assert").write_bytes(b"store-assertion")
+            return {"argv": argv, "returncode": 0, "stdout": "fetched", "stderr": ""}
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    with pytest.raises(spu.PlanError, match="freshly downloaded Store artifact"):
+        spu._revalidate_snap_provenance(stage, plan, policy, os.geteuid())
+
+
+def test_snap_provenance_accepts_byteidentical_store_redownload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage = tmp_path / "stage"
+    snap_dir = stage / "snap"
+    snap_dir.mkdir(parents=True)
+    staged_snap = snap_dir / "core22_2.snap"
+    staged_assert = snap_dir / "core22_2.assert"
+    staged_snap.write_bytes(b"store-snap")
+    staged_assert.write_bytes(b"store-assertion")
+    item = {
+        "name": "core22", "version": "new", "revision": "2", "baseline_revision": "1",
+        "snap_relative_path": "snap/core22_2.snap",
+        "snap_sha256": spu._sha256_file(staged_snap), "snap_size": staged_snap.stat().st_size,
+        "assert_relative_path": "snap/core22_2.assert",
+        "assert_sha256": spu._sha256_file(staged_assert), "assert_size": staged_assert.stat().st_size,
+    }
+    plan = {"snap": {"enabled": True, "packages": [item]}}
+    policy = {"snap": {"enabled": True}}
+
+    def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
+        if argv[:3] == ["/usr/bin/snap", "refresh", "--list"]:
+            return {"argv": argv, "returncode": 0, "stdout": "Name Version Rev Size Publisher Notes\ncore22 new 2 1MB canonical** base\n", "stderr": ""}
+        if argv[:2] == ["/usr/bin/snap", "download"]:
+            basename = argv[argv.index("--basename") + 1]
+            target = Path(argv[argv.index("--target-directory") + 1])
+            (target / f"{basename}.snap").write_bytes(b"store-snap")
+            (target / f"{basename}.assert").write_bytes(b"store-assertion")
+            return {"argv": argv, "returncode": 0, "stdout": "fetched", "stderr": ""}
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    spu._revalidate_snap_provenance(stage, plan, policy, os.geteuid())
 
 
 def test_parse_apt_simulation_keeps_exact_identity() -> None:
@@ -271,8 +343,15 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--pipe",
         "--unit=heim-pc-package-update-20260826T194332Z-1dedf2da5503.service",
         "--property=Type=exec",
-        "--property=NoNewPrivileges=no",
+        "--property=NoNewPrivileges=yes",
         "--property=PrivateTmp=yes",
+        "--property=PrivateMounts=yes",
+        "--property=PrivateNetwork=yes",
+        "--property=TemporaryFileSystem=/run",
+        "--property=ProtectProc=invisible",
+        "--property=ProcSubset=pid",
+        "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
+        "--property=CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_TTY_CONFIG",
         "--property=MemoryDenyWriteExecute=no",
         "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK",
         "--property=IPAddressDeny=any",
@@ -288,6 +367,12 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert apt_apply[0] == "/usr/bin/systemd-run"
     assert "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK" in apt_apply
     assert "--property=IPAddressDeny=any" in apt_apply
+    assert "--property=PrivateNetwork=yes" in apt_apply
+    assert "--property=PrivateMounts=yes" in apt_apply
+    assert "--property=TemporaryFileSystem=/run" in apt_apply
+    assert "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket" in apt_apply
+    assert not any(arg.startswith("--property=InaccessiblePaths=/proc/1") for arg in apt_apply)
+    assert any(arg.startswith("--property=CapabilityBoundingSet=~CAP_SYS_ADMIN") for arg in apt_apply)
     assert apt_apply[apt_apply.index("--") + 1] == "/usr/bin/dpkg"
     assert commands["snap_apply_argvs"] == [
         ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.assert"],
@@ -344,6 +429,17 @@ def test_policy_requires_read_only_handoff_guard(tmp_path: Path) -> None:
     path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="require_broker_read_only_handoff"):
         spu.load_policy(path)
+
+
+def test_policy_requires_snap_store_revalidation_and_private_apt_runtime(tmp_path: Path) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    for key in ("require_snap_store_artifact_revalidation", "require_apt_apply_private_runtime_namespace"):
+        mutated = json.loads(json.dumps(policy))
+        mutated["safety"][key] = False
+        path = tmp_path / f"{key}.json"
+        path.write_text(json.dumps(mutated))
+        with pytest.raises(spu.PolicyError, match=key):
+            spu.load_policy(path)
 
 
 def test_policy_requires_signed_apt_provenance_and_pre_download_cap(tmp_path: Path) -> None:

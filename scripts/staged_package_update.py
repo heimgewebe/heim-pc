@@ -160,6 +160,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_dpkg_recursive_apply",
         "require_no_remove_selection",
         "require_signed_snap_assertion",
+        "require_snap_store_artifact_revalidation",
+        "require_apt_apply_private_runtime_namespace",
         "privileged_broker_network_must_remain_blocked",
     )
     for key in required_true:
@@ -438,19 +440,31 @@ def parse_apt_print_uris(text: str) -> list[dict[str, Any]]:
         if len(parts) != 4 or not parts[2].isdigit():
             raise PlanError(f"unexpected apt --print-uris output: {line}")
         hash_kind, separator, digest = parts[3].partition(":")
-        if separator != ":" or hash_kind.upper() != "SHA512" or re.fullmatch(r"[0-9a-fA-F]{128}", digest) is None:
-            raise PlanError("APT repository metadata did not provide a strong SHA512 artifact hash")
+        algorithm = hash_kind.upper()
+        digest_lengths = {"SHA256": 64, "SHA512": 128}
+        expected_length = digest_lengths.get(algorithm)
+        if (
+            separator != ":"
+            or expected_length is None
+            or re.fullmatch(rf"[0-9a-fA-F]{{{expected_length}}}", digest) is None
+        ):
+            raise PlanError("APT repository metadata did not provide a supported strong SHA256/SHA512 artifact hash")
         records.append({
             "repository_uri_sha256": _sha256_bytes(parts[0].encode("utf-8")),
             "repository_filename": parts[1],
             "repository_size": int(parts[2]),
-            "repository_sha512": digest.lower(),
+            "repository_hash_algorithm": algorithm,
+            "repository_hash": digest.lower(),
         })
     return records
 
 
-def _sha512_file(path: Path) -> str:
-    digest = hashlib.sha512()
+def _strong_hash_file(path: Path, algorithm: str) -> str:
+    constructors = {"SHA256": hashlib.sha256, "SHA512": hashlib.sha512}
+    constructor = constructors.get(algorithm)
+    if constructor is None:
+        raise PlanError(f"unsupported strong APT artifact hash algorithm: {algorithm}")
+    digest = constructor()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
@@ -575,7 +589,10 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
         seen.add(key)
         auth_key = _candidate_identity(candidate)
         repository = authenticated[auth_key]
-        if info_before.st_size != repository["repository_size"] or _sha512_file(path) != repository["repository_sha512"]:
+        if (
+            info_before.st_size != repository["repository_size"]
+            or _strong_hash_file(path, repository["repository_hash_algorithm"]) != repository["repository_hash"]
+        ):
             raise PlanError(f"downloaded DEB does not match authenticated repository metadata: {key}")
         digest = _sha256_file(path)
         safe_package = SAFE_NAME_RE.sub("_", candidate["name"])
@@ -699,7 +716,10 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
         raise PlanError("APT signed upgrade candidate set changed or plan was not derived from the current signed candidate set")
     for item in planned_packages:
         repository = _apt_repository_record(options, item)
-        for key in ("repository_size", "repository_sha512", "repository_manifest_sha256", "repository_uri_sha256"):
+        for key in (
+            "repository_size", "repository_hash_algorithm", "repository_hash",
+            "repository_manifest_sha256", "repository_uri_sha256",
+        ):
             if item.get(key) != repository.get(key):
                 raise PlanError(f"APT authenticated repository provenance changed for {item['name']}")
         path = _stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")
@@ -710,11 +730,45 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
         expected_package = str(item["name"]).split(":", 1)[0]
         if (package, version, arch) != (expected_package, item["version"], item["arch"]):
             raise PlanError(f"APT artifact package identity does not match signed plan candidate: {path}")
-        if info.st_size != repository["repository_size"] or _sha512_file(path) != repository["repository_sha512"]:
+        if (
+            info.st_size != repository["repository_size"]
+            or _strong_hash_file(path, repository["repository_hash_algorithm"]) != repository["repository_hash"]
+        ):
             raise PlanError(f"APT artifact bytes do not match freshly authenticated repository metadata: {path}")
 
 
-def _revalidate_snap_provenance(plan: dict[str, Any], policy: dict[str, Any]) -> None:
+def _revalidate_snap_store_artifact(stage: Path, item: dict[str, Any], uid: int) -> None:
+    snap_dir = stage / "snap"
+    _ensure_private_dir(snap_dir, uid)
+    staged_snap = _stage_artifact_path(stage, item.get("snap_relative_path"), snap_dir)
+    staged_assert = _stage_artifact_path(stage, item.get("assert_relative_path"), snap_dir)
+    staged_snap_info = _regular_owned_file(staged_snap, uid)
+    staged_assert_info = _regular_owned_file(staged_assert, uid)
+    with tempfile.TemporaryDirectory(prefix=".verify-store-", dir=snap_dir) as verify_dir_raw:
+        verify_dir = Path(verify_dir_raw)
+        basename = f"verify-{SAFE_NAME_RE.sub('_', str(item['name']))}_{item['revision']}-{secrets.token_hex(4)}"
+        _run([
+            "/usr/bin/snap", "download", str(item["name"]),
+            "--revision", str(item["revision"]),
+            "--basename", basename,
+            "--target-directory", str(verify_dir),
+        ])
+        store_snap = verify_dir / f"{basename}.snap"
+        store_assert = verify_dir / f"{basename}.assert"
+        store_snap_info = _regular_owned_file(store_snap, uid)
+        store_assert_info = _regular_owned_file(store_assert, uid)
+        if store_assert_info.st_size == 0:
+            raise PlanError(f"fresh Store assertion is empty for {item['name']}")
+        if (
+            staged_snap_info.st_size != store_snap_info.st_size
+            or _sha256_file(staged_snap) != _sha256_file(store_snap)
+            or staged_assert_info.st_size != store_assert_info.st_size
+            or _sha256_file(staged_assert) != _sha256_file(store_assert)
+        ):
+            raise PlanError(f"Snap staged assertion/artifact does not match freshly downloaded Store artifact: {item['name']}")
+
+
+def _revalidate_snap_provenance(stage: Path, plan: dict[str, Any], policy: dict[str, Any], uid: int) -> None:
     snap = plan.get("snap")
     if not isinstance(snap, dict) or snap.get("enabled") is not (policy["snap"].get("enabled") is True):
         raise PlanError("Snap plan enabled state is inconsistent with policy")
@@ -733,6 +787,8 @@ def _revalidate_snap_provenance(plan: dict[str, Any], policy: dict[str, Any]) ->
     planned = sorted((item["name"], item["version"], item["revision"]) for item in planned_packages)
     if current != planned:
         raise PlanError("Snap pending refresh set changed or plan was not derived from the current Store refresh set")
+    for item in planned_packages:
+        _revalidate_snap_store_artifact(stage, item, uid)
 
 
 def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
@@ -745,8 +801,15 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
         "--pipe",
         f"--unit={unit_name}",
         "--property=Type=exec",
-        "--property=NoNewPrivileges=no",
+        "--property=NoNewPrivileges=yes",
         "--property=PrivateTmp=yes",
+        "--property=PrivateMounts=yes",
+        "--property=PrivateNetwork=yes",
+        "--property=TemporaryFileSystem=/run",
+        "--property=ProtectProc=invisible",
+        "--property=ProcSubset=pid",
+        "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
+        "--property=CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_TTY_CONFIG",
         "--property=MemoryDenyWriteExecute=no",
         "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK",
         "--property=IPAddressDeny=any",
@@ -863,6 +926,8 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
             "root_executes_user_code": False,
             "apt_selection_no_remove": True,
             "apt_apply_network_capable": False,
+            "apt_apply_host_ipc_capable": False,
+            "apt_apply_runtime_namespace": "private-run-private-network",
             "apt_apply_engine": "dpkg-recursive-root-stage",
             "apt_apply_execution": "network-denied-systemd-system-task",
             "snap_dangerous": False,
@@ -963,7 +1028,7 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     _require_broker_handoff_binding(policy)
     _validate_stage_artifacts(plan, uid, policy)
     _revalidate_apt_provenance(stage, plan, policy, uid)
-    _revalidate_snap_provenance(plan, policy)
+    _revalidate_snap_provenance(stage, plan, policy, uid)
     for item in plan["snap"].get("packages", []):
         if _snap_installed_revision(item["name"]) != item["baseline_revision"]:
             raise PlanError(f"installed snap revision changed after planning: {item['name']}")

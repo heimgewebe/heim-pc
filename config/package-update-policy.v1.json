@@ -47,6 +47,8 @@
     "require_dpkg_recursive_apply": true,
     "require_no_remove_selection": true,
     "require_signed_snap_assertion": true,
+    "require_snap_store_artifact_revalidation": true,
+    "require_apt_apply_private_runtime_namespace": true,
     "privileged_broker_network_must_remain_blocked": true
   },
   "postflight": {
