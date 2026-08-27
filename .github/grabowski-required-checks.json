@@ -1,0 +1,4 @@
+{
+  "schema_version": 1,
+  "required_checks": ["validate", "guard / verify", "smoke / verify"]
+}
