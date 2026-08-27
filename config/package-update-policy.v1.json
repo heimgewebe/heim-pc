@@ -15,8 +15,8 @@
   "apt": {
     "enabled": true,
     "selection_mode": "upgrade-with-new-pkgs-no-remove",
-    "apply_mode": "dpkg-recursive-root-stage",
-    "max_packages": 200,
+    "apply_mode": "dpkg-explicit-root-stage",
+    "max_packages": 64,
     "max_download_bytes": 6442450944,
     "sensitive_prefixes": [
       "linux-",
@@ -36,7 +36,8 @@
     "max_snaps": 32,
     "max_download_bytes": 6442450944,
     "max_assertion_bytes": 1048576,
-    "allow_dangerous": false
+    "allow_dangerous": false,
+    "download_quota_mode": "userns-tmpfs"
   },
   "safety": {
     "require_exact_plan_hash": true,
@@ -51,7 +52,6 @@
     "require_root_owned_copy_before_apply": true,
     "require_root_copy_hash_readback": true,
     "require_broker_read_only_handoff": true,
-    "require_dpkg_recursive_apply": true,
     "require_no_remove_selection": true,
     "require_signed_snap_assertion": true,
     "require_snap_store_artifact_revalidation": true,
@@ -63,7 +63,9 @@
     "privileged_broker_network_must_remain_blocked": true,
     "require_privileged_broker_output_evidence": true,
     "require_target_downgrade_refusal": true,
-    "require_explicit_activation_semantics": true
+    "require_explicit_activation_semantics": true,
+    "require_dpkg_explicit_apply": true,
+    "require_snap_download_hard_quota": true
   },
   "postflight": {
     "system_services": [

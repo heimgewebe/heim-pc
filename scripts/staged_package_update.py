@@ -12,6 +12,7 @@ import secrets
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Iterable
@@ -161,7 +162,7 @@ def _validate_broker_output_evidence(
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISREG(info.st_mode)
         or info.st_uid != expected_owner_uid
-        or stat.S_IMODE(info.st_mode) != 0o644
+        or stat.S_IMODE(info.st_mode) != 0o640
         or info.st_nlink != 1
     ):
         raise PlanError("privileged broker output evidence file is not trusted")
@@ -230,6 +231,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         raise PolicyError("staging, apt, snap and safety must be objects")
     if snap.get("allow_dangerous") is not False:
         raise PolicyError("snap.allow_dangerous must remain false")
+    if snap.get("download_quota_mode") != "userns-tmpfs":
+        raise PolicyError("snap.download_quota_mode must be userns-tmpfs")
     required_true = (
         "require_exact_plan_hash",
         "require_fresh_apt_indexes",
@@ -243,7 +246,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_root_owned_copy_before_apply",
         "require_root_copy_hash_readback",
         "require_broker_read_only_handoff",
-        "require_dpkg_recursive_apply",
+        "require_dpkg_explicit_apply",
         "require_no_remove_selection",
         "require_signed_snap_assertion",
         "require_snap_store_artifact_revalidation",
@@ -251,6 +254,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_apt_apply_kernel_device_isolation",
         "require_apply_readback_authorization",
         "require_snap_download_byte_cap",
+        "require_snap_download_hard_quota",
         "require_postflight_plan_identity",
         "privileged_broker_network_must_remain_blocked",
         "require_privileged_broker_output_evidence",
@@ -270,7 +274,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
             raise PolicyError(f"{key} must be a positive integer")
     if apt.get("selection_mode") != "upgrade-with-new-pkgs-no-remove":
         raise PolicyError("unsupported apt selection mode")
-    if apt.get("apply_mode") != "dpkg-recursive-root-stage":
+    if apt.get("apply_mode") != "dpkg-explicit-root-stage":
         raise PolicyError("unsupported apt apply mode")
     return value
 
@@ -580,8 +584,11 @@ def _prepare_apt_dirs(stage: Path, uid: int) -> None:
 def parse_apt_simulation(text: str) -> list[dict[str, str]]:
     packages: list[dict[str, str]] = []
     for raw_line in text.splitlines():
-        match = APT_INST_RE.match(raw_line.strip())
+        line = raw_line.strip()
+        match = APT_INST_RE.match(line)
         if match is None:
+            if line.startswith("Inst "):
+                raise PlanError(f"unexpected apt simulation Inst row: {line}")
             continue
         name, version, arch = match.groups()
         packages.append({"name": name, "version": version, "arch": arch})
@@ -854,6 +861,84 @@ def _snap_installed_revision(name: str) -> str:
     return parts[2]
 
 
+def _snap_quota_worker(args: list[str]) -> int:
+    if len(args) != 7:
+        raise PlanError("Snap quota worker argument count is invalid")
+    mountpoint = Path(args[0]); output_dir = Path(args[1]); name, revision, basename = args[2], args[3], args[4]
+    if (not mountpoint.is_absolute() or not output_dir.is_absolute() or not name or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name) is None or re.fullmatch(r"[0-9]+", revision) is None or re.fullmatch(r"[A-Za-z0-9.+-]{1,200}", basename) is None):
+        raise PlanError("Snap quota worker identity is invalid")
+    try:
+        snap_cap = int(args[5]); assertion_cap = int(args[6])
+    except ValueError as exc:
+        raise PlanError("Snap quota worker byte limits are invalid") from exc
+    if snap_cap <= 0 or assertion_cap <= 0:
+        raise PlanError("Snap quota worker byte limits must be positive")
+    quota_bytes = snap_cap + assertion_cap
+    for directory, label in ((mountpoint, "mountpoint"), (output_dir, "output directory")):
+        info = directory.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or (stat.S_IMODE(info.st_mode) & 0o022):
+            raise PlanError(f"Snap quota {label} is unsafe")
+    if any(mountpoint.iterdir()):
+        raise PlanError("Snap quota mountpoint must start empty")
+    expected_names = {f"{basename}.snap", f"{basename}.assert"}; copied: list[Path] = []; mounted = False
+    try:
+        safe_env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
+        mount = subprocess.run(["/usr/bin/mount", "-t", "tmpfs", "-o", f"size={quota_bytes},mode=0700,nosuid,nodev,noexec", "tmpfs", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=safe_env)
+        if mount.returncode != 0:
+            raise PlanError(f"Snap quota tmpfs mount failed: {mount.stderr.strip()}")
+        mounted = True
+        download = subprocess.run(["/usr/bin/snap", "download", name, "--revision", revision, "--basename", basename, "--target-directory", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=os.environ.copy())
+        if download.returncode != 0:
+            raise PlanError(f"snap download failed inside hard quota rc={download.returncode}: {download.stderr.strip() or download.stdout.strip()}")
+        if {entry.name for entry in mountpoint.iterdir()} != expected_names:
+            raise PlanError("Snap quota download produced an unexpected artifact inventory")
+        for source, destination, limit, label in ((mountpoint / f"{basename}.snap", output_dir / f"{basename}.snap", snap_cap, "snap"), (mountpoint / f"{basename}.assert", output_dir / f"{basename}.assert", assertion_cap, "assertion")):
+            source_info = source.lstat()
+            if stat.S_ISLNK(source_info.st_mode) or not stat.S_ISREG(source_info.st_mode) or source_info.st_uid != os.geteuid() or source_info.st_nlink != 1 or source_info.st_size <= 0 or source_info.st_size > limit:
+                raise PlanError(f"Snap quota {label} artifact is unsafe or over limit")
+            source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0), 0o600); copied.append(destination)
+                try:
+                    remaining = source_info.st_size
+                    while remaining:
+                        chunk = os.read(source_fd, min(1024 * 1024, remaining))
+                        if not chunk: raise PlanError(f"Snap quota {label} artifact ended early")
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(destination_fd, view)
+                            if written <= 0: raise OSError("Snap quota artifact copy was incomplete")
+                            view = view[written:]
+                        remaining -= len(chunk)
+                    if os.read(source_fd, 1): raise PlanError(f"Snap quota {label} artifact grew during copy")
+                    os.fsync(destination_fd)
+                finally: os.close(destination_fd)
+            finally: os.close(source_fd)
+        _fsync_directory(output_dir)
+        if download.stdout: sys.stdout.write(download.stdout)
+        return 0
+    except BaseException:
+        for destination in reversed(copied): destination.unlink(missing_ok=True)
+        raise
+    finally:
+        if mounted: subprocess.run(["/usr/bin/umount", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+
+
+def _snap_quota_argv(output_dir: Path, mountpoint: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int) -> list[str]:
+    return ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "/usr/bin/python3", str(Path(__file__).resolve()), "__snap-quota-worker", str(mountpoint), str(output_dir), name, revision, basename, str(snap_cap), str(assertion_cap)]
+
+
+def _snap_quota_download(output_dir: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int, uid: int) -> dict[str, Any]:
+    _ensure_private_dir(output_dir, uid); mountpoint = output_dir / f".quota-{basename}-{secrets.token_hex(6)}"; mountpoint.mkdir(mode=0o700)
+    try:
+        result = _run(_snap_quota_argv(output_dir, mountpoint, name=name, revision=revision, basename=basename, snap_cap=snap_cap, assertion_cap=assertion_cap))
+        if any(mountpoint.iterdir()): raise PlanError("Snap quota mountpoint retained unexpected files after namespace exit")
+        return result
+    finally:
+        try: mountpoint.rmdir()
+        except FileNotFoundError: pass
+
+
 def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
     if policy["snap"].get("enabled") is not True:
         return {"enabled": False, "packages": [], "download_bytes": 0, "declared_upper_bound_bytes": 0}
@@ -877,12 +962,11 @@ def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]
     for item in pending:
         baseline_revision = _snap_installed_revision(str(item["name"]))
         basename = f"{SAFE_NAME_RE.sub('_', str(item['name']))}_{item['revision']}"
-        download = _run([
-            "/usr/bin/snap", "download", str(item["name"]),
-            "--revision", str(item["revision"]),
-            "--basename", basename,
-            "--target-directory", str(snap_dir),
-        ])
+        download = _snap_quota_download(
+            snap_dir, name=str(item["name"]), revision=str(item["revision"]),
+            basename=basename, snap_cap=int(item["size_upper_bound_bytes"]),
+            assertion_cap=policy["snap"]["max_assertion_bytes"], uid=uid,
+        )
         snap_path = snap_dir / f"{basename}.snap"
         assertion_path = snap_dir / f"{basename}.assert"
         snap_info = _regular_owned_file(snap_path, uid)
@@ -986,12 +1070,11 @@ def _revalidate_snap_store_artifact(
     with tempfile.TemporaryDirectory(prefix=".verify-store-", dir=snap_dir) as verify_dir_raw:
         verify_dir = Path(verify_dir_raw)
         basename = f"verify-{SAFE_NAME_RE.sub('_', str(item['name']))}_{item['revision']}-{secrets.token_hex(4)}"
-        _run([
-            "/usr/bin/snap", "download", str(item["name"]),
-            "--revision", str(item["revision"]),
-            "--basename", basename,
-            "--target-directory", str(verify_dir),
-        ])
+        _snap_quota_download(
+            verify_dir, name=str(item["name"]), revision=str(item["revision"]),
+            basename=basename, snap_cap=int(item["size_upper_bound_bytes"]),
+            assertion_cap=policy["snap"]["max_assertion_bytes"], uid=uid,
+        )
         store_snap = verify_dir / f"{basename}.snap"
         store_assert = verify_dir / f"{basename}.assert"
         store_snap_info = _regular_owned_file(store_snap, uid)
@@ -1047,9 +1130,24 @@ def _revalidate_snap_provenance(stage: Path, plan: dict[str, Any], policy: dict[
         _revalidate_snap_store_artifact(stage, item, uid, policy)
 
 
-def _apt_apply_systemd_argv(plan_id: str, root_debs: Path, runtime_capture: Path) -> list[str]:
+def _root_apt_deb_paths(plan: dict[str, Any]) -> list[Path]:
+    root_debs = Path(plan["root_commands"]["root_stage"]) / "debs"
+    paths: list[Path] = []
+    for item in plan["apt"].get("packages", []):
+        relative = item.get("relative_path")
+        if not isinstance(relative, str) or not relative:
+            raise PlanError("APT package relative_path is missing")
+        paths.append(root_debs / Path(relative).name)
+    return paths
+
+
+def _apt_apply_systemd_argv(
+    plan_id: str, root_deb_paths: list[Path], runtime_capture: Path
+) -> list[str]:
+    if not root_deb_paths:
+        raise PlanError("APT apply requires at least one explicit root-owned DEB path")
     unit_name = f"heim-pc-package-update-{SAFE_NAME_RE.sub('_', plan_id)}.service"
-    return [
+    argv = [
         "/usr/bin/systemd-run",
         "--system",
         "--wait",
@@ -1082,9 +1180,11 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path, runtime_capture: Path
         "--refuse-downgrade",
         "--force-confold",
         "--install",
-        "--recursive",
-        str(root_debs),
+        *[str(path) for path in root_deb_paths],
     ]
+    if len(argv) > 128:
+        raise PlanError("APT apply argv exceeds privileged broker item limit")
+    return argv
 
 
 def _root_commands(
@@ -1136,24 +1236,27 @@ def _copy_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, An
 
 
 def _apt_apply_preflight_argv(plan: dict[str, Any]) -> list[str] | None:
-    if not plan["apt"].get("packages"):
+    root_deb_paths = _root_apt_deb_paths(plan)
+    if not root_deb_paths:
         return None
-    root_debs = Path(plan["root_commands"]["root_stage"]) / "debs"
-    return [
+    argv = [
         "/usr/bin/dpkg", "--simulate", "--refuse-downgrade", "--force-confold",
-        "--install", "--recursive", str(root_debs),
+        "--install", *[str(path) for path in root_deb_paths],
     ]
+    if len(argv) > 128:
+        raise PlanError("APT preflight argv exceeds privileged broker item limit")
+    return argv
 
 
 def _apply_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     commands = plan["root_commands"]
     root_stage = Path(commands["root_stage"])
-    root_debs = root_stage / "debs"
     root_snaps = root_stage / "snaps"
+    root_deb_paths = _root_apt_deb_paths(plan)
     apt_apply = None
-    if plan["apt"].get("packages"):
+    if root_deb_paths:
         apt_apply = _apt_apply_systemd_argv(
-            plan["plan_id"], root_debs, Path(commands["runtime_capture_path"])
+            plan["plan_id"], root_deb_paths, Path(commands["runtime_capture_path"])
         )
     snap_apply: list[list[str]] = []
     for item in plan["snap"].get("packages", []):
@@ -1578,15 +1681,26 @@ def root_readback_authorize(
     return {**authorization, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
 
 
-def _dpkg_version(name: str, arch: str | None = None) -> str | None:
+def _dpkg_state(name: str, arch: str | None = None) -> dict[str, str] | None:
     query_name = name if ":" in name or not arch else f"{name}:{arch}"
-    result = _run(["/usr/bin/dpkg-query", "-W", "-f=${Version}\n", query_name], check=False)
+    result = _run(
+        ["/usr/bin/dpkg-query", "-W", "-f=${Version}\t${Status}\n", query_name],
+        check=False,
+    )
     if result["returncode"] != 0:
         return None
-    versions = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
-    if len(versions) != 1:
+    rows = [line.rstrip("\n") for line in result["stdout"].splitlines() if line.strip()]
+    if len(rows) != 1 or "\t" not in rows[0]:
         return None
-    return versions[0]
+    version, status = rows[0].split("\t", 1)
+    if not version or not status:
+        return None
+    return {"version": version, "status": status}
+
+
+def _dpkg_version(name: str, arch: str | None = None) -> str | None:
+    state = _dpkg_state(name, arch)
+    return state["version"] if state is not None else None
 
 
 def _service_state(unit: str, *, user: bool) -> str:
@@ -1602,14 +1716,26 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     plan, policy, _stage, _uid = _validate_plan_identity(plan_path, confirmation)
     apt_results: list[dict[str, Any]] = []
     for item in plan["apt"].get("packages", []):
-        installed = _dpkg_version(item["name"], item.get("arch"))
+        installed = _dpkg_state(item["name"], item.get("arch"))
+        installed_version = installed.get("version") if installed is not None else None
+        installed_status = installed.get("status") if installed is not None else None
         apt_results.append({
             "name": item["name"],
             "arch": item.get("arch"),
             "expected_version": item["version"],
-            "installed_version": installed,
-            "matched": installed == item["version"],
+            "installed_version": installed_version,
+            "installed_status": installed_status,
+            "matched": (
+                installed_version == item["version"]
+                and installed_status == "install ok installed"
+            ),
         })
+    dpkg_audit = _run(["/usr/bin/dpkg", "--audit"], check=False)
+    dpkg_audit_ok = (
+        dpkg_audit["returncode"] == 0
+        and not dpkg_audit["stdout"].strip()
+        and not dpkg_audit["stderr"].strip()
+    )
     snap_results: list[dict[str, Any]] = []
     for item in plan["snap"].get("packages", []):
         try:
@@ -1672,6 +1798,9 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "snap": snap_results,
         "all_apt_matched": all(item["matched"] for item in apt_results),
         "all_snap_matched": all(item["matched"] for item in snap_results),
+        "dpkg_audit_ok": dpkg_audit_ok,
+        "dpkg_audit_stdout_sha256": _sha256_bytes(dpkg_audit["stdout"].encode()),
+        "dpkg_audit_stderr_sha256": _sha256_bytes(dpkg_audit["stderr"].encode()),
         "all_system_services_active": all_system_services_active,
         "all_user_services_active": all_user_services_active,
         "service_liveness_established": all_system_services_active and all_user_services_active,
@@ -1698,6 +1827,8 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     _atomic_json(receipt_path, receipt)
     if not receipt["all_apt_matched"] or not receipt["all_snap_matched"]:
         raise PlanError(f"postflight target mismatch; receipt={receipt_path}")
+    if not receipt["dpkg_audit_ok"]:
+        raise PlanError(f"postflight dpkg audit mismatch; receipt={receipt_path}")
     if not receipt["all_system_services_active"] or not receipt["all_user_services_active"]:
         raise PlanError(f"postflight service health mismatch; receipt={receipt_path}")
     if not receipt["nvidia_smi_ok"]:
@@ -1730,6 +1861,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "__snap-quota-worker":
+        try: return _snap_quota_worker(sys.argv[2:])
+        except (PlanError, OSError) as exc:
+            print(str(exc), file=sys.stderr); return 2
     args = _build_parser().parse_args()
     try:
         if args.command == "plan":
