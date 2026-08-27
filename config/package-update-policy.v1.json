@@ -7,6 +7,7 @@
     "runtime_root": "/home/alex/repos/.heim-pc-worktrees/.package-update-handoff",
     "broker_bind_root": "/home/alex/repos/.heim-pc-worktrees",
     "root_root": "/var/lib/heim-pc/package-update-stages",
+    "runtime_capture_root": "/run/heim-pc-package-update-captures",
     "max_plan_age_seconds": 3600
   },
   "apt": {
@@ -31,6 +32,8 @@
   "snap": {
     "enabled": true,
     "max_snaps": 32,
+    "max_download_bytes": 6442450944,
+    "max_assertion_bytes": 1048576,
     "allow_dangerous": false
   },
   "safety": {
@@ -39,6 +42,8 @@
     "require_apt_signature_verification": true,
     "require_signed_apt_artifact_provenance": true,
     "require_pre_download_byte_cap": true,
+    "require_root_staging_capacity": true,
+    "require_reboot_capture": true,
     "require_dpkg_status_precondition": true,
     "require_source_config_precondition": true,
     "require_root_owned_copy_before_apply": true,
@@ -49,6 +54,10 @@
     "require_signed_snap_assertion": true,
     "require_snap_store_artifact_revalidation": true,
     "require_apt_apply_private_runtime_namespace": true,
+    "require_apt_apply_kernel_device_isolation": true,
+    "require_apply_readback_authorization": true,
+    "require_snap_download_byte_cap": true,
+    "require_postflight_plan_identity": true,
     "privileged_broker_network_must_remain_blocked": true
   },
   "postflight": {

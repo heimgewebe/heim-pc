@@ -181,7 +181,7 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
     }
     plan = {"apt": {"enabled": True, "packages": [item]}}
-    policy = {"apt": {"enabled": True, "max_packages": 10}}
+    policy = {"apt": {"enabled": True, "max_packages": 10, "max_download_bytes": 1024 * 1024}}
     monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
@@ -194,8 +194,13 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
 
 
 def test_snap_provenance_requires_current_pending_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    plan = {"snap": {"enabled": True, "packages": [{"name": "core22", "version": "new", "revision": "2"}]}}
-    policy = {"snap": {"enabled": True}}
+    upper = spu._snap_size_upper_bound_bytes("1MB")
+    plan = {"snap": {
+        "enabled": True,
+        "packages": [{"name": "core22", "version": "new", "revision": "2", "size_upper_bound_bytes": upper}],
+        "download_bytes": 0, "declared_upper_bound_bytes": upper + 1024,
+    }}
+    policy = {"snap": {"enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": 1024}}
     monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {
         "argv": argv, "returncode": 0,
         "stdout": "Name Version Rev Size Publisher Notes\ncore22 newer 3 1MB canonical** base\n", "stderr": "",
@@ -212,15 +217,24 @@ def test_snap_provenance_rejects_staged_bytes_not_from_store(tmp_path: Path, mon
     staged_assert = snap_dir / "core22_2.assert"
     staged_snap.write_bytes(b"forged-snap")
     staged_assert.write_bytes(b"forged-assertion")
+    upper = spu._snap_size_upper_bound_bytes("1MB")
+    assertion_cap = 1024
     item = {
         "name": "core22", "version": "new", "revision": "2", "baseline_revision": "1",
+        "size_upper_bound_bytes": upper,
         "snap_relative_path": "snap/core22_2.snap",
         "snap_sha256": spu._sha256_file(staged_snap), "snap_size": staged_snap.stat().st_size,
         "assert_relative_path": "snap/core22_2.assert",
         "assert_sha256": spu._sha256_file(staged_assert), "assert_size": staged_assert.stat().st_size,
     }
-    plan = {"snap": {"enabled": True, "packages": [item]}}
-    policy = {"snap": {"enabled": True}}
+    actual = staged_snap.stat().st_size + staged_assert.stat().st_size
+    plan = {"snap": {
+        "enabled": True, "packages": [item], "download_bytes": actual,
+        "declared_upper_bound_bytes": upper + assertion_cap,
+    }}
+    policy = {"snap": {
+        "enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
+    }}
 
     def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
         if argv[:3] == ["/usr/bin/snap", "refresh", "--list"]:
@@ -246,15 +260,24 @@ def test_snap_provenance_accepts_byteidentical_store_redownload(tmp_path: Path, 
     staged_assert = snap_dir / "core22_2.assert"
     staged_snap.write_bytes(b"store-snap")
     staged_assert.write_bytes(b"store-assertion")
+    upper = spu._snap_size_upper_bound_bytes("1MB")
+    assertion_cap = 1024
     item = {
         "name": "core22", "version": "new", "revision": "2", "baseline_revision": "1",
+        "size_upper_bound_bytes": upper,
         "snap_relative_path": "snap/core22_2.snap",
         "snap_sha256": spu._sha256_file(staged_snap), "snap_size": staged_snap.stat().st_size,
         "assert_relative_path": "snap/core22_2.assert",
         "assert_sha256": spu._sha256_file(staged_assert), "assert_size": staged_assert.stat().st_size,
     }
-    plan = {"snap": {"enabled": True, "packages": [item]}}
-    policy = {"snap": {"enabled": True}}
+    actual = staged_snap.stat().st_size + staged_assert.stat().st_size
+    plan = {"snap": {
+        "enabled": True, "packages": [item], "download_bytes": actual,
+        "declared_upper_bound_bytes": upper + assertion_cap,
+    }}
+    policy = {"snap": {
+        "enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
+    }}
 
     def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
         if argv[:3] == ["/usr/bin/snap", "refresh", "--list"]:
@@ -291,9 +314,35 @@ core22 20260410 2437 77.6MB canonical** base
 gnome-46-2404 0+git.b31ceab 164 644MB canonical** -
 """
     assert spu.parse_snap_refresh_list(text) == [
-        {"name": "core22", "version": "20260410", "revision": "2437"},
-        {"name": "gnome-46-2404", "version": "0+git.b31ceab", "revision": "164"},
+        {
+            "name": "core22", "version": "20260410", "revision": "2437",
+            "size_upper_bound_bytes": spu._snap_size_upper_bound_bytes("77.6MB"),
+        },
+        {
+            "name": "gnome-46-2404", "version": "0+git.b31ceab", "revision": "164",
+            "size_upper_bound_bytes": spu._snap_size_upper_bound_bytes("644MB"),
+        },
     ]
+    assert spu._snap_size_upper_bound_bytes("77.6MB") > 77_600_000
+    with pytest.raises(spu.PlanError, match="unexpected snap size"):
+        spu._snap_size_upper_bound_bytes("unknown")
+
+
+def test_stage_snap_enforces_declared_byte_cap_before_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
+        calls.append(argv)
+        if argv[:3] == ["/usr/bin/snap", "refresh", "--list"]:
+            return {"argv": argv, "returncode": 0, "stdout": "Name Version Rev Size Publisher Notes\ncore22 new 2 2GB canonical** base\n", "stderr": ""}
+        raise AssertionError(f"download should not start: {argv}")
+    monkeypatch.setattr(spu, "_run", fake_run)
+    policy = {"snap": {
+        "enabled": True, "max_snaps": 10, "max_download_bytes": 1024 * 1024,
+        "max_assertion_bytes": 1024,
+    }}
+    with pytest.raises(spu.PlanError, match="before download"):
+        spu._stage_snap(tmp_path / "stage", policy, os.geteuid())
+    assert not any(argv[:2] == ["/usr/bin/snap", "download"] for argv in calls)
 
 
 def test_plan_hash_excludes_only_hash_field() -> None:
@@ -307,7 +356,10 @@ def test_plan_hash_excludes_only_hash_field() -> None:
 
 def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Path) -> None:
     policy = {
-        "staging": {"root_root": "/var/lib/heim-pc/package-update-stages"},
+        "staging": {
+            "root_root": "/var/lib/heim-pc/package-update-stages",
+            "runtime_capture_root": "/run/heim-pc-package-update-captures",
+        },
     }
     stage = tmp_path / "stage"
     apt = {
@@ -315,6 +367,7 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
             {
                 "relative_path": "apt/debs/000-curl-amd64-deadbeef.deb",
                 "sha256": "a" * 64,
+                "size": 123,
             }
         ]
     }
@@ -322,14 +375,21 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "packages": [
             {
                 "assert_relative_path": "snap/core22_2437.assert",
+                "assert_size": 10,
                 "snap_relative_path": "snap/core22_2437.snap",
+                "snap_size": 20,
             }
         ]
     }
     plan_id = "20260826T194332Z-1dedf2da5503"
     commands = spu._root_commands(plan_id, stage, policy, apt, snap)
     apt_preflight = commands["apt_apply_preflight_argv"]
-    apt_apply = commands["apt_apply_argv"]
+    assert "apt_apply_argv" not in commands
+    assert "snap_apply_argvs" not in commands
+    assert commands["apply_readback_required"] is True
+    plan = {"plan_id": plan_id, "root_commands": commands, "apt": apt, "snap": snap}
+    apply_commands = spu._apply_commands(plan, policy)
+    apt_apply = apply_commands["apt_apply_argv"]
     root_debs = "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/debs"
     assert apt_preflight == [
         "/usr/bin/dpkg", "--simulate", "--force-confold",
@@ -347,10 +407,18 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--property=PrivateTmp=yes",
         "--property=PrivateMounts=yes",
         "--property=PrivateNetwork=yes",
-        "--property=TemporaryFileSystem=/run",
+        "--property=BindPaths=/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503:/run",
         "--property=ProtectProc=invisible",
         "--property=ProcSubset=pid",
         "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
+        "--property=ProtectControlGroups=yes",
+        "--property=PrivateDevices=yes",
+        "--property=RestrictNamespaces=yes",
+        "--property=ProtectKernelLogs=yes",
+        "--property=ProtectClock=yes",
+        "--property=LockPersonality=yes",
         "--property=CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_TTY_CONFIG",
         "--property=MemoryDenyWriteExecute=no",
         "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK",
@@ -369,16 +437,115 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert "--property=IPAddressDeny=any" in apt_apply
     assert "--property=PrivateNetwork=yes" in apt_apply
     assert "--property=PrivateMounts=yes" in apt_apply
-    assert "--property=TemporaryFileSystem=/run" in apt_apply
+    assert "--property=BindPaths=/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503:/run" in apt_apply
+    assert "--property=TemporaryFileSystem=/run" not in apt_apply
     assert "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket" in apt_apply
+    for prop in (
+        "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
+        "PrivateDevices=yes", "RestrictNamespaces=yes", "ProtectKernelLogs=yes",
+        "ProtectClock=yes", "LockPersonality=yes",
+    ):
+        assert f"--property={prop}" in apt_apply
     assert not any(arg.startswith("--property=InaccessiblePaths=/proc/1") for arg in apt_apply)
     assert any(arg.startswith("--property=CapabilityBoundingSet=~CAP_SYS_ADMIN") for arg in apt_apply)
     assert apt_apply[apt_apply.index("--") + 1] == "/usr/bin/dpkg"
-    assert commands["snap_apply_argvs"] == [
+    assert apply_commands["snap_apply_argvs"] == [
         ["/usr/bin/snap", "ack", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.assert"],
         ["/usr/bin/snap", "install", "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/snaps/core22_2437.snap"],
     ]
-    assert all("--dangerous" not in argv for argv in commands["snap_apply_argvs"])
+    assert all("--dangerous" not in argv for argv in apply_commands["snap_apply_argvs"])
+    assert commands["runtime_capture_path"] == "/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503"
+    assert commands["root_copy_required_bytes"] == 153
+    assert commands["root_capacity_argv"] == [
+        "/usr/bin/stat", "-f", "-c", "%a:%S", "/var/lib/heim-pc/package-update-stages"
+    ]
+    assert commands["cleanup_runtime_capture_argv"] == [
+        "/usr/bin/rm", "-rf", "--", "/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503"
+    ]
+
+
+def test_root_staging_capacity_probe_and_readback_are_fail_closed(tmp_path: Path) -> None:
+    policy = {
+        "staging": {
+            "root_root": "/var/lib/heim-pc/package-update-stages",
+            "runtime_capture_root": "/run/heim-pc-package-update-captures",
+        }
+    }
+    apt = {"packages": [{"relative_path": "apt/debs/a.deb", "sha256": "a" * 64, "size": 80}]}
+    snap = {"packages": [{
+        "assert_relative_path": "snap/a.assert", "assert_size": 10,
+        "snap_relative_path": "snap/a.snap", "snap_size": 20,
+    }]}
+    commands = spu._root_commands("20260827T010203Z-123456abcdef", tmp_path / "stage", policy, apt, snap)
+    assert commands["root_copy_required_bytes"] == 110
+    assert commands["root_capacity_argv"] == [
+        "/usr/bin/stat", "-f", "-c", "%a:%S", "/var/lib/heim-pc/package-update-stages"
+    ]
+    assert spu.parse_root_capacity_readback("100:4096\n", 110) == {
+        "required_bytes": 110, "available_bytes": 409600, "sufficient": True
+    }
+    with pytest.raises(spu.PlanError, match="requires 110 bytes"):
+        spu.parse_root_capacity_readback("10:10", 110)
+    with pytest.raises(spu.PlanError, match="unexpected root staging filesystem capacity readback"):
+        spu.parse_root_capacity_readback("not-a-capacity", 110)
+
+
+def test_verify_rejects_authenticated_apt_total_over_byte_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stage = tmp_path / "stage"
+    (stage / "apt" / "debs").mkdir(parents=True)
+    item = {
+        "name": "curl", "version": "new", "arch": "amd64",
+        "repository_size": 2048, "repository_hash_algorithm": "SHA256", "repository_hash": "a" * 64,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+        "relative_path": "apt/debs/curl.deb",
+    }
+    plan = {"apt": {"enabled": True, "packages": [item], "authenticated_download_bytes": 2048, "download_bytes": 2048}}
+    policy = {"apt": {"enabled": True, "max_packages": 10, "max_download_bytes": 1024}}
+    monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
+    monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
+        "repository_size": 2048, "repository_hash_algorithm": "SHA256", "repository_hash": "a" * 64,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64, "repository_filename": "curl.deb",
+    })
+    with pytest.raises(spu.PlanError, match="exceed policy limit during verification"):
+        spu._revalidate_apt_provenance(stage, plan, policy, os.geteuid())
+
+
+def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    plan_id = "20260827T010203Z-123456abcdef"
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    apt = {"packages": [{
+        "name": "curl", "version": "new", "arch": "amd64",
+        "relative_path": "apt/debs/curl.deb", "sha256": "a" * 64, "size": 10,
+    }]}
+    snap = {"packages": []}
+    commands = spu._root_commands(plan_id, stage, policy, apt, snap)
+    root_path = str(Path(commands["root_stage"]) / "debs" / "curl.deb")
+    plan: dict[str, object] = {
+        "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": plan_id,
+        "plan_sha256": "f" * 64, "policy_path": str((ROOT / "config" / "package-update-policy.v1.json").resolve()),
+        "stage_path": str(stage), "root_commands": commands, "root_artifact_sha256": {root_path: "a" * 64},
+        "apt": apt, "snap": snap,
+    }
+    plan_path = stage / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+    monkeypatch.setattr(spu, "verify_plan", lambda path, confirmation: {"age_seconds": 1})
+    monkeypatch.setattr(spu, "_read_json", lambda path: plan)
+    monkeypatch.setattr(spu, "load_policy", lambda path: policy)
+    result = spu.root_readback_authorize(plan_path, "f" * 64, f"{'a' * 64}  {root_path}\n", "")
+    assert result["status"] == "root-readback-authorized"
+    assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
+    with pytest.raises(spu.PlanError, match="root artifact hash readback mismatch"):
+        spu.root_readback_authorize(plan_path, "f" * 64, f"{'b' * 64}  {root_path}\n", "")
+
+
+def test_sha256sum_readback_rejects_duplicate_or_relative_paths() -> None:
+    digest = "a" * 64
+    with pytest.raises(spu.PlanError, match="unsafe or duplicate"):
+        spu._parse_sha256sum_output(f"{digest}  relative.deb\n")
+    with pytest.raises(spu.PlanError, match="unsafe or duplicate"):
+        spu._parse_sha256sum_output(f"{digest}  /x\n{digest}  /x\n")
 
 
 def test_dpkg_version_qualifies_multiarch_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -433,7 +600,12 @@ def test_policy_requires_read_only_handoff_guard(tmp_path: Path) -> None:
 
 def test_policy_requires_snap_store_revalidation_and_private_apt_runtime(tmp_path: Path) -> None:
     policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
-    for key in ("require_snap_store_artifact_revalidation", "require_apt_apply_private_runtime_namespace"):
+    for key in (
+        "require_snap_store_artifact_revalidation", "require_apt_apply_private_runtime_namespace",
+        "require_root_staging_capacity", "require_reboot_capture",
+        "require_apt_apply_kernel_device_isolation", "require_apply_readback_authorization",
+        "require_snap_download_byte_cap", "require_postflight_plan_identity",
+    ):
         mutated = json.loads(json.dumps(policy))
         mutated["safety"][key] = False
         path = tmp_path / f"{key}.json"
@@ -498,27 +670,23 @@ def test_exact_confirmation_required() -> None:
         spu._validate_confirmation(plan, "0" * 64)
 
 
-def test_postflight_rejects_policy_drift(tmp_path: Path) -> None:
-    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
-    policy_path = tmp_path / "policy.json"
-    policy_path.write_text(json.dumps(policy, sort_keys=True))
+def test_postflight_rejects_noncanonical_plan_identity(tmp_path: Path) -> None:
+    alternate_policy = tmp_path / "policy.json"
+    alternate_policy.write_bytes((ROOT / "config" / "package-update-policy.v1.json").read_bytes())
     stage = tmp_path / "stage"
     stage.mkdir()
     plan = {
-        "schema_version": 1,
-        "kind": spu.PLAN_KIND,
-        "plan_id": "policy-drift",
-        "policy_path": str(policy_path),
-        "policy_sha256": spu._sha256_file(policy_path),
-        "stage_path": str(stage),
-        "apt": {"packages": []},
-        "snap": {"packages": []},
+        "schema_version": 1, "kind": spu.PLAN_KIND,
+        "plan_id": "20260827T010203Z-123456abcdef",
+        "policy_path": str(alternate_policy), "policy_sha256": spu._sha256_file(alternate_policy),
+        "stage_path": str(stage), "baseline": {"uid": os.geteuid()},
+        "apt": {"packages": []}, "snap": {"packages": []},
+        "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/x"},
+        "root_artifact_sha256": {},
     }
     plan["plan_sha256"] = spu._plan_digest(plan)
-    policy["postflight"]["system_services"] = []
-    policy_path.write_text(json.dumps(policy, sort_keys=True))
     plan_path = _write_plan(tmp_path, plan)
-    with pytest.raises(spu.PlanError, match="policy changed after planning"):
+    with pytest.raises(spu.PlanError, match="canonical repository policy"):
         spu.postflight(plan_path, str(plan["plan_sha256"]))
 
 
@@ -528,10 +696,20 @@ def _write_plan(tmp_path: Path, plan: dict[str, object]) -> Path:
     return path
 
 
+def _stub_postflight_identity(monkeypatch: pytest.MonkeyPatch, plan: dict[str, object]) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    monkeypatch.setattr(
+        spu, "_validate_plan_identity",
+        lambda plan_path, confirmation: (plan, policy, Path(str(plan["stage_path"])), os.geteuid()),
+    )
+
+
 def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     policy_path = ROOT / "config" / "package-update-policy.v1.json"
     stage = tmp_path / "stage"
     stage.mkdir()
+    capture = tmp_path / "runtime-capture"
+    capture.mkdir(mode=0o711)
     plan: dict[str, object] = {
         "schema_version": 1,
         "kind": spu.PLAN_KIND,
@@ -539,11 +717,13 @@ def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatc
         "policy_path": str(policy_path.resolve()),
         "policy_sha256": spu._sha256_file(policy_path),
         "stage_path": str(stage),
-        "apt": {"packages": [{"name": "curl", "arch": "amd64", "version": "wanted"}]},
+        "apt": {"packages": [{"name": "curl", "arch": "amd64", "version": "wanted", "reboot_marker_capable": False}]},
         "snap": {"packages": []},
+        "root_commands": {"runtime_capture_path": str(capture)},
     }
     plan["plan_sha256"] = spu._plan_digest(plan)
     plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
     monkeypatch.setattr(spu, "_dpkg_version", lambda name, arch=None: "actual")
     monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
     monkeypatch.setattr(
@@ -556,6 +736,77 @@ def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatc
     receipt = json.loads((stage / "postflight.json").read_text())
     assert receipt["all_apt_matched"] is False
     assert receipt["all_snap_matched"] is True
+
+
+def test_postflight_preserves_isolated_reboot_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage-reboot"
+    stage.mkdir()
+    capture = tmp_path / "capture-reboot"
+    capture.mkdir(mode=0o711)
+    (capture / "reboot-required").touch()
+    plan: dict[str, object] = {
+        "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": "reboot-capture",
+        "policy_path": str(policy_path.resolve()), "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": [{"name": "curl", "arch": "amd64", "version": "wanted", "reboot_marker_capable": False}]},
+        "snap": {"packages": []}, "root_commands": {"runtime_capture_path": str(capture)},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
+    monkeypatch.setattr(spu, "_dpkg_version", lambda name, arch=None: "wanted")
+    monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
+    monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "gpu-ok\n", "stderr": ""})
+    result = spu.postflight(plan_path, str(plan["plan_sha256"]))
+    assert result["reboot_required"] is True
+    assert "isolated-apt-runtime-marker" in result["reboot_required_sources"]
+
+
+def test_postflight_conservatively_flags_reboot_marker_capable_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage-reboot-conservative"
+    stage.mkdir()
+    capture = tmp_path / "capture-reboot-conservative"
+    capture.mkdir(mode=0o711)
+    plan: dict[str, object] = {
+        "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": "reboot-conservative",
+        "policy_path": str(policy_path.resolve()), "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": [{"name": "dbus", "arch": "amd64", "version": "wanted", "reboot_marker_capable": True}]},
+        "snap": {"packages": []}, "root_commands": {"runtime_capture_path": str(capture)},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
+    monkeypatch.setattr(spu, "_dpkg_version", lambda name, arch=None: "wanted")
+    monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
+    monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "gpu-ok\n", "stderr": ""})
+    result = spu.postflight(plan_path, str(plan["plan_sha256"]))
+    assert result["reboot_required"] is True
+    assert result["reboot_marker_capable_packages"] == ["dbus"]
+    assert "planned-reboot-marker-capable-package" in result["reboot_required_sources"]
+
+
+def test_postflight_fails_if_apt_runtime_capture_was_cleaned_early(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = ROOT / "config" / "package-update-policy.v1.json"
+    stage = tmp_path / "stage-reboot-missing"
+    stage.mkdir()
+    plan: dict[str, object] = {
+        "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": "reboot-missing",
+        "policy_path": str(policy_path.resolve()), "policy_sha256": spu._sha256_file(policy_path),
+        "stage_path": str(stage),
+        "apt": {"packages": [{"name": "curl", "arch": "amd64", "version": "wanted", "reboot_marker_capable": False}]},
+        "snap": {"packages": []}, "root_commands": {"runtime_capture_path": str(tmp_path / "missing-capture")},
+    }
+    plan["plan_sha256"] = spu._plan_digest(plan)
+    plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
+    monkeypatch.setattr(spu, "_dpkg_version", lambda name, arch=None: "wanted")
+    monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
+    monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {"argv": argv, "returncode": 0, "stdout": "gpu-ok\n", "stderr": ""})
+    with pytest.raises(spu.PlanError, match="runtime capture is missing"):
+        spu.postflight(plan_path, str(plan["plan_sha256"]))
 
 
 def test_postflight_inactive_service_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -574,6 +825,7 @@ def test_postflight_inactive_service_writes_receipt_and_fails(tmp_path: Path, mo
     }
     plan["plan_sha256"] = spu._plan_digest(plan)
     plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
     monkeypatch.setattr(
         spu, "_service_state",
         lambda unit, user: "inactive" if unit == "docker.service" else "active",
@@ -606,6 +858,7 @@ def test_postflight_nvidia_failure_writes_receipt_and_fails(tmp_path: Path, monk
     }
     plan["plan_sha256"] = spu._plan_digest(plan)
     plan_path = _write_plan(tmp_path, plan)
+    _stub_postflight_identity(monkeypatch, plan)
     monkeypatch.setattr(spu, "_service_state", lambda unit, user: "active")
     monkeypatch.setattr(
         spu, "_run",

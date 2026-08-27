@@ -152,6 +152,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_apt_signature_verification",
         "require_signed_apt_artifact_provenance",
         "require_pre_download_byte_cap",
+        "require_root_staging_capacity",
+        "require_reboot_capture",
         "require_dpkg_status_precondition",
         "require_source_config_precondition",
         "require_root_owned_copy_before_apply",
@@ -162,12 +164,20 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_signed_snap_assertion",
         "require_snap_store_artifact_revalidation",
         "require_apt_apply_private_runtime_namespace",
+        "require_apt_apply_kernel_device_isolation",
+        "require_apply_readback_authorization",
+        "require_snap_download_byte_cap",
+        "require_postflight_plan_identity",
         "privileged_broker_network_must_remain_blocked",
     )
     for key in required_true:
         if safety.get(key) is not True:
             raise PolicyError(f"safety.{key} must be true")
-    for parent, key in ((staging, "max_plan_age_seconds"), (apt, "max_packages"), (apt, "max_download_bytes"), (snap, "max_snaps")):
+    for parent, key in (
+        (staging, "max_plan_age_seconds"),
+        (apt, "max_packages"), (apt, "max_download_bytes"),
+        (snap, "max_snaps"), (snap, "max_download_bytes"), (snap, "max_assertion_bytes"),
+    ):
         if not isinstance(parent.get(key), int) or parent[key] <= 0:
             raise PolicyError(f"{key} must be a positive integer")
     if apt.get("selection_mode") != "upgrade-with-new-pkgs-no-remove":
@@ -252,6 +262,58 @@ def _root_stage_root(policy: dict[str, Any]) -> Path:
     if not path.is_absolute() or path == Path("/"):
         raise PolicyError("staging.root_root must be an absolute non-root path")
     return path
+
+
+def _runtime_capture_root(policy: dict[str, Any]) -> Path:
+    value = policy["staging"]["runtime_capture_root"]
+    path = Path(value)
+    if not path.is_absolute() or path == Path("/"):
+        raise PolicyError("staging.runtime_capture_root must be an absolute non-root path")
+    try:
+        relative = path.relative_to(Path("/run"))
+    except ValueError as exc:
+        raise PolicyError("staging.runtime_capture_root must be below /run") from exc
+    if not relative.parts:
+        raise PolicyError("staging.runtime_capture_root may not equal /run")
+    return path
+
+
+def _root_capacity_argv(policy: dict[str, Any]) -> list[str]:
+    return ["/usr/bin/stat", "-f", "-c", "%a:%S", str(_root_stage_root(policy))]
+
+
+def parse_root_capacity_readback(text: str, required_bytes: int) -> dict[str, int | bool]:
+    match = re.fullmatch(r"([0-9]+):([0-9]+)", text.strip())
+    if match is None:
+        raise PlanError("unexpected root staging filesystem capacity readback")
+    available_blocks = int(match.group(1))
+    block_size = int(match.group(2))
+    if block_size <= 0:
+        raise PlanError("root staging filesystem reported an invalid block size")
+    available_bytes = available_blocks * block_size
+    if required_bytes < 0:
+        raise PlanError("root staging required bytes may not be negative")
+    if available_bytes < required_bytes:
+        raise PlanError(
+            f"root staging requires {required_bytes} bytes but destination filesystem has only {available_bytes} available"
+        )
+    return {"required_bytes": required_bytes, "available_bytes": available_bytes, "sufficient": True}
+
+
+def _root_copy_required_bytes(apt: dict[str, Any], snap: dict[str, Any]) -> int:
+    total = 0
+    for item in apt.get("packages", []):
+        size = item.get("size")
+        if not isinstance(size, int) or size < 0:
+            raise PlanError("APT artifact size is missing or invalid for root staging")
+        total += size
+    for item in snap.get("packages", []):
+        for key in ("assert_size", "snap_size"):
+            size = item.get(key)
+            if not isinstance(size, int) or size < 0:
+                raise PlanError("Snap artifact size is missing or invalid for root staging")
+            total += size
+    return total
 
 
 def _ensure_private_dir(path: Path, uid: int) -> None:
@@ -525,6 +587,29 @@ def _deb_field(path: Path, field: str) -> str:
     return result["stdout"].strip()
 
 
+def _deb_reboot_marker_capable(path: Path, uid: int) -> bool:
+    with tempfile.TemporaryDirectory(prefix=".control-", dir=path.parent) as control_raw:
+        control = Path(control_raw)
+        _run(["/usr/bin/dpkg-deb", "--control", str(path), str(control)])
+        total_bytes = 0
+        needles = (b"reboot-required", b"notify-reboot-required")
+        for candidate in sorted(control.rglob("*"), key=str):
+            if candidate.is_symlink():
+                raise PlanError(f"DEB control archive contains a symlink: {candidate}")
+            if not candidate.is_file():
+                continue
+            info = candidate.stat()
+            if info.st_uid != uid or info.st_nlink != 1:
+                raise PlanError(f"DEB control file has unsafe ownership/link count: {candidate}")
+            total_bytes += info.st_size
+            if total_bytes > 8 * 1024 * 1024:
+                raise PlanError("DEB control archive exceeds bounded reboot-marker inspection size")
+            data = candidate.read_bytes()
+            if any(needle in data for needle in needles):
+                return True
+    return False
+
+
 def _is_sensitive_package(name: str, policy: dict[str, Any]) -> bool:
     lowered = name.split(":", 1)[0].lower()
     prefixes = policy["apt"].get("sensitive_prefixes", [])
@@ -610,6 +695,7 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
             "size": info.st_size,
             **repository,
             "sensitive": _is_sensitive_package(candidate["name"], policy),
+            "reboot_marker_capable": _deb_reboot_marker_capable(renamed, uid),
         })
     missing = sorted(set(expected) - seen)
     if missing:
@@ -627,16 +713,37 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
     }
 
 
-def parse_snap_refresh_list(text: str) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def _snap_size_upper_bound_bytes(value: str) -> int:
+    match = re.fullmatch(r"([0-9]+)(?:\.([0-9]+))?([KMGTPE]?B)", value.strip(), flags=re.I)
+    if match is None:
+        raise PlanError(f"unexpected snap size: {value}")
+    whole = match.group(1)
+    fraction = match.group(2) or ""
+    digits = int(whole + fraction)
+    scale = 10 ** len(fraction)
+    # One displayed quantum is added deliberately so rounded human output is a safe upper bound.
+    upper_digits = digits + 1
+    unit = match.group(3).upper()
+    powers = {"B": 0, "KB": 1, "MB": 2, "GB": 3, "TB": 4, "PB": 5, "EB": 6}
+    multiplier = 1024 ** powers[unit]
+    return (upper_digits * multiplier + scale - 1) // scale
+
+
+def parse_snap_refresh_list(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.lower().startswith("name ") or "up to date" in line.lower():
             continue
         parts = line.split()
-        if len(parts) < 3 or not parts[2].isdigit():
-            continue
-        rows.append({"name": parts[0], "version": parts[1], "revision": parts[2]})
+        if len(parts) < 4 or not parts[2].isdigit():
+            raise PlanError(f"unexpected snap refresh --list row: {line}")
+        rows.append({
+            "name": parts[0],
+            "version": parts[1],
+            "revision": parts[2],
+            "size_upper_bound_bytes": _snap_size_upper_bound_bytes(parts[3]),
+        })
     return rows
 
 
@@ -653,22 +760,30 @@ def _snap_installed_revision(name: str) -> str:
 
 def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
     if policy["snap"].get("enabled") is not True:
-        return {"enabled": False, "packages": []}
+        return {"enabled": False, "packages": [], "download_bytes": 0, "declared_upper_bound_bytes": 0}
     snap_dir = stage / "snap"
     _ensure_private_dir(snap_dir, uid)
     listed = _run(["/usr/bin/snap", "refresh", "--list"], check=False)
-    if listed["returncode"] not in (0,):
+    if listed["returncode"] != 0:
         raise PlanError(f"snap refresh --list failed: {listed['stderr'].strip()}")
     pending = parse_snap_refresh_list(listed["stdout"])
     if len(pending) > policy["snap"]["max_snaps"]:
         raise PlanError(f"snap candidate count {len(pending)} exceeds policy limit")
+    assertion_budget = policy["snap"]["max_assertion_bytes"] * len(pending)
+    declared_upper_bound = sum(int(item["size_upper_bound_bytes"]) for item in pending) + assertion_budget
+    if declared_upper_bound > policy["snap"]["max_download_bytes"]:
+        raise PlanError(f"Snap declared download upper bound {declared_upper_bound} exceeds policy limit before download")
+    available = _available_bytes(snap_dir)
+    if declared_upper_bound > available:
+        raise PlanError(f"Snap declared download upper bound {declared_upper_bound} exceeds available staging bytes {available}")
     artifacts: list[dict[str, Any]] = []
+    total_bytes = 0
     for item in pending:
-        baseline_revision = _snap_installed_revision(item["name"])
-        basename = f"{SAFE_NAME_RE.sub('_', item['name'])}_{item['revision']}"
+        baseline_revision = _snap_installed_revision(str(item["name"]))
+        basename = f"{SAFE_NAME_RE.sub('_', str(item['name']))}_{item['revision']}"
         download = _run([
-            "/usr/bin/snap", "download", item["name"],
-            "--revision", item["revision"],
+            "/usr/bin/snap", "download", str(item["name"]),
+            "--revision", str(item["revision"]),
             "--basename", basename,
             "--target-directory", str(snap_dir),
         ])
@@ -676,8 +791,13 @@ def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]
         assertion_path = snap_dir / f"{basename}.assert"
         snap_info = _regular_owned_file(snap_path, uid)
         assertion_info = _regular_owned_file(assertion_path, uid)
-        if assertion_info.st_size == 0:
-            raise PlanError(f"snap assertion is empty for {item['name']}")
+        if assertion_info.st_size == 0 or assertion_info.st_size > policy["snap"]["max_assertion_bytes"]:
+            raise PlanError(f"snap assertion size is invalid for {item['name']}")
+        if snap_info.st_size > int(item["size_upper_bound_bytes"]):
+            raise PlanError(f"downloaded snap exceeds the Store-list size upper bound: {item['name']}")
+        total_bytes += snap_info.st_size + assertion_info.st_size
+        if total_bytes > policy["snap"]["max_download_bytes"]:
+            raise PlanError("actual Snap download bytes exceed policy limit")
         os.chmod(snap_path, 0o600)
         os.chmod(assertion_path, 0o600)
         artifacts.append({
@@ -695,6 +815,8 @@ def _stage_snap(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]
         "enabled": True,
         "list_sha256": _sha256_bytes(listed["stdout"].encode()),
         "packages": artifacts,
+        "download_bytes": total_bytes,
+        "declared_upper_bound_bytes": declared_upper_bound,
     }
 
 
@@ -714,6 +836,7 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
     planned_identities = sorted(_candidate_identity(item) for item in planned_packages)
     if current_identities != planned_identities:
         raise PlanError("APT signed upgrade candidate set changed or plan was not derived from the current signed candidate set")
+    authenticated_total = 0
     for item in planned_packages:
         repository = _apt_repository_record(options, item)
         for key in (
@@ -722,6 +845,9 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
         ):
             if item.get(key) != repository.get(key):
                 raise PlanError(f"APT authenticated repository provenance changed for {item['name']}")
+        authenticated_total += int(repository["repository_size"])
+        if authenticated_total > policy["apt"]["max_download_bytes"]:
+            raise PlanError(f"APT authenticated download bytes {authenticated_total} exceed policy limit during verification")
         path = _stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")
         info = _regular_owned_file(path, uid)
         package = _deb_field(path, "Package")
@@ -735,15 +861,32 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
             or _strong_hash_file(path, repository["repository_hash_algorithm"]) != repository["repository_hash"]
         ):
             raise PlanError(f"APT artifact bytes do not match freshly authenticated repository metadata: {path}")
+        reboot_marker_capable = _deb_reboot_marker_capable(path, uid)
+        if item.get("reboot_marker_capable") is not reboot_marker_capable:
+            raise PlanError(f"APT reboot-marker capability changed for {item['name']}")
+    if apt.get("authenticated_download_bytes") != authenticated_total or apt.get("download_bytes") != authenticated_total:
+        raise PlanError("APT planned download byte totals differ from freshly authenticated repository sizes")
 
 
-def _revalidate_snap_store_artifact(stage: Path, item: dict[str, Any], uid: int) -> None:
+def _revalidate_snap_store_artifact(
+    stage: Path, item: dict[str, Any], uid: int, policy: dict[str, Any]
+) -> None:
     snap_dir = stage / "snap"
     _ensure_private_dir(snap_dir, uid)
     staged_snap = _stage_artifact_path(stage, item.get("snap_relative_path"), snap_dir)
     staged_assert = _stage_artifact_path(stage, item.get("assert_relative_path"), snap_dir)
     staged_snap_info = _regular_owned_file(staged_snap, uid)
     staged_assert_info = _regular_owned_file(staged_assert, uid)
+    if staged_snap_info.st_size > int(item["size_upper_bound_bytes"]):
+        raise PlanError(f"staged snap exceeds declared Store-list upper bound: {item['name']}")
+    if staged_assert_info.st_size > policy["snap"]["max_assertion_bytes"]:
+        raise PlanError(f"staged snap assertion exceeds policy limit: {item['name']}")
+    verify_upper_bound = int(item["size_upper_bound_bytes"]) + policy["snap"]["max_assertion_bytes"]
+    if verify_upper_bound > policy["snap"]["max_download_bytes"]:
+        raise PlanError(f"Snap verification download upper bound exceeds policy limit: {item['name']}")
+    available = _available_bytes(snap_dir)
+    if verify_upper_bound > available:
+        raise PlanError(f"Snap verification download upper bound exceeds available staging bytes: {item['name']}")
     with tempfile.TemporaryDirectory(prefix=".verify-store-", dir=snap_dir) as verify_dir_raw:
         verify_dir = Path(verify_dir_raw)
         basename = f"verify-{SAFE_NAME_RE.sub('_', str(item['name']))}_{item['revision']}-{secrets.token_hex(4)}"
@@ -757,8 +900,10 @@ def _revalidate_snap_store_artifact(stage: Path, item: dict[str, Any], uid: int)
         store_assert = verify_dir / f"{basename}.assert"
         store_snap_info = _regular_owned_file(store_snap, uid)
         store_assert_info = _regular_owned_file(store_assert, uid)
-        if store_assert_info.st_size == 0:
-            raise PlanError(f"fresh Store assertion is empty for {item['name']}")
+        if store_assert_info.st_size == 0 or store_assert_info.st_size > policy["snap"]["max_assertion_bytes"]:
+            raise PlanError(f"fresh Store assertion size is invalid for {item['name']}")
+        if store_snap_info.st_size > int(item["size_upper_bound_bytes"]):
+            raise PlanError(f"fresh Store snap exceeds declared size upper bound: {item['name']}")
         if (
             staged_snap_info.st_size != store_snap_info.st_size
             or _sha256_file(staged_snap) != _sha256_file(store_snap)
@@ -783,15 +928,30 @@ def _revalidate_snap_provenance(stage: Path, plan: dict[str, Any], policy: dict[
     planned_packages = snap.get("packages", [])
     if not isinstance(planned_packages, list):
         raise PlanError("Snap plan packages must be a list")
-    current = sorted((item["name"], item["version"], item["revision"]) for item in pending)
-    planned = sorted((item["name"], item["version"], item["revision"]) for item in planned_packages)
+    current = sorted(
+        (item["name"], item["version"], item["revision"], item["size_upper_bound_bytes"]) for item in pending
+    )
+    planned = sorted(
+        (item["name"], item["version"], item["revision"], item["size_upper_bound_bytes"]) for item in planned_packages
+    )
     if current != planned:
         raise PlanError("Snap pending refresh set changed or plan was not derived from the current Store refresh set")
+    declared_upper_bound = (
+        sum(int(item["size_upper_bound_bytes"]) for item in planned_packages)
+        + policy["snap"]["max_assertion_bytes"] * len(planned_packages)
+    )
+    if declared_upper_bound > policy["snap"]["max_download_bytes"]:
+        raise PlanError("Snap declared verification bytes exceed policy limit")
+    if snap.get("declared_upper_bound_bytes") != declared_upper_bound:
+        raise PlanError("Snap declared upper-bound byte total changed")
+    actual_total = sum(int(item["snap_size"]) + int(item["assert_size"]) for item in planned_packages)
+    if snap.get("download_bytes") != actual_total or actual_total > policy["snap"]["max_download_bytes"]:
+        raise PlanError("Snap planned download byte total is inconsistent or over policy")
     for item in planned_packages:
-        _revalidate_snap_store_artifact(stage, item, uid)
+        _revalidate_snap_store_artifact(stage, item, uid, policy)
 
 
-def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
+def _apt_apply_systemd_argv(plan_id: str, root_debs: Path, runtime_capture: Path) -> list[str]:
     unit_name = f"heim-pc-package-update-{SAFE_NAME_RE.sub('_', plan_id)}.service"
     return [
         "/usr/bin/systemd-run",
@@ -805,10 +965,18 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
         "--property=PrivateTmp=yes",
         "--property=PrivateMounts=yes",
         "--property=PrivateNetwork=yes",
-        "--property=TemporaryFileSystem=/run",
+        f"--property=BindPaths={runtime_capture}:/run",
         "--property=ProtectProc=invisible",
         "--property=ProcSubset=pid",
         "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
+        "--property=ProtectControlGroups=yes",
+        "--property=PrivateDevices=yes",
+        "--property=RestrictNamespaces=yes",
+        "--property=ProtectKernelLogs=yes",
+        "--property=ProtectClock=yes",
+        "--property=LockPersonality=yes",
         "--property=CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_TTY_CONFIG",
         "--property=MemoryDenyWriteExecute=no",
         "--property=RestrictAddressFamilies=AF_UNIX AF_NETLINK",
@@ -824,10 +992,15 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path) -> list[str]:
 
 def _root_commands(plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any]:
     plan_id = _validate_plan_id(plan_id)
+    required_bytes = _root_copy_required_bytes(apt, snap)
     root_stage = _root_stage_root(policy) / plan_id
     root_debs = root_stage / "debs"
     root_snaps = root_stage / "snaps"
-    prepare = ["/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0700", str(root_debs), str(root_snaps)]
+    runtime_capture = _runtime_capture_root(policy) / plan_id
+    prepare = [
+        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
+        str(root_stage), str(root_debs), str(root_snaps), str(runtime_capture),
+    ]
     apt_sources = [str(_stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")) for item in apt.get("packages", [])]
     apt_destinations = [str(root_debs / Path(item["relative_path"]).name) for item in apt.get("packages", [])]
     snap_sources: list[str] = []
@@ -842,30 +1015,50 @@ def _root_commands(plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[
     hash_apt = ["/usr/bin/sha256sum", *apt_destinations] if apt_destinations else None
     hash_snap = ["/usr/bin/sha256sum", *snap_destinations] if snap_destinations else None
     apt_apply_preflight = None
-    apt_apply = None
     if apt_destinations:
         apt_apply_preflight = [
             "/usr/bin/dpkg", "--simulate", "--force-confold",
             "--install", "--recursive", str(root_debs),
         ]
-        apt_apply = _apt_apply_systemd_argv(plan_id, root_debs)
-    snap_apply: list[list[str]] = []
-    for item in snap.get("packages", []):
-        assertion = str(root_snaps / Path(item["assert_relative_path"]).name)
-        snap_file = str(root_snaps / Path(item["snap_relative_path"]).name)
-        snap_apply.append(["/usr/bin/snap", "ack", assertion])
-        snap_apply.append(["/usr/bin/snap", "install", snap_file])
     return {
         "root_stage": str(root_stage),
+        "runtime_capture_path": str(runtime_capture),
+        "root_copy_required_bytes": required_bytes,
+        "root_capacity_argv": _root_capacity_argv(policy),
         "prepare_argv": prepare,
         "copy_apt_argv": copy_apt,
         "copy_snap_argv": copy_snap,
         "hash_apt_argv": hash_apt,
         "hash_snap_argv": hash_snap,
         "apt_apply_preflight_argv": apt_apply_preflight,
+        "apply_readback_required": bool(apt_destinations or snap_destinations),
+        "cleanup_argv": ["/usr/bin/rm", "-rf", "--", str(root_stage)],
+        "cleanup_runtime_capture_argv": ["/usr/bin/rm", "-rf", "--", str(runtime_capture)],
+    }
+
+
+def _apply_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    commands = plan["root_commands"]
+    root_stage = Path(commands["root_stage"])
+    root_debs = root_stage / "debs"
+    root_snaps = root_stage / "snaps"
+    apt_apply = None
+    if plan["apt"].get("packages"):
+        apt_apply = _apt_apply_systemd_argv(
+            plan["plan_id"], root_debs, Path(commands["runtime_capture_path"])
+        )
+    snap_apply: list[list[str]] = []
+    for item in plan["snap"].get("packages", []):
+        assertion = str(root_snaps / Path(item["assert_relative_path"]).name)
+        snap_file = str(root_snaps / Path(item["snap_relative_path"]).name)
+        snap_apply.append(["/usr/bin/snap", "ack", assertion])
+        snap_apply.append(["/usr/bin/snap", "install", snap_file])
+    for argv in snap_apply:
+        if "--dangerous" in argv:
+            raise PlanError("dangerous snap installation is forbidden")
+    return {
         "apt_apply_argv": apt_apply,
         "snap_apply_argvs": snap_apply,
-        "cleanup_argv": ["/usr/bin/rm", "-rf", "--", str(root_stage)],
     }
 
 
@@ -927,7 +1120,11 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
             "apt_selection_no_remove": True,
             "apt_apply_network_capable": False,
             "apt_apply_host_ipc_capable": False,
-            "apt_apply_runtime_namespace": "private-run-private-network",
+            "apt_apply_runtime_namespace": "persistent-private-run-capture-private-network",
+            "apt_apply_reboot_capture": True,
+            "apt_apply_kernel_device_isolation": True,
+            "apply_commands_embedded_in_plan": False,
+            "apply_requires_root_hash_readback": True,
             "apt_apply_engine": "dpkg-recursive-root-stage",
             "apt_apply_execution": "network-denied-systemd-system-task",
             "snap_dangerous": False,
@@ -998,14 +1195,26 @@ def _validate_stage_artifacts(plan: dict[str, Any], uid: int, policy: dict[str, 
                 raise PlanError(f"snap artifact changed: {path}")
 
 
-def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
+def _validate_plan_identity(
+    plan_path: Path, confirmation: str
+) -> tuple[dict[str, Any], dict[str, Any], Path, int]:
+    if os.geteuid() == 0:
+        raise PlanError("package plan verification/postflight must run unprivileged")
     plan = _read_json(plan_path)
     if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
         raise PlanError("plan schema or kind mismatch")
     _validate_confirmation(plan, confirmation)
     plan_id = _validate_plan_id(plan.get("plan_id"))
     policy_path = _require_canonical_policy_path(Path(plan["policy_path"]))
+    expected_policy_sha256 = plan.get("policy_sha256")
+    if not isinstance(expected_policy_sha256, str) or SHA256_RE.fullmatch(expected_policy_sha256) is None:
+        raise PlanError("plan policy digest is missing or invalid")
+    policy_sha256_before = _sha256_file(policy_path)
+    if policy_sha256_before != expected_policy_sha256:
+        raise PlanError("package update policy changed after planning")
     policy = load_policy(policy_path)
+    if _sha256_file(policy_path) != policy_sha256_before:
+        raise PlanError("package update policy changed while loading plan identity")
     uid = os.geteuid()
     runtime_root = _expand_runtime_root(policy, uid)
     expected_stage = runtime_root / plan_id
@@ -1013,10 +1222,26 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     if stage != expected_stage:
         raise PlanError("plan stage does not match canonical runtime_root/plan_id")
     if plan_path != stage / "plan.json" or plan_path.is_symlink():
-        raise PlanError("plan must be verified from its canonical non-symlink stage plan.json path")
+        raise PlanError("plan must use its canonical non-symlink stage plan.json path")
     _regular_owned_file(plan_path, uid)
-    if _sha256_file(policy_path) != plan.get("policy_sha256"):
-        raise PlanError("policy changed after planning")
+    baseline = plan.get("baseline")
+    if not isinstance(baseline, dict) or baseline.get("uid") != uid:
+        raise PlanError("plan baseline uid differs from current uid")
+    _require_broker_handoff_binding(policy)
+    expected_artifacts = plan.get("root_artifact_sha256")
+    if expected_artifacts != _artifact_expectations(plan):
+        raise PlanError("root artifact expectation map is inconsistent")
+    commands = plan.get("root_commands")
+    expected_commands = _root_commands(plan_id, stage, policy, plan["apt"], plan["snap"])
+    if commands != expected_commands:
+        raise PlanError("root command set is inconsistent with the current policy and exact plan artifacts")
+    if "apt_apply_argv" in commands or "snap_apply_argvs" in commands:
+        raise PlanError("apply commands must not be embedded in a package plan")
+    return plan, policy, stage, uid
+
+
+def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
+    plan, policy, stage, uid = _validate_plan_identity(plan_path, confirmation)
     age = int(time.time()) - int(plan["created_at_unix"])
     if age < 0 or age > policy["staging"]["max_plan_age_seconds"]:
         raise PlanError(f"plan age {age}s exceeds policy limit")
@@ -1033,28 +1258,15 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         if _snap_installed_revision(item["name"]) != item["baseline_revision"]:
             raise PlanError(f"installed snap revision changed after planning: {item['name']}")
     expected = plan["root_artifact_sha256"]
-    if expected != _artifact_expectations(plan):
-        raise PlanError("root artifact expectation map is inconsistent")
     commands = plan["root_commands"]
-    expected_commands = _root_commands(
-        plan["plan_id"], Path(plan["stage_path"]), policy, plan["apt"], plan["snap"]
-    )
-    if commands != expected_commands:
-        raise PlanError("root command set is inconsistent with the current policy and exact plan artifacts")
     apt_preflight = commands.get("apt_apply_preflight_argv") or []
-    apt_apply = commands.get("apt_apply_argv") or []
-    if apt_apply:
+    if plan["apt"].get("packages"):
         expected_root_debs = str(Path(commands["root_stage"]) / "debs")
         if apt_preflight != [
             "/usr/bin/dpkg", "--simulate", "--force-confold",
             "--install", "--recursive", expected_root_debs,
         ]:
             raise PlanError("APT root preflight is not an exact local dpkg simulation")
-        if apt_apply != _apt_apply_systemd_argv(plan["plan_id"], Path(expected_root_debs)):
-            raise PlanError("APT root apply is not the exact network-denied systemd dpkg task")
-    for argv in commands.get("snap_apply_argvs", []):
-        if "--dangerous" in argv:
-            raise PlanError("dangerous snap installation is forbidden")
     return {
         "status": "verified",
         "plan_path": str(plan_path),
@@ -1069,6 +1281,63 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
             "postflight service health",
         ],
     }
+
+
+def _parse_sha256sum_output(text: str) -> dict[str, str]:
+    observed: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2 or SHA256_RE.fullmatch(parts[0]) is None:
+            raise PlanError(f"unexpected sha256sum readback line: {line}")
+        path = parts[1].lstrip("*").strip()
+        if not path.startswith("/") or path in observed:
+            raise PlanError(f"unsafe or duplicate root hash readback path: {path}")
+        observed[path] = parts[0]
+    return observed
+
+
+def root_readback_authorize(
+    plan_path: Path, confirmation: str, apt_sha256sum_output: str, snap_sha256sum_output: str
+) -> dict[str, Any]:
+    verified = verify_plan(plan_path, confirmation)
+    plan = _read_json(plan_path)
+    policy_path = _require_canonical_policy_path(Path(plan["policy_path"]))
+    policy = load_policy(policy_path)
+    observed = _parse_sha256sum_output(apt_sha256sum_output)
+    snap_observed = _parse_sha256sum_output(snap_sha256sum_output)
+    overlap = set(observed).intersection(snap_observed)
+    if overlap:
+        raise PlanError(f"duplicate root hash readback paths across APT/Snap: {sorted(overlap)}")
+    observed.update(snap_observed)
+    expected = plan["root_artifact_sha256"]
+    if observed != expected:
+        missing = sorted(set(expected) - set(observed))
+        extra = sorted(set(observed) - set(expected))
+        mismatched = sorted(path for path in set(expected).intersection(observed) if expected[path] != observed[path])
+        raise PlanError(
+            f"root artifact hash readback mismatch missing={missing} extra={extra} mismatched={mismatched}"
+        )
+    apply_commands = _apply_commands(plan, policy)
+    authorization: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_root_readback",
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "root_artifact_sha256": observed,
+        "root_readback_sha256": _sha256_json({
+            "plan_sha256": plan["plan_sha256"], "root_artifact_sha256": observed
+        }),
+        "apt_apply_preflight_argv": plan["root_commands"].get("apt_apply_preflight_argv"),
+        "apply_commands": apply_commands,
+        "status": "root-readback-authorized",
+        "does_not_establish": ["privileged apply completion", "postflight service health"],
+    }
+    receipt_path = Path(plan["stage_path"]) / "root-readback.json"
+    _atomic_json(receipt_path, authorization)
+    return {**authorization, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
 
 
 def _dpkg_version(name: str, arch: str | None = None) -> str | None:
@@ -1092,20 +1361,7 @@ def _service_state(unit: str, *, user: bool) -> str:
 
 
 def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
-    plan = _read_json(plan_path)
-    if plan.get("schema_version") != 1 or plan.get("kind") != PLAN_KIND:
-        raise PlanError("plan schema or kind mismatch")
-    _validate_confirmation(plan, confirmation)
-    policy_path = Path(plan["policy_path"])
-    expected_policy_sha256 = plan.get("policy_sha256")
-    if not isinstance(expected_policy_sha256, str) or not SHA256_RE.fullmatch(expected_policy_sha256):
-        raise PlanError("plan policy digest is missing or invalid")
-    policy_sha256_before = _sha256_file(policy_path)
-    if policy_sha256_before != expected_policy_sha256:
-        raise PlanError("package update policy changed after planning")
-    policy = load_policy(policy_path)
-    if _sha256_file(policy_path) != policy_sha256_before:
-        raise PlanError("package update policy changed while postflight loaded it")
+    plan, policy, _stage, _uid = _validate_plan_identity(plan_path, confirmation)
     apt_results: list[dict[str, Any]] = []
     for item in plan["apt"].get("packages", []):
         installed = _dpkg_version(item["name"], item.get("arch"))
@@ -1142,6 +1398,32 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     all_system_services_active = all(state == "active" for state in system_services.values())
     all_user_services_active = all(state == "active" for state in user_services.values())
     nvidia_smi_ok = nvidia["returncode"] == 0 and bool(nvidia["stdout"].strip())
+    host_reboot_required = Path("/var/run/reboot-required").exists()
+    isolated_reboot_required = False
+    runtime_capture_path: Path | None = None
+    if plan["apt"].get("packages"):
+        raw_capture = plan.get("root_commands", {}).get("runtime_capture_path")
+        if not isinstance(raw_capture, str) or not raw_capture:
+            raise PlanError("APT postflight is missing the private runtime capture path")
+        runtime_capture_path = Path(raw_capture)
+        info = runtime_capture_path.lstat() if runtime_capture_path.exists() else None
+        if info is None or not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise PlanError("APT private runtime capture is missing or unsafe; reboot evidence is incomplete")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise PlanError("APT private runtime capture is writable by non-owner principals")
+        isolated_reboot_required = (runtime_capture_path / "reboot-required").exists()
+    reboot_marker_capable_packages = [
+        item["name"] for item in plan["apt"].get("packages", [])
+        if item.get("reboot_marker_capable") is True
+    ]
+    conservative_reboot_required = bool(reboot_marker_capable_packages) and not isolated_reboot_required
+    reboot_required_sources: list[str] = []
+    if host_reboot_required:
+        reboot_required_sources.append("host-marker")
+    if isolated_reboot_required:
+        reboot_required_sources.append("isolated-apt-runtime-marker")
+    if conservative_reboot_required:
+        reboot_required_sources.append("planned-reboot-marker-capable-package")
     receipt: dict[str, Any] = {
         "schema_version": 1,
         "kind": RECEIPT_KIND,
@@ -1155,7 +1437,10 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "all_system_services_active": all_system_services_active,
         "all_user_services_active": all_user_services_active,
         "nvidia_smi_ok": nvidia_smi_ok,
-        "reboot_required": Path("/var/run/reboot-required").exists(),
+        "reboot_required": bool(reboot_required_sources),
+        "reboot_required_sources": reboot_required_sources,
+        "reboot_marker_capable_packages": reboot_marker_capable_packages,
+        "runtime_capture_path": str(runtime_capture_path) if runtime_capture_path is not None else None,
         "system_services": system_services,
         "user_services": user_services,
         "nvidia_smi": nvidia["stdout"].strip() if nvidia_smi_ok else None,
@@ -1185,6 +1470,11 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="Verify exact plan, live preconditions and staged artifacts.")
     verify.add_argument("--plan", type=Path, required=True)
     verify.add_argument("--confirmation", required=True)
+    readback = sub.add_parser("readback", help="Authorize apply argv only after exact root-owned sha256sum readback.")
+    readback.add_argument("--plan", type=Path, required=True)
+    readback.add_argument("--confirmation", required=True)
+    readback.add_argument("--apt-sha256sum-output", default="")
+    readback.add_argument("--snap-sha256sum-output", default="")
     post = sub.add_parser("postflight", help="Verify installed versions, snap revisions and service health.")
     post.add_argument("--plan", type=Path, required=True)
     post.add_argument("--confirmation", required=True)
@@ -1198,6 +1488,10 @@ def main() -> int:
             result = create_plan(args.policy)
         elif args.command == "verify":
             result = verify_plan(args.plan, args.confirmation)
+        elif args.command == "readback":
+            result = root_readback_authorize(
+                args.plan, args.confirmation, args.apt_sha256sum_output, args.snap_sha256sum_output
+            )
         elif args.command == "postflight":
             result = postflight(args.plan, args.confirmation)
         else:

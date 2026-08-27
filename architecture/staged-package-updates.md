@@ -19,8 +19,8 @@ APT- und Snap-Updates werden so vorbereitet, dass der bestehende privilegierte G
 Das Verfahren trennt drei Autoritäten:
 
 1. **Stage:** Ein unprivilegierter Prozess darf Netzwerkzugriff benutzen, Repository-Metadaten verifizieren und Pakete herunterladen.
-2. **Plan/Verify:** Ein lokaler Plan bindet exakte Artefakte, System- und Quellen-Preconditions sowie Root-Argumente an einen SHA-256-Digest. Der Plan selbst autorisiert nichts.
-3. **Apply:** Der Controller lässt Root ausschließlich lokale Artefakte in einen root-eigenen Stagingbaum kopieren, liest deren Hashes zurück und startet den APT-Paketmanager danach in einer eigenen transienten System-Unit ohne IP-Netz; Snap wird über den lokalen `snapd`-Unix-Socket angewendet.
+2. **Plan/Verify:** Ein lokaler Plan bindet exakte Artefakte, System- und Quellen-Preconditions sowie ausschließlich vorbereitende Root-Argumente an einen SHA-256-Digest. Der Plan selbst enthält **keine ausführbaren Apply-Argumente** und autorisiert nichts.
+3. **Root-Readback/Apply:** Der Controller lässt Root ausschließlich lokale Artefakte in einen root-eigenen Stagingbaum kopieren und liest deren SHA-256-Hashes zurück. Erst der maschinenlesbare `readback`-Schritt vergleicht diese Root-Hashes vollständig mit dem Plan und gibt bei exakter Gleichheit die Apply-Argumente frei. Danach läuft APT in einer eigenen transienten System-Unit ohne IP-Netz; Snap wird über den lokalen `snapd`-Unix-Socket angewendet.
 
 ## Broker-sichtbarer Handoff
 
@@ -51,15 +51,17 @@ Nur bei erfolgreicher Simulation wird genau dieser Baum angewendet. Der Broker f
 
 `dpkg --force-confold --install --recursive <root-owned-deb-dir>`
 
-Die Unit besitzt ein eigenes Netzwerk- und Mount-Namespace (`PrivateNetwork=yes`, `PrivateMounts=yes`) und überblendet `/run` mit einem privaten `tmpfs`. Systemd stellt seine Manager-Endpunkte in einem Service-Namespace teilweise erneut bereit; deshalb werden `/run/systemd/private` und `/run/dbus/system_bus_socket` zusätzlich explizit read-only durch `/dev/null` ersetzt. Damit kann selbst Root mit `CAP_DAC_OVERRIDE` dort keinen Socket öffnen. Andere Host-Sockets unter `/run` – etwa Docker, libvirt oder snapd – bleiben durch den privaten `/run`-Baum verborgen. `ProtectProc=invisible` und `ProcSubset=pid` minimieren die Prozesssicht; außerdem werden insbesondere `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, Netzwerk- und Modul-Capabilities aus dem Bounding Set entfernt. `RestrictAddressFamilies=AF_UNIX AF_NETLINK` und `IPAddressDeny=any` bleiben als weitere Schichten aktiv. Damit kann Paketcode weder direkt IP-Sockets öffnen noch über PID 1/System-D-Bus eine neue netzfähige Ausführung delegieren. `MemoryDenyWriteExecute` bleibt dagegen deaktiviert, damit legitime Paket-Maintainer-Skripte und Laufzeit-Trigger nicht unnötig gebrochen werden.
+Die Unit besitzt ein eigenes Netzwerk- und Mount-Namespace (`PrivateNetwork=yes`, `PrivateMounts=yes`). Ihr `/run` ist ein dedizierter root-eigener Capture-Baum unter `/run/heim-pc-package-update-captures/<plan-id>` und enthält daher keine Host-Sockets. So bleiben von Maintainer-Skripten erzeugte `reboot-required`-Marker nach Unit-Ende für den Postflight erhalten. Systemd stellt seine Manager-Endpunkte in einem Service-Namespace teilweise erneut bereit; deshalb werden `/run/systemd/private` und `/run/dbus/system_bus_socket` zusätzlich explizit read-only durch `/dev/null` ersetzt. Damit kann selbst Root mit `CAP_DAC_OVERRIDE` dort keinen Socket öffnen. Andere Host-Sockets unter `/run` – etwa Docker, libvirt oder snapd – bleiben durch den privaten `/run`-Baum verborgen.
+
+Zusätzlich kapselt die Unit Kernel- und Device-Oberflächen: `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectControlGroups=yes`, `ProtectKernelLogs=yes`, `ProtectClock=yes`, `PrivateDevices=yes`, `RestrictNamespaces=yes` und `LockPersonality=yes`. `ProtectProc=invisible` und `ProcSubset=pid` minimieren die Prozesssicht; insbesondere `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, Netzwerk-, Raw-I/O- und Modul-Capabilities werden aus dem Bounding Set entfernt. `RestrictAddressFamilies=AF_UNIX AF_NETLINK` und `IPAddressDeny=any` bleiben als weitere Schichten aktiv. Damit kann Paketcode weder direkt IP-Sockets öffnen, über PID 1/System-D-Bus eine neue netzfähige Ausführung delegieren noch auf reale Blockgeräte oder schreibbare Kernel-Tunables ausweichen. `MemoryDenyWriteExecute` bleibt dagegen deaktiviert, damit legitime Paket-Maintainer-Skripte und Laufzeit-Trigger nicht unnötig gebrochen werden.
 
 Die Paketmenge stammt weiterhin aus der signaturgeprüften APT-Simulation `upgrade --with-new-pkgs --no-remove`; der privilegierte Apply selbst hat jedoch keinerlei Beschaffungsfunktion. Damit gibt es keine Abhängigkeit von globalen oder veralteten APT-Indizes und keinen Archiv-Fetch, nicht einmal über einen lokalen APT-Acquire-Schritt. Zusätzlich bleibt der Broker selbst ohne `AF_INET`/`AF_INET6`, und die transiente Paket-Unit besitzt ebenfalls kein IP-Netz.
 
 ## Snap
 
-`snap refresh --list` bestimmt unprivilegiert die angebotenen Revisionen. `snap download --revision ...` lädt pro Revision die `.snap`-Datei und die zugehörige Store-Assertion.
+`snap refresh --list` bestimmt unprivilegiert die angebotenen Revisionen und deren angezeigte Größe. Aus dieser gerundeten Store-Größe wird fail-closed ein konservativer Byte-Oberwert berechnet; zusammen mit einem begrenzten Assertion-Budget muss die gesamte Pending-Menge **vor dem ersten Download** unter `snap.max_download_bytes` und dem freien Handoff-Speicher liegen. Erst dann lädt `snap download --revision ...` pro Revision die `.snap`-Datei und die zugehörige Store-Assertion. Nach jedem Download werden tatsächliche Snap- und Assertion-Größen erneut gegen Einzel- und Gesamtgrenzen geprüft.
 
-`verify` akzeptiert nicht nur das Pending-Tuple aus Name, Version und Revision. Für jede geplante Revision wird dieselbe `name + revision` über den lokalen snapd/Store-Pfad in einen frischen privaten Verify-Unterbaum erneut heruntergeladen; sowohl `.snap` als auch `.assert` müssen in Größe und SHA-256 byteidentisch mit den gestagten Artefakten sein. Damit kann ein caller-konstruierter Plan kein anderes gültig signiertes Snap/Assertion-Paar unter einer angebotenen Revision unterschieben.
+`verify` akzeptiert nicht nur das Pending-Tuple aus Name, Version und Revision. Es bindet auch denselben Store-Größenoberwert und dieselben Gesamtbudgets. Für jede geplante Revision wird dieselbe `name + revision` über den lokalen snapd/Store-Pfad in einen frischen privaten Verify-Unterbaum erneut heruntergeladen; **auch dieser Redownload wird vorab gegen Byte- und Speichergrenzen geprüft**. `.snap` und `.assert` müssen anschließend in Größe und SHA-256 byteidentisch mit den gestagten Artefakten sein. Damit kann ein caller-konstruierter Plan weder ein anderes gültig signiertes Snap/Assertion-Paar unter einer angebotenen Revision unterschieben noch den Verify-Pfad für ungebundene Großdownloads missbrauchen.
 
 Nach Root-Copy und Hash-Readback wird die so Store-gebundene Assertion mit `snap ack` bestätigt und die lokale Snap-Datei mit `snap install <file.snap>` eingespielt. `--dangerous` ist durch Policy und Verifikation verboten.
 
@@ -71,7 +73,9 @@ Der unprivilegierte Handoff bleibt bis zum Copy user-schreibbar. Deshalb darf Ro
 
 `/var/lib/heim-pc/package-update-stages/<plan-id>`.
 
-Der Controller vergleicht anschließend die Hashausgabe der root-eigenen Kopie vollständig mit dem Plan. Erst dieser Readback macht die Apply-Argumente verwendbar.
+Der Plan bindet die deterministische Summe aller APT-, Snap- und Assertion-Bytes sowie einen kanonischen read-only Root-Probe (`stat -f -c %a:%S <root-stage>`). Unmittelbar vor `prepare`/Copy führt ausschließlich der bereits recovery-gated Root-Broker diesen Probe aus; der unprivilegierte Controller parst den gebundenen Readback fail-closed und verlangt `available_bytes >= root_copy_required_bytes`. So muss der Planner den absichtlich root-privaten `/var/lib/...`-Stage nicht traversieren, und die Kapazitätswahrheit stammt trotzdem vom tatsächlichen **Root-Zielfilesystem**.
+
+Nach dem Copy führt Root ausschließlich die im Plan gebundenen `sha256sum`-Kommandos auf dem root-eigenen Stage aus. Der normale Plan- und `verify`-Output enthält absichtlich **keine** `apt_apply_argv` oder `snap_apply_argvs`. Der separate `readback`-Schritt akzeptiert den Apply erst, wenn die geparste Root-Hashmenge exakt – ohne fehlende, zusätzliche, doppelte oder abweichende Pfade – der plan-gebundenen Erwartungsmenge entspricht. Erst dieses Receipt (`root-readback-authorized`) erzeugt die tatsächlichen Apply-Argumente. Damit ist die Reihenfolge Copy → Root-Hash-Readback → Apply maschinenlesbar erzwungen statt nur prozedural dokumentiert.
 
 ## Preconditions
 
@@ -89,7 +93,9 @@ Der Plan hat eine kurze maximale Lebensdauer. Jede Abweichung verlangt einen neu
 
 ## Postflight
 
-`postflight` vergleicht jede geplante DEB-Version architekturgenau (`paket:architektur`) und jede Snap-Revision mit dem installierten Zustand, liest `reboot-required`, Kernservices und `nvidia-smi` zurück und schreibt ein Receipt in den Handoff-Stage. Damit werden Multiarch-Pakete wie `libssl3:amd64` und `libssl3:i386` nicht zu einer scheinbaren Doppelversion zusammengezogen.
+`postflight` verwendet dieselbe kanonische Plan-Identity-Grenze wie `verify`: exakte Plan-ID, kanonische Repository-Policy samt Digest, exakter `<runtime_root>/<plan-id>/plan.json`-Container, Benutzerbindung, Handoff-Broker-Bindung, Root-Artefakterwartungen und deterministische Root-Kommandos müssen unverändert sein. Erst danach vergleicht es jede geplante DEB-Version architekturgenau (`paket:architektur`) und jede Snap-Revision mit dem installierten Zustand, liest Kernservices und `nvidia-smi` zurück und schreibt ein Receipt in den Handoff-Stage. Für Reboot-Evidenz kombiniert es den normalen Host-Marker mit dem persistenten privaten `/run`-Capture der APT-Unit. Zusätzlich werden die **neuen** DEB-Control-Skripte bereits beim Staging bounded auf `reboot-required`/`notify-reboot-required` geprüft und im Verify erneut klassifiziert; ist ein solches Paket geplant, aber wegen der Prozessisolation kein Laufzeitmarker beobachtbar, meldet Postflight konservativ `reboot_required=true` statt eines falschen Negativs. Damit werden Multiarch-Pakete wie `libssl3:amd64` und `libssl3:i386` nicht zu einer scheinbaren Doppelversion zusammengezogen.
+
+Der Runtime-Capture muss bis zum erfolgreichen Postflight erhalten bleiben; ein vorzeitiger Cleanup macht den Postflight fail-closed. Erst danach dürfen sowohl der root-eigene Paketstage als auch der Capture-Baum entfernt werden.
 
 Ein grünes Postflight-Receipt behauptet keine zukünftige Repository-Freshness und keinen bereits vollzogenen Neustart.
 
