@@ -2,7 +2,7 @@
 id: model
 role: norm
 status: canonical
-last_reviewed: 2026-07-13
+last_reviewed: 2026-08-26
 depends_on:
   - security
 verifies_with:
@@ -52,7 +52,7 @@ Ein lokales Artefakt gilt nur für die im Receipt belegte Quelle und den belegte
 * CI: technische Checks am exakten Head;
 * systemd, Logs und Healthchecks: Dienste und Runtime;
 * Systemkatalog: stabile Ökosystemsemantik, nicht Livegesundheit;
-* RepoBrief/Lenskit: quellengebundener Repository-Kontext, nicht ungeprüfte Livewahrheit.
+* RepoGround: quellengebundener Repository-Kontext, nicht ungeprüfte Livewahrheit.
 
 ## Status der alten State-Dateien
 
