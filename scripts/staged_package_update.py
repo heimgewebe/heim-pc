@@ -174,7 +174,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         if safety.get(key) is not True:
             raise PolicyError(f"safety.{key} must be true")
     for parent, key in (
-        (staging, "max_plan_age_seconds"),
+        (staging, "max_plan_age_seconds"), (staging, "root_stage_safety_margin_bytes"),
         (apt, "max_packages"), (apt, "max_download_bytes"),
         (snap, "max_snaps"), (snap, "max_download_bytes"), (snap, "max_assertion_bytes"),
     ):
@@ -276,6 +276,14 @@ def _runtime_capture_root(policy: dict[str, Any]) -> Path:
     if not relative.parts:
         raise PolicyError("staging.runtime_capture_root may not equal /run")
     return path
+
+
+def _root_capacity_prepare_argv(policy: dict[str, Any]) -> list[str]:
+    root_root = _root_stage_root(policy)
+    return [
+        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
+        str(root_root),
+    ]
 
 
 def _root_capacity_argv(policy: dict[str, Any]) -> list[str]:
@@ -990,50 +998,52 @@ def _apt_apply_systemd_argv(plan_id: str, root_debs: Path, runtime_capture: Path
     ]
 
 
-def _root_commands(plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[str, Any], snap: dict[str, Any]) -> dict[str, Any]:
+def _root_commands(
+    plan_id: str, stage: Path, policy: dict[str, Any], apt: dict[str, Any], snap: dict[str, Any]
+) -> dict[str, Any]:
     plan_id = _validate_plan_id(plan_id)
-    required_bytes = _root_copy_required_bytes(apt, snap)
+    copy_bytes = _root_copy_required_bytes(apt, snap)
+    safety_margin_bytes = policy["staging"]["root_stage_safety_margin_bytes"] if copy_bytes else 0
+    required_bytes = copy_bytes + safety_margin_bytes
     root_stage = _root_stage_root(policy) / plan_id
-    root_debs = root_stage / "debs"
-    root_snaps = root_stage / "snaps"
     runtime_capture = _runtime_capture_root(policy) / plan_id
-    prepare = [
-        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
-        str(root_stage), str(root_debs), str(root_snaps), str(runtime_capture),
-    ]
-    apt_sources = [str(_stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")) for item in apt.get("packages", [])]
-    apt_destinations = [str(root_debs / Path(item["relative_path"]).name) for item in apt.get("packages", [])]
-    snap_sources: list[str] = []
-    snap_destinations: list[str] = []
-    for item in snap.get("packages", []):
-        for key in ("assert_relative_path", "snap_relative_path"):
-            source = _stage_artifact_path(stage, item.get(key), stage / "snap")
-            snap_sources.append(str(source))
-            snap_destinations.append(str(root_snaps / source.name))
-    copy_apt = ["/usr/bin/install", "-o", "root", "-g", "root", "-m", "0600", *apt_sources, str(root_debs)] if apt_sources else None
-    copy_snap = ["/usr/bin/install", "-o", "root", "-g", "root", "-m", "0600", *snap_sources, str(root_snaps)] if snap_sources else None
-    hash_apt = ["/usr/bin/sha256sum", *apt_destinations] if apt_destinations else None
-    hash_snap = ["/usr/bin/sha256sum", *snap_destinations] if snap_destinations else None
-    apt_apply_preflight = None
-    if apt_destinations:
-        apt_apply_preflight = [
-            "/usr/bin/dpkg", "--simulate", "--force-confold",
-            "--install", "--recursive", str(root_debs),
-        ]
     return {
         "root_stage": str(root_stage),
         "runtime_capture_path": str(runtime_capture),
-        "root_copy_required_bytes": required_bytes,
-        "root_capacity_argv": _root_capacity_argv(policy),
-        "prepare_argv": prepare,
-        "copy_apt_argv": copy_apt,
-        "copy_snap_argv": copy_snap,
-        "hash_apt_argv": hash_apt,
-        "hash_snap_argv": hash_snap,
-        "apt_apply_preflight_argv": apt_apply_preflight,
-        "apply_readback_required": bool(apt_destinations or snap_destinations),
+        "root_copy_required_bytes": copy_bytes,
+        "root_stage_safety_margin_bytes": safety_margin_bytes,
+        "root_capacity_required_bytes": required_bytes,
+        "root_capacity_prepare_argv": _root_capacity_prepare_argv(policy) if copy_bytes else None,
+        "root_capacity_argv": _root_capacity_argv(policy) if copy_bytes else None,
+        "capacity_readback_required": bool(copy_bytes),
+        "apply_readback_required": bool(copy_bytes),
         "cleanup_argv": ["/usr/bin/rm", "-rf", "--", str(root_stage)],
         "cleanup_runtime_capture_argv": ["/usr/bin/rm", "-rf", "--", str(runtime_capture)],
+    }
+
+
+def _copy_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    commands = plan["root_commands"]
+    stage = Path(plan["stage_path"])
+    root_stage = Path(commands["root_stage"])
+    root_debs = root_stage / "debs"
+    root_snaps = root_stage / "snaps"
+    runtime_capture = Path(commands["runtime_capture_path"])
+    apt_sources = [str(_stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")) for item in plan["apt"].get("packages", [])]
+    apt_destinations = [str(root_debs / Path(item["relative_path"]).name) for item in plan["apt"].get("packages", [])]
+    snap_sources: list[str] = []
+    snap_destinations: list[str] = []
+    for item in plan["snap"].get("packages", []):
+        for key in ("assert_relative_path", "snap_relative_path"):
+            source = _stage_artifact_path(stage, item.get(key), stage / "snap")
+            snap_sources.append(str(source)); snap_destinations.append(str(root_snaps / source.name))
+    return {
+        "prepare_argv": ["/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711", str(root_stage), str(root_debs), str(root_snaps), str(runtime_capture)],
+        "copy_apt_argv": ["/usr/bin/install", "-o", "root", "-g", "root", "-m", "0600", *apt_sources, str(root_debs)] if apt_sources else None,
+        "copy_snap_argv": ["/usr/bin/install", "-o", "root", "-g", "root", "-m", "0600", *snap_sources, str(root_snaps)] if snap_sources else None,
+        "hash_apt_argv": ["/usr/bin/sha256sum", *apt_destinations] if apt_destinations else None,
+        "hash_snap_argv": ["/usr/bin/sha256sum", *snap_destinations] if snap_destinations else None,
+        "apt_apply_preflight_argv": ["/usr/bin/dpkg", "--simulate", "--force-confold", "--install", "--recursive", str(root_debs)] if apt_destinations else None,
     }
 
 
@@ -1123,6 +1133,8 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
             "apt_apply_runtime_namespace": "persistent-private-run-capture-private-network",
             "apt_apply_reboot_capture": True,
             "apt_apply_kernel_device_isolation": True,
+            "copy_commands_embedded_in_plan": False,
+            "copy_requires_root_capacity_readback": True,
             "apply_commands_embedded_in_plan": False,
             "apply_requires_root_hash_readback": True,
             "apt_apply_engine": "dpkg-recursive-root-stage",
@@ -1150,6 +1162,9 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
         "snap_packages": len(snap.get("packages", [])),
         "snap_names": [item["name"] for item in snap.get("packages", [])],
         "root_stage": commands["root_stage"],
+        "root_capacity_prepare_argv": commands["root_capacity_prepare_argv"],
+        "root_capacity_argv": commands["root_capacity_argv"],
+        "root_capacity_required_bytes": commands["root_capacity_required_bytes"],
     }
 
 
@@ -1232,15 +1247,25 @@ def _validate_plan_identity(
     if expected_artifacts != _artifact_expectations(plan):
         raise PlanError("root artifact expectation map is inconsistent")
     commands = plan.get("root_commands")
+    if not isinstance(commands, dict):
+        raise PlanError("root_commands must be an object")
     expected_commands = _root_commands(plan_id, stage, policy, plan["apt"], plan["snap"])
     if commands != expected_commands:
         raise PlanError("root command set is inconsistent with the current policy and exact plan artifacts")
-    if "apt_apply_argv" in commands or "snap_apply_argvs" in commands:
-        raise PlanError("apply commands must not be embedded in a package plan")
+    forbidden_embedded = {
+        "prepare_argv", "copy_apt_argv", "copy_snap_argv",
+        "hash_apt_argv", "hash_snap_argv", "apt_apply_preflight_argv",
+        "apt_apply_argv", "snap_apply_argvs",
+    }
+    embedded = sorted(forbidden_embedded.intersection(commands))
+    if embedded:
+        raise PlanError(f"copy/apply commands must not be embedded in a package plan: {embedded}")
     return plan, policy, stage, uid
 
 
-def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
+def _verify_plan_loaded(
+    plan_path: Path, confirmation: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     plan, policy, stage, uid = _validate_plan_identity(plan_path, confirmation)
     age = int(time.time()) - int(plan["created_at_unix"])
     if age < 0 or age > policy["staging"]["max_plan_age_seconds"]:
@@ -1257,30 +1282,114 @@ def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     for item in plan["snap"].get("packages", []):
         if _snap_installed_revision(item["name"]) != item["baseline_revision"]:
             raise PlanError(f"installed snap revision changed after planning: {item['name']}")
-    expected = plan["root_artifact_sha256"]
     commands = plan["root_commands"]
-    apt_preflight = commands.get("apt_apply_preflight_argv") or []
-    if plan["apt"].get("packages"):
-        expected_root_debs = str(Path(commands["root_stage"]) / "debs")
-        if apt_preflight != [
-            "/usr/bin/dpkg", "--simulate", "--force-confold",
-            "--install", "--recursive", expected_root_debs,
-        ]:
-            raise PlanError("APT root preflight is not an exact local dpkg simulation")
-    return {
+    result = {
         "status": "verified",
         "plan_path": str(plan_path),
         "plan_sha256": plan["plan_sha256"],
         "age_seconds": age,
-        "root_artifact_sha256": expected,
-        "root_commands": commands,
-        "sensitive_apt_packages": [item["name"] for item in plan["apt"].get("packages", []) if item.get("sensitive")],
+        "root_artifact_sha256": plan["root_artifact_sha256"],
+        "root_capacity": {
+            "required": bool(commands.get("capacity_readback_required")),
+            "prepare_argv": commands.get("root_capacity_prepare_argv"),
+            "argv": commands.get("root_capacity_argv"),
+            "copy_bytes": commands.get("root_copy_required_bytes", 0),
+            "safety_margin_bytes": commands.get("root_stage_safety_margin_bytes", 0),
+            "required_bytes": commands.get("root_capacity_required_bytes", 0),
+        },
+        "sensitive_apt_packages": [
+            item["name"] for item in plan["apt"].get("packages", []) if item.get("sensitive")
+        ],
         "does_not_establish": [
+            "root copy authorization before root capacity readback",
             "root artifact copy integrity before root hash readback",
             "privileged apply completion",
             "postflight service health",
         ],
     }
+    return result, plan, policy
+
+
+def verify_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
+    result, _plan, _policy = _verify_plan_loaded(plan_path, confirmation)
+    return result
+
+
+def root_capacity_authorize(
+    plan_path: Path, confirmation: str, root_capacity_output: str
+) -> dict[str, Any]:
+    verified, plan, policy = _verify_plan_loaded(plan_path, confirmation)
+    commands = plan["root_commands"]
+    if not commands.get("capacity_readback_required"):
+        raise PlanError("root capacity authorization is unnecessary when no package artifacts are planned")
+    required_bytes = commands.get("root_capacity_required_bytes")
+    copy_bytes = commands.get("root_copy_required_bytes")
+    safety_margin_bytes = commands.get("root_stage_safety_margin_bytes")
+    if not all(isinstance(value, int) and value >= 0 for value in (required_bytes, copy_bytes, safety_margin_bytes)):
+        raise PlanError("root capacity byte bindings are missing or invalid")
+    if required_bytes != copy_bytes + safety_margin_bytes:
+        raise PlanError("root capacity requirement does not equal artifact bytes plus safety margin")
+    capacity = parse_root_capacity_readback(root_capacity_output, required_bytes)
+    copy_commands = _copy_commands(plan, policy)
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_root_capacity",
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "root_capacity_prepare_argv": commands.get("root_capacity_prepare_argv"),
+        "root_capacity_argv": commands.get("root_capacity_argv"),
+        "root_copy_bytes": copy_bytes,
+        "safety_margin_bytes": safety_margin_bytes,
+        "required_bytes": required_bytes,
+        "available_bytes": capacity["available_bytes"],
+        "copy_commands": copy_commands,
+        "status": "root-capacity-authorized",
+        "does_not_establish": [
+            "future root-filesystem capacity",
+            "root artifact copy completion",
+            "root artifact hash correctness",
+            "privileged apply completion",
+        ],
+    }
+    receipt["receipt_sha256"] = _sha256_json(receipt)
+    receipt_path = Path(plan["stage_path"]) / "root-capacity.json"
+    _atomic_json(receipt_path, receipt)
+    return {**receipt, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
+
+
+def _validate_root_capacity_receipt(
+    plan: dict[str, Any], policy: dict[str, Any], uid: int
+) -> dict[str, Any]:
+    commands = plan["root_commands"]
+    if not commands.get("capacity_readback_required"):
+        return {"status": "not-required", "copy_commands": _copy_commands(plan, policy)}
+    receipt_path = Path(plan["stage_path"]) / "root-capacity.json"
+    receipt = _read_json(receipt_path)
+    _regular_owned_file(receipt_path, uid)
+    if receipt.get("schema_version") != 1 or receipt.get("kind") != "heim_pc.staged_package_update_root_capacity":
+        raise PlanError("root capacity receipt schema or kind mismatch")
+    if receipt.get("status") != "root-capacity-authorized":
+        raise PlanError("root capacity receipt is not authorized")
+    if receipt.get("plan_id") != plan["plan_id"] or receipt.get("plan_sha256") != plan["plan_sha256"]:
+        raise PlanError("root capacity receipt is bound to a different plan")
+    expected = {
+        "root_capacity_prepare_argv": commands.get("root_capacity_prepare_argv"),
+        "root_capacity_argv": commands.get("root_capacity_argv"),
+        "root_copy_bytes": commands.get("root_copy_required_bytes"),
+        "safety_margin_bytes": commands.get("root_stage_safety_margin_bytes"),
+        "required_bytes": commands.get("root_capacity_required_bytes"),
+        "copy_commands": _copy_commands(plan, policy),
+    }
+    for key, value in expected.items():
+        if receipt.get(key) != value:
+            raise PlanError(f"root capacity receipt binding changed: {key}")
+    if not isinstance(receipt.get("available_bytes"), int) or receipt["available_bytes"] < receipt["required_bytes"]:
+        raise PlanError("root capacity receipt no longer proves sufficient destination space")
+    digest = receipt.get("receipt_sha256")
+    unsigned = dict(receipt); unsigned.pop("receipt_sha256", None)
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None or _sha256_json(unsigned) != digest:
+        raise PlanError("root capacity receipt content hash mismatch")
+    return receipt
 
 
 def _parse_sha256sum_output(text: str) -> dict[str, str]:
@@ -1302,10 +1411,8 @@ def _parse_sha256sum_output(text: str) -> dict[str, str]:
 def root_readback_authorize(
     plan_path: Path, confirmation: str, apt_sha256sum_output: str, snap_sha256sum_output: str
 ) -> dict[str, Any]:
-    verified = verify_plan(plan_path, confirmation)
-    plan = _read_json(plan_path)
-    policy_path = _require_canonical_policy_path(Path(plan["policy_path"]))
-    policy = load_policy(policy_path)
+    verified, plan, policy = _verify_plan_loaded(plan_path, confirmation)
+    capacity_receipt = _validate_root_capacity_receipt(plan, policy, os.geteuid())
     observed = _parse_sha256sum_output(apt_sha256sum_output)
     snap_observed = _parse_sha256sum_output(snap_sha256sum_output)
     overlap = set(observed).intersection(snap_observed)
@@ -1330,7 +1437,8 @@ def root_readback_authorize(
         "root_readback_sha256": _sha256_json({
             "plan_sha256": plan["plan_sha256"], "root_artifact_sha256": observed
         }),
-        "apt_apply_preflight_argv": plan["root_commands"].get("apt_apply_preflight_argv"),
+        "capacity_receipt_sha256": capacity_receipt.get("receipt_sha256"),
+        "apt_apply_preflight_argv": capacity_receipt.get("copy_commands", {}).get("apt_apply_preflight_argv"),
         "apply_commands": apply_commands,
         "status": "root-readback-authorized",
         "does_not_establish": ["privileged apply completion", "postflight service health"],
@@ -1470,6 +1578,10 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="Verify exact plan, live preconditions and staged artifacts.")
     verify.add_argument("--plan", type=Path, required=True)
     verify.add_argument("--confirmation", required=True)
+    capacity = sub.add_parser("capacity", help="Release root copy argv only after destination-filesystem capacity readback.")
+    capacity.add_argument("--plan", type=Path, required=True)
+    capacity.add_argument("--confirmation", required=True)
+    capacity.add_argument("--root-capacity-output", required=True)
     readback = sub.add_parser("readback", help="Authorize apply argv only after exact root-owned sha256sum readback.")
     readback.add_argument("--plan", type=Path, required=True)
     readback.add_argument("--confirmation", required=True)
@@ -1488,6 +1600,8 @@ def main() -> int:
             result = create_plan(args.policy)
         elif args.command == "verify":
             result = verify_plan(args.plan, args.confirmation)
+        elif args.command == "capacity":
+            result = root_capacity_authorize(args.plan, args.confirmation, args.root_capacity_output)
         elif args.command == "readback":
             result = root_readback_authorize(
                 args.plan, args.confirmation, args.apt_sha256sum_output, args.snap_sha256sum_output

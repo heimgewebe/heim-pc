@@ -359,6 +359,7 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "staging": {
             "root_root": "/var/lib/heim-pc/package-update-stages",
             "runtime_capture_root": "/run/heim-pc-package-update-captures",
+            "root_stage_safety_margin_bytes": 1000,
         },
     }
     stage = tmp_path / "stage"
@@ -383,11 +384,17 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     }
     plan_id = "20260826T194332Z-1dedf2da5503"
     commands = spu._root_commands(plan_id, stage, policy, apt, snap)
-    apt_preflight = commands["apt_apply_preflight_argv"]
-    assert "apt_apply_argv" not in commands
-    assert "snap_apply_argvs" not in commands
+    for withheld in (
+        "prepare_argv", "copy_apt_argv", "copy_snap_argv",
+        "hash_apt_argv", "hash_snap_argv", "apt_apply_preflight_argv",
+        "apt_apply_argv", "snap_apply_argvs",
+    ):
+        assert withheld not in commands
+    assert commands["capacity_readback_required"] is True
     assert commands["apply_readback_required"] is True
-    plan = {"plan_id": plan_id, "root_commands": commands, "apt": apt, "snap": snap}
+    plan = {"plan_id": plan_id, "stage_path": str(stage), "root_commands": commands, "apt": apt, "snap": snap}
+    copy_commands = spu._copy_commands(plan, policy)
+    apt_preflight = copy_commands["apt_apply_preflight_argv"]
     apply_commands = spu._apply_commands(plan, policy)
     apt_apply = apply_commands["apt_apply_argv"]
     root_debs = "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503/debs"
@@ -456,6 +463,12 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert all("--dangerous" not in argv for argv in apply_commands["snap_apply_argvs"])
     assert commands["runtime_capture_path"] == "/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503"
     assert commands["root_copy_required_bytes"] == 153
+    assert commands["root_stage_safety_margin_bytes"] == 1000
+    assert commands["root_capacity_required_bytes"] == 1153
+    assert commands["root_capacity_prepare_argv"] == [
+        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
+        "/var/lib/heim-pc/package-update-stages",
+    ]
     assert commands["root_capacity_argv"] == [
         "/usr/bin/stat", "-f", "-c", "%a:%S", "/var/lib/heim-pc/package-update-stages"
     ]
@@ -469,6 +482,7 @@ def test_root_staging_capacity_probe_and_readback_are_fail_closed(tmp_path: Path
         "staging": {
             "root_root": "/var/lib/heim-pc/package-update-stages",
             "runtime_capture_root": "/run/heim-pc-package-update-captures",
+            "root_stage_safety_margin_bytes": 100,
         }
     }
     apt = {"packages": [{"relative_path": "apt/debs/a.deb", "sha256": "a" * 64, "size": 80}]}
@@ -476,18 +490,106 @@ def test_root_staging_capacity_probe_and_readback_are_fail_closed(tmp_path: Path
         "assert_relative_path": "snap/a.assert", "assert_size": 10,
         "snap_relative_path": "snap/a.snap", "snap_size": 20,
     }]}
-    commands = spu._root_commands("20260827T010203Z-123456abcdef", tmp_path / "stage", policy, apt, snap)
+    commands = spu._root_commands(
+        "20260827T010203Z-123456abcdef", tmp_path / "stage", policy, apt, snap
+    )
     assert commands["root_copy_required_bytes"] == 110
+    assert commands["root_stage_safety_margin_bytes"] == 100
+    assert commands["root_capacity_required_bytes"] == 210
+    assert commands["root_capacity_prepare_argv"] == [
+        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
+        "/var/lib/heim-pc/package-update-stages",
+    ]
     assert commands["root_capacity_argv"] == [
         "/usr/bin/stat", "-f", "-c", "%a:%S", "/var/lib/heim-pc/package-update-stages"
     ]
-    assert spu.parse_root_capacity_readback("100:4096\n", 110) == {
-        "required_bytes": 110, "available_bytes": 409600, "sufficient": True
+    assert spu.parse_root_capacity_readback("100:4096\n", 210) == {
+        "required_bytes": 210, "available_bytes": 409600, "sufficient": True
     }
-    with pytest.raises(spu.PlanError, match="requires 110 bytes"):
-        spu.parse_root_capacity_readback("10:10", 110)
+    with pytest.raises(spu.PlanError, match="requires 210 bytes"):
+        spu.parse_root_capacity_readback("20:10", 210)
     with pytest.raises(spu.PlanError, match="unexpected root staging filesystem capacity readback"):
         spu.parse_root_capacity_readback("not-a-capacity", 110)
+
+
+def test_root_capacity_gate_can_provision_empty_base_before_stat_without_releasing_copy(
+    tmp_path: Path,
+) -> None:
+    root_root = tmp_path / "first-run" / "package-update-stages"
+    policy = {
+        "staging": {
+            "root_root": str(root_root),
+            "runtime_capture_root": "/run/heim-pc-package-update-captures",
+            "root_stage_safety_margin_bytes": 100,
+        }
+    }
+    apt = {"packages": [{"relative_path": "apt/debs/a.deb", "sha256": "a" * 64, "size": 80}]}
+    commands = spu._root_commands(
+        "20260827T010203Z-123456abcdef", tmp_path / "stage", policy, apt, {"packages": []}
+    )
+    assert not root_root.exists()
+    assert commands["root_capacity_prepare_argv"] == [
+        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
+        str(root_root),
+    ]
+    assert commands["root_capacity_argv"] == [
+        "/usr/bin/stat", "-f", "-c", "%a:%S", str(root_root)
+    ]
+    for withheld in ("prepare_argv", "copy_apt_argv", "copy_snap_argv", "hash_apt_argv", "hash_snap_argv"):
+        assert withheld not in commands
+
+
+def test_verify_withholds_root_copy_commands_until_capacity_readback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    stage = tmp_path / "verify-capacity"
+    stage.mkdir()
+    apt = {"packages": [{"name": "curl", "relative_path": "apt/debs/curl.deb", "sha256": "a" * 64, "size": 10}]}
+    snap = {"packages": []}
+    commands = spu._root_commands("20260827T010203Z-123456abcdef", stage, policy, apt, snap)
+    plan = {
+        "plan_id": "20260827T010203Z-123456abcdef", "plan_sha256": "f" * 64,
+        "created_at_unix": 1, "stage_path": str(stage),
+        "baseline": {"uid": os.geteuid(), "dpkg_status_sha256": "status", "apt_source_config": []},
+        "apt": apt, "snap": snap, "root_commands": commands, "root_artifact_sha256": {},
+    }
+    monkeypatch.setattr(spu, "_validate_plan_identity", lambda path, confirmation: (plan, policy, stage, os.geteuid()))
+    monkeypatch.setattr(spu.time, "time", lambda: 2)
+    monkeypatch.setattr(spu, "_dpkg_status_sha256", lambda: "status")
+    monkeypatch.setattr(spu, "_validate_source_config", lambda expected: None)
+    monkeypatch.setattr(spu, "_require_broker_handoff_binding", lambda policy: None)
+    monkeypatch.setattr(spu, "_validate_stage_artifacts", lambda plan, uid, policy: None)
+    monkeypatch.setattr(spu, "_revalidate_apt_provenance", lambda stage, plan, policy, uid: None)
+    monkeypatch.setattr(spu, "_revalidate_snap_provenance", lambda stage, plan, policy, uid: None)
+    result = spu.verify_plan(stage / "plan.json", "f" * 64)
+    assert "root_commands" not in result
+    assert result["root_capacity"]["required"] is True
+    assert result["root_capacity"]["prepare_argv"] == commands["root_capacity_prepare_argv"]
+    assert result["root_capacity"]["argv"] == commands["root_capacity_argv"]
+    assert result["root_capacity"]["copy_bytes"] == 10
+    assert result["root_capacity"]["safety_margin_bytes"] == policy["staging"]["root_stage_safety_margin_bytes"]
+    assert result["root_capacity"]["required_bytes"] == 10 + policy["staging"]["root_stage_safety_margin_bytes"]
+
+
+def test_capacity_authorization_blocks_before_copy_when_root_stage_space_is_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text())
+    stage = tmp_path / "capacity-block"
+    stage.mkdir()
+    apt = {"packages": [{"name": "curl", "relative_path": "apt/debs/curl.deb", "sha256": "a" * 64, "size": 10}]}
+    snap = {"packages": []}
+    plan = {
+        "plan_id": "20260827T010203Z-123456abcdef",
+        "plan_sha256": "f" * 64,
+        "stage_path": str(stage),
+        "root_commands": spu._root_commands("20260827T010203Z-123456abcdef", stage, policy, apt, snap),
+        "apt": apt,
+        "snap": snap,
+    }
+    monkeypatch.setattr(spu, "_verify_plan_loaded", lambda path, confirmation: ({"age_seconds": 1}, plan, policy))
+    with pytest.raises(spu.PlanError, match="destination filesystem has only 0 available"):
+        spu.root_capacity_authorize(stage / "plan.json", "f" * 64, "0:4096")
+    assert not (stage / "root-capacity.json").exists()
 
 
 def test_verify_rejects_authenticated_apt_total_over_byte_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -530,9 +632,10 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     }
     plan_path = stage / "plan.json"
     plan_path.write_text(json.dumps(plan))
-    monkeypatch.setattr(spu, "verify_plan", lambda path, confirmation: {"age_seconds": 1})
-    monkeypatch.setattr(spu, "_read_json", lambda path: plan)
-    monkeypatch.setattr(spu, "load_policy", lambda path: policy)
+    monkeypatch.setattr(spu, "_verify_plan_loaded", lambda path, confirmation: ({"age_seconds": 1}, plan, policy))
+    capacity = spu.root_capacity_authorize(plan_path, "f" * 64, "1000000:4096")
+    assert capacity["status"] == "root-capacity-authorized"
+    assert capacity["copy_commands"]["copy_apt_argv"] is not None
     result = spu.root_readback_authorize(plan_path, "f" * 64, f"{'a' * 64}  {root_path}\n", "")
     assert result["status"] == "root-readback-authorized"
     assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"

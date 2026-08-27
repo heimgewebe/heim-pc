@@ -8,6 +8,7 @@
     "broker_bind_root": "/home/alex/repos/.heim-pc-worktrees",
     "root_root": "/var/lib/heim-pc/package-update-stages",
     "runtime_capture_root": "/run/heim-pc-package-update-captures",
+    "root_stage_safety_margin_bytes": 268435456,
     "max_plan_age_seconds": 3600
   },
   "apt": {
