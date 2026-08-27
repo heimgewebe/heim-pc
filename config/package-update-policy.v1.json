@@ -37,7 +37,7 @@
     "max_download_bytes": 6442450944,
     "max_assertion_bytes": 1048576,
     "allow_dangerous": false,
-    "download_quota_mode": "userns-tmpfs"
+    "download_quota_mode": "userns-pid-tmpfs-bwrap-ro-root"
   },
   "safety": {
     "require_exact_plan_hash": true,
@@ -65,7 +65,8 @@
     "require_target_downgrade_refusal": true,
     "require_explicit_activation_semantics": true,
     "require_dpkg_explicit_apply": true,
-    "require_snap_download_hard_quota": true
+    "require_snap_download_hard_quota": true,
+    "require_authenticated_apply_completion_evidence": true
   },
   "postflight": {
     "system_services": [

@@ -23,6 +23,7 @@ RECEIPT_KIND = "heim_pc.staged_package_update_receipt"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PLAN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?: .*)?$")
+APT_SUMMARY_RE = re.compile(r"^(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded\.$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
 BROKER_OUTPUT_EVIDENCE_ROOT = Path("/run/grabowski/privileged-broker-evidence")
 BROKER_OUTPUT_EVIDENCE_KIND = "grabowski_privileged_output_evidence"
@@ -73,14 +74,19 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run(argv: list[str], *, cwd: Path | None = None, check: bool = True) -> dict[str, Any]:
-    env = os.environ.copy()
-    env.pop("APT_CONFIG", None)
-    env.update({"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"})
+def _run(
+    argv: list[str], *, cwd: Path | None = None, check: bool = True,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    command_env = os.environ.copy() if env is None else dict(env)
+    for key in list(command_env):
+        if key == "APT_CONFIG" or key.startswith(("DPKG_", "LD_", "SNAPD_", "SYSTEMD_", "DBUS_", "PYTHON")):
+            command_env.pop(key, None)
+    command_env.update({"LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive"})
     completed = subprocess.run(
         argv,
         cwd=str(cwd) if cwd else None,
-        env=env,
+        env=command_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -98,6 +104,17 @@ def _run(argv: list[str], *, cwd: Path | None = None, check: bool = True) -> dic
             f"{completed.stderr.strip() or completed.stdout.strip()}"
         )
     return result
+
+
+def _host_readback_env(*, user: bool = False) -> dict[str, str]:
+    value = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "LANG": "C", "DEBIAN_FRONTEND": "noninteractive", "HOME": "/"}
+    if user:
+        value["XDG_RUNTIME_DIR"] = f"/run/user/{os.geteuid()}"
+    return value
+
+
+def _host_dpkg_env() -> dict[str, str]:
+    return _host_readback_env()
 
 
 def _fsync_directory(path: Path) -> None:
@@ -231,8 +248,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         raise PolicyError("staging, apt, snap and safety must be objects")
     if snap.get("allow_dangerous") is not False:
         raise PolicyError("snap.allow_dangerous must remain false")
-    if snap.get("download_quota_mode") != "userns-tmpfs":
-        raise PolicyError("snap.download_quota_mode must be userns-tmpfs")
+    if snap.get("download_quota_mode") != "userns-pid-tmpfs-bwrap-ro-root":
+        raise PolicyError("snap.download_quota_mode must be userns-pid-tmpfs-bwrap-ro-root")
     required_true = (
         "require_exact_plan_hash",
         "require_fresh_apt_indexes",
@@ -255,6 +272,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_apply_readback_authorization",
         "require_snap_download_byte_cap",
         "require_snap_download_hard_quota",
+        "require_authenticated_apply_completion_evidence",
         "require_postflight_plan_identity",
         "privileged_broker_network_must_remain_blocked",
         "require_privileged_broker_output_evidence",
@@ -583,15 +601,29 @@ def _prepare_apt_dirs(stage: Path, uid: int) -> None:
 
 def parse_apt_simulation(text: str) -> list[dict[str, str]]:
     packages: list[dict[str, str]] = []
+    summary_total: int | None = None
     for raw_line in text.splitlines():
         line = raw_line.strip()
+        summary = APT_SUMMARY_RE.match(line)
+        if summary is not None:
+            if summary_total is not None:
+                raise PlanError("APT simulation contains multiple summary rows")
+            upgraded, newly_installed, removed, _not_upgraded = (int(value) for value in summary.groups())
+            if removed != 0:
+                raise PlanError("APT simulation unexpectedly proposes removals")
+            summary_total = upgraded + newly_installed
+            continue
         match = APT_INST_RE.match(line)
         if match is None:
-            if line.startswith("Inst "):
+            if "Inst " in line:
                 raise PlanError(f"unexpected apt simulation Inst row: {line}")
             continue
         name, version, arch = match.groups()
         packages.append({"name": name, "version": version, "arch": arch})
+    if summary_total is None:
+        raise PlanError("APT simulation summary row is missing or changed format")
+    if len(packages) != summary_total:
+        raise PlanError(f"APT simulation parsed {len(packages)} install rows but summary declares {summary_total}")
     return packages
 
 
@@ -851,7 +883,7 @@ def parse_snap_refresh_list(text: str) -> list[dict[str, Any]]:
 
 
 def _snap_installed_revision(name: str) -> str:
-    result = _run(["/usr/bin/snap", "list", name])
+    result = _run(["/usr/bin/snap", "list", name], env=_host_readback_env())
     lines = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
     if len(lines) < 2:
         raise PlanError(f"cannot read installed snap revision for {name}")
@@ -887,7 +919,8 @@ def _snap_quota_worker(args: list[str]) -> int:
         if mount.returncode != 0:
             raise PlanError(f"Snap quota tmpfs mount failed: {mount.stderr.strip()}")
         mounted = True
-        download = subprocess.run(["/usr/bin/snap", "download", name, "--revision", revision, "--basename", basename, "--target-directory", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=os.environ.copy())
+        snap_env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(mountpoint), "TMPDIR": str(mountpoint), "XDG_CACHE_HOME": str(mountpoint), "XDG_CONFIG_HOME": str(mountpoint)}
+        download = subprocess.run(["/usr/bin/bwrap", "--ro-bind", "/", "/", "--bind", str(mountpoint), str(mountpoint), "--die-with-parent", "/usr/bin/snap", "download", name, "--revision", revision, "--basename", basename, "--target-directory", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=snap_env)
         if download.returncode != 0:
             raise PlanError(f"snap download failed inside hard quota rc={download.returncode}: {download.stderr.strip() or download.stdout.strip()}")
         if {entry.name for entry in mountpoint.iterdir()} != expected_names:
@@ -915,6 +948,10 @@ def _snap_quota_worker(args: list[str]) -> int:
                 finally: os.close(destination_fd)
             finally: os.close(source_fd)
         _fsync_directory(output_dir)
+        unmount = subprocess.run(["/usr/bin/umount", str(mountpoint)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=safe_env)
+        if unmount.returncode != 0:
+            raise PlanError(f"Snap quota tmpfs teardown failed: {unmount.stderr.strip()}")
+        mounted = False
         if download.stdout: sys.stdout.write(download.stdout)
         return 0
     except BaseException:
@@ -925,7 +962,7 @@ def _snap_quota_worker(args: list[str]) -> int:
 
 
 def _snap_quota_argv(output_dir: Path, mountpoint: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int) -> list[str]:
-    return ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "/usr/bin/python3", str(Path(__file__).resolve()), "__snap-quota-worker", str(mountpoint), str(output_dir), name, revision, basename, str(snap_cap), str(assertion_cap)]
+    return ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3", str(Path(__file__).resolve()), "__snap-quota-worker", str(mountpoint), str(output_dir), name, revision, basename, str(snap_cap), str(assertion_cap)]
 
 
 def _snap_quota_download(output_dir: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int, uid: int) -> dict[str, Any]:
@@ -1338,7 +1375,7 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
             "copy_requires_root_capacity_readback": True,
             "apply_commands_embedded_in_plan": False,
             "apply_requires_root_hash_readback": True,
-            "apt_apply_engine": "dpkg-recursive-root-stage",
+            "apt_apply_engine": "dpkg-explicit-root-stage",
             "apt_apply_execution": "network-denied-systemd-system-task",
             "snap_dangerous": False,
             "privileged_network_required": False,
@@ -1671,21 +1708,92 @@ def root_readback_authorize(
         }),
         "broker_output_evidence": evidence,
         "capacity_receipt_sha256": capacity_receipt.get("receipt_sha256"),
+        "root_hash_output": sha256sum_output,
+        "authorized_at_unix": int(time.time()),
         "apt_apply_preflight_argv": _apt_apply_preflight_argv(plan),
         "apply_commands": apply_commands,
         "status": "root-readback-authorized",
         "does_not_establish": ["privileged apply completion", "postflight service health"],
     }
+    authorization["receipt_sha256"] = _sha256_json(authorization)
     receipt_path = Path(plan["stage_path"]) / "root-readback.json"
     _atomic_json(receipt_path, authorization)
     return {**authorization, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
 
 
+def _validate_root_readback_receipt(plan: dict[str, Any], policy: dict[str, Any], uid: int) -> dict[str, Any]:
+    receipt_path = Path(plan["stage_path"]) / "root-readback.json"
+    receipt = _read_json(receipt_path)
+    _regular_owned_file(receipt_path, uid)
+    if (receipt.get("schema_version") != 1 or receipt.get("kind") != "heim_pc.staged_package_update_root_readback" or receipt.get("status") != "root-readback-authorized" or receipt.get("plan_id") != plan["plan_id"] or receipt.get("plan_sha256") != plan["plan_sha256"] or receipt.get("root_artifact_sha256") != plan["root_artifact_sha256"] or receipt.get("apt_apply_preflight_argv") != _apt_apply_preflight_argv(plan) or receipt.get("apply_commands") != _apply_commands(plan, policy)):
+        raise PlanError("root readback receipt binding is invalid")
+    authorized_at = receipt.get("authorized_at_unix"); now = int(time.time())
+    if isinstance(authorized_at, bool) or not isinstance(authorized_at, int) or authorized_at < int(plan["created_at_unix"]) or authorized_at > now + 5 or now - authorized_at > policy["staging"]["max_plan_age_seconds"]:
+        raise PlanError("root readback receipt is stale or outside the plan lifetime")
+    root_hash_output = receipt.get("root_hash_output"); broker_output_evidence = receipt.get("broker_output_evidence"); hash_argv = _copy_commands(plan, policy).get("hash_argv")
+    if not isinstance(root_hash_output, str) or not isinstance(broker_output_evidence, dict) or not isinstance(hash_argv, list):
+        raise PlanError("root readback receipt lacks authenticated hash evidence")
+    evidence = _validate_broker_output_evidence(Path(str(broker_output_evidence.get("path", ""))), expected_argv=hash_argv, stdout_text=root_hash_output, expected_peer_uid=int(plan["baseline"]["uid"]), not_before_unix=int(plan["created_at_unix"]), max_age_seconds=policy["staging"]["max_plan_age_seconds"])
+    if evidence != broker_output_evidence or _parse_sha256sum_output(root_hash_output) != plan["root_artifact_sha256"]:
+        raise PlanError("root readback receipt authenticated hash binding changed")
+    digest = receipt.get("receipt_sha256"); unsigned = dict(receipt); unsigned.pop("receipt_sha256", None)
+    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None or _sha256_json(unsigned) != digest:
+        raise PlanError("root readback receipt content hash mismatch")
+    return receipt
+
+
+def _expected_apply_stage_paths(plan: dict[str, Any], argv: list[str]) -> list[str]:
+    root_stage = str(Path(plan["root_commands"]["root_stage"])) + "/"
+    paths = [value for value in argv if isinstance(value, str) and value.startswith(root_stage)]
+    if not paths:
+        raise PlanError("apply argv has no exact package-stage artifact path")
+    return paths
+
+
+def _validate_broker_apply_evidence(evidence_path: Path, *, expected_argv: list[str], plan: dict[str, Any], guard_evidence_sha256: str, not_before_unix: int, max_age_seconds: int, expected_owner_uid: int = 0) -> dict[str, Any]:
+    if evidence_path.parent != BROKER_OUTPUT_EVIDENCE_ROOT:
+        raise PlanError("package apply evidence path is outside the canonical evidence root")
+    root_info = BROKER_OUTPUT_EVIDENCE_ROOT.lstat(); info = evidence_path.lstat()
+    if BROKER_OUTPUT_EVIDENCE_ROOT.is_symlink() or not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != expected_owner_uid or stat.S_IMODE(root_info.st_mode) & 0o022 or stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != expected_owner_uid or stat.S_IMODE(info.st_mode) != 0o640 or info.st_nlink != 1:
+        raise PlanError("package apply evidence path is not trusted")
+    value = _read_json(evidence_path, max_bytes=64 * 1024); request_id = value.get("request_id"); expected_paths = _expected_apply_stage_paths(plan, expected_argv)
+    if value.get("schema_version") != 1 or value.get("kind") != BROKER_OUTPUT_EVIDENCE_KIND or value.get("action") != BROKER_POWER_ACTION or value.get("mode") != "argv-json" or value.get("peer_uid") != int(plan["baseline"]["uid"]) or value.get("peer_unit") != BROKER_PEER_UNIT or value.get("returncode") != 0 or value.get("timed_out") is not False or value.get("stdout_truncated") is not False or value.get("package_apply_completed") is not True or value.get("package_plan_id") != plan["plan_id"] or value.get("package_paths") != expected_paths or value.get("package_apply_guard_evidence_sha256") != guard_evidence_sha256 or not isinstance(request_id, str) or re.fullmatch(r"[0-9a-f]{32}", request_id) is None or evidence_path.name != f"{request_id}.json":
+        raise PlanError("package apply evidence identity, plan binding or execution status is invalid")
+    for key in ("reference_sha256", "argv_sha256", "cwd_sha256", "stdout_sha256", "evidence_sha256"):
+        if not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None:
+            raise PlanError(f"package apply evidence {key} is invalid")
+    if value["argv_sha256"] != _sha256_json(expected_argv):
+        raise PlanError("package apply evidence is bound to different argv")
+    timestamp = value.get("timestamp_unix"); now = int(time.time())
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < not_before_unix or timestamp > now + 5 or now - timestamp > max_age_seconds:
+        raise PlanError("package apply evidence is stale or predates root authorization")
+    digest = value["evidence_sha256"]; unsigned = dict(value); unsigned.pop("evidence_sha256", None)
+    if _sha256_json(unsigned) != digest:
+        raise PlanError("package apply evidence content hash mismatch")
+    return {"path": str(evidence_path), "request_id": request_id, "evidence_sha256": digest, "argv_sha256": value["argv_sha256"], "timestamp_unix": timestamp}
+
+
+def _validate_postflight_authorization(plan: dict[str, Any], policy: dict[str, Any], uid: int, apply_evidence_paths: list[Path]) -> dict[str, Any]:
+    age = int(time.time()) - int(plan["created_at_unix"]); apply_commands = _apply_commands(plan, policy); expected_argvs = ([apply_commands["apt_apply_argv"]] if apply_commands.get("apt_apply_argv") else []) + list(apply_commands.get("snap_apply_argvs", []))
+    if age < 0 or age > policy["staging"]["max_plan_age_seconds"]:
+        raise PlanError(f"postflight plan age {age}s exceeds policy limit")
+    if not expected_argvs:
+        if apply_evidence_paths:
+            raise PlanError("postflight received apply evidence for a plan with no package apply")
+        return {"status": "not-required", "apply_evidence": []}
+    root_readback = _validate_root_readback_receipt(plan, policy, uid)
+    if len(apply_evidence_paths) != len(expected_argvs):
+        raise PlanError("postflight requires one authenticated completion evidence file per apply argv")
+    guard_sha = root_readback["broker_output_evidence"]["evidence_sha256"]
+    summaries = [_validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256=guard_sha, not_before_unix=int(root_readback["authorized_at_unix"]), max_age_seconds=policy["staging"]["max_plan_age_seconds"]) for path, argv in zip(apply_evidence_paths, expected_argvs, strict=True)]
+    return {"status": "authenticated-apply-complete", "root_readback_receipt_sha256": root_readback["receipt_sha256"], "apply_evidence": summaries}
+
+
 def _dpkg_state(name: str, arch: str | None = None) -> dict[str, str] | None:
     query_name = name if ":" in name or not arch else f"{name}:{arch}"
     result = _run(
-        ["/usr/bin/dpkg-query", "-W", "-f=${Version}\t${Status}\n", query_name],
-        check=False,
+        ["/usr/bin/dpkg-query", "--admindir=/var/lib/dpkg", "-W", "-f=${Version}\t${Status}\n", query_name],
+        check=False, env=_host_dpkg_env(),
     )
     if result["returncode"] != 0:
         return None
@@ -1708,12 +1816,13 @@ def _service_state(unit: str, *, user: bool) -> str:
     if user:
         argv.append("--user")
     argv.extend(["is-active", unit])
-    result = _run(argv, check=False)
+    result = _run(argv, check=False, env=_host_readback_env(user=user))
     return result["stdout"].strip() or f"rc={result['returncode']}"
 
 
-def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
+def postflight(plan_path: Path, confirmation: str, apply_evidence_paths: list[Path] | None = None) -> dict[str, Any]:
     plan, policy, _stage, _uid = _validate_plan_identity(plan_path, confirmation)
+    apply_authorization = _validate_postflight_authorization(plan, policy, _uid, apply_evidence_paths or [])
     apt_results: list[dict[str, Any]] = []
     for item in plan["apt"].get("packages", []):
         installed = _dpkg_state(item["name"], item.get("arch"))
@@ -1730,7 +1839,7 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
                 and installed_status == "install ok installed"
             ),
         })
-    dpkg_audit = _run(["/usr/bin/dpkg", "--audit"], check=False)
+    dpkg_audit = _run(["/usr/bin/dpkg", "--admindir=/var/lib/dpkg", "--audit"], check=False, env=_host_dpkg_env())
     dpkg_audit_ok = (
         dpkg_audit["returncode"] == 0
         and not dpkg_audit["stdout"].strip()
@@ -1758,7 +1867,7 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
     }
     nvidia = _run([
         "/usr/bin/nvidia-smi", "--query-gpu=name,driver_version,temperature.gpu,memory.used,memory.total", "--format=csv,noheader"
-    ], check=False)
+    ], check=False, env=_host_readback_env())
     all_system_services_active = all(state == "active" for state in system_services.values())
     all_user_services_active = all(state == "active" for state in user_services.values())
     nvidia_smi_ok = nvidia["returncode"] == 0 and bool(nvidia["stdout"].strip())
@@ -1801,6 +1910,7 @@ def postflight(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "dpkg_audit_ok": dpkg_audit_ok,
         "dpkg_audit_stdout_sha256": _sha256_bytes(dpkg_audit["stdout"].encode()),
         "dpkg_audit_stderr_sha256": _sha256_bytes(dpkg_audit["stderr"].encode()),
+        "apply_authorization": apply_authorization,
         "all_system_services_active": all_system_services_active,
         "all_user_services_active": all_user_services_active,
         "service_liveness_established": all_system_services_active and all_user_services_active,
@@ -1854,9 +1964,10 @@ def _build_parser() -> argparse.ArgumentParser:
     readback.add_argument("--confirmation", required=True)
     readback.add_argument("--sha256sum-output", required=True)
     readback.add_argument("--broker-evidence", type=Path, required=True)
-    post = sub.add_parser("postflight", help="Verify installed versions, snap revisions and service health.")
+    post = sub.add_parser("postflight", help="Verify authenticated apply completion, installed state and service health.")
     post.add_argument("--plan", type=Path, required=True)
     post.add_argument("--confirmation", required=True)
+    post.add_argument("--apply-evidence", type=Path, action="append", default=[])
     return parser
 
 
@@ -1878,7 +1989,7 @@ def main() -> int:
                 args.plan, args.confirmation, args.sha256sum_output, args.broker_evidence
             )
         elif args.command == "postflight":
-            result = postflight(args.plan, args.confirmation)
+            result = postflight(args.plan, args.confirmation, args.apply_evidence)
         else:
             raise PlanError("unsupported command")
     except (PolicyError, PlanError, OSError, json.JSONDecodeError) as exc:

@@ -131,7 +131,8 @@ def test_apt_update_fails_closed_on_any_index_error(tmp_path: Path, monkeypatch:
 
     def fake_run(argv: list[str], **_: object) -> dict[str, object]:
         calls.append(argv)
-        return {"argv": argv, "returncode": 0, "stdout": "", "stderr": ""}
+        stdout = "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n" if "-s" in argv else ""
+        return {"argv": argv, "returncode": 0, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(spu, "_run", fake_run)
     policy = {
@@ -167,7 +168,7 @@ def test_parse_apt_print_uris_requires_supported_strong_hash() -> None:
 
 def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
-    simulation = "Inst curl [old] (new Repo [amd64])\n"
+    simulation = "Inst curl [old] (new Repo [amd64])\n1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"
 
     def fake_run(argv: list[str], **_: object) -> dict[str, object]:
         calls.append(argv)
@@ -343,6 +344,7 @@ def test_parse_apt_simulation_keeps_exact_identity() -> None:
             "Inst curl [7.81.0-1ubuntu1.25] (7.81.0-1ubuntu1.27 Ubuntu:22.04/jammy-security [amd64])",
             "Inst libssl3:i386 [3.0.2-0ubuntu1.26] (3.0.2-0ubuntu1.29 Ubuntu:22.04/jammy-security [i386])",
             "Conf curl (7.81.0-1ubuntu1.27 Ubuntu:22.04/jammy-security [amd64])",
+            "2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
         ]
     )
     assert spu.parse_apt_simulation(text) == [
@@ -353,15 +355,28 @@ def test_parse_apt_simulation_keeps_exact_identity() -> None:
 
 def test_parse_apt_simulation_rejects_unparsed_inst_row() -> None:
     with pytest.raises(spu.PlanError, match="unexpected apt simulation Inst row"):
-        spu.parse_apt_simulation("Inst curl malformed solver output")
+        spu.parse_apt_simulation("Inst curl malformed solver output\n1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.")
 
 
 def test_parse_apt_simulation_rejects_mixed_partial_parse() -> None:
     text = "\n".join([
         "Inst curl [old] (new Ubuntu:22.04/jammy [amd64])",
         "Inst second-package output-format-drift",
+        "2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
     ])
     with pytest.raises(spu.PlanError, match="second-package"):
+        spu.parse_apt_simulation(text)
+
+
+def test_parse_apt_simulation_rejects_prefixed_inst_row() -> None:
+    text = "\x1b[31mInst curl [old] (new Repo [amd64])\n1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"
+    with pytest.raises(spu.PlanError, match="unexpected apt simulation Inst row"):
+        spu.parse_apt_simulation(text)
+
+
+def test_parse_apt_simulation_requires_summary_count_match() -> None:
+    text = "Inst curl [old] (new Repo [amd64])\n2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"
+    with pytest.raises(spu.PlanError, match="summary declares 2"):
         spu.parse_apt_simulation(text)
 
 
@@ -395,7 +410,7 @@ def test_stage_snap_enforces_declared_byte_cap_before_download(tmp_path: Path, m
     monkeypatch.setattr(spu, "_run", fake_run)
     policy = {"snap": {
         "enabled": True, "max_snaps": 10, "max_download_bytes": 1024 * 1024,
-        "max_assertion_bytes": 1024, "download_quota_mode": "userns-tmpfs",
+        "max_assertion_bytes": 1024, "download_quota_mode": "userns-pid-tmpfs-bwrap-ro-root",
     }}
     with pytest.raises(spu.PlanError, match="before download"):
         spu._stage_snap(tmp_path / "stage", policy, os.geteuid())
@@ -405,8 +420,11 @@ def test_stage_snap_enforces_declared_byte_cap_before_download(tmp_path: Path, m
 def test_snap_quota_argv_is_userns_mount_isolated(tmp_path: Path) -> None:
     output = (tmp_path / "snap").resolve(); mountpoint = output / ".quota-test"
     argv = spu._snap_quota_argv(output, mountpoint, name="core22", revision="2", basename="core22_2", snap_cap=2048, assertion_cap=1024)
-    assert argv[:5] == ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "/usr/bin/python3"]
-    assert "__snap-quota-worker" in argv and argv[-2:] == ["2048", "1024"] and "/usr/bin/snap" not in argv
+    assert argv[:4] == ["/usr/bin/unshare", "--user", "--map-root-user", "--mount"]
+    for flag in ("--pid", "--fork", "--kill-child=KILL", "--mount-proc"):
+        assert flag in argv
+    assert "/usr/bin/python3" in argv and "__snap-quota-worker" in argv
+    assert argv[-2:] == ["2048", "1024"] and "/usr/bin/snap" not in argv
 
 
 def test_stage_snap_uses_hard_quota_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -418,7 +436,7 @@ def test_stage_snap_uses_hard_quota_download(tmp_path: Path, monkeypatch: pytest
     def fake_quota(target: Path, **kwargs: object) -> dict[str, object]:
         calls.append(dict(kwargs)); basename = str(kwargs["basename"]); (target / f"{basename}.snap").write_bytes(b"snap"); (target / f"{basename}.assert").write_bytes(b"assert"); return {"argv": ["quota"], "returncode": 0, "stdout": "fetched", "stderr": ""}
     monkeypatch.setattr(spu, "_run", fake_run); monkeypatch.setattr(spu, "_snap_quota_download", fake_quota)
-    policy = {"snap": {"enabled": True, "max_snaps": 10, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": 1024, "download_quota_mode": "userns-tmpfs"}}
+    policy = {"snap": {"enabled": True, "max_snaps": 10, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": 1024, "download_quota_mode": "userns-pid-tmpfs-bwrap-ro-root"}}
     result = spu._stage_snap(tmp_path / "stage", policy, os.geteuid())
     assert len(calls) == 1 and calls[0]["name"] == "core22" and calls[0]["assertion_cap"] == 1024 and calls[0]["snap_cap"] == spu._snap_size_upper_bound_bytes("1MB")
     assert result["download_bytes"] == len(b"snap") + len(b"assert")
@@ -427,8 +445,10 @@ def test_stage_snap_uses_hard_quota_download(tmp_path: Path, monkeypatch: pytest
 def test_policy_requires_snap_hard_quota_mode(tmp_path: Path) -> None:
     policy = json.loads((ROOT / "config" / "package-update-policy.v1.json").read_text()); policy["snap"]["download_quota_mode"] = "postcheck-only"; path = tmp_path / "policy.json"; path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="download_quota_mode"): spu.load_policy(path)
-    policy["snap"]["download_quota_mode"] = "userns-tmpfs"; policy["safety"]["require_snap_download_hard_quota"] = False; path.write_text(json.dumps(policy))
+    policy["snap"]["download_quota_mode"] = "userns-pid-tmpfs-bwrap-ro-root"; policy["safety"]["require_snap_download_hard_quota"] = False; path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="require_snap_download_hard_quota"): spu.load_policy(path)
+    policy["safety"]["require_snap_download_hard_quota"] = True; policy["safety"]["require_authenticated_apply_completion_evidence"] = False; path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="require_authenticated_apply_completion_evidence"): spu.load_policy(path)
 
 
 def test_broker_evidence_requires_group_read_only_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -820,6 +840,26 @@ def test_sha256sum_readback_rejects_duplicate_or_relative_paths() -> None:
         spu._parse_sha256sum_output(f"{digest}  /x\n{digest}  /x\n")
 
 
+def test_dpkg_state_ignores_caller_dpkg_and_loader_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    class Completed:
+        returncode = 0
+        stdout = "1.0\tinstall ok installed\n"
+        stderr = ""
+    def fake_run(argv: list[str], **kwargs: object) -> Completed:
+        captured.update(kwargs)
+        return Completed()
+    for key in ("DPKG_ADMINDIR", "DPKG_ROOT", "DPKG_FORCE", "LD_PRELOAD", "SYSTEMD_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+        monkeypatch.setenv(key, "/tmp/attacker-controlled")
+    monkeypatch.setattr(spu.subprocess, "run", fake_run)
+    assert spu._dpkg_state("curl", "amd64") == {"version": "1.0", "status": "install ok installed"}
+    env = captured["env"]
+    assert isinstance(env, dict)
+    for key in ("DPKG_ADMINDIR", "DPKG_ROOT", "DPKG_FORCE", "LD_PRELOAD", "SYSTEMD_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+        assert key not in env
+    assert env["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 def test_dpkg_state_qualifies_multiarch_identity_and_requires_status(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -834,6 +874,7 @@ def test_dpkg_state_qualifies_multiarch_identity_and_requires_status(monkeypatch
     assert spu._dpkg_state("libssl3", "amd64") == {
         "version": "3.0.2-0ubuntu1.29", "status": "install ok installed"
     }
+    assert "--admindir=/var/lib/dpkg" in calls[-1]
     assert calls[-1][-1] == "libssl3:amd64"
     assert spu._dpkg_version("libssl3:i386", "i386") == "3.0.2-0ubuntu1.29"
     assert calls[-1][-1] == "libssl3:i386"
@@ -884,7 +925,7 @@ def test_policy_requires_snap_store_revalidation_and_private_apt_runtime(tmp_pat
         "require_snap_store_artifact_revalidation", "require_apt_apply_private_runtime_namespace",
         "require_root_staging_capacity", "require_reboot_capture",
         "require_apt_apply_kernel_device_isolation", "require_apply_readback_authorization",
-        "require_snap_download_byte_cap", "require_snap_download_hard_quota", "require_postflight_plan_identity",
+        "require_snap_download_byte_cap", "require_snap_download_hard_quota", "require_authenticated_apply_completion_evidence", "require_postflight_plan_identity",
         "require_privileged_broker_output_evidence", "require_target_downgrade_refusal",
         "require_explicit_activation_semantics",
     ):
@@ -984,13 +1025,17 @@ def _stub_postflight_identity(monkeypatch: pytest.MonkeyPatch, plan: dict[str, o
         spu, "_validate_plan_identity",
         lambda plan_path, confirmation: (plan, policy, Path(str(plan["stage_path"])), os.geteuid()),
     )
+    monkeypatch.setattr(
+        spu, "_validate_postflight_authorization",
+        lambda plan_value, policy_value, uid, paths: {"status": "test-authenticated", "apply_evidence": []},
+    )
 
 
 def _postflight_run(
     argv: list[str], *, gpu_returncode: int = 0, gpu_stdout: str = "gpu-ok\n",
     gpu_stderr: str = "", audit_stdout: str = "", audit_stderr: str = "",
 ) -> dict[str, object]:
-    if argv == ["/usr/bin/dpkg", "--audit"]:
+    if argv == ["/usr/bin/dpkg", "--admindir=/var/lib/dpkg", "--audit"]:
         return {
             "argv": argv, "returncode": 0,
             "stdout": audit_stdout, "stderr": audit_stderr,
@@ -1001,6 +1046,45 @@ def _postflight_run(
             "stdout": gpu_stdout, "stderr": gpu_stderr,
         }
     raise AssertionError(argv)
+
+
+def test_broker_apply_evidence_binds_plan_argv_paths_and_hash_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    evidence_root = tmp_path / "apply-evidence"; evidence_root.mkdir(mode=0o755)
+    monkeypatch.setattr(spu, "BROKER_OUTPUT_EVIDENCE_ROOT", evidence_root)
+    plan_id = "20260827T010203Z-123456abcdef"
+    root_stage = f"/var/lib/heim-pc/package-update-stages/{plan_id}"
+    deb = f"{root_stage}/debs/a.deb"
+    argv = ["/usr/bin/systemd-run", "--system", "--wait", "--", "/usr/bin/dpkg", "--install", deb]
+    guard = "a" * 64; request_id = "b" * 32; now = int(spu.time.time())
+    value: dict[str, object] = {
+        "schema_version": 1, "kind": spu.BROKER_OUTPUT_EVIDENCE_KIND, "request_id": request_id,
+        "reference_sha256": "c" * 64, "action": spu.BROKER_POWER_ACTION, "mode": "argv-json",
+        "argv_sha256": spu._sha256_json(argv), "cwd_sha256": "d" * 64,
+        "peer_uid": os.geteuid(), "peer_unit": spu.BROKER_PEER_UNIT, "returncode": 0,
+        "timed_out": False, "stdout_sha256": spu._sha256_bytes(b""), "stdout_bytes": 0,
+        "stdout_truncated": False, "timestamp_unix": now, "package_plan_id": plan_id,
+        "package_paths": [deb], "package_apply_completed": True,
+        "package_apply_guard_evidence_sha256": guard, "package_exact_evidence": True,
+    }
+    value["evidence_sha256"] = spu._sha256_json(value)
+    path = evidence_root / f"{request_id}.json"; path.write_text(json.dumps(value, sort_keys=True) + "\n"); path.chmod(0o640)
+    plan = {"plan_id": plan_id, "baseline": {"uid": os.geteuid()}, "root_commands": {"root_stage": root_stage}}
+    result = spu._validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256=guard, not_before_unix=now - 1, max_age_seconds=60, expected_owner_uid=os.geteuid())
+    assert result["evidence_sha256"] == value["evidence_sha256"]
+    with pytest.raises(spu.PlanError, match="execution status is invalid"):
+        spu._validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256="e" * 64, not_before_unix=now - 1, max_age_seconds=60, expected_owner_uid=os.geteuid())
+
+
+def test_postflight_authorization_rejects_stale_plan_without_apply() -> None:
+    policy = {"staging": {"max_plan_age_seconds": 60}}
+    plan = {
+        "plan_id": "20260827T010203Z-123456abcdef",
+        "created_at_unix": int(spu.time.time()) - 61,
+        "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/20260827T010203Z-123456abcdef"},
+        "apt": {"packages": []}, "snap": {"packages": []},
+    }
+    with pytest.raises(spu.PlanError, match="postflight plan age"):
+        spu._validate_postflight_authorization(plan, policy, os.geteuid(), [])
 
 
 def test_postflight_mismatch_writes_receipt_and_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
