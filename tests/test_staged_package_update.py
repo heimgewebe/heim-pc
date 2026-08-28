@@ -234,9 +234,13 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
         "sha256": spu._sha256_file(artifact),
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+        "sensitive": False,
     }
     plan = {"apt": {"enabled": True, "packages": [item]}}
-    policy = {"apt": {"enabled": True, "max_packages": 10, "max_download_bytes": 1024 * 1024}}
+    policy = {"apt": {
+        "enabled": True, "max_packages": 10, "max_download_bytes": 1024 * 1024,
+        "sensitive_prefixes": [],
+    }}
     monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
@@ -248,6 +252,33 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
         spu._revalidate_apt_provenance(stage, plan, policy, os.geteuid())
 
 
+def test_apt_provenance_revalidation_rejects_forged_sensitive_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = "a" * 64
+    item = {
+        "name": "linux-image-generic", "version": "new", "arch": "amd64",
+        "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+        "sensitive": False,
+    }
+    plan = {"apt": {"enabled": True, "packages": [item]}}
+    policy = {"apt": {
+        "enabled": True, "max_download_bytes": 1024 * 1024,
+        "sensitive_prefixes": ["linux-", "systemd", "nvidia-"],
+    }}
+    monkeypatch.setattr(
+        spu, "_apt_update_and_candidates",
+        lambda *args: ([], {}, {}, [{"name": "linux-image-generic", "version": "new", "arch": "amd64"}]),
+    )
+    monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
+        "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
+    })
+    with pytest.raises(spu.PlanError, match="sensitive-package classification"):
+        spu._revalidate_apt_provenance(tmp_path / "stage", plan, policy, os.geteuid())
+
+
 def test_snap_provenance_requires_current_pending_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     upper = spu._snap_size_upper_bound_bytes("1MB")
     plan = {"snap": {
@@ -255,12 +286,33 @@ def test_snap_provenance_requires_current_pending_set(tmp_path: Path, monkeypatc
         "packages": [{"name": "core22", "version": "new", "revision": "2", "size_upper_bound_bytes": upper}],
         "download_bytes": 0, "declared_upper_bound_bytes": upper + 1024,
     }}
-    policy = {"snap": {"enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": 1024}}
+    policy = {"snap": {"enabled": True, "max_snaps": 10, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": 1024}}
     monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {
         "argv": argv, "returncode": 0,
         "stdout": "Name Version Rev Size Publisher Notes\ncore22 newer 3 1MB canonical** base\n", "stderr": "",
     })
     with pytest.raises(spu.PlanError, match="pending refresh set changed"):
+        spu._revalidate_snap_provenance(tmp_path / "stage", plan, policy, os.geteuid())
+
+
+def test_snap_provenance_enforces_max_snaps_during_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = {"snap": {"enabled": True, "packages": []}}
+    policy = {"snap": {
+        "enabled": True, "max_snaps": 1, "max_download_bytes": 10 * 1024 * 1024,
+        "max_assertion_bytes": 1024,
+    }}
+    monkeypatch.setattr(spu, "_run", lambda argv, **kwargs: {
+        "argv": argv, "returncode": 0,
+        "stdout": (
+            "Name Version Rev Size Publisher Notes\n"
+            "core22 newer 3 1MB canonical** base\n"
+            "snapd newer 4 1MB canonical** snapd\n"
+        ),
+        "stderr": "",
+    })
+    with pytest.raises(spu.PlanError, match="candidate count 2 exceeds policy limit during verification"):
         spu._revalidate_snap_provenance(tmp_path / "stage", plan, policy, os.geteuid())
 
 
@@ -288,7 +340,7 @@ def test_snap_provenance_rejects_staged_bytes_not_from_store(tmp_path: Path, mon
         "declared_upper_bound_bytes": upper + assertion_cap,
     }}
     policy = {"snap": {
-        "enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
+        "enabled": True, "max_snaps": 10, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
     }}
 
     def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
@@ -330,7 +382,7 @@ def test_snap_provenance_accepts_byteidentical_store_redownload(tmp_path: Path, 
         "declared_upper_bound_bytes": upper + assertion_cap,
     }}
     policy = {"snap": {
-        "enabled": True, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
+        "enabled": True, "max_snaps": 10, "max_download_bytes": 10 * 1024 * 1024, "max_assertion_bytes": assertion_cap,
     }}
 
     def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:

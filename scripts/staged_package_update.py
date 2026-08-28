@@ -1077,6 +1077,9 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
         authenticated_total += int(repository["repository_size"])
         if authenticated_total > policy["apt"]["max_download_bytes"]:
             raise PlanError(f"APT authenticated download bytes {authenticated_total} exceed policy limit during verification")
+        sensitive = _is_sensitive_package(str(item["name"]), policy)
+        if item.get("sensitive") is not sensitive:
+            raise PlanError(f"APT sensitive-package classification changed for {item['name']}")
         path = _stage_artifact_path(stage, item.get("relative_path"), stage / "apt" / "debs")
         info = _regular_owned_file(path, uid)
         package = _deb_field(path, "Package")
@@ -1153,6 +1156,8 @@ def _revalidate_snap_provenance(stage: Path, plan: dict[str, Any], policy: dict[
     if listed["returncode"] != 0:
         raise PlanError(f"snap refresh --list failed during verification: {listed['stderr'].strip()}")
     pending = parse_snap_refresh_list(listed["stdout"])
+    if len(pending) > policy["snap"]["max_snaps"]:
+        raise PlanError(f"snap candidate count {len(pending)} exceeds policy limit during verification")
     planned_packages = snap.get("packages", [])
     if not isinstance(planned_packages, list):
         raise PlanError("Snap plan packages must be a list")
