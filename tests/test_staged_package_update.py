@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -579,6 +580,12 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert commands["apply_readback_required"] is True
     plan = {"plan_id": plan_id, "stage_path": str(stage), "root_commands": commands, "apt": apt, "snap": snap}
     copy_commands = spu._copy_commands(plan, policy)
+    assert copy_commands["copy_apt_argv"][:7] == [
+        "/usr/bin/install", "-o", "root", "-g", "grabowski", "-m", "0440",
+    ]
+    assert copy_commands["copy_snap_argv"][:7] == [
+        "/usr/bin/install", "-o", "root", "-g", "grabowski", "-m", "0440",
+    ]
     apt_preflight = spu._apt_apply_preflight_argv(plan)
     assert "apt_apply_preflight_argv" not in copy_commands
     apply_commands = spu._apply_commands(plan, policy)
@@ -846,6 +853,11 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     plan_path = stage / "plan.json"
     plan_path.write_text(json.dumps(plan))
     monkeypatch.setattr(spu, "_verify_plan_loaded", lambda path, confirmation: ({"age_seconds": 1}, plan, policy))
+    expected_root_provenance = [{
+        "path": root_path, "size": 10, "sha256": "a" * 64,
+        "repository_hash_algorithm": "SHA512", "repository_hash": "b" * 128,
+    }]
+    monkeypatch.setattr(spu, "_root_apt_provenance", lambda current_plan: expected_root_provenance)
     evidence_root = tmp_path / "broker-evidence"
     monkeypatch.setattr(spu, "BROKER_OUTPUT_EVIDENCE_ROOT", evidence_root)
     _allow_test_owned_broker_evidence(monkeypatch)
@@ -879,6 +891,8 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     assert result["status"] == "root-readback-authorized"
     assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
     assert result["broker_output_evidence"]["request_id"] == "3" * 32
+    assert result["root_apt_provenance"] == expected_root_provenance
+    assert result["root_apt_provenance_sha256"] == spu._sha256_json(expected_root_provenance)
 
     bad_output = f"{'b' * 64}  {root_path}\n"
     bad_evidence = _write_broker_evidence(
@@ -901,6 +915,66 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
     )
     with pytest.raises(spu.PlanError, match="different argv"):
         spu.root_readback_authorize(plan_path, "f" * 64, forged_output, wrong_argv_evidence)
+
+def test_root_readonly_artifact_hashes_require_immutable_readable_copy(tmp_path: Path) -> None:
+    artifact = tmp_path / "root-copy.deb"
+    artifact.write_bytes(b"verified-root-copy")
+    artifact.chmod(0o440)
+    size, hashes = spu._root_readonly_artifact_hashes(
+        artifact, {"SHA256", "SHA512"}, expected_owner_uid=os.geteuid(),
+        expected_group_gid=os.getegid(),
+    )
+    assert size == len(b"verified-root-copy")
+    assert hashes == {
+        "SHA256": hashlib.sha256(b"verified-root-copy").hexdigest(),
+        "SHA512": hashlib.sha512(b"verified-root-copy").hexdigest(),
+    }
+    artifact.chmod(0o644)
+    with pytest.raises(spu.PlanError, match="root:grabowski read-only"):
+        spu._root_readonly_artifact_hashes(
+            artifact, {"SHA256"}, expected_owner_uid=os.geteuid(),
+            expected_group_gid=os.getegid(),
+        )
+
+
+def test_root_apt_provenance_closes_plan_hash_vs_repository_hash_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_stage = tmp_path / "root-stage"
+    plan_sha256 = hashlib.sha256(b"artifact-A-123456").hexdigest()
+    repository_sha512 = hashlib.sha512(b"artifact-B-123456").hexdigest()
+    attacker_sha512 = hashlib.sha512(b"artifact-A-123456").hexdigest()
+    plan = {
+        "root_commands": {"root_stage": str(root_stage)},
+        "apt": {"packages": [{
+            "name": "bash", "version": "1", "arch": "amd64",
+            "relative_path": "apt/debs/bash.deb",
+            "size": len(b"artifact-A-123456"),
+            "sha256": plan_sha256,
+            "repository_size": len(b"artifact-A-123456"),
+            "repository_hash_algorithm": "SHA512",
+            "repository_hash": repository_sha512,
+        }]},
+    }
+    monkeypatch.setattr(
+        spu, "_root_readonly_artifact_hashes",
+        lambda path, algorithms: (
+            len(b"artifact-A-123456"),
+            {"SHA256": plan_sha256, "SHA512": attacker_sha512},
+        ),
+    )
+    with pytest.raises(spu.PlanError, match="both plan hash and authenticated repository provenance"):
+        spu._root_apt_provenance(plan)
+
+    plan["apt"]["packages"][0]["repository_hash"] = attacker_sha512
+    assert spu._root_apt_provenance(plan) == [{
+        "path": str(root_stage / "debs" / "bash.deb"),
+        "size": len(b"artifact-A-123456"),
+        "sha256": plan_sha256,
+        "repository_hash_algorithm": "SHA512",
+        "repository_hash": attacker_sha512,
+    }]
+
 
 def test_sha256sum_readback_rejects_duplicate_or_relative_paths() -> None:
     digest = "a" * 64
