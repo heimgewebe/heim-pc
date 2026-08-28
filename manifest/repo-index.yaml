@@ -18,6 +18,7 @@ zones:
       - storage-lifecycle.md
       - managed-builds.md
       - cache-maintenance.md
+      - staged-package-updates.md
       - maintenance-outcomes.md
       - home-hygiene.md
       - runaway-guard.md

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.staged_package_update_policy",
+  "policy_id": "heim-pc-staged-package-update-v1",
+  "automatic_apply": false,
+  "staging": {
+    "runtime_root": "/home/alex/repos/.heim-pc-worktrees/.package-update-handoff",
+    "broker_bind_root": "/home/alex/repos/.heim-pc-worktrees",
+    "root_root": "/var/lib/heim-pc/package-update-stages",
+    "runtime_capture_root": "/run/heim-pc-package-update-captures",
+    "root_stage_safety_margin_bytes": 268435456,
+    "privileged_readback_max_age_seconds": 600,
+    "max_plan_age_seconds": 3600
+  },
+  "apt": {
+    "enabled": true,
+    "selection_mode": "upgrade-with-new-pkgs-no-remove",
+    "apply_mode": "dpkg-explicit-root-stage",
+    "max_packages": 64,
+    "max_download_bytes": 6442450944,
+    "sensitive_prefixes": [
+      "linux-",
+      "kernel",
+      "nvidia-",
+      "libnvidia-",
+      "system76-driver",
+      "system76-firmware",
+      "systemd",
+      "grub",
+      "initramfs",
+      "snapd"
+    ]
+  },
+  "snap": {
+    "enabled": true,
+    "max_snaps": 32,
+    "max_download_bytes": 6442450944,
+    "max_assertion_bytes": 1048576,
+    "allow_dangerous": false,
+    "download_quota_mode": "userns-pid-tmpfs-bwrap-ro-root"
+  },
+  "safety": {
+    "require_exact_plan_hash": true,
+    "require_fresh_apt_indexes": true,
+    "require_apt_signature_verification": true,
+    "require_signed_apt_artifact_provenance": true,
+    "require_pre_download_byte_cap": true,
+    "require_root_staging_capacity": true,
+    "require_reboot_capture": true,
+    "require_dpkg_status_precondition": true,
+    "require_source_config_precondition": true,
+    "require_root_owned_copy_before_apply": true,
+    "require_root_copy_hash_readback": true,
+    "require_broker_read_only_handoff": true,
+    "require_no_remove_selection": true,
+    "require_signed_snap_assertion": true,
+    "require_snap_store_artifact_revalidation": true,
+    "require_apt_apply_private_runtime_namespace": true,
+    "require_apt_apply_kernel_device_isolation": true,
+    "require_apply_readback_authorization": true,
+    "require_snap_download_byte_cap": true,
+    "require_postflight_plan_identity": true,
+    "privileged_broker_network_must_remain_blocked": true,
+    "require_privileged_broker_output_evidence": true,
+    "require_target_downgrade_refusal": true,
+    "require_explicit_activation_semantics": true,
+    "require_dpkg_explicit_apply": true,
+    "require_snap_download_hard_quota": true,
+    "require_authenticated_apt_preflight_completion": true,
+    "require_authenticated_apply_completion_evidence": true
+  },
+  "postflight": {
+    "system_services": [
+      "grabowski-operator.service",
+      "tailscaled.service",
+      "docker.service",
+      "libvirtd.service"
+    ],
+    "user_services": [
+      "pipewire.service",
+      "wireplumber.service"
+    ]
+  }
+}
