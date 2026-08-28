@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from typing import Any, Iterable
 
 POLICY_PATH = Path(__file__).resolve().parents[1] / "config" / "package-update-policy.v1.json"
@@ -658,8 +659,13 @@ def parse_apt_print_uris(text: str) -> list[dict[str, Any]]:
             or re.fullmatch(rf"[0-9a-fA-F]{{{expected_length}}}", digest) is None
         ):
             raise PlanError("APT repository metadata did not provide a supported strong SHA256/SHA512 artifact hash")
+        uri_path = urllib.parse.unquote(urllib.parse.urlsplit(parts[0]).path)
+        uri_basename = Path(uri_path).name
+        if not uri_basename:
+            raise PlanError("APT repository URI did not provide an artifact basename")
         records.append({
             "repository_uri_sha256": _sha256_bytes(parts[0].encode("utf-8")),
+            "repository_uri_basename": uri_basename,
             "repository_filename": parts[1],
             "repository_size": int(parts[2]),
             "repository_hash_algorithm": algorithm,
@@ -669,14 +675,14 @@ def parse_apt_print_uris(text: str) -> list[dict[str, Any]]:
 
 
 def parse_apt_cache_show_sha256(
-    text: str, candidate: dict[str, str], *, repository_filename: str,
+    text: str, candidate: dict[str, str], *, repository_uri_basename: str,
     repository_size: int,
 ) -> str:
     expected_package = str(candidate["name"]).split(":", 1)[0]
     expected_version = str(candidate["version"])
     expected_arch = str(candidate["arch"])
     if (
-        not repository_filename
+        not repository_uri_basename
         or isinstance(repository_size, bool)
         or not isinstance(repository_size, int)
         or repository_size < 0
@@ -702,7 +708,7 @@ def parse_apt_cache_show_sha256(
             or fields.get("version") != expected_version
             or fields.get("architecture") != expected_arch
             or fields.get("size") != str(repository_size)
-            or Path(fields.get("filename", "")).name != repository_filename
+            or Path(fields.get("filename", "")).name != repository_uri_basename
         ):
             continue
         digest = fields.get("sha256", "").lower()
@@ -745,7 +751,7 @@ def _apt_repository_record(options: list[str], candidate: dict[str, str]) -> dic
     metadata = _run(["/usr/bin/apt-cache", *options, "show", metadata_spec])
     repository_sha256 = parse_apt_cache_show_sha256(
         metadata["stdout"], candidate,
-        repository_filename=str(repository["repository_filename"]),
+        repository_uri_basename=str(repository["repository_uri_basename"]),
         repository_size=int(repository["repository_size"]),
     )
     return {

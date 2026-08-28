@@ -164,6 +164,7 @@ def test_parse_apt_print_uris_requires_supported_strong_hash() -> None:
         text = f"'https://example.invalid/pkg.deb' pkg.deb 123 {algorithm}:{digest}\n"
         assert spu.parse_apt_print_uris(text) == [{
             "repository_uri_sha256": spu._sha256_bytes(b"https://example.invalid/pkg.deb"),
+            "repository_uri_basename": "pkg.deb",
             "repository_filename": "pkg.deb",
             "repository_size": 123,
             "repository_hash_algorithm": algorithm,
@@ -187,11 +188,11 @@ def test_parse_apt_cache_show_sha256_binds_exact_candidate_and_artifact() -> Non
         "Description: ignored\n continuation ignored\n\n"
     )
     assert spu.parse_apt_cache_show_sha256(
-        text, candidate, repository_filename="curl.deb", repository_size=123
+        text, candidate, repository_uri_basename="curl.deb", repository_size=123
     ) == digest
     with pytest.raises(spu.PlanError, match="exactly one SHA-256"):
         spu.parse_apt_cache_show_sha256(
-            text, candidate, repository_filename="other.deb", repository_size=123
+            text, candidate, repository_uri_basename="other.deb", repository_size=123
         )
 
 
@@ -227,6 +228,41 @@ def test_apt_repository_record_binds_signed_sha256_when_print_uris_uses_sha512(
     assert calls[1][-2:] == ["show", "bash:amd64=2.0"]
 
 
+def test_apt_repository_record_matches_epoch_candidate_by_uri_basename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha256 = "a" * 64
+    sha512 = "b" * 128
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        if argv[0] == "/usr/bin/apt-get":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "'https://example.invalid/pool/main/b/bolt/bolt-20_20.1.8-0ubuntu1_amd64.deb' "
+                    f"'bolt-20_1%3a20.1.8-0ubuntu1_amd64.deb' 123 SHA512:{sha512}\n"
+                ),
+            }
+        if argv[0] == "/usr/bin/apt-cache":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "Package: bolt-20\nVersion: 1:20.1.8-0ubuntu1\nArchitecture: amd64\n"
+                    "Filename: pool/main/b/bolt/bolt-20_20.1.8-0ubuntu1_amd64.deb\n"
+                    "Size: 123\nSHA256: " + sha256 + "\n\n"
+                ),
+            }
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    record = spu._apt_repository_record(
+        [], {"name": "bolt-20", "version": "1:20.1.8-0ubuntu1", "arch": "amd64"}
+    )
+    assert record["repository_filename"] == "bolt-20_1%3a20.1.8-0ubuntu1_amd64.deb"
+    assert record["repository_uri_basename"] == "bolt-20_20.1.8-0ubuntu1_amd64.deb"
+    assert record["repository_sha256"] == sha256
+
+
 def test_stage_apt_uses_authenticated_repository_sha256_as_plan_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -255,6 +291,7 @@ def test_stage_apt_uses_authenticated_repository_sha256_as_plan_hash(
         "repository_sha256": sha256,
         "repository_manifest_sha256": "b" * 64,
         "repository_uri_sha256": "c" * 64,
+        "repository_uri_basename": "curl.deb",
         "repository_filename": "curl.deb",
     })
     monkeypatch.setattr(
