@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 from __future__ import annotations
 
 import argparse
@@ -74,11 +74,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _base_command_env() -> dict[str, str]:
+    return {
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "LC_ALL": "C",
+        "LANG": "C",
+        "DEBIAN_FRONTEND": "noninteractive",
+        "HOME": "/",
+        "TMPDIR": "/tmp",
+    }
+
+
 def _run(
     argv: list[str], *, cwd: Path | None = None, check: bool = True,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    command_env = os.environ.copy() if env is None else dict(env)
+    command_env = _base_command_env() if env is None else dict(env)
     for key in list(command_env):
         if key == "APT_CONFIG" or key.startswith(("DPKG_", "LD_", "SNAPD_", "SYSTEMD_", "DBUS_", "PYTHON")):
             command_env.pop(key, None)
@@ -272,6 +283,7 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
         "require_apply_readback_authorization",
         "require_snap_download_byte_cap",
         "require_snap_download_hard_quota",
+        "require_authenticated_apt_preflight_completion",
         "require_authenticated_apply_completion_evidence",
         "require_postflight_plan_identity",
         "privileged_broker_network_must_remain_blocked",
@@ -962,7 +974,7 @@ def _snap_quota_worker(args: list[str]) -> int:
 
 
 def _snap_quota_argv(output_dir: Path, mountpoint: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int) -> list[str]:
-    return ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3", str(Path(__file__).resolve()), "__snap-quota-worker", str(mountpoint), str(output_dir), name, revision, basename, str(snap_cap), str(assertion_cap)]
+    return ["/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork", "--kill-child=KILL", "--mount-proc", "/usr/bin/python3", "-I", str(Path(__file__).resolve()), "__snap-quota-worker", str(mountpoint), str(output_dir), name, revision, basename, str(snap_cap), str(assertion_cap)]
 
 
 def _snap_quota_download(output_dir: Path, *, name: str, revision: str, basename: str, snap_cap: int, assertion_cap: int, uid: int) -> dict[str, Any]:
@@ -1750,43 +1762,238 @@ def _expected_apply_stage_paths(plan: dict[str, Any], argv: list[str]) -> list[s
     return paths
 
 
-def _validate_broker_apply_evidence(evidence_path: Path, *, expected_argv: list[str], plan: dict[str, Any], guard_evidence_sha256: str, not_before_unix: int, max_age_seconds: int, expected_owner_uid: int = 0) -> dict[str, Any]:
+def _read_broker_package_completion_evidence(
+    evidence_path: Path, *, expected_owner_uid: int
+) -> tuple[dict[str, Any], str]:
     if evidence_path.parent != BROKER_OUTPUT_EVIDENCE_ROOT:
-        raise PlanError("package apply evidence path is outside the canonical evidence root")
-    root_info = BROKER_OUTPUT_EVIDENCE_ROOT.lstat(); info = evidence_path.lstat()
-    if BROKER_OUTPUT_EVIDENCE_ROOT.is_symlink() or not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != expected_owner_uid or stat.S_IMODE(root_info.st_mode) & 0o022 or stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != expected_owner_uid or stat.S_IMODE(info.st_mode) != 0o640 or info.st_nlink != 1:
-        raise PlanError("package apply evidence path is not trusted")
-    value = _read_json(evidence_path, max_bytes=64 * 1024); request_id = value.get("request_id"); expected_paths = _expected_apply_stage_paths(plan, expected_argv)
-    if value.get("schema_version") != 1 or value.get("kind") != BROKER_OUTPUT_EVIDENCE_KIND or value.get("action") != BROKER_POWER_ACTION or value.get("mode") != "argv-json" or value.get("peer_uid") != int(plan["baseline"]["uid"]) or value.get("peer_unit") != BROKER_PEER_UNIT or value.get("returncode") != 0 or value.get("timed_out") is not False or value.get("stdout_truncated") is not False or value.get("package_apply_completed") is not True or value.get("package_plan_id") != plan["plan_id"] or value.get("package_paths") != expected_paths or value.get("package_apply_guard_evidence_sha256") != guard_evidence_sha256 or not isinstance(request_id, str) or re.fullmatch(r"[0-9a-f]{32}", request_id) is None or evidence_path.name != f"{request_id}.json":
+        raise PlanError("package completion evidence path is outside the canonical evidence root")
+    root_info = BROKER_OUTPUT_EVIDENCE_ROOT.lstat()
+    info = evidence_path.lstat()
+    if (
+        BROKER_OUTPUT_EVIDENCE_ROOT.is_symlink()
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != expected_owner_uid
+        or stat.S_IMODE(root_info.st_mode) & 0o022
+        or stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != expected_owner_uid
+        or stat.S_IMODE(info.st_mode) != 0o640
+        or info.st_nlink != 1
+    ):
+        raise PlanError("package completion evidence path is not trusted")
+    value = _read_json(evidence_path, max_bytes=64 * 1024)
+    request_id = value.get("request_id")
+    if (
+        not isinstance(request_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
+        or evidence_path.name != f"{request_id}.json"
+    ):
+        raise PlanError("package completion evidence request identity is invalid")
+    return value, request_id
+
+
+def _validate_broker_preflight_evidence(
+    evidence_path: Path, *, expected_argv: list[str], plan: dict[str, Any],
+    guard_evidence_sha256: str, not_before_unix: int, max_age_seconds: int,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    value, request_id = _read_broker_package_completion_evidence(
+        evidence_path, expected_owner_uid=expected_owner_uid
+    )
+    expected_paths = _expected_apply_stage_paths(plan, expected_argv)
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != BROKER_OUTPUT_EVIDENCE_KIND
+        or value.get("action") != BROKER_POWER_ACTION
+        or value.get("mode") != "argv-json"
+        or value.get("peer_uid") != int(plan["baseline"]["uid"])
+        or value.get("peer_unit") != BROKER_PEER_UNIT
+        or value.get("returncode") != 0
+        or value.get("timed_out") is not False
+        or value.get("stdout_truncated") is not False
+        or value.get("stderr_truncated") is not False
+        or value.get("package_preflight_completed") is not True
+        or value.get("package_operation") != "apt_preflight"
+        or value.get("package_exact_evidence") is not True
+        or value.get("package_plan_id") != plan["plan_id"]
+        or value.get("package_paths") != expected_paths
+        or value.get("package_preflight_guard_evidence_sha256") != guard_evidence_sha256
+    ):
+        raise PlanError("APT preflight evidence identity, plan binding or execution status is invalid")
+    for key in ("reference_sha256", "argv_sha256", "cwd_sha256", "stdout_sha256", "evidence_sha256"):
+        if not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None:
+            raise PlanError(f"APT preflight evidence {key} is invalid")
+    if value["argv_sha256"] != _sha256_json(expected_argv):
+        raise PlanError("APT preflight evidence is bound to different argv")
+    timestamp = value.get("timestamp_unix")
+    now = int(time.time())
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, int)
+        or timestamp < not_before_unix
+        or timestamp > now + 5
+        or now - timestamp > max_age_seconds
+    ):
+        raise PlanError("APT preflight evidence is stale or predates root authorization")
+    digest = value["evidence_sha256"]
+    unsigned = dict(value)
+    unsigned.pop("evidence_sha256", None)
+    if _sha256_json(unsigned) != digest:
+        raise PlanError("APT preflight evidence content hash mismatch")
+    return {
+        "path": str(evidence_path),
+        "request_id": request_id,
+        "evidence_sha256": digest,
+        "argv_sha256": value["argv_sha256"],
+        "timestamp_unix": timestamp,
+    }
+
+
+def _validate_broker_apply_evidence(
+    evidence_path: Path, *, expected_argv: list[str], expected_operation: str,
+    plan: dict[str, Any], guard_evidence_sha256: str, not_before_unix: int,
+    max_age_seconds: int, expected_preflight_evidence_sha256: str | None = None,
+    preflight_timestamp_unix: int | None = None, expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    value, request_id = _read_broker_package_completion_evidence(
+        evidence_path, expected_owner_uid=expected_owner_uid
+    )
+    expected_paths = _expected_apply_stage_paths(plan, expected_argv)
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != BROKER_OUTPUT_EVIDENCE_KIND
+        or value.get("action") != BROKER_POWER_ACTION
+        or value.get("mode") != "argv-json"
+        or value.get("peer_uid") != int(plan["baseline"]["uid"])
+        or value.get("peer_unit") != BROKER_PEER_UNIT
+        or value.get("returncode") != 0
+        or value.get("timed_out") is not False
+        or value.get("stdout_truncated") is not False
+        or value.get("stderr_truncated") is not False
+        or value.get("package_apply_completed") is not True
+        or value.get("package_operation") != expected_operation
+        or value.get("package_exact_evidence") is not True
+        or value.get("package_plan_id") != plan["plan_id"]
+        or value.get("package_paths") != expected_paths
+        or value.get("package_apply_guard_evidence_sha256") != guard_evidence_sha256
+    ):
         raise PlanError("package apply evidence identity, plan binding or execution status is invalid")
+    if expected_operation == "apt_apply":
+        if (
+            not isinstance(expected_preflight_evidence_sha256, str)
+            or SHA256_RE.fullmatch(expected_preflight_evidence_sha256) is None
+            or value.get("package_apply_preflight_evidence_sha256")
+            != expected_preflight_evidence_sha256
+            or isinstance(preflight_timestamp_unix, bool)
+            or not isinstance(preflight_timestamp_unix, int)
+        ):
+            raise PlanError("APT apply evidence lacks the authenticated preflight binding")
     for key in ("reference_sha256", "argv_sha256", "cwd_sha256", "stdout_sha256", "evidence_sha256"):
         if not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None:
             raise PlanError(f"package apply evidence {key} is invalid")
     if value["argv_sha256"] != _sha256_json(expected_argv):
         raise PlanError("package apply evidence is bound to different argv")
-    timestamp = value.get("timestamp_unix"); now = int(time.time())
-    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < not_before_unix or timestamp > now + 5 or now - timestamp > max_age_seconds:
-        raise PlanError("package apply evidence is stale or predates root authorization")
-    digest = value["evidence_sha256"]; unsigned = dict(value); unsigned.pop("evidence_sha256", None)
+    timestamp = value.get("timestamp_unix")
+    now = int(time.time())
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, int)
+        or timestamp < not_before_unix
+        or timestamp > now + 5
+        or now - timestamp > max_age_seconds
+        or (
+            expected_operation == "apt_apply"
+            and isinstance(preflight_timestamp_unix, int)
+            and timestamp < preflight_timestamp_unix
+        )
+    ):
+        raise PlanError("package apply evidence is stale or predates required authorization")
+    digest = value["evidence_sha256"]
+    unsigned = dict(value)
+    unsigned.pop("evidence_sha256", None)
     if _sha256_json(unsigned) != digest:
         raise PlanError("package apply evidence content hash mismatch")
-    return {"path": str(evidence_path), "request_id": request_id, "evidence_sha256": digest, "argv_sha256": value["argv_sha256"], "timestamp_unix": timestamp}
+    return {
+        "path": str(evidence_path),
+        "request_id": request_id,
+        "evidence_sha256": digest,
+        "argv_sha256": value["argv_sha256"],
+        "timestamp_unix": timestamp,
+        "package_operation": expected_operation,
+    }
 
 
-def _validate_postflight_authorization(plan: dict[str, Any], policy: dict[str, Any], uid: int, apply_evidence_paths: list[Path]) -> dict[str, Any]:
-    age = int(time.time()) - int(plan["created_at_unix"]); apply_commands = _apply_commands(plan, policy); expected_argvs = ([apply_commands["apt_apply_argv"]] if apply_commands.get("apt_apply_argv") else []) + list(apply_commands.get("snap_apply_argvs", []))
+def _validate_postflight_authorization(
+    plan: dict[str, Any], policy: dict[str, Any], uid: int,
+    apply_evidence_paths: list[Path], apt_preflight_evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    age = int(time.time()) - int(plan["created_at_unix"])
+    apply_commands = _apply_commands(plan, policy)
+    apt_apply_argv = apply_commands.get("apt_apply_argv")
+    snap_apply_argvs = list(apply_commands.get("snap_apply_argvs", []))
+    expected_specs: list[tuple[list[str], str]] = []
+    if isinstance(apt_apply_argv, list):
+        expected_specs.append((apt_apply_argv, "apt_apply"))
+    for argv in snap_apply_argvs:
+        if argv[:2] == ["/usr/bin/snap", "ack"]:
+            operation = "snap_ack"
+        elif argv[:2] == ["/usr/bin/snap", "install"]:
+            operation = "snap_install"
+        else:
+            raise PlanError("unexpected Snap apply argv in verified plan")
+        expected_specs.append((argv, operation))
     if age < 0 or age > policy["staging"]["max_plan_age_seconds"]:
         raise PlanError(f"postflight plan age {age}s exceeds policy limit")
-    if not expected_argvs:
-        if apply_evidence_paths:
-            raise PlanError("postflight received apply evidence for a plan with no package apply")
-        return {"status": "not-required", "apply_evidence": []}
+    if not expected_specs:
+        if apply_evidence_paths or apt_preflight_evidence_path is not None:
+            raise PlanError("postflight received completion evidence for a plan with no package apply")
+        return {"status": "not-required", "apt_preflight_evidence": None, "apply_evidence": []}
     root_readback = _validate_root_readback_receipt(plan, policy, uid)
-    if len(apply_evidence_paths) != len(expected_argvs):
-        raise PlanError("postflight requires one authenticated completion evidence file per apply argv")
     guard_sha = root_readback["broker_output_evidence"]["evidence_sha256"]
-    summaries = [_validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256=guard_sha, not_before_unix=int(root_readback["authorized_at_unix"]), max_age_seconds=policy["staging"]["max_plan_age_seconds"]) for path, argv in zip(apply_evidence_paths, expected_argvs, strict=True)]
-    return {"status": "authenticated-apply-complete", "root_readback_receipt_sha256": root_readback["receipt_sha256"], "apply_evidence": summaries}
+    preflight_summary: dict[str, Any] | None = None
+    if isinstance(apt_apply_argv, list):
+        preflight_argv = root_readback.get("apt_apply_preflight_argv")
+        if not isinstance(preflight_argv, list) or apt_preflight_evidence_path is None:
+            raise PlanError("postflight requires authenticated successful APT preflight evidence")
+        preflight_summary = _validate_broker_preflight_evidence(
+            apt_preflight_evidence_path,
+            expected_argv=preflight_argv,
+            plan=plan,
+            guard_evidence_sha256=guard_sha,
+            not_before_unix=int(root_readback["authorized_at_unix"]),
+            max_age_seconds=policy["staging"]["max_plan_age_seconds"],
+        )
+    elif apt_preflight_evidence_path is not None:
+        raise PlanError("postflight received APT preflight evidence for a plan without APT apply")
+    if len(apply_evidence_paths) != len(expected_specs):
+        raise PlanError("postflight requires one authenticated completion evidence file per apply argv")
+    summaries: list[dict[str, Any]] = []
+    for path, (argv, operation) in zip(apply_evidence_paths, expected_specs, strict=True):
+        summaries.append(_validate_broker_apply_evidence(
+            path,
+            expected_argv=argv,
+            expected_operation=operation,
+            plan=plan,
+            guard_evidence_sha256=guard_sha,
+            not_before_unix=int(root_readback["authorized_at_unix"]),
+            max_age_seconds=policy["staging"]["max_plan_age_seconds"],
+            expected_preflight_evidence_sha256=(
+                preflight_summary["evidence_sha256"]
+                if operation == "apt_apply" and preflight_summary is not None
+                else None
+            ),
+            preflight_timestamp_unix=(
+                int(preflight_summary["timestamp_unix"])
+                if operation == "apt_apply" and preflight_summary is not None
+                else None
+            ),
+        ))
+    return {
+        "status": "authenticated-apply-complete",
+        "root_readback_receipt_sha256": root_readback["receipt_sha256"],
+        "apt_preflight_evidence": preflight_summary,
+        "apply_evidence": summaries,
+    }
 
 
 def _dpkg_state(name: str, arch: str | None = None) -> dict[str, str] | None:
@@ -1820,9 +2027,14 @@ def _service_state(unit: str, *, user: bool) -> str:
     return result["stdout"].strip() or f"rc={result['returncode']}"
 
 
-def postflight(plan_path: Path, confirmation: str, apply_evidence_paths: list[Path] | None = None) -> dict[str, Any]:
+def postflight(
+    plan_path: Path, confirmation: str, apply_evidence_paths: list[Path] | None = None,
+    apt_preflight_evidence_path: Path | None = None,
+) -> dict[str, Any]:
     plan, policy, _stage, _uid = _validate_plan_identity(plan_path, confirmation)
-    apply_authorization = _validate_postflight_authorization(plan, policy, _uid, apply_evidence_paths or [])
+    apply_authorization = _validate_postflight_authorization(
+        plan, policy, _uid, apply_evidence_paths or [], apt_preflight_evidence_path
+    )
     apt_results: list[dict[str, Any]] = []
     for item in plan["apt"].get("packages", []):
         installed = _dpkg_state(item["name"], item.get("arch"))
@@ -1967,11 +2179,18 @@ def _build_parser() -> argparse.ArgumentParser:
     post = sub.add_parser("postflight", help="Verify authenticated apply completion, installed state and service health.")
     post.add_argument("--plan", type=Path, required=True)
     post.add_argument("--confirmation", required=True)
+    post.add_argument(
+        "--apt-preflight-evidence", type=Path,
+        help="Root-owned Grabowski evidence for the exact successful dpkg --simulate preflight.",
+    )
     post.add_argument("--apply-evidence", type=Path, action="append", default=[])
     return parser
 
 
 def main() -> int:
+    if not sys.flags.isolated:
+        print(json.dumps({"status": "blocked", "error": "staged package update CLI requires isolated Python (-I)"}, sort_keys=True))
+        return 2
     if len(sys.argv) > 1 and sys.argv[1] == "__snap-quota-worker":
         try: return _snap_quota_worker(sys.argv[2:])
         except (PlanError, OSError) as exc:
@@ -1989,7 +2208,9 @@ def main() -> int:
                 args.plan, args.confirmation, args.sha256sum_output, args.broker_evidence
             )
         elif args.command == "postflight":
-            result = postflight(args.plan, args.confirmation, args.apply_evidence)
+            result = postflight(
+                args.plan, args.confirmation, args.apply_evidence, args.apt_preflight_evidence
+            )
         else:
             raise PlanError("unsupported command")
     except (PolicyError, PlanError, OSError, json.JSONDecodeError) as exc:

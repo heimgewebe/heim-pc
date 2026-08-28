@@ -61,7 +61,7 @@ def _allow_test_owned_broker_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_run_strips_caller_apt_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_uses_minimal_environment_and_ignores_caller_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class Completed:
@@ -73,12 +73,21 @@ def test_run_strips_caller_apt_config(monkeypatch: pytest.MonkeyPatch) -> None:
         captured.update(kwargs)
         return Completed()
 
-    monkeypatch.setenv("APT_CONFIG", "/tmp/untrusted-apt.conf")
+    attacker = {
+        "APT_CONFIG": "/tmp/untrusted-apt.conf", "PATH": "/tmp/attacker",
+        "HOME": "/tmp/attacker-home", "TMPDIR": "/tmp/attacker-tmp",
+        "XDG_CONFIG_HOME": "/tmp/xdg", "PYTHONPATH": "/tmp/python",
+        "LD_PRELOAD": "/tmp/evil.so", "SSL_CERT_FILE": "/tmp/evil-ca",
+        "HTTPS_PROXY": "http://127.0.0.1:9", "GCONV_PATH": "/tmp/gconv",
+        "LOCPATH": "/tmp/locale",
+    }
+    for key, value in attacker.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(spu.subprocess, "run", fake_run)
     spu._run(["/usr/bin/true"])
     env = captured["env"]
     assert isinstance(env, dict)
-    assert "APT_CONFIG" not in env
+    assert env == spu._base_command_env()
 
 
 def test_apt_options_pin_system_sources_and_authenticated_repositories(tmp_path: Path) -> None:
@@ -423,8 +432,15 @@ def test_snap_quota_argv_is_userns_mount_isolated(tmp_path: Path) -> None:
     assert argv[:4] == ["/usr/bin/unshare", "--user", "--map-root-user", "--mount"]
     for flag in ("--pid", "--fork", "--kill-child=KILL", "--mount-proc"):
         assert flag in argv
-    assert "/usr/bin/python3" in argv and "__snap-quota-worker" in argv
+    python_index = argv.index("/usr/bin/python3")
+    assert argv[python_index + 1] == "-I"
+    assert "__snap-quota-worker" in argv
     assert argv[-2:] == ["2048", "1024"] and "/usr/bin/snap" not in argv
+
+
+def test_cli_shebang_requires_isolated_python() -> None:
+    first_line = SCRIPT.read_text().splitlines()[0]
+    assert first_line == "#!/usr/bin/python3 -I"
 
 
 def test_stage_snap_uses_hard_quota_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,7 +463,9 @@ def test_policy_requires_snap_hard_quota_mode(tmp_path: Path) -> None:
     with pytest.raises(spu.PolicyError, match="download_quota_mode"): spu.load_policy(path)
     policy["snap"]["download_quota_mode"] = "userns-pid-tmpfs-bwrap-ro-root"; policy["safety"]["require_snap_download_hard_quota"] = False; path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="require_snap_download_hard_quota"): spu.load_policy(path)
-    policy["safety"]["require_snap_download_hard_quota"] = True; policy["safety"]["require_authenticated_apply_completion_evidence"] = False; path.write_text(json.dumps(policy))
+    policy["safety"]["require_snap_download_hard_quota"] = True; policy["safety"]["require_authenticated_apt_preflight_completion"] = False; path.write_text(json.dumps(policy))
+    with pytest.raises(spu.PolicyError, match="require_authenticated_apt_preflight_completion"): spu.load_policy(path)
+    policy["safety"]["require_authenticated_apt_preflight_completion"] = True; policy["safety"]["require_authenticated_apply_completion_evidence"] = False; path.write_text(json.dumps(policy))
     with pytest.raises(spu.PolicyError, match="require_authenticated_apply_completion_evidence"): spu.load_policy(path)
 
 
@@ -925,7 +943,9 @@ def test_policy_requires_snap_store_revalidation_and_private_apt_runtime(tmp_pat
         "require_snap_store_artifact_revalidation", "require_apt_apply_private_runtime_namespace",
         "require_root_staging_capacity", "require_reboot_capture",
         "require_apt_apply_kernel_device_isolation", "require_apply_readback_authorization",
-        "require_snap_download_byte_cap", "require_snap_download_hard_quota", "require_authenticated_apply_completion_evidence", "require_postflight_plan_identity",
+        "require_snap_download_byte_cap", "require_snap_download_hard_quota",
+        "require_authenticated_apt_preflight_completion", "require_authenticated_apply_completion_evidence",
+        "require_postflight_plan_identity",
         "require_privileged_broker_output_evidence", "require_target_downgrade_refusal",
         "require_explicit_activation_semantics",
     ):
@@ -1027,7 +1047,9 @@ def _stub_postflight_identity(monkeypatch: pytest.MonkeyPatch, plan: dict[str, o
     )
     monkeypatch.setattr(
         spu, "_validate_postflight_authorization",
-        lambda plan_value, policy_value, uid, paths: {"status": "test-authenticated", "apply_evidence": []},
+        lambda plan_value, policy_value, uid, paths, apt_preflight_path=None: {
+            "status": "test-authenticated", "apt_preflight_evidence": None, "apply_evidence": []
+        },
     )
 
 
@@ -1048,31 +1070,120 @@ def _postflight_run(
     raise AssertionError(argv)
 
 
-def test_broker_apply_evidence_binds_plan_argv_paths_and_hash_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    evidence_root = tmp_path / "apply-evidence"; evidence_root.mkdir(mode=0o755)
+def test_broker_apply_evidence_requires_authenticated_preflight_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_root = tmp_path / "apply-evidence"
+    evidence_root.mkdir(mode=0o755)
     monkeypatch.setattr(spu, "BROKER_OUTPUT_EVIDENCE_ROOT", evidence_root)
     plan_id = "20260827T010203Z-123456abcdef"
     root_stage = f"/var/lib/heim-pc/package-update-stages/{plan_id}"
     deb = f"{root_stage}/debs/a.deb"
-    argv = ["/usr/bin/systemd-run", "--system", "--wait", "--", "/usr/bin/dpkg", "--install", deb]
-    guard = "a" * 64; request_id = "b" * 32; now = int(spu.time.time())
-    value: dict[str, object] = {
-        "schema_version": 1, "kind": spu.BROKER_OUTPUT_EVIDENCE_KIND, "request_id": request_id,
-        "reference_sha256": "c" * 64, "action": spu.BROKER_POWER_ACTION, "mode": "argv-json",
-        "argv_sha256": spu._sha256_json(argv), "cwd_sha256": "d" * 64,
-        "peer_uid": os.geteuid(), "peer_unit": spu.BROKER_PEER_UNIT, "returncode": 0,
-        "timed_out": False, "stdout_sha256": spu._sha256_bytes(b""), "stdout_bytes": 0,
-        "stdout_truncated": False, "timestamp_unix": now, "package_plan_id": plan_id,
-        "package_paths": [deb], "package_apply_completed": True,
-        "package_apply_guard_evidence_sha256": guard, "package_exact_evidence": True,
+    preflight_argv = [
+        "/usr/bin/dpkg", "--simulate", "--refuse-downgrade", "--force-confold",
+        "--install", deb,
+    ]
+    apply_argv = [
+        "/usr/bin/systemd-run", "--system", "--wait", "--",
+        "/usr/bin/dpkg", "--install", deb,
+    ]
+    guard = "a" * 64
+    now = int(spu.time.time())
+    plan = {
+        "plan_id": plan_id,
+        "baseline": {"uid": os.geteuid()},
+        "root_commands": {"root_stage": root_stage},
     }
-    value["evidence_sha256"] = spu._sha256_json(value)
-    path = evidence_root / f"{request_id}.json"; path.write_text(json.dumps(value, sort_keys=True) + "\n"); path.chmod(0o640)
-    plan = {"plan_id": plan_id, "baseline": {"uid": os.geteuid()}, "root_commands": {"root_stage": root_stage}}
-    result = spu._validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256=guard, not_before_unix=now - 1, max_age_seconds=60, expected_owner_uid=os.geteuid())
-    assert result["evidence_sha256"] == value["evidence_sha256"]
-    with pytest.raises(spu.PlanError, match="execution status is invalid"):
-        spu._validate_broker_apply_evidence(path, expected_argv=argv, plan=plan, guard_evidence_sha256="e" * 64, not_before_unix=now - 1, max_age_seconds=60, expected_owner_uid=os.geteuid())
+
+    def write_completion(
+        request_id: str, argv: list[str], timestamp_unix: int, **package_fields: object
+    ) -> Path:
+        value: dict[str, object] = {
+            "schema_version": 1, "kind": spu.BROKER_OUTPUT_EVIDENCE_KIND,
+            "request_id": request_id, "reference_sha256": "c" * 64,
+            "action": spu.BROKER_POWER_ACTION, "mode": "argv-json",
+            "argv_sha256": spu._sha256_json(argv), "cwd_sha256": "d" * 64,
+            "peer_uid": os.geteuid(), "peer_unit": spu.BROKER_PEER_UNIT,
+            "returncode": 0, "timed_out": False,
+            "stdout_sha256": spu._sha256_bytes(b""), "stdout_bytes": 0,
+            "stdout_truncated": False, "stderr_truncated": False,
+            "timestamp_unix": timestamp_unix,
+            **package_fields,
+        }
+        value["evidence_sha256"] = spu._sha256_json(value)
+        path = evidence_root / f"{request_id}.json"
+        path.write_text(json.dumps(value, sort_keys=True) + "\n")
+        path.chmod(0o640)
+        return path
+
+    preflight_path = write_completion(
+        "b" * 32, preflight_argv, now,
+        package_plan_id=plan_id, package_paths=[deb],
+        package_preflight_completed=True, package_operation="apt_preflight",
+        package_exact_evidence=True,
+        package_preflight_guard_evidence_sha256=guard,
+    )
+    preflight = spu._validate_broker_preflight_evidence(
+        preflight_path, expected_argv=preflight_argv, plan=plan,
+        guard_evidence_sha256=guard, not_before_unix=now - 1,
+        max_age_seconds=60, expected_owner_uid=os.geteuid(),
+    )
+    apply_path = write_completion(
+        "c" * 32, apply_argv, now,
+        package_plan_id=plan_id, package_paths=[deb],
+        package_apply_completed=True, package_operation="apt_apply",
+        package_exact_evidence=True, package_apply_guard_evidence_sha256=guard,
+        package_apply_preflight_evidence_sha256=preflight["evidence_sha256"],
+    )
+    result = spu._validate_broker_apply_evidence(
+        apply_path, expected_argv=apply_argv, expected_operation="apt_apply", plan=plan,
+        guard_evidence_sha256=guard, not_before_unix=now - 1, max_age_seconds=60,
+        expected_preflight_evidence_sha256=str(preflight["evidence_sha256"]),
+        preflight_timestamp_unix=int(preflight["timestamp_unix"]),
+        expected_owner_uid=os.geteuid(),
+    )
+    assert result["package_operation"] == "apt_apply"
+    with pytest.raises(spu.PlanError, match="lacks the authenticated preflight binding"):
+        spu._validate_broker_apply_evidence(
+            apply_path, expected_argv=apply_argv, expected_operation="apt_apply", plan=plan,
+            guard_evidence_sha256=guard, not_before_unix=now - 1, max_age_seconds=60,
+            expected_preflight_evidence_sha256="e" * 64, preflight_timestamp_unix=now,
+            expected_owner_uid=os.geteuid(),
+        )
+
+
+def test_postflight_authorization_requires_apt_preflight_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(spu.time.time())
+    plan_id = "20260827T010203Z-123456abcdef"
+    root_stage = f"/var/lib/heim-pc/package-update-stages/{plan_id}"
+    deb = f"{root_stage}/debs/a.deb"
+    apt_apply = ["/usr/bin/systemd-run", "--wait", deb]
+    apt_preflight = ["/usr/bin/dpkg", "--simulate", "--install", deb]
+    plan = {
+        "plan_id": plan_id, "created_at_unix": now - 1,
+        "baseline": {"uid": os.geteuid()},
+        "root_commands": {"root_stage": root_stage},
+    }
+    policy = {"staging": {"max_plan_age_seconds": 60}}
+    monkeypatch.setattr(
+        spu, "_apply_commands",
+        lambda plan_value, policy_value: {"apt_apply_argv": apt_apply, "snap_apply_argvs": []},
+    )
+    monkeypatch.setattr(
+        spu, "_validate_root_readback_receipt",
+        lambda plan_value, policy_value, uid: {
+            "broker_output_evidence": {"evidence_sha256": "a" * 64},
+            "authorized_at_unix": now - 1,
+            "apt_apply_preflight_argv": apt_preflight,
+            "receipt_sha256": "b" * 64,
+        },
+    )
+    with pytest.raises(spu.PlanError, match="requires authenticated successful APT preflight evidence"):
+        spu._validate_postflight_authorization(
+            plan, policy, os.geteuid(), [Path("/nonexistent-apply-evidence.json")]
+        )
 
 
 def test_postflight_authorization_rejects_stale_plan_without_apply() -> None:

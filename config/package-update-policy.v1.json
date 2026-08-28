@@ -66,6 +66,7 @@
     "require_explicit_activation_semantics": true,
     "require_dpkg_explicit_apply": true,
     "require_snap_download_hard_quota": true,
+    "require_authenticated_apt_preflight_completion": true,
     "require_authenticated_apply_completion_evidence": true
   },
   "postflight": {
