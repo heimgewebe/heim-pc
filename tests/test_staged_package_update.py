@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -163,6 +164,7 @@ def test_parse_apt_print_uris_requires_supported_strong_hash() -> None:
         text = f"'https://example.invalid/pkg.deb' pkg.deb 123 {algorithm}:{digest}\n"
         assert spu.parse_apt_print_uris(text) == [{
             "repository_uri_sha256": spu._sha256_bytes(b"https://example.invalid/pkg.deb"),
+            "repository_uri_basename": "pkg.deb",
             "repository_filename": "pkg.deb",
             "repository_size": 123,
             "repository_hash_algorithm": algorithm,
@@ -173,6 +175,143 @@ def test_parse_apt_print_uris_requires_supported_strong_hash() -> None:
             spu.parse_apt_print_uris(f"'https://example.invalid/pkg.deb' pkg.deb 123 {weak}")
     with pytest.raises(spu.PlanError, match="supported strong SHA256/SHA512"):
         spu.parse_apt_print_uris("'https://example.invalid/pkg.deb' pkg.deb 123 SHA256:deadbeef")
+
+
+def test_parse_apt_cache_show_sha256_binds_exact_candidate_and_artifact() -> None:
+    digest = "d" * 64
+    candidate = {"name": "curl", "version": "2.0", "arch": "amd64"}
+    text = (
+        "Package: curl\nVersion: 1.0\nArchitecture: amd64\n"
+        "Filename: pool/curl.deb\nSize: 123\nSHA256: " + "a" * 64 + "\n\n"
+        "Package: curl\nVersion: 2.0\nArchitecture: amd64\n"
+        "Filename: pool/main/c/curl/curl.deb\nSize: 123\nSHA256: " + digest + "\n"
+        "Description: ignored\n continuation ignored\n\n"
+    )
+    assert spu.parse_apt_cache_show_sha256(
+        text, candidate, repository_uri_basename="curl.deb", repository_size=123
+    ) == digest
+    with pytest.raises(spu.PlanError, match="exactly one SHA-256"):
+        spu.parse_apt_cache_show_sha256(
+            text, candidate, repository_uri_basename="other.deb", repository_size=123
+        )
+
+
+def test_apt_repository_record_binds_signed_sha256_when_print_uris_uses_sha512(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha256 = "a" * 64
+    sha512 = "b" * 128
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        calls.append(argv)
+        if argv[0] == "/usr/bin/apt-get":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": f"'https://example.invalid/bash.deb' bash.deb 123 SHA512:{sha512}\n",
+            }
+        if argv[0] == "/usr/bin/apt-cache":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "Package: bash\nVersion: 2.0\nArchitecture: amd64\n"
+                    "Filename: pool/bash.deb\nSize: 123\nSHA256: " + sha256 + "\n\n"
+                ),
+            }
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    record = spu._apt_repository_record([], {"name": "bash", "version": "2.0", "arch": "amd64"})
+    assert record["repository_hash_algorithm"] == "SHA512"
+    assert record["repository_hash"] == sha512
+    assert record["repository_sha256"] == sha256
+    assert calls[1][-2:] == ["show", "bash:amd64=2.0"]
+
+
+def test_apt_repository_record_matches_epoch_candidate_by_uri_basename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha256 = "a" * 64
+    sha512 = "b" * 128
+
+    def fake_run(argv: list[str], **_: object) -> dict[str, object]:
+        if argv[0] == "/usr/bin/apt-get":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "'https://example.invalid/pool/main/b/bolt/bolt-20_20.1.8-0ubuntu1_amd64.deb' "
+                    f"'bolt-20_1%3a20.1.8-0ubuntu1_amd64.deb' 123 SHA512:{sha512}\n"
+                ),
+            }
+        if argv[0] == "/usr/bin/apt-cache":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "Package: bolt-20\nVersion: 1:20.1.8-0ubuntu1\nArchitecture: amd64\n"
+                    "Filename: pool/main/b/bolt/bolt-20_20.1.8-0ubuntu1_amd64.deb\n"
+                    "Size: 123\nSHA256: " + sha256 + "\n\n"
+                ),
+            }
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    record = spu._apt_repository_record(
+        [], {"name": "bolt-20", "version": "1:20.1.8-0ubuntu1", "arch": "amd64"}
+    )
+    assert record["repository_filename"] == "bolt-20_1%3a20.1.8-0ubuntu1_amd64.deb"
+    assert record["repository_uri_basename"] == "bolt-20_20.1.8-0ubuntu1_amd64.deb"
+    assert record["repository_sha256"] == sha256
+
+
+def test_stage_apt_uses_authenticated_repository_sha256_as_plan_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"signed-repository-deb"
+    sha256 = spu._sha256_bytes(payload)
+    sha512 = hashlib.sha512(payload).hexdigest()
+    candidate = {"name": "curl", "version": "new", "arch": "amd64"}
+    simulation = "Inst curl [old] (new Repo [amd64])\n1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"
+
+    def fake_run(argv: list[str], **kwargs: object) -> dict[str, object]:
+        if argv[-1] == "update":
+            return {"argv": argv, "returncode": 0, "stdout": "", "stderr": ""}
+        if "-s" in argv:
+            return {"argv": argv, "returncode": 0, "stdout": simulation, "stderr": ""}
+        if argv[0] == "/usr/bin/apt-get" and "download" in argv and "--print-uris" not in argv:
+            cwd = Path(str(kwargs["cwd"]))
+            (cwd / "curl.deb").write_bytes(payload)
+            return {"argv": argv, "returncode": 0, "stdout": "", "stderr": ""}
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(spu, "_run", fake_run)
+    monkeypatch.setattr(spu, "_apt_repository_record", lambda options, current: {
+        "repository_size": len(payload),
+        "repository_hash_algorithm": "SHA512",
+        "repository_hash": sha512,
+        "repository_sha256": sha256,
+        "repository_manifest_sha256": "b" * 64,
+        "repository_uri_sha256": "c" * 64,
+        "repository_uri_basename": "curl.deb",
+        "repository_filename": "curl.deb",
+    })
+    monkeypatch.setattr(
+        spu, "_deb_field",
+        lambda path, field: {"Package": "curl", "Version": "new", "Architecture": "amd64"}[field],
+    )
+    monkeypatch.setattr(spu, "_deb_reboot_marker_capable", lambda path, uid: False)
+    policy = {
+        "apt": {
+            "enabled": True, "max_packages": 10, "max_download_bytes": 1024 * 1024,
+            "sensitive_prefixes": [],
+        }
+    }
+    result = spu._stage_apt(tmp_path / "stage", policy, os.geteuid())
+    assert len(result["packages"]) == 1
+    artifact = result["packages"][0]
+    assert artifact["sha256"] == sha256
+    assert artifact["repository_sha256"] == sha256
+    assert artifact["repository_hash_algorithm"] == "SHA512"
+    assert artifact["repository_hash"] == sha512
 
 
 def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,6 +326,14 @@ def test_stage_apt_enforces_authenticated_byte_cap_before_download(tmp_path: Pat
             return {"argv": argv, "returncode": 0, "stdout": simulation, "stderr": ""}
         if "--print-uris" in argv:
             return {"argv": argv, "returncode": 0, "stdout": "'https://example.invalid/curl.deb' curl.deb 2048 SHA256:" + "a" * 64 + "\n", "stderr": ""}
+        if argv[0] == "/usr/bin/apt-cache":
+            return {
+                "argv": argv, "returncode": 0, "stderr": "",
+                "stdout": (
+                    "Package: curl\nVersion: new\nArchitecture: amd64\n"
+                    "Filename: pool/curl.deb\nSize: 2048\nSHA256: " + "a" * 64 + "\n\n"
+                ),
+            }
         raise AssertionError(f"unexpected actual download: {argv}")
 
     monkeypatch.setattr(spu, "_run", fake_run)
@@ -231,8 +378,9 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
     item = {
         "name": "curl", "version": "new", "arch": "amd64", "package": "curl",
         "relative_path": "apt/debs/curl.deb", "size": len(b"forged"),
-        "sha256": spu._sha256_file(artifact),
+        "sha256": digest,
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_sha256": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
         "sensitive": False,
     }
@@ -244,6 +392,7 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
     monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_sha256": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
         "repository_filename": "curl.deb",
     })
@@ -252,13 +401,49 @@ def test_apt_provenance_revalidation_rejects_forged_deb_bytes(tmp_path: Path, mo
         spu._revalidate_apt_provenance(stage, plan, policy, os.geteuid())
 
 
+def test_apt_revalidation_rejects_plan_hash_not_bound_to_signed_repository_sha256(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authentic_sha256 = "a" * 64
+    attacker_sha256 = "b" * 64
+    sha512 = "c" * 128
+    item = {
+        "name": "bash", "version": "new", "arch": "amd64",
+        "sha256": attacker_sha256,
+        "repository_size": 123,
+        "repository_hash_algorithm": "SHA512",
+        "repository_hash": sha512,
+        "repository_sha256": authentic_sha256,
+        "repository_manifest_sha256": "d" * 64,
+        "repository_uri_sha256": "e" * 64,
+    }
+    plan = {"apt": {"enabled": True, "packages": [item]}}
+    policy = {"apt": {"enabled": True, "max_download_bytes": 1024 * 1024, "sensitive_prefixes": []}}
+    monkeypatch.setattr(
+        spu, "_apt_update_and_candidates",
+        lambda *args: ([], {}, {}, [{"name": "bash", "version": "new", "arch": "amd64"}]),
+    )
+    monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
+        "repository_size": 123,
+        "repository_hash_algorithm": "SHA512",
+        "repository_hash": sha512,
+        "repository_sha256": authentic_sha256,
+        "repository_manifest_sha256": "d" * 64,
+        "repository_uri_sha256": "e" * 64,
+    })
+    with pytest.raises(spu.PlanError, match="plan SHA-256 differs from signed repository SHA-256"):
+        spu._revalidate_apt_provenance(tmp_path / "stage", plan, policy, os.geteuid())
+
+
 def test_apt_provenance_revalidation_rejects_forged_sensitive_classification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     digest = "a" * 64
     item = {
         "name": "linux-image-generic", "version": "new", "arch": "amd64",
+        "sha256": digest,
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_sha256": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
         "sensitive": False,
     }
@@ -273,6 +458,7 @@ def test_apt_provenance_revalidation_rejects_forged_sensitive_classification(
     )
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
         "repository_size": 123, "repository_hash_algorithm": "SHA256", "repository_hash": digest,
+        "repository_sha256": digest,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
     })
     with pytest.raises(spu.PlanError, match="sensitive-package classification"):
@@ -807,7 +993,9 @@ def test_verify_rejects_authenticated_apt_total_over_byte_cap(tmp_path: Path, mo
     (stage / "apt" / "debs").mkdir(parents=True)
     item = {
         "name": "curl", "version": "new", "arch": "amd64",
+        "sha256": "a" * 64,
         "repository_size": 2048, "repository_hash_algorithm": "SHA256", "repository_hash": "a" * 64,
+        "repository_sha256": "a" * 64,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64,
         "relative_path": "apt/debs/curl.deb",
     }
@@ -816,6 +1004,7 @@ def test_verify_rejects_authenticated_apt_total_over_byte_cap(tmp_path: Path, mo
     monkeypatch.setattr(spu, "_apt_update_and_candidates", lambda *args: ([], {}, {}, [{"name": "curl", "version": "new", "arch": "amd64"}]))
     monkeypatch.setattr(spu, "_apt_repository_record", lambda options, candidate: {
         "repository_size": 2048, "repository_hash_algorithm": "SHA256", "repository_hash": "a" * 64,
+        "repository_sha256": "a" * 64,
         "repository_manifest_sha256": "b" * 64, "repository_uri_sha256": "c" * 64, "repository_filename": "curl.deb",
     })
     with pytest.raises(spu.PlanError, match="exceed policy limit during verification"):

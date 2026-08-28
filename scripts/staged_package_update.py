@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from typing import Any, Iterable
 
 POLICY_PATH = Path(__file__).resolve().parents[1] / "config" / "package-update-policy.v1.json"
@@ -658,14 +659,68 @@ def parse_apt_print_uris(text: str) -> list[dict[str, Any]]:
             or re.fullmatch(rf"[0-9a-fA-F]{{{expected_length}}}", digest) is None
         ):
             raise PlanError("APT repository metadata did not provide a supported strong SHA256/SHA512 artifact hash")
+        uri_path = urllib.parse.unquote(urllib.parse.urlsplit(parts[0]).path)
+        uri_basename = Path(uri_path).name
+        if not uri_basename:
+            raise PlanError("APT repository URI did not provide an artifact basename")
         records.append({
             "repository_uri_sha256": _sha256_bytes(parts[0].encode("utf-8")),
+            "repository_uri_basename": uri_basename,
             "repository_filename": parts[1],
             "repository_size": int(parts[2]),
             "repository_hash_algorithm": algorithm,
             "repository_hash": digest.lower(),
         })
     return records
+
+
+def parse_apt_cache_show_sha256(
+    text: str, candidate: dict[str, str], *, repository_uri_basename: str,
+    repository_size: int,
+) -> str:
+    expected_package = str(candidate["name"]).split(":", 1)[0]
+    expected_version = str(candidate["version"])
+    expected_arch = str(candidate["arch"])
+    if (
+        not repository_uri_basename
+        or isinstance(repository_size, bool)
+        or not isinstance(repository_size, int)
+        or repository_size < 0
+    ):
+        raise PlanError("APT repository artifact identity is invalid")
+    digests: set[str] = set()
+    for paragraph in re.split(r"\n\s*\n", text.strip()):
+        if not paragraph.strip():
+            continue
+        fields: dict[str, str] = {}
+        current: str | None = None
+        for raw_line in paragraph.splitlines():
+            if raw_line[:1].isspace() and current is not None:
+                continue
+            match = re.match(r"^([A-Za-z0-9-]+):\s*(.*)$", raw_line)
+            if match is None:
+                current = None
+                continue
+            current = match.group(1).lower()
+            fields[current] = match.group(2).strip()
+        if (
+            fields.get("package") != expected_package
+            or fields.get("version") != expected_version
+            or fields.get("architecture") != expected_arch
+            or fields.get("size") != str(repository_size)
+            or Path(fields.get("filename", "")).name != repository_uri_basename
+        ):
+            continue
+        digest = fields.get("sha256", "").lower()
+        if SHA256_RE.fullmatch(digest) is None:
+            continue
+        digests.add(digest)
+    if len(digests) != 1:
+        raise PlanError(
+            f"APT signed package metadata did not resolve exactly one SHA-256 for "
+            f"{expected_package}:{expected_arch}={expected_version}"
+        )
+    return next(iter(digests))
 
 
 def _strong_hash_file(path: Path, algorithm: str) -> str:
@@ -690,7 +745,20 @@ def _apt_repository_record(options: list[str], candidate: dict[str, str]) -> dic
     records = parse_apt_print_uris(result["stdout"])
     if len(records) != 1:
         raise PlanError(f"APT repository metadata did not resolve exactly one artifact for {spec}")
-    return {**records[0], "repository_manifest_sha256": _sha256_bytes(result["stdout"].encode())}
+    repository = records[0]
+    base_name = str(candidate["name"]).split(":", 1)[0]
+    metadata_spec = f"{base_name}:{candidate['arch']}={candidate['version']}"
+    metadata = _run(["/usr/bin/apt-cache", *options, "show", metadata_spec])
+    repository_sha256 = parse_apt_cache_show_sha256(
+        metadata["stdout"], candidate,
+        repository_uri_basename=str(repository["repository_uri_basename"]),
+        repository_size=int(repository["repository_size"]),
+    )
+    return {
+        **repository,
+        "repository_sha256": repository_sha256,
+        "repository_manifest_sha256": _sha256_bytes(result["stdout"].encode()),
+    }
 
 
 def _available_bytes(path: Path) -> int:
@@ -821,12 +889,13 @@ def _stage_apt(stage: Path, policy: dict[str, Any], uid: int) -> dict[str, Any]:
         seen.add(key)
         auth_key = _candidate_identity(candidate)
         repository = authenticated[auth_key]
+        digest = _sha256_file(path)
         if (
             info_before.st_size != repository["repository_size"]
+            or digest != repository["repository_sha256"]
             or _strong_hash_file(path, repository["repository_hash_algorithm"]) != repository["repository_hash"]
         ):
             raise PlanError(f"downloaded DEB does not match authenticated repository metadata: {key}")
-        digest = _sha256_file(path)
         safe_package = SAFE_NAME_RE.sub("_", candidate["name"])
         root_name = f"{index:03d}-{safe_package}-{arch}-{digest[:16]}.deb"
         renamed = deb_dir / root_name
@@ -1068,12 +1137,19 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
     authenticated_total = 0
     for item in planned_packages:
         repository = _apt_repository_record(options, item)
+        repository_sha256 = repository.get("repository_sha256")
+        if not isinstance(repository_sha256, str) or SHA256_RE.fullmatch(repository_sha256) is None:
+            raise PlanError(f"APT signed repository SHA-256 is missing or invalid for {item['name']}")
         for key in (
             "repository_size", "repository_hash_algorithm", "repository_hash",
-            "repository_manifest_sha256", "repository_uri_sha256",
+            "repository_sha256", "repository_manifest_sha256", "repository_uri_sha256",
         ):
             if item.get(key) != repository.get(key):
                 raise PlanError(f"APT authenticated repository provenance changed for {item['name']}")
+        if item.get("sha256") != repository_sha256:
+            raise PlanError(
+                f"APT plan SHA-256 differs from signed repository SHA-256 for {item['name']}"
+            )
         authenticated_total += int(repository["repository_size"])
         if authenticated_total > policy["apt"]["max_download_bytes"]:
             raise PlanError(f"APT authenticated download bytes {authenticated_total} exceed policy limit during verification")
@@ -1090,6 +1166,7 @@ def _revalidate_apt_provenance(stage: Path, plan: dict[str, Any], policy: dict[s
             raise PlanError(f"APT artifact package identity does not match signed plan candidate: {path}")
         if (
             info.st_size != repository["repository_size"]
+            or _sha256_file(path) != repository_sha256
             or _strong_hash_file(path, repository["repository_hash_algorithm"]) != repository["repository_hash"]
         ):
             raise PlanError(f"APT artifact bytes do not match freshly authenticated repository metadata: {path}")
