@@ -1300,7 +1300,10 @@ def _apt_apply_systemd_argv(
         # Making that tree read-only converts a valid offline kernel upgrade into
         # a partial dpkg transaction before the package can reach postinst.
         "--property=ProtectControlGroups=yes",
-        "--property=PrivateDevices=yes",
+        # Kernel hooks need block-device identity for root/ESP UUID lookup;
+        # keep devices closed and permit only read-only block access.
+        "--property=DevicePolicy=closed",
+        "--property=DeviceAllow=block-* r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
