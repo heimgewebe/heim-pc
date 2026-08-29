@@ -1301,9 +1301,11 @@ def _apt_apply_systemd_argv(
         # a partial dpkg transaction before the package can reach postinst.
         "--property=ProtectControlGroups=yes",
         # Kernel hooks need block-device identity for root/ESP UUID lookup;
-        # keep devices closed and permit only read-only block access.
+        # keep devices closed and permit read-only access only to the audited
+        # root and ESP devices.
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=block-* r",
+        "--property=DeviceAllow=/dev/nvme0n1p3 r",
+        "--property=DeviceAllow=/dev/nvme0n1p1 r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
