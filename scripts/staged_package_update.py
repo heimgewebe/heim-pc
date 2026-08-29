@@ -1292,7 +1292,8 @@ def _apt_apply_systemd_argv(
         "--property=PrivateNetwork=yes",
         f"--property=BindPaths={runtime_capture}:/run",
         "--property=ProtectProc=invisible",
-        "--property=ProcSubset=pid",
+        # ProcSubset=pid would hide non-process /proc metadata required by
+        # kernel maintainer scripts (initramfs-tools/kernelstub).
         "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
         "--property=ProtectKernelTunables=yes",
         # Kernel DEBs legitimately create /usr/lib/modules/<version> during unpack.
