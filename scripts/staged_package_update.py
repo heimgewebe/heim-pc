@@ -1295,7 +1295,9 @@ def _apt_apply_systemd_argv(
         "--property=ProcSubset=pid",
         "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket",
         "--property=ProtectKernelTunables=yes",
-        "--property=ProtectKernelModules=yes",
+        # Kernel DEBs legitimately create /usr/lib/modules/<version> during unpack.
+        # Making that tree read-only converts a valid offline kernel upgrade into
+        # a partial dpkg transaction before the package can reach postinst.
         "--property=ProtectControlGroups=yes",
         "--property=PrivateDevices=yes",
         "--property=RestrictNamespaces=yes",
