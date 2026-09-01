@@ -64,14 +64,20 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _expand_path(value: str, home: Path) -> Path:
+def _expand_path_lexical(value: str, home: Path) -> Path:
     if not isinstance(value, str) or not value:
         raise PolicyError("configured paths must be non-empty strings")
-    expanded = value.replace("${HOME}", str(home)).replace("~", str(home), 1)
+    expanded = value.replace("${HOME}", str(home))
+    if expanded.startswith("~"):
+        expanded = expanded.replace("~", str(home), 1)
     path = Path(expanded)
     if not path.is_absolute():
         raise PolicyError(f"configured path must be absolute after expansion: {value}")
-    return path.resolve(strict=False)
+    return path
+
+
+def _expand_path(value: str, home: Path) -> Path:
+    return _expand_path_lexical(value, home).resolve(strict=False)
 
 
 def _positive_int(value: Any, label: str, *, allow_zero: bool = False) -> int:
@@ -514,7 +520,7 @@ def _process_reference_roots(policy: dict[str, Any]) -> list[Path]:
 
     roots: set[Path] = set()
     for raw_root in raw_roots:
-        root = _expand_path(raw_root, home)
+        root = _expand_path_lexical(raw_root, home)
         try:
             info = root.lstat()
         except FileNotFoundError:

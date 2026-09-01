@@ -130,6 +130,25 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertIn(plans.resolve(), roots)
         self.assertIn(receipts.resolve(), roots)
 
+    def test_process_reference_roots_reject_configured_symlink_root(self) -> None:
+        target = self.home / "cache-target"
+        target.mkdir()
+        configured_root = self.home / "configured-cache"
+        configured_root.symlink_to(target, target_is_directory=True)
+        self.policy["classes"]["filesystem_cache"]["targets"] = [
+            {
+                "id": "configured-cache",
+                "path": "${HOME}/configured-cache",
+                "minimum_unused_seconds": 1,
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            cache_maintenance.PlanError,
+            "process-reference root is not a directory",
+        ):
+            cache_maintenance._process_reference_roots(self.policy)
+
     def test_process_observation_uses_bounded_rootbroker_for_path_references(self) -> None:
         cache_root = self.home / ".cache" / "pip"
         cache_root.mkdir(parents=True)
