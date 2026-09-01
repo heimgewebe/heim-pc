@@ -510,6 +510,7 @@ def _process_reference_roots(policy: dict[str, Any]) -> list[Path]:
     )
     raw_roots.append(policy["classes"]["trash"]["root"])
     raw_roots.append(policy["classes"]["grabowski_releases"]["root"])
+    raw_roots.extend(policy["classes"]["maintenance_journal"]["roots"])
 
     roots: set[Path] = set()
     for raw_root in raw_roots:

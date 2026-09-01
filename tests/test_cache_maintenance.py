@@ -119,6 +119,17 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertFalse(self.policy["safety"]["referenced_images_authorized"])
         self.assertFalse(self.policy["classes"]["user_journal"]["apply_authorized"])
 
+    def test_process_reference_roots_include_maintenance_journal_directories(self) -> None:
+        plans = self.home / ".local/state/heim-pc/cache-maintenance/plans"
+        receipts = self.home / ".local/state/heim-pc/cache-maintenance/receipts"
+        plans.mkdir(parents=True)
+        receipts.mkdir(parents=True)
+
+        roots = cache_maintenance._process_reference_roots(self.policy)
+
+        self.assertIn(plans.resolve(), roots)
+        self.assertIn(receipts.resolve(), roots)
+
     def test_process_observation_uses_bounded_rootbroker_for_path_references(self) -> None:
         cache_root = self.home / ".cache" / "pip"
         cache_root.mkdir(parents=True)
