@@ -19,6 +19,11 @@ import time
 from typing import Any, Callable, Iterable
 import urllib.parse
 
+try:
+    from scripts import worktree_target_maintenance as _process_reference_broker
+except ImportError:  # direct execution via `python3 scripts/cache_maintenance.py`
+    import worktree_target_maintenance as _process_reference_broker
+
 POLICY_PATH = Path(__file__).resolve().parents[1] / "config" / "cache-policy.v1.json"
 PLAN_KIND = "heim_pc.cache_maintenance_plan"
 RECEIPT_KIND = "heim_pc.cache_maintenance_receipt"
@@ -450,15 +455,12 @@ def _tree_snapshot(
     }
 
 
-def _process_observation(policy: dict[str, Any]) -> dict[str, Any]:
+def _docker_build_process_observation(policy: dict[str, Any]) -> dict[str, Any]:
     limits = policy["limits"]
     max_processes = limits["max_processes"]
-    max_fds = limits["max_open_file_descriptors"]
     uid = os.geteuid()
-    paths: list[dict[str, Any]] = []
     build_pids: list[int] = []
     process_count = 0
-    fd_count = 0
     complete = True
     errors: list[str] = []
     proc = Path("/proc")
@@ -491,47 +493,134 @@ def _process_observation(policy: dict[str, Any]) -> dict[str, Any]:
         except PermissionError:
             complete = False
             errors.append(f"cmdline-permission:{pid}")
-        for kind, link in (("cwd", entry / "cwd"), ("exe", entry / "exe")):
-            try:
-                paths.append({"pid": pid, "kind": kind, "path": os.readlink(link)})
-            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-                pass
-        fd_root = entry / "fd"
-        try:
-            descriptors = list(fd_root.iterdir())
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except PermissionError:
-            complete = False
-            errors.append(f"fd-permission:{pid}")
-            continue
-        for descriptor in descriptors:
-            fd_count += 1
-            if fd_count > max_fds:
-                complete = False
-                errors.append("fd-limit-exceeded")
-                break
-            try:
-                target = os.readlink(descriptor)
-            except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-                continue
-            if target.startswith("/"):
-                paths.append({"pid": pid, "kind": "fd", "path": target})
-        if fd_count > max_fds:
-            break
-    unique = {
-        (item["pid"], item["kind"], item["path"]): item
-        for item in paths
-    }
     return {
         "complete": complete,
         "process_count": min(process_count, max_processes),
-        "open_file_descriptors_checked": min(fd_count, max_fds),
-        "path_references": [unique[key] for key in sorted(unique)],
         "active_docker_build_pids": sorted(set(build_pids)),
         "errors": sorted(set(errors)),
     }
 
+
+def _process_reference_roots(policy: dict[str, Any]) -> list[Path]:
+    home = Path(policy["resolved_home"])
+    raw_roots: list[str] = []
+    raw_roots.extend(
+        target["path"]
+        for target in policy["classes"]["filesystem_cache"]["targets"]
+    )
+    raw_roots.append(policy["classes"]["trash"]["root"])
+    raw_roots.append(policy["classes"]["grabowski_releases"]["root"])
+
+    roots: set[Path] = set()
+    for raw_root in raw_roots:
+        root = _expand_path(raw_root, home)
+        try:
+            info = root.lstat()
+        except FileNotFoundError:
+            # An absent cleanup root cannot contain a current candidate or an
+            # open reference. A later-created root is observed afresh at apply.
+            continue
+        except OSError as exc:
+            raise PlanError(f"cannot inspect process-reference root: {root}") from exc
+        if root.is_symlink() or not stat.S_ISDIR(info.st_mode):
+            raise PlanError(f"process-reference root is not a directory: {root}")
+        roots.add(root.resolve(strict=True))
+    return sorted(roots, key=str)
+
+
+def _privileged_process_reference_observation(
+    policy: dict[str, Any], roots: list[Path]
+) -> dict[str, Any]:
+    if not roots:
+        material: dict[str, Any] = {
+            "kind": _process_reference_broker.OBSERVATION_KIND,
+            "schema_version": 1,
+            "complete": True,
+            "target_uid": os.geteuid(),
+            "roots": [],
+            "process_count": 0,
+            "open_file_descriptors_checked": 0,
+            "path_references": [],
+            "errors": [],
+        }
+        material["observation_sha256"] = _sha256_json(material)
+        return material
+    return _process_reference_broker.observe_processes(
+        roots,
+        owner_uid=os.geteuid(),
+        state_root=Path(policy["resolved_state_root"]) / "process-reference-observer",
+        max_processes=policy["limits"]["max_processes"],
+        max_fds=policy["limits"]["max_open_file_descriptors"],
+    )
+
+
+def _process_observation(policy: dict[str, Any]) -> dict[str, Any]:
+    """Combine fail-closed build detection with bounded rootbroker references.
+
+    The unprivileged pass deliberately reads command lines only. Path-reference
+    authority comes from the existing root-owned `observe_process_references`
+    action, which has no deletion or signal capability and projects only hits
+    below the exact requested roots. Either observation being incomplete keeps
+    cleanup blocked.
+    """
+    build_scan = _docker_build_process_observation(policy)
+    roots = _process_reference_roots(policy)
+    try:
+        references = _privileged_process_reference_observation(policy, roots)
+    except Exception as exc:
+        references = {
+            "complete": False,
+            "process_count": 0,
+            "open_file_descriptors_checked": 0,
+            "path_references": [],
+            "errors": [f"observer-failure:{type(exc).__name__}"],
+            "observation_sha256": None,
+        }
+
+    path_references = [
+        {
+            "pid": item["pid"],
+            "kind": item["kind"],
+            "path": item["path"],
+        }
+        for item in references.get("path_references", [])
+    ]
+    unique = {
+        (item["pid"], item["kind"], item["path"]): item
+        for item in path_references
+    }
+    errors = sorted(
+        [f"build-scan:{item}" for item in build_scan.get("errors", [])]
+        + [
+            f"reference-observer:{item}"
+            for item in references.get("errors", [])
+        ]
+    )
+    complete = (
+        bool(build_scan.get("complete"))
+        and bool(references.get("complete"))
+        and not errors
+    )
+    return {
+        "complete": complete,
+        "process_count": max(
+            int(build_scan.get("process_count", 0)),
+            int(references.get("process_count", 0)),
+        ),
+        "open_file_descriptors_checked": int(
+            references.get("open_file_descriptors_checked", 0)
+        ),
+        "path_references": [unique[key] for key in sorted(unique)],
+        "active_docker_build_pids": sorted(
+            set(build_scan.get("active_docker_build_pids", []))
+        ),
+        "errors": errors,
+        "reference_observation_sha256": references.get("observation_sha256"),
+        "reference_roots": [str(root) for root in roots],
+        "observation_model": (
+            "unprivileged-build-scan+bounded-rootbroker-path-references-v1"
+        ),
+    }
 
 def _references_for_path(observation: dict[str, Any], path: Path) -> list[dict[str, Any]]:
     references: list[dict[str, Any]] = []

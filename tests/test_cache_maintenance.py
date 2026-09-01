@@ -119,6 +119,158 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertFalse(self.policy["safety"]["referenced_images_authorized"])
         self.assertFalse(self.policy["classes"]["user_journal"]["apply_authorized"])
 
+    def test_process_observation_uses_bounded_rootbroker_for_path_references(self) -> None:
+        cache_root = self.home / ".cache" / "pip"
+        cache_root.mkdir(parents=True)
+        referenced = cache_root / "active"
+        referenced.mkdir()
+        broker_observation = {
+            "kind": "grabowski_process_reference_observation",
+            "schema_version": 1,
+            "complete": True,
+            "target_uid": os.geteuid(),
+            "roots": [str(cache_root)],
+            "process_count": 7,
+            "open_file_descriptors_checked": 11,
+            "path_references": [
+                {
+                    "pid": 42,
+                    "uid": os.geteuid(),
+                    "kind": "fd",
+                    "root": str(cache_root),
+                    "path": str(referenced),
+                }
+            ],
+            "errors": [],
+            "observation_sha256": "a" * 64,
+        }
+        build_scan = {
+            "complete": True,
+            "process_count": 5,
+            "active_docker_build_pids": [],
+            "errors": [],
+        }
+
+        with patch.object(
+            cache_maintenance,
+            "_process_reference_roots",
+            return_value=[cache_root],
+        ), patch.object(
+            cache_maintenance,
+            "_privileged_process_reference_observation",
+            return_value=broker_observation,
+        ), patch.object(
+            cache_maintenance,
+            "_docker_build_process_observation",
+            return_value=build_scan,
+        ):
+            observed = cache_maintenance._process_observation(self.policy)
+
+        self.assertTrue(observed["complete"])
+        self.assertEqual(observed["open_file_descriptors_checked"], 11)
+        self.assertEqual(
+            observed["path_references"],
+            [{"pid": 42, "kind": "fd", "path": str(referenced)}],
+        )
+        self.assertEqual(observed["reference_observation_sha256"], "a" * 64)
+
+    def test_process_observation_keeps_reference_observer_failure_fail_closed(self) -> None:
+        cache_root = self.home / ".cache" / "pip"
+        cache_root.mkdir(parents=True)
+        build_scan = {
+            "complete": True,
+            "process_count": 5,
+            "active_docker_build_pids": [],
+            "errors": [],
+        }
+        with patch.object(
+            cache_maintenance,
+            "_process_reference_roots",
+            return_value=[cache_root],
+        ), patch.object(
+            cache_maintenance,
+            "_privileged_process_reference_observation",
+            side_effect=RuntimeError("broker unavailable"),
+        ), patch.object(
+            cache_maintenance,
+            "_docker_build_process_observation",
+            return_value=build_scan,
+        ):
+            observed = cache_maintenance._process_observation(self.policy)
+
+        self.assertFalse(observed["complete"])
+        self.assertEqual(observed["path_references"], [])
+        self.assertIn(
+            "reference-observer:observer-failure:RuntimeError",
+            observed["errors"],
+        )
+
+    def test_process_observation_keeps_build_scan_failure_fail_closed(self) -> None:
+        broker_observation = {
+            "complete": True,
+            "process_count": 5,
+            "open_file_descriptors_checked": 10,
+            "path_references": [],
+            "errors": [],
+            "observation_sha256": "b" * 64,
+        }
+        build_scan = {
+            "complete": False,
+            "process_count": 5,
+            "active_docker_build_pids": [],
+            "errors": ["cmdline-permission:42"],
+        }
+        with patch.object(
+            cache_maintenance,
+            "_process_reference_roots",
+            return_value=[],
+        ), patch.object(
+            cache_maintenance,
+            "_privileged_process_reference_observation",
+            return_value=broker_observation,
+        ), patch.object(
+            cache_maintenance,
+            "_docker_build_process_observation",
+            return_value=build_scan,
+        ):
+            observed = cache_maintenance._process_observation(self.policy)
+
+        self.assertFalse(observed["complete"])
+        self.assertIn("build-scan:cmdline-permission:42", observed["errors"])
+
+    def test_process_observation_preserves_active_docker_build_detection(self) -> None:
+        broker_observation = {
+            "complete": True,
+            "process_count": 5,
+            "open_file_descriptors_checked": 10,
+            "path_references": [],
+            "errors": [],
+            "observation_sha256": "c" * 64,
+        }
+        build_scan = {
+            "complete": True,
+            "process_count": 5,
+            "active_docker_build_pids": [99],
+            "errors": [],
+        }
+        with patch.object(
+            cache_maintenance,
+            "_process_reference_roots",
+            return_value=[],
+        ), patch.object(
+            cache_maintenance,
+            "_privileged_process_reference_observation",
+            return_value=broker_observation,
+        ), patch.object(
+            cache_maintenance,
+            "_docker_build_process_observation",
+            return_value=build_scan,
+        ):
+            observed = cache_maintenance._process_observation(self.policy)
+
+        self.assertTrue(observed["complete"])
+        self.assertEqual(observed["active_docker_build_pids"], [99])
+
     def test_policy_rejects_docker_volume_authority(self) -> None:
         data = json.loads(self.policy_path.read_text(encoding="utf-8"))
         data["safety"]["docker_volumes_authorized"] = True
