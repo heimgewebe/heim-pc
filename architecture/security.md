@@ -41,7 +41,9 @@ verifies_with: []
    - `state/` nur soweit `architecture/model.md` das konkrete Artefakt ausdrücklich als quellengebundene Projektion oder historische Fixture zulässt. `state/index.json` und `state/repos.json` sind insbesondere keine aktuelle Hostwahrheit.
 
 2. **Lokaler quellengebundener Betriebszustand außerhalb Git**:
-   - Receipts, Driftberichte und volatile Inventare unter `~/.local/state/heim-pc/`;
+   - user-/operator-scoped Receipts, Driftberichte und volatile Inventare standardmäßig unter `~/.local/state/heim-pc/`;
+   - privilegierter Host-/Service-State darf in einem eng reviewten root-owned State-Root, zum Beispiel unter `/var/lib/heim-pc/`, liegen, wenn Ownership, systemd-`StateDirectory` oder Schutzgrenzen dies erfordern;
+   - privilegierte Artefakte werden nicht zur Vereinheitlichung in das Benutzer-Home kopiert; jeder root-owned Producer bleibt auf einen schmalen dokumentierten State-Pfad und Datenminimierung begrenzt;
    - jedes aktuelle Artefakt mit Quelle, Zeitpunkt, Hashbindung und Frischegrenze gemäß `architecture/model.md`.
 
 3. **Große Daten, Backups und externe Artefakte**:
