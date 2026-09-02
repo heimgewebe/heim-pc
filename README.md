@@ -11,7 +11,7 @@
 * Welche lokalen Flächen bleiben tabu?
 * Wo liegt die kanonische Ökosystemkarte?
 
-Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-Rolle eingeordnet.
+Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-Rolle eingeordnet. Der zusätzliche Host-Sollvertrag (`system-constitution`) bleibt auf genau diesen Rechner begrenzt und ersetzt weder Systemkatalog noch Live-Primärquellen.
 
 ## These / Antithese / Synthese
 
@@ -49,6 +49,8 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [Programminventar](runtime/program-inventory-summary.md) – kompakte Übersicht aus Root-/Paket-/Prozessscan; Rohlisten bleiben lokal
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen
+* [Systemverfassung](architecture/system-constitution.md) – dauerhafte host-lokale Soll-, Trust-, Daten- und Recovery-Invarianten
+* [NixOS Executor-Profil 2026](architecture/nixos-executor-2026.md) – austauschbare konkrete Ausprägung der Systemverfassung
 
 ## Kanonischer Maschinenstart
 
@@ -83,7 +85,9 @@ und lokale Health-Listener; API-Schlüssel, Header und MCP-Konfiguration bleiben
 außerhalb der Ausgabe. Die kanonischen lokalen Zuweisungen sind `grabowski` auf
 `127.0.0.1:18080`, `heim-pc-dashboard` auf `127.0.0.1:18081` und
 `grabowski-johannes` auf `127.0.0.1:18083`. Doppelte Listener oder Abweichungen
-führen zu einem Nichtnullstatus.
+führen zu einem Nichtnullstatus. Diese loopback-only Zuordnung ist die in
+`architecture/security.md` ausdrücklich reviewte öffentliche Diagnosekonstante;
+sie ist keine Authentisierungs- oder Vertrauensgrenze.
 
 ```bash
 python3 scripts/tunnel_profile_diagnostics.py
@@ -440,6 +444,8 @@ For a complete overview of all canonical documents, their review status, and dep
 ## Mehr erfahren
 
 * [Weltmodell-Konzept](architecture/model.md) – Was ist das Weltmodell?
+* [Systemverfassung](architecture/system-constitution.md) – Welche langfristigen Invarianten gelten für den Rechner?
+* [NixOS Executor-Profil 2026](architecture/nixos-executor-2026.md) – Wie setzt NixOS diese Invarianten 2026 konkret um?
 * [Operatorium-Entrée](architecture/operatorium-entry.md) – Wie heim-pc als lokale Empfangshalle funktioniert
 * [Zonen & Bedeutungen](architecture/zones.md) – Semantische Bereiche
 * [Drift-Definition](architecture/drift-policy.md) – Was bedeutet Drift und wie wird er erkannt?

@@ -2,7 +2,7 @@
 id: security
 role: norm
 status: canonical
-last_reviewed: 2026-02-28
+last_reviewed: 2026-09-02
 depends_on: []
 verifies_with: []
 ---
@@ -13,7 +13,7 @@ verifies_with: []
 
 1. **Privacy by Design** – Sensible Daten nie ins Repository
 2. **Minimal Exposure** – Nur notwendige Pfade scannen
-3. **Token Security** – Tokens nur für non-loopback
+3. **Endpoint Security** – Lokale Transportgrenzen ersetzen keine Authentisierung für privilegierte Endpunkte
 4. **Error Safety** – Keine sensitiven Details in Exceptions
 5. **Metadata Only** – Weltmodell ist Struktur, nicht Inhalte
 
@@ -33,19 +33,25 @@ verifies_with: []
 * **Sensible Pfade**: `.ssh`, `.gnupg`, Browser-Profile ausgeschlossen
 * **Personenbezogene Daten**: Keine E-Mails, Chat-Historie, etc.
 
-### Zwei-Schichten-Architektur
+### Drei Schutz- und Zustandsflächen
 
-1. **Git-Repository (klein, reviewbar)**:
-   - `state/*.json` – Strukturierte Metadaten (< 100 KB)
-   - `config/*.yml` – Konfiguration
-   - `docs/` – Dokumentation
+1. **Öffentliches Git-Repository (klein, reviewbar)**:
+   - normative Architektur, Policies und kleine Maschinenverträge;
+   - Konfiguration ohne Secret-Material;
+   - `state/` nur soweit `architecture/model.md` das konkrete Artefakt ausdrücklich als quellengebundene Projektion oder historische Fixture zulässt. `state/index.json` und `state/repos.json` sind insbesondere keine aktuelle Hostwahrheit.
 
-2. **Externe Storage (groß, ephemeral)**:
-   - Vollständige Snapshots als GitHub Artifacts (90-Tage-Retention)
-   - Oder als Release Assets für langfristige Archivierung
-   - Oder lokal in `~/vault-gewebe/` für persönliche Backups
+2. **Lokaler quellengebundener Betriebszustand außerhalb Git**:
+   - user-/operator-scoped Receipts, Driftberichte und volatile Inventare standardmäßig unter `~/.local/state/heim-pc/`;
+   - privilegierter Host-/Service-State darf in einem eng reviewten root-owned State-Root, zum Beispiel unter `/var/lib/heim-pc/`, liegen, wenn Ownership, systemd-`StateDirectory` oder Schutzgrenzen dies erfordern;
+   - privilegierte Artefakte werden nicht zur Vereinheitlichung in das Benutzer-Home kopiert; jeder root-owned Producer bleibt auf einen schmalen dokumentierten State-Pfad und Datenminimierung begrenzt;
+   - jedes aktuelle Artefakt mit Quelle, Zeitpunkt, Hashbindung und Frischegrenze gemäß `architecture/model.md`.
 
-**Goldene Regel**: Klein committen, groß auslagern.
+3. **Große Daten, Backups und externe Artefakte**:
+   - Nutzdaten und Backups außerhalb der Git-Historie;
+   - CI-/Release-Artefakte nur für dafür geeignete, nicht-sensitive Daten;
+   - Off-host-Backups folgen einem eigenen Recovery-Vertrag und sind keine Runtime-Wahrheit.
+
+**Goldene Regel**: Klein committen, groß auslagern. Git ist Soll-/Normquelle, nicht Livezustand.
 
 ## Root-Grenzen
 
@@ -111,18 +117,20 @@ excludes:
     reason: "Large backup directory"
 ```
 
-## Token-Sicherheit
+## Lokale Endpunkt- und Token-Sicherheit
 
-### Regel: Tokens nur für non-loopback
+### Regel: Loopback ist lokal, aber nicht automatisch vertrauenswürdig
 
-* **Loopback** (localhost, 127.0.0.1): Kein Token nötig
-* **Non-loopback** (Netzwerk, Internet): Token erforderlich
+* **Non-loopback** (LAN, Tailnet, Internet): Authentisierung ist grundsätzlich erforderlich.
+* **Loopback** (`localhost`, `127.0.0.1`, `::1`) und lokale Unix-Sockets sind nur eine Transportgrenze. Auf demselben Host kann nicht vertrauenswürdiger Projekt-, Build- oder Containercode laufen; die lokale Adresse allein erteilt daher keine Autorität.
+* Operator-, Secret-, Mutations- oder privilegierte Endpunkte benötigen auch lokal eine geeignete Capability, Authentisierung/Peer-Bindung oder eine nachweisbare Netzwerk-/Prozessisolation.
+* Ein unauthentisierter Loopback-Health-Endpunkt ist nur zulässig, wenn er read-only, datensparsam und ausdrücklich als niedriges Risiko klassifiziert ist und keine privilegierte Folgeaktion auslösen kann.
 
-### Warum?
+### Explizite öffentliche Diagnosekonstante
 
-* Loopback ist per Definition sicher (nur lokaler Zugriff)
-* Netzwerk-Zugriff benötigt Authentifizierung
-* Verhindert unautorisierten Remote-Zugriff
+Die festen **loopback-only** Health-Listener-Zuordnungen in `scripts/tunnel_profile_diagnostics.py` und die dazugehörige README-Dokumentation sind eine bewusst minimierte öffentliche Ausnahme von der allgemeinen Regel gegen konkrete interne Listener-Mappings. Sie enthalten weder Non-loopback-Adressen noch Tokens und dienen ausschließlich deterministischer Kollisions-/Profilprüfung.
+
+Diese Veröffentlichung ist **keine Sicherheitsgrenze und keine Authentisierungsfreigabe**. Sobald ein solcher Listener Non-loopback erreichbar, operatorfähig, secrettragend oder mutierend wird, erlischt die Ausnahme; dann sind Zieladresse und Authentisierungsvertrag separat zu reviewen.
 
 ### Token-Storage
 
@@ -161,10 +169,20 @@ return {"error": f"Failed to read /home/alex/.ssh/id_rsa: Permission denied"}
 
 #### Im Git-Repository (öffentlich)
 
-* Pfad-Strukturen (ohne sensible Namen)
-* Dateigrößen, Timestamps
-* Repository-Namen (öffentliche Repos)
-* Aggregierte Statistiken
+Das Repository `heimgewebe/heim-pc` ist öffentlich. Die Bezeichnung „lokaler/privater Maschinen-Einstieg“ in der Architektur beschreibt den Gegenstand und die lokale Operatorrolle, **nicht** eine Vertraulichkeitsgrenze des Git-Repositorys. Repository-Sichtbarkeit darf niemals als Schutz für sensitive Hostdetails vorausgesetzt werden.
+
+* kleine normative Verträge und Konfiguration ohne Secrets;
+* abstrahierte Pfad-Strukturen ohne sensible Namen;
+* aggregierte Größen/Timestamps nur, wenn sie keine private Nutzung offenlegen;
+* öffentliche Repository-Referenzen.
+
+Nicht versionieren: Geräte-Seriennummern, MAC-Adressen, private LAN-Topologie, konkrete interne Listener/Ports, private Hostnamen oder andere hochauflösende Recon-Daten, sofern sie nicht für einen ausdrücklich geprüften öffentlichen Vertrag unvermeidbar und minimiert sind.
+
+### Explizite öffentliche Hardware-Acceptance-Ausnahme
+
+Nicht eindeutige **Produkt-/Modellbezeichnungen** von Hardware dürfen in einem zeitgebundenen Executor-/Acceptance-Profil öffentlich benannt werden, wenn sie für reproduzierbare Hardware-Gates nötig sind und die Veröffentlichung bewusst reviewt wurde. Zulässig sind beispielsweise GPU-, Audio- oder MIDI-Modellbezeichnungen; ausgeschlossen bleiben Seriennummern, MAC-/Geräte-IDs, private Topologie, Ports und andere eindeutige oder hochauflösende Identifikatoren.
+
+Solche Modellbezeichnungen sind **Acceptance-Anker, kein Liveinventar**. Vor einer realen Freigabe werden sie lokal aus quellengebundener frischer Hardware-Evidenz bestätigt. Diese Ausnahme erweitert weder die Listener-Ausnahme noch die Erlaubnis für Netzwerk-Recon.
 
 #### NICHT im Git-Repository
 
@@ -176,18 +194,19 @@ return {"error": f"Failed to read /home/alex/.ssh/id_rsa: Permission denied"}
 
 ### Snapshot-Artefakte
 
-Vollständige Snapshots (als GitHub Artifacts):
+Das öffentliche Repository ist **keine Vertraulichkeitsgrenze für CI-/Release-Artefakte**. Vollständige oder sensitive Hostsnapshots dürfen deshalb nicht allein aufgrund eines GitHub-Artifact-/Release-Mechanismus als „privat“ gelten.
 
-* **Privat**: Nur für Repo-Collaborators
-* **Ephemeral**: Auto-Delete nach 90 Tagen
-* **Optional**: Können deaktiviert werden
+* Sensitive Vollsnapshots werden nicht in GitHub Actions oder Releases publiziert, solange kein separat belegter Zugriffsschutz und eine dafür freigegebene Datenklassifikation existiert.
+* Zulässige CI-Artefakte enthalten nur bereits freigegebene, minimierte oder nicht-sensitive Daten.
+* Automatische Löschfristen (Retention) begrenzen Lebensdauer, ersetzen aber keine Zugriffskontrolle.
+* Private Backups und Recovery-Artefakte gehören in den separaten Off-host-Backup-Vertrag, nicht in die öffentliche Repo-/CI-Fläche.
 
 ## Compliance
 
 ### GDPR
 
 * Keine personenbezogenen Daten im Repository
-* Snapshots privat und ephemeral
+* Keine sensitiven Snapshots in öffentlichen Repo-/CI-Flächen ohne separat belegte Zugriffskontrolle
 * Opt-in für Telemetrie (keine Standard-Aktivierung)
 
 ### Best Practices
@@ -221,4 +240,4 @@ Vollständige Snapshots (als GitHub Artifacts):
 - [ ] Exception-Handling ohne Details
 - [ ] `.gitignore` für lokale Configs
 - [ ] Regelmäßige Security-Reviews
-- [ ] Snapshot-Artefakte auf "Private"
+- [ ] CI-/Release-Artefakte gegen öffentliche Repo-Sichtbarkeit und Datenklassifikation geprüft

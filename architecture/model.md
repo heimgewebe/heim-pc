@@ -2,7 +2,7 @@
 id: model
 role: norm
 status: canonical
-last_reviewed: 2026-08-26
+last_reviewed: 2026-09-02
 depends_on:
   - security
 verifies_with:
@@ -17,11 +17,11 @@ verifies_with:
 
 **Antithese:** Repo-gebundene Zustandsabbilder veralten, duplizieren Livewahrheit und können einen Agenten mit scheinpräzisen, aber falschen Daten fehlleiten.
 
-**Synthese:** `heim-pc` versioniert den statischen Einstieg, Lokatoren, Schemata und Sicherheitsgrenzen. Volatile Zustände werden frisch aus ihren Primärquellen gelesen oder lokal außerhalb Git als quellengebundene Receipts erzeugt. Prosa und Snapshots sind Projektionen, keine zweite Wahrheit.
+**Synthese:** `heim-pc` versioniert den statischen Einstieg, Lokatoren, Schemata, Sicherheitsgrenzen und schmale host-lokale Sollverträge. Volatile Zustände werden frisch aus ihren Primärquellen gelesen oder lokal außerhalb Git als quellengebundene Receipts erzeugt. Prosa, Sollverträge und Snapshots sind keine Ersatz-Livewahrheit; ein deklarierter Ziel-Executor beschreibt insbesondere nicht den aktuell laufenden Host.
 
 ## Drei Ebenen
 
-### 1. Statischer Host-Einstieg
+### 1. Statischer Host-Einstieg und host-lokaler Sollvertrag
 
 Kanonisch im Repository:
 
@@ -29,20 +29,21 @@ Kanonisch im Repository:
 * `.ai-context.yml` – kompakte Rollenklassifikation;
 * `AGENTS.md` – Arbeits- und Stop-Regeln;
 * `config/agents/` – installierbare lokale Pointer;
-* `config/zones.yml` – semantische Hostzonen ohne Inhaltsdump.
+* `config/zones.yml` – semantische Hostzonen ohne Inhaltsdump;
+* kanonische host-lokale Sollverträge und zeitgebundene Executor-Profile unter `architecture/`, soweit sie im Manifest als normative Dokumente geführt werden.
 
-Diese Ebene darf keine aktuelle Gesundheit, Taskpriorität, Branchstände oder Merge-Reife behaupten.
+Diese Ebene darf keine aktuelle Gesundheit, Taskpriorität, Branchstände, Merge-Reife oder den tatsächlich laufenden Executor behaupten. Systemweite Zwecke, Beziehungen und Wahrheitszuständigkeiten bleiben beim Systemkatalog.
 
 ### 2. Lokale quellengebundene Betriebsartefakte
 
-Außerhalb Git unter `~/.local/state/heim-pc/`:
+Außerhalb Git werden Betriebsartefakte nach Privileg- und Eigentumsdomäne getrennt:
 
-* Installationsreceipts;
-* Driftberichte;
-* große oder volatile Inventare;
-* Generatorausgaben mit Zeitpunkt, Quelle und Hashbindung.
+* **User-/Operator-scoped:** standardmäßig unter `~/.local/state/heim-pc/`, etwa Driftberichte, volatile Inventare und unprivilegierte Generator-/Operationsreceipts;
+* **privilegierter Host-/Service-State:** in einem eng reviewten root-owned Service-State-Root, zum Beispiel unter `/var/lib/heim-pc/`, wenn Eigentum, systemd-`StateDirectory` oder Schutzgrenzen dies erfordern.
 
-Ein lokales Artefakt gilt nur für die im Receipt belegte Quelle und den belegten Zeitpunkt.
+Ein privilegiertes Receipt wird nicht nur der Einheitlichkeit halber in das Benutzer-Home kopiert. Umgekehrt legitimiert `/var/lib/heim-pc/` keinen allgemeinen Hostdump: jeder Producer braucht einen schmalen, dokumentierten State-Pfad und Datenminimierung.
+
+Jedes lokale Artefakt gilt nur für die im Receipt belegte Quelle und den belegten Zeitpunkt und benötigt die für seine Privilegdomäne geeigneten Dateirechte und Ownership-Grenzen.
 
 ### 3. Primärquellen für Livezustand
 
@@ -95,4 +96,4 @@ Ohne diese Angaben bleibt das Ergebnis eine nichtkanonische Beobachtung.
 
 ## Abgrenzung
 
-`heim-pc` ist kein Backup, kein Sync-Werkzeug, kein Dateimanager, keine Ökosystemdatenbank und kein Runtime-Dashboard. Es ist der private lokale Maschinen-Einstieg mit schmalen, überprüfbaren Pointern zu den jeweiligen Wahrheitsquellen.
+`heim-pc` ist kein Backup, kein Sync-Werkzeug, kein Dateimanager, keine Ökosystemdatenbank und kein Runtime-Dashboard. Es ist der lokale Maschinen-Einstieg mit schmalen, überprüfbaren Pointern zu den jeweiligen Wahrheitsquellen und einem begrenzten host-lokalen Sollvertrag. Der Sollvertrag erweitert nicht die Ökosystemautorität des Repositorys.
