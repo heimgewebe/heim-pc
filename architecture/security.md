@@ -13,7 +13,7 @@ verifies_with: []
 
 1. **Privacy by Design** – Sensible Daten nie ins Repository
 2. **Minimal Exposure** – Nur notwendige Pfade scannen
-3. **Token Security** – Tokens nur für non-loopback
+3. **Endpoint Security** – Lokale Transportgrenzen ersetzen keine Authentisierung für privilegierte Endpunkte
 4. **Error Safety** – Keine sensitiven Details in Exceptions
 5. **Metadata Only** – Weltmodell ist Struktur, nicht Inhalte
 

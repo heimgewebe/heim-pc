@@ -307,15 +307,18 @@ Ein autonomer Agent darf nicht direkt von Quelländerung zu `switch` springen. D
 Für Kernel, Initrd, Bootloader, frühe Storage-/LUKS-Pfade oder vergleichbare Änderungen:
 
 ```text
-build
+Entrypoint-spezifische Evaluation/Checks
+-> verwalteter Control-Build
+-> Receipt: exakte System-Closure + Control-Release-Set-Digest
 -> geeignete isolierte Tests
--> nixos-rebuild boot
+-> closure-gebundene Next-Boot-Aktivierung ohne Re-Evaluation
 -> kontrollierter Reboot
 -> Boot-/Hardware-/Runtime-Gates
+-> Readback: gebootete Closure == freigegebene Closure
 -> bei Fehler: bekannte Generation / Break-glass / Rollback
 ```
 
-`boot` und `switch` werden bewusst nicht als Synonyme behandelt.
+Next-Boot- und persistente Aktivierung werden bewusst nicht als Synonyme behandelt. Beide nehmen ausschließlich die bereits geprüfte, receipte Closure entgegen; ein erneutes `nixos-rebuild boot` oder eine andere Source-/Lock-Re-Evaluation zwischen Build und Bootfreigabe ist für den autonomen Pfad unzulässig.
 
 ### Destruktiver Storage-/Firmware-Pfad
 
