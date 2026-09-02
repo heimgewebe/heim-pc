@@ -36,14 +36,14 @@ Diese Ebene darf keine aktuelle Gesundheit, Taskpriorität, Branchstände, Merge
 
 ### 2. Lokale quellengebundene Betriebsartefakte
 
-Außerhalb Git unter `~/.local/state/heim-pc/`:
+Außerhalb Git werden Betriebsartefakte nach Privileg- und Eigentumsdomäne getrennt:
 
-* Installationsreceipts;
-* Driftberichte;
-* große oder volatile Inventare;
-* Generatorausgaben mit Zeitpunkt, Quelle und Hashbindung.
+* **User-/Operator-scoped:** standardmäßig unter `~/.local/state/heim-pc/`, etwa Driftberichte, volatile Inventare und unprivilegierte Generator-/Operationsreceipts;
+* **privilegierter Host-/Service-State:** in einem eng reviewten root-owned Service-State-Root, zum Beispiel unter `/var/lib/heim-pc/`, wenn Eigentum, systemd-`StateDirectory` oder Schutzgrenzen dies erfordern.
 
-Ein lokales Artefakt gilt nur für die im Receipt belegte Quelle und den belegten Zeitpunkt.
+Ein privilegiertes Receipt wird nicht nur der Einheitlichkeit halber in das Benutzer-Home kopiert. Umgekehrt legitimiert `/var/lib/heim-pc/` keinen allgemeinen Hostdump: jeder Producer braucht einen schmalen, dokumentierten State-Pfad und Datenminimierung.
+
+Jedes lokale Artefakt gilt nur für die im Receipt belegte Quelle und den belegten Zeitpunkt und benötigt die für seine Privilegdomäne geeigneten Dateirechte und Ownership-Grenzen.
 
 ### 3. Primärquellen für Livezustand
 
