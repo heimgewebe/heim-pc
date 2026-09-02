@@ -49,6 +49,8 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [Programminventar](runtime/program-inventory-summary.md) – kompakte Übersicht aus Root-/Paket-/Prozessscan; Rohlisten bleiben lokal
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen
+* [Systemverfassung](architecture/system-constitution.md) – dauerhafte Soll-, Wahrheits-, Trust-, Daten- und Recovery-Invarianten
+* [NixOS Executor-Profil 2026](architecture/nixos-executor-2026.md) – austauschbare konkrete Ausprägung der Systemverfassung
 
 ## Kanonischer Maschinenstart
 
@@ -440,6 +442,8 @@ For a complete overview of all canonical documents, their review status, and dep
 ## Mehr erfahren
 
 * [Weltmodell-Konzept](architecture/model.md) – Was ist das Weltmodell?
+* [Systemverfassung](architecture/system-constitution.md) – Welche langfristigen Invarianten gelten für den Rechner?
+* [NixOS Executor-Profil 2026](architecture/nixos-executor-2026.md) – Wie setzt NixOS diese Invarianten 2026 konkret um?
 * [Operatorium-Entrée](architecture/operatorium-entry.md) – Wie heim-pc als lokale Empfangshalle funktioniert
 * [Zonen & Bedeutungen](architecture/zones.md) – Semantische Bereiche
 * [Drift-Definition](architecture/drift-policy.md) – Was bedeutet Drift und wie wird er erkannt?

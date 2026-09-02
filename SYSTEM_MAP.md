@@ -22,6 +22,8 @@ It provides a complete overview of the canonical documentation zones and their c
 | document-text-engine | [architecture/document-text-engine.md](architecture/document-text-engine.md) | canonical | 2026-08-24 | operatorium-entry, security |
 | asr-golden-corpus | [architecture/asr-golden-corpus.md](architecture/asr-golden-corpus.md) | canonical | 2026-08-13 | asr-engine |
 | model | [architecture/model.md](architecture/model.md) | canonical | 2026-08-26 | security |
+| system-constitution | [architecture/system-constitution.md](architecture/system-constitution.md) | canonical | 2026-09-02 | model, security, storage-lifecycle, managed-builds, operatorium-entry |
+| nixos-executor-2026 | [architecture/nixos-executor-2026.md](architecture/nixos-executor-2026.md) | canonical | 2026-09-02 | system-constitution, model, security, storage-lifecycle, managed-builds |
 | security | [architecture/security.md](architecture/security.md) | canonical | 2026-02-28 | - |
 | zones | [architecture/zones.md](architecture/zones.md) | canonical | 2026-02-28 | - |
 | drift-policy | [architecture/drift-policy.md](architecture/drift-policy.md) | canonical | 2026-02-28 | - |
