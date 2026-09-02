@@ -176,6 +176,12 @@ Das Repository `heimgewebe/heim-pc` ist öffentlich. Die Bezeichnung „lokaler/
 
 Nicht versionieren: Geräte-Seriennummern, MAC-Adressen, private LAN-Topologie, konkrete interne Listener/Ports, private Hostnamen oder andere hochauflösende Recon-Daten, sofern sie nicht für einen ausdrücklich geprüften öffentlichen Vertrag unvermeidbar und minimiert sind.
 
+### Explizite öffentliche Hardware-Acceptance-Ausnahme
+
+Nicht eindeutige **Produkt-/Modellbezeichnungen** von Hardware dürfen in einem zeitgebundenen Executor-/Acceptance-Profil öffentlich benannt werden, wenn sie für reproduzierbare Hardware-Gates nötig sind und die Veröffentlichung bewusst reviewt wurde. Zulässig sind beispielsweise GPU-, Audio- oder MIDI-Modellbezeichnungen; ausgeschlossen bleiben Seriennummern, MAC-/Geräte-IDs, private Topologie, Ports und andere eindeutige oder hochauflösende Identifikatoren.
+
+Solche Modellbezeichnungen sind **Acceptance-Anker, kein Liveinventar**. Vor einer realen Freigabe werden sie lokal aus quellengebundener frischer Hardware-Evidenz bestätigt. Diese Ausnahme erweitert weder die Listener-Ausnahme noch die Erlaubnis für Netzwerk-Recon.
+
 #### NICHT im Git-Repository
 
 * Datei-Inhalte
@@ -190,7 +196,7 @@ Das öffentliche Repository ist **keine Vertraulichkeitsgrenze für CI-/Release-
 
 * Sensitive Vollsnapshots werden nicht in GitHub Actions oder Releases publiziert, solange kein separat belegter Zugriffsschutz und eine dafür freigegebene Datenklassifikation existiert.
 * Zulässige CI-Artefakte enthalten nur bereits freigegebene, minimierte oder nicht-sensitive Daten.
-* Retention begrenzt Lebensdauer, ersetzt aber keine Zugriffskontrolle.
+* Automatische Löschfristen (Retention) begrenzen Lebensdauer, ersetzen aber keine Zugriffskontrolle.
 * Private Backups und Recovery-Artefakte gehören in den separaten Off-host-Backup-Vertrag, nicht in die öffentliche Repo-/CI-Fläche.
 
 ## Compliance

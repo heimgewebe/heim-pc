@@ -30,8 +30,7 @@ Kanonisch im Repository:
 * `AGENTS.md` – Arbeits- und Stop-Regeln;
 * `config/agents/` – installierbare lokale Pointer;
 * `config/zones.yml` – semantische Hostzonen ohne Inhaltsdump;
-* `architecture/system-constitution.md` – langfristige host-lokale Soll-, Trust-, Daten- und Recovery-Invarianten;
-* `architecture/nixos-executor-2026.md` – austauschbares Ziel-Executor-Profil, kein Runtime-Status.
+* kanonische host-lokale Sollverträge und zeitgebundene Executor-Profile unter `architecture/`, soweit sie im Manifest als normative Dokumente geführt werden.
 
 Diese Ebene darf keine aktuelle Gesundheit, Taskpriorität, Branchstände, Merge-Reife oder den tatsächlich laufenden Executor behaupten. Systemweite Zwecke, Beziehungen und Wahrheitszuständigkeiten bleiben beim Systemkatalog.
 

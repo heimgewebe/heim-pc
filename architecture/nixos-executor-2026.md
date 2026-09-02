@@ -122,7 +122,7 @@ Für nicht ausreichend vertraute Hooks wird eine isolierte Ausführung vorgesehe
 
 ## 5. NVIDIA, CUDA und CDI
 
-Die RTX 4070 Ti SUPER ist Host-Hardware. Der Host besitzt Treiber und Gerätelayer; experimentelle CUDA-/Python-/ML-Stacks gehören nicht global in den Host.
+Für das 2026-Profil ist die RTX 4070 Ti SUPER der erwartete GPU-Acceptance-Anker. Diese Modellbezeichnung ist **kein Liveinventar**; vor einem Cutover wird sie durch einen frischen quellengebundenen Hardware-Receipt bestätigt oder das Profil vor der Freigabe angepasst. Der bestätigte Host besitzt Treiber und Gerätelayer; experimentelle CUDA-/Python-/ML-Stacks gehören nicht global in den Host.
 
 GPU-fähige OCI-Workloads verwenden CDI als Host/Container-Schnittstelle. Das Profil bindet **keinen konkreten CDI-Dateinamen**. Acceptance prüft die veröffentlichte CDI-Geräteidentität über die Runtime selbst.
 
@@ -172,7 +172,9 @@ Freier Speicher oder ein Pressure-Signal allein ist keine Löschfreigabe. Vor un
 
 ### Persist
 
-`@persist` ist eine Whitelist. Typische Kandidaten können Machine-ID, Hostkeys, notwendige Netzwerkidentitäten und ausdrücklich genehmigte Systemzustände sein.
+`@persist` ist eine Whitelist für **Systemzustand**. Typische Kandidaten können Machine-ID, Hostkeys, notwendige Netzwerkidentitäten und ausdrücklich genehmigte Systemzustände sein.
+
+`@persist` ist ausdrücklich **nicht** die Daten-Domäne: Datenbanken, zustandsbehaftete Service-Volumes und andere nicht reproduzierbare Workload-Daten gehören nach `@data`, nicht nach `@persist` oder `@containers`.
 
 Die Aufnahme eines Pfads ist eine reviewbare Graphänderung. Nach einem Fehler wird nicht reflexartig ein Verzeichnis persistiert.
 
@@ -205,9 +207,11 @@ Der Restore-Test misst nicht nur „Datei vorhanden“, sondern beweist einen re
 
 ### Offline-Systemrekonstruktionssatz
 
-Zusätzlich wird off-host ein verifizierter, **netzunabhängiger Rekonstruktionssatz** gehalten. Er enthält mindestens ein bootfähiges Recovery-/Installationsmedium, die gepinnte Host-Konfiguration beziehungsweise einen hashgebundenen Source-Snapshot, das zugehörige Control-Release-Set/Lock, die notwendigen Trust-Roots und genug verifizierten System-Payload (z. B. bekannte funktionierende System-Closure oder gleichwertiges Closure-Archiv), um einen bekannten Hostzustand ohne Zugriff auf das ausgefallene Systemlaufwerk und ohne Netzwerk wiederherzustellen.
+Zusätzlich wird off-host ein verifizierter, **netzunabhängiger Rekonstruktionssatz** gehalten. Sein Mindestziel ist nicht die vollständige Offline-Rekonstruktion jeder Devshell und jedes Workloads, sondern ein bekannter **recovery-fähiger Control-/Host-Minimalzustand**, aus dem Datenträgerzugriff, Entschlüsselung, Restore, Diagnose und die Rückkehr zum freigegebenen Sollgraphen möglich sind.
 
-Der Satz wird nach materiellen Control-Release-Änderungen erneuert und regelmäßig auf einem entbehrlichen Ziel oder einer gleichwertig isolierten Recovery-Fläche mit **Netzwerk aus und produktiver System-SSD nicht verfügbar** restore-getestet. Ein Bootmedium, das erst online Nixpkgs, Caches oder die Hostkonfiguration nachladen muss, erfüllt den Break-glass-Vertrag nicht.
+Der Mindestsatz enthält ein bootfähiges Recovery-/Installationsmedium, die gepinnte Host-Konfiguration beziehungsweise einen hashgebundenen Source-Snapshot, das zugehörige Control-Release-Set/Lock, die notwendigen Trust-Roots sowie verifizierten Boot-/Recovery-Payload: mindestens bekannte funktionierende Kernel-/Initrd-/Boot-Artefakte und die für Storage-, LUKS-, Restore- und Nix-Recovery nötigen Werkzeuge beziehungsweise eine entsprechend begrenzte bekannte funktionierende System-Closure. Eine vollständige Dev-/Workload-Closure ist **nicht** Teil dieses Minimums.
+
+Der Satz wird nach materiellen Control-Release-Änderungen erneuert und regelmäßig auf einem entbehrlichen Ziel oder einer gleichwertig isolierten Recovery-Fläche mit **Netzwerk aus und produktiver System-SSD nicht verfügbar** restore-getestet. Das Offline-Gate ist bestanden, wenn der recovery-fähige Minimalzustand ohne Nachladen von Nixpkgs, Caches oder Hostkonfiguration erreicht wird. Der vollständige Arbeitsrechner darf anschließend nach Wiederherstellung eines vertrauenswürdigen Netzpfads aus dem gepinnten Sollgraphen rekonstruiert werden.
 
 Eine Recovery-Partition auf demselben Datenträger kann die erste Ebene unterstützen, ersetzt aber keinen Off-host-Backup-Pfad gegen Datenträgerausfall.
 
@@ -266,7 +270,7 @@ Der NixOS-Build erzeugt eine kleine JSON-kompatible Sollprojektion. Sie enthält
 - relevante deklarierte Boot-/Kernel-/GPU-/Storage-/Audio-/Runtime-Fähigkeiten;
 - Bindung an den gebauten Systemzustand.
 
-Diese `declared-facts`-Projektion ist Build-Output beziehungsweise Teil der gebauten Generation, nicht ein nachträglicher Scan des Hosts.
+Git versioniert den Sollgraphen und die Definition dieser Projektion. `declared-facts` selbst sind daraus abgeleiteter Build-Output beziehungsweise Teil der gebauten Generation und werden **nicht als separat gepflegte aktuelle Soll-/Live-Datei in Git** geführt; Fixtures müssen ausdrücklich als solche markiert sein.
 
 Runtime-Fakten werden separat quellengebunden erhoben. Volatile Runtime-Artefakte folgen dem bestehenden `model` und liegen außerhalb Git mit Quelle, Zeitpunkt, Hashbindung und Frischegrenze.
 
@@ -283,6 +287,16 @@ Deshalb gilt fail-closed: **Bis ein reviewter Nix-Buildpfad in `managed-builds` 
 Vor Freigabe automatisierter NixOS-Änderungen muss der Managed-Nix-Buildvertrag mindestens Repository-/Revision-Bindung, Control-Release-Identität, Store-/Cache-Budgets, Prozess-/Lease-Schutz, bounded Receipts, zulässige Privilegien und den Übergang in die nachfolgenden Aktivierungs-Gates definieren. Menschliche Diagnose oder ein separat autorisierter Migrationslauf bleibt davon unterscheidbar und darf nicht als verwalteter Agentenlauf ausgegeben werden.
 
 Der Build-Receipt bindet zusätzlich die **exakte gebaute System-Closure** (`/nix/store/...-nixos-system-*` oder gleichwertige unveränderliche Identität) und den Control-Release-Set-Digest. Jede privilegierte Aktivierungsstufe nimmt ausschließlich diese vorab geprüfte Closure entgegen. Sie darf weder den Git-Checkout neu auswerten noch einen Branch, Lock oder Input erneut auflösen. Eine Source-/Lock-/Release-Set-Abweichung nach dem Build blockiert die Aktivierung statt still eine andere Closure zu erzeugen.
+
+### Wirkungsklassen-Classifier
+
+Die Klasse folgt der **möglichen Wirkung**, nicht Dateiname, Paketname oder behaupteter Absicht. Kann ein Agent die niedrigere Klasse nicht belegen, wird fail-closed in die strengere Klasse eskaliert.
+
+- **Destruktiv:** Änderungen an Partitionstabellen, Dateisystemanlage/-zerstörung, LUKS-Container-/Metadaten-/Keyslot-Wirkung, EFI-/Secure-Boot-Keymaterial oder Firmware-Flash. Diese laufen ausschließlich über den separaten destruktiven Plan.
+- **Bootkritisch:** jede nicht-destruktive Änderung, die Kernel, Initrd, Bootloader, frühe Userspace-Pfade, Root-/LUKS-Unlock, frühe Mountabhängigkeiten oder Treiber/Module beeinflussen kann, die vor Erreichen des normalen Userspace benötigt werden. Auch unklare Grenzfälle werden bootkritisch behandelt.
+- **Normal:** nur Änderungen, deren Wirkung nachweislich weder destruktiv noch bootkritisch ist.
+
+Eine Änderung an LUKS-/Storage-Konfiguration kann daher bootkritisch sein, während eine tatsächliche Mutation von Container, Partition oder Keyslot destruktiv ist.
 
 ### Normale Hoständerung
 
@@ -328,7 +342,7 @@ Sie benötigen jeweils einen separaten, vorzustandsgebundenen Plan mit Backup-/R
 
 ## 12. Hardware Acceptance Gates
 
-Buildbarkeit ist nicht Hardwarefunktion.
+Buildbarkeit ist nicht Hardwarefunktion. Die nachfolgenden Produktbezeichnungen sind **2026-Acceptance-Anker**, keine Behauptung über das aktuell angeschlossene Inventar. Vor Cutover werden sie aus frischer quellengebundener Runtime-/Hardware-Evidenz bestätigt; Abweichungen erzwingen Profilreview statt stiller Anpassung.
 
 ### Gate A — Grafik, GPU, CUDA, CDI
 
@@ -368,7 +382,7 @@ Auf physischer Hardware müssen mindestens belegt sein:
 
 - UEFI-Boot;
 - Initrd und Entschlüsselung;
-- korrektes Mounten aller benötigten Zustandsdomänen;
+- korrektes Mounten aller benötigten Zustandsdomänen; im 2026-Btrfs-Profil insbesondere `@data` als eigene Daten-Domäne getrennt von `@persist` und `@containers`;
 - manuelle Recovery mit unabhängig verwahrtem Material;
 - Boot einer bekannten vorherigen Generation;
 - unabhängiger Recovery-Bootpfad;

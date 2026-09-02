@@ -25,7 +25,7 @@ Ein lokales Entrée kann leicht zu viel wollen: eine zweite Systemkarte, ein Hom
 
 ## Synthese
 
-`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind, und darf einen schmalen host-lokalen Sollvertrag für genau diesen Rechner tragen. Der Systemkatalog bleibt die kanonische Quelle stabiler Ökosystemsemantik. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern.
+`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind, und darf schmale host-lokale Sollverträge für genau diesen Rechner tragen. Der Systemkatalog bleibt die kanonische Quelle stabiler Ökosystemsemantik. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern; maschinelle Receipts und volatile Betriebsartefakte liegen gemäß `model` gekapselt unter `~/.local/state/heim-pc/`.
 
 ## Rolle im Ökosystem
 
@@ -41,7 +41,7 @@ Das Repository ersetzt weder den Systemkatalog noch aktuelle Runtime-Primärquel
 
 Der Systemkatalog ist der kanonische Ort für Systemzwecke, Grenzen, Wahrheitsbesitz, stabile Beziehungen und Einstiegspunkte. `heim-pc` darf darauf verweisen und einen unabhängigen Driftalarm betreiben, aber keine konkurrierende Semantik pflegen.
 
-Die `system-constitution` ist deshalb **kein zweiter Systemkatalog**: Sie besitzt ausschließlich den Sollvertrag des einzelnen Heim-PC-Hosts. Sie darf festlegen, wie dieser Host reproduzierbar, sicher, recoverbar und testbar sein soll, aber keine systemweiten Zuständigkeiten oder Zwecke anderer Komponenten neu definieren.
+Ein host-lokaler Sollvertrag ist deshalb **kein zweiter Systemkatalog**: Er darf festlegen, wie dieser Host reproduzierbar, sicher, recoverbar und testbar sein soll, aber keine systemweiten Zuständigkeiten oder Zwecke anderer Komponenten neu definieren.
 
 `SYSTEM_MAP.md` in diesem Repository ist enger geschnitten: Es ist eine generierte Karte der kanonischen heim-pc-Dokumentation aus `manifest/repo-index.yaml` und Frontmatter. Es ist keine vollständige Karte des Heimgewebe-Systems.
 
@@ -50,6 +50,8 @@ Die `system-constitution` ist deshalb **kein zweiter Systemkatalog**: Sie besitz
 `/home/alex` ist eine lokale Landefläche. Dort können kurze Pointer liegen, zum Beispiel ein README oder ein AGENTS-Hinweis. Diese Pointer sollen Agenten zu den richtigen Repositories führen.
 
 `/home/alex` soll nicht als versioniertes Vollabbild gepflegt werden. Private Inhalte, Browserprofile, Keyrings, Credentials, Agent-Runtime-Historien und persönliche Arbeitsflächen bleiben außerhalb des Repo-Entrées.
+
+Die lokale Landefläche ist dabei **kein Runtime-State-Root**. Quellengebundene maschinelle Receipts, Drift- und Inventarartefakte gehören in den im `model` definierten lokalen State-Bereich, nicht als lose Zustandsdateien direkt unter `/home/alex`.
 
 ## Was hier versioniert werden soll
 

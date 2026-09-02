@@ -6,9 +6,6 @@ last_reviewed: 2026-09-02
 depends_on:
   - model
   - security
-  - storage-lifecycle
-  - managed-builds
-  - operatorium-entry
 verifies_with:
   - scripts/ci/check_repo_index_consistency.py
   - scripts/generate-system-map.py
@@ -30,22 +27,21 @@ Das langfristige Host-Asset ist der versionierte Sollzustand samt lokalen Vertr�
 
 Diese Datei **definiert keine systemweiten Zwecke, Beziehungen oder Wahrheitszuständigkeiten**. Dafür bleibt der Systemkatalog kanonisch. `heim-pc` konsumiert diese Zuordnungen nur und darf sie nicht lokal neu erfinden.
 
-Innerhalb dieses Repositories ist Git die kanonische Quelle für **deklarierte host-lokale Sollzustände und normative Host-Verträge**. Git ist ausdrücklich keine globale oder laufende Livewahrheit. Aktuelle Tatsachen werden weiterhin aus den in `model`, `operatorium-entry` und dem Systemkatalog ausgewiesenen Primärquellen gelesen.
+Innerhalb dieses Repositories ist Git die kanonische Quelle für **deklarierte host-lokale Sollzustände und normative Host-Verträge**. Git ist ausdrücklich keine globale oder laufende Livewahrheit. Aktuelle Tatsachen werden weiterhin aus den in `model` und dem Systemkatalog ausgewiesenen Primärquellen gelesen.
 
 Eine statische Projektion dieser Host-Verfassung darf keine externe Autorität ersetzen oder neue Ökosystemautorität begründen.
 
 ### Konflikt- und Zuständigkeitsregel
 
-Diese Verfassung ergänzt bestehende kanonische Normen, sie überschreibt sie nicht still:
+Diese Verfassung baut nur auf den langfristigen Basisschichten auf:
 
-- `model` definiert die Trennung von statischem Einstieg, quellengebundenen Betriebsartefakten und Live-Primärquellen;
-- `security` definiert Daten-, Disclosure- und Secret-Grenzen;
-- `storage-lifecycle` definiert Schutz-, Plan-/Apply- und Löschautorität für verwaltete Speicherressourcen;
-- `managed-builds` definiert die bestehende Build-/Cache-Lifecycle-Semantik;
-- `operatorium-entry` definiert die Rolle dieses Repositorys;
+- `model` definiert die Trennung von statischem Soll-/Orientierungszustand, quellengebundenen Betriebsartefakten und Live-Primärquellen;
+- `security` definiert Daten-, Disclosure-, Endpoint- und Secret-Grenzen;
 - der Systemkatalog bleibt kanonisch für systemweite Zwecke, Beziehungen und Wahrheitszuständigkeiten.
 
-Bei einer Überschneidung gilt ohne einen ausdrücklich reviewten engeren Vertrag die **strengere Sicherheits- und Nichtmutationsregel**. Ein Executor-Profil darf diese Normen nur konkretisieren, nicht lockern.
+Operative Verträge für Entrée, Storage-Lifecycle, Build-Lifecycle oder andere heutige Implementierungsflächen bleiben eigenständig und dürfen sich weiterentwickeln, ohne dadurch eine Verfassungsreview zu erzwingen. Sie und jedes Executor-Profil müssen die Verfassung respektieren; die Verfassung hängt nicht von ihrer konkreten heutigen Ausprägung ab.
+
+Bei einer Überschneidung gilt ohne einen ausdrücklich reviewten engeren Vertrag die **strengere Sicherheits- und Nichtmutationsregel**. Ein Executor-Profil darf die Basisschichten nur konkretisieren, nicht lockern.
 
 ## Topologie
 
@@ -59,11 +55,12 @@ Bei einer Überschneidung gilt ohne einen ausdrücklich reviewten engeren Vertra
               │                           │
        getestetes Release-Set       eigene Pins/Locks/
               │                     OCI-Digests
-        ┌─────┴─────┐               │
-        │           │          ┌────┼────────┐
+        ┌─────┴─────┐          ┌────┼────────┐
+        │           │          │    │        │
       HOST         USER       Rust  Node     AI
-        │           │              Workloads
-        └─ getrennte Aktivierung ───────┘
+        │           │          └────┴────────┘
+        └── getrennte Aktivierung     │
+                                      └── eigene Deploy-Zyklen
 
                             │
                             ▼
@@ -86,6 +83,8 @@ Die Ebenen besitzen unterschiedliche Änderungsraten, Fehlerdomänen und Wahrhei
 ### 1. Vertrag vor Executor
 
 Primäres Asset sind semantische Sollverträge, Konfiguration, Tests und Recovery-Regeln. Der installierte Host ist eine Ausführung davon, nicht deren Quelle.
+
+Entrypoints, Adapter und alternative Auswertungswege dürfen denselben Sollgraphen projizieren, aber **keine zweite fachliche Konfiguration oder parallele Sollwahrheit** entwickeln. Ein neuer Entrypoint ist eine andere Sicht auf denselben Vertrag, kein Fork der Host-Semantik.
 
 ### 2. Nix ist die strategische Wette, NixOS der ausgewählte Ziel-Executor
 
@@ -123,6 +122,8 @@ Reproduzierbare Projektumgebungen gehören in projektgebundene Entwicklungsumgeb
 
 GPU- oder Gerätezugriff erhält eine klar definierte Host/Workload-Schnittstelle und eigene Acceptance Gates.
 
+Workload-Code erhält durch bloße Ausführung auf dem Host keine implizite Host-Administrations- oder Secret-Autorität. Das gilt ausdrücklich auch für Build- und Install-Hooks wie `build.rs`, Paketmanager-Lifecycle-Skripte oder vergleichbare fremde Buildbackends.
+
 ### 9. Storage ist rekonstruierbar, zustandsbewusst und verschlüsselt nach Threat Model
 
 Das Platten- und Mountmodell muss deklarativ oder gleichwertig reproduzierbar beschrieben sein. Systemzustand, Nutzdaten, regenerierbare Daten und Recovery-Material werden explizit getrennt.
@@ -138,6 +139,8 @@ Persistenz darf nicht zu einer versteckten zweiten Installation werden.
 ### 11. Daten und Recovery sind eigene Assets
 
 Persönliche Daten, Quell- und Arbeitsdaten, Datenbanken, Modelle, Browserzustand, DAW-Projekte, Samples und andere nicht reproduzierbare Nutzdaten sind nicht Teil des Systemgraphen.
+
+Zustandsbehaftete Service- und Workload-Daten bilden dabei eine eigene **Daten-Domäne**. Sie dürfen weder still in Systempersistenz noch in regenerierbare Container-/Cache-Domänen einsickern; konkrete Mount- oder Subvolume-Namen bleiben Executor-Detail.
 
 Sie besitzen eine eigene Sicherungsstrategie. Mindestens die nicht reproduzierbaren Daten müssen einen verifizierbaren **Off-host-Restore-Pfad** besitzen. Snapshots, Nix-Generationen oder derselbe physische Datenträger gelten nicht allein als Backup.
 
@@ -157,9 +160,9 @@ Zulässige Quellen, Cache-/Signaturschlüssel, OCI-Digests beziehungsweise gleic
 
 ### 14. Declared Facts und Runtime Facts bleiben getrennt
 
-Der Build erzeugt eine versionierte maschinenlesbare Sollprojektion, konzeptionell `declared-facts.json`, mit mindestens `apiVersion` und Bindung an den gebauten Sollzustand.
+Git trägt den deklarativen Sollgraphen sowie die Generator-/Schema-Definition für dessen maschinenlesbare Projektion. Der Build leitet daraus deterministisch `declared-facts` ab und bindet sie an den konkret gebauten Sollzustand. `declared-facts` sind damit **Build-Artefakt beziehungsweise Teil der Generation und keine separat gepflegte Live- oder Soll-Datei in Git**.
 
-Der laufende Rechner darf separat `runtime-facts.json` oder äquivalente quellengebundene Beobachtungen erzeugen. Runtime-Fakten dienen Healthcheck, Hardwareprüfung, Drift und Diagnose. Sie sind niemals Quelle, aus der der Sollgraph rekonstruiert wird.
+Die Sollprojektion enthält mindestens `apiVersion` und die Bindung an den gebauten Sollzustand. Der laufende Rechner darf separat `runtime-facts.json` oder äquivalente quellengebundene Beobachtungen erzeugen. Runtime-Fakten dienen Healthcheck, Hardwareprüfung, Drift und Diagnose. Sie sind niemals Quelle, aus der der Sollgraph rekonstruiert wird.
 
 ```text
 Sollgraph -> Build -> Declared Facts -> laufender Host
@@ -248,7 +251,7 @@ Diese Details dürfen optimiert oder ersetzt werden, solange die Invarianten und
 
 ## Verhältnis zum Repository
 
-`heim-pc` bleibt das kleine versionierte Operatorium-Entrée des lokalen Rechners. Diese Verfassung erweitert diese Rolle nur um den **host-lokalen** Sollvertrag des Rechners. Systemweite Zwecke, stabile Beziehungen, Wahrheitszuständigkeiten und Einstiegspunkte bleiben im Systemkatalog; diese Datei darf davon höchstens referenzieren oder lokale Konsequenzen ableiten.
+Diese Verfassung besitzt ausschließlich den **host-lokalen** Sollvertrag des Rechners. Sie erweitert keine Ökosystemautorität und legt die übrige Repository-Rolle nicht neu fest. Systemweite Zwecke, stabile Beziehungen, Wahrheitszuständigkeiten und Einstiegspunkte bleiben im Systemkatalog; diese Datei darf davon höchstens referenzieren oder lokale Konsequenzen ableiten.
 
 Volatile Belege bleiben bei ihren Primärquellen oder als quellengebundene lokale Receipts außerhalb Git. Private Inhalte und Secret-Material bleiben tabu.
 
