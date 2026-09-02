@@ -9,6 +9,7 @@ depends_on:
   - security
   - storage-lifecycle
   - managed-builds
+  - network-identity
 verifies_with:
   - scripts/ci/check_repo_index_consistency.py
   - scripts/generate-system-map.py
@@ -23,6 +24,8 @@ Dieses Dokument konkretisiert die `system-constitution` für den bevorzugten Exe
 **Ziel-Executor:** NixOS Stable 26.05.
 
 Das Profil beschreibt den Sollschnitt für eine spätere NixOS-Migration. Es autorisiert keine Installation, keine Partitionierung, kein Firmware-Update und keinen Eingriff in den produktiven Datenträger.
+
+Das Profil wird mindestens bei jedem NixOS-Stable-Wechsel sowie bei einem materiellen Wechsel von Nix-/Nixpkgs-, Home-Manager-, Storage-, Secret- oder Trust-Bausteinen neu geprüft. Sein Datum ist keine Dauerfreigabe.
 
 Die Systemverfassung bleibt höher priorisiert. Wird ein Detail dieses Profils unzweckmäßig, darf das Profil geändert werden, ohne die Verfassung umzuschreiben.
 
@@ -111,6 +114,12 @@ OCI ist die bevorzugte Isolationsschicht für Workloads mit eigenem Release-Takt
 
 Nicht jeder Dienst muss containerisiert werden. Die Entscheidung folgt Fehlerdomäne, Wartbarkeit und Schnittstellenklarheit, nicht Container-Purismus.
 
+### Untrusted Build- und Install-Hooks
+
+`build.rs`, `npm`-/`pnpm`-Lifecycle-Skripte, Python-Buildbackends und vergleichbare fremde Projekt-Hooks gelten als ausführbarer Workload-Code. Sie erhalten **keine implizite Secret- oder Host-Administrationsautorität** nur weil sie in einer Devshell laufen.
+
+Für nicht ausreichend vertraute Hooks wird eine isolierte Ausführung vorgesehen, beispielsweise über Container, gehärtete systemd-Einheiten oder eine getrennte Ausführungsidentität. Insbesondere dürfen solche Workloads keinen blanket-Zugriff auf SSH-/GPG-/Password-Store-/Secret-Material und keine pauschale `wheel`-, `NOPASSWD`- oder Nix-`trusted-users`-Berechtigung erhalten.
+
 ## 5. NVIDIA, CUDA und CDI
 
 Die RTX 4070 Ti SUPER ist Host-Hardware. Der Host besitzt Treiber und Gerätelayer; experimentelle CUDA-/Python-/ML-Stacks gehören nicht global in den Host.
@@ -137,6 +146,7 @@ GPT
         ├── @nix
         ├── @persist
         ├── @home
+        ├── @data
         └── @containers
 ```
 
@@ -154,7 +164,11 @@ Vollständige Impermanence wird erst aktiviert, nachdem die tatsächlich nötige
 
 ### Nix Store
 
-`@nix` ist persistent und getrennt vom zurücksetzbaren Root. Generationen und Store-Garbage-Collection erhalten eigene Retention-/Budgetregeln; freier Speicher ist kein Grund für ungebundene Löschungen.
+`@nix` ist persistent und getrennt vom zurücksetzbaren Root. `/nix/store`, GC-Roots und Generationen werden vor dem produktiven Cutover als **eigene verwaltete Speicherproduzenten** in die bestehende Storage-Lifecycle-/Budgetlogik aufgenommen. Nix-GC darf nicht als ungebundener zweiter Cleanup-Kanal neben `storage-lifecycle` entstehen.
+
+Generationen und Store-Garbage-Collection erhalten eigene Retention-/Budgetregeln. Mindestens die aktuell laufende, die konfigurierte Boot-Default- und eine nach Hardware-Gates bekannte funktionierende Recovery-Generation bleiben geschützt. Ein `--delete-older-than`-ähnlicher Automatismus darf diese Schutzmenge nicht implizit zerstören.
+
+Freier Speicher oder ein Pressure-Signal allein ist keine Löschfreigabe. Vor und nach GC werden Schutzmenge, GC-Roots, Wirkung und tatsächlich gewonnener Speicher quellengebunden zurückgelesen und receipted.
 
 ### Persist
 
@@ -162,11 +176,21 @@ Vollständige Impermanence wird erst aktiviert, nachdem die tatsächlich nötige
 
 Die Aufnahme eines Pfads ist eine reviewbare Graphänderung. Nach einem Fehler wird nicht reflexartig ein Verzeichnis persistiert.
 
-### Home und Containerdaten
+### Home, zustandsbehaftete Daten und Container-Cache
 
 `@home` bleibt persistenter Nutzdatenraum und ist kein Nix-Systemgraph.
 
-`@containers` trennt OCI-Images/-Layer und Workload-Volumes vom Root. CoW bleibt Standard. `nodatacow` wird nicht pauschal auf das Subvolume gesetzt. NOCOW/+C wird nur für gemessene konkrete Write-heavy-Verzeichnisse nach dokumentiertem Trade-off eingesetzt.
+`@data` ist die bevorzugte eigene **Daten-Domäne** für zustandsbehaftete Service- und Workload-Daten, insbesondere Datenbanken oder Container-Volumes, deren Verlust nicht durch einen Rebuild behoben werden kann. Das Subvolume auf derselben SSD ist ausdrücklich **kein Backup**. Solche Daten werden klassifiziert und in den Off-host-Restore-Vertrag aufgenommen.
+
+`@containers` enthält nur regenerierbare OCI-Images/-Layer, Build-Cache und ausdrücklich als entbehrlich klassifizierte Volumes. Zustandsbehaftete Daten dürfen nicht still in diese Lifecycle-Domäne geraten. CoW bleibt Standard. `nodatacow` wird nicht pauschal auf das Subvolume gesetzt. NOCOW/+C wird nur für gemessene konkrete Write-heavy-Verzeichnisse nach dokumentiertem Trade-off eingesetzt.
+
+### Btrfs- und Lifecycle-Kompatibilität
+
+Bestehende Cleanup-Verträge, die einen Tree vor dem Löschen per `rename(2)` atomar in Quarantäne verschieben, dürfen durch das neue Subvolume-Layout nicht gebrochen werden. Für jeden solchen Pfad wird vor Cutover belegt, dass Quelle und Quarantäne **rename-kompatibel** sind; ein `EXDEV`-Pfad blockiert die Migration dieses Producers, bis Layout oder Lifecycle-Implementierung angepasst und getestet sind.
+
+Btrfs-Kompression, Reflinks und Snapshots trennen logische Größe, belegte Blöcke und tatsächlich rückgewinnbaren Speicher. Inventarwerte wie `st_blocks` oder apparent size dürfen deshalb nicht als garantierter Reclaim ausgegeben werden. Cleanup-/GC-Receipts vergleichen den realen Dateisystem-Freiplatz beziehungsweise eine Btrfs-spezifisch geeignete Belegungsmetrik vor und nach Wirkung.
+
+Snapshots von regenerierbaren Cache-/Buildflächen werden nur eingeführt, wenn ihr Retention- und Reclaim-Effekt explizit im Storage-Lifecycle berücksichtigt ist.
 
 ## 7. Recovery und Backup
 
@@ -175,7 +199,9 @@ Die produktive Migration darf den bisherigen Recovery-Wert nicht verschlechtern.
 Das Zielprofil verlangt zwei verschiedene Recovery-Ebenen:
 
 1. **Host-unabhängiger Boot-/Recovery-Pfad:** nutzbar bei defekter NixOS-Generation oder beschädigtem Root; nicht abhängig von Grabowski, Bureau oder Netzwerk.
-2. **Off-host-Datenrestore:** nicht reproduzierbare Daten und benötigtes Recovery-Material müssen von einem anderen physischen oder externen Speicherort wiederherstellbar sein.
+2. **Off-host-Datenrestore:** nicht reproduzierbare Daten und benötigtes Recovery-Material müssen von einem anderen physischen oder externen Speicherort wiederherstellbar sein. Dazu gehören mindestens die relevanten `/home`-Daten, die Offline-Secret-Recovery-Identität, für das Verschlüsselungsdesign notwendige Recovery-Metadaten beziehungsweise Header-Sicherungen sowie die für fail-closed Provenienz benötigte Receipt-Klasse unter `~/.local/state/heim-pc/`, soweit diese nicht anderweitig rekonstruierbar ist.
+
+Der Restore-Test misst nicht nur „Datei vorhanden“, sondern beweist einen repräsentativen Wiederanlauf und dokumentiert RPO/RTO beziehungsweise bewusst akzeptierte Grenzen.
 
 Eine Recovery-Partition auf demselben Datenträger kann die erste Ebene unterstützen, ersetzt aber keinen Off-host-Backup-Pfad gegen Datenträgerausfall.
 
@@ -192,7 +218,7 @@ Ein separater Testdatenträger bleibt der bevorzugte Falsifikationspfad, ist abe
 
 ## 8. Secrets
 
-Die bestehende `security`-Policy bleibt verbindlich: Credentials, Tokens, private Schlüssel und Secret-Plaintext gehören nicht in dieses Repository.
+Die bestehende `security`-Policy bleibt verbindlich: Credentials, Tokens, private Schlüssel und Secret-Plaintext gehören nicht in dieses Repository. Das gilt auch für offline angreifbare Passwort-/Credential-Repräsentationen oder Konfigurationsfelder wie `initialPassword`, `initialHashedPassword`, ungeschützte `hashedPassword`-Werte, Access-Tokens, Netrc-Inhalte, WLAN-PSKs oder LUKS-Keymaterial.
 
 `sops-nix` plus age ist ein bevorzugter 2026-Kandidat für die Aktivierung von Secrets, **aber nicht automatisch für deren Ablage in diesem Repository**.
 
@@ -220,7 +246,9 @@ Er bindet mindestens:
 - OCI-Images über unveränderliche Digests oder gleichwertige verifizierte Identitäten;
 - Herkunft eigener Builds/CI-Artefakte.
 
-`latest`, ungebundene Branch-Tarballs oder ungeprüfte Fremdcaches sind keine Produktionsidentität.
+`latest`, ungebundene Branch-Tarballs oder ungeprüfte Fremdcaches sind keine Produktionsidentität. Impure Evaluation und unhashed Remote-Fetches sind für produktive Control-Plane-Builds nicht zulässig.
+
+Nix-`trusted-users` und vergleichbare Root-äquivalente Vertrauensflächen bleiben minimal; insbesondere wird nicht pauschal `@wheel`, der interaktive Benutzer oder eine Agentenidentität als vertrauenswürdig freigegeben. Änderungen an Substituters, Trust-Keys und Lock-/Release-Set-Identitäten sind reviewpflichtige Supply-Chain-Änderungen.
 
 ## 10. Facts-Vertrag
 
@@ -243,17 +271,20 @@ Agenten vergleichen Soll und Ist. Sie schreiben Runtime-Beobachtungen niemals al
 ### Normale Hoständerung
 
 ```text
-nix evaluate/check
+Entrypoint-spezifische Evaluation/Checks
+  (z. B. `nix flake check` und gezieltes `nix eval` beim Flake-Adapter)
 -> nixos-rebuild build
 -> nixos-rebuild dry-activate
--> build-vm / Integrationstest, wenn aussagekräftig
+-> nixos-rebuild build-vm / Integrationstest, wenn aussagekräftig
 -> nixos-rebuild test
 -> Runtime-/Hardware-Gates
 -> nixos-rebuild switch
 -> Readback
 ```
 
-Ein autonomer Agent darf nicht direkt von Quelländerung zu `switch` springen.
+Es gibt bewusst keinen Pseudobefehl `nix evaluate/check`: Der freigegebene Entrypoint muss die tatsächlich verwendeten `nix eval`-/`nix flake check`-Ziele beziehungsweise einen äquivalenten nicht-Flake-Prüfpfad explizit definieren.
+
+Ein autonomer Agent darf nicht direkt von Quelländerung zu `switch` springen. Die dafür notwendige Root-Wirkung wird über eine enge, allowlist- und receipt-gebundene Aktivierungsschnittstelle vermittelt; ein allgemeiner `sudo`-/Root-Shell-Vertrag oder blanket `NOPASSWD` ist dafür nicht zulässig.
 
 ### Bootkritische Änderung
 
@@ -323,7 +354,32 @@ Auf physischer Hardware müssen mindestens belegt sein:
 - Boot einer bekannten vorherigen Generation;
 - unabhängiger Recovery-Bootpfad;
 - Wiederherstellung ohne Grabowski/Bureau/Netzwerk;
-- verifizierter Off-host-Restore mindestens eines repräsentativen kritischen Datensatzes.
+- verifizierter Off-host-Restore mindestens eines repräsentativen kritischen Datensatzes;
+- Recovery der für das gewählte Verschlüsselungsdesign notwendigen Offline-Metadaten beziehungsweise Header-Sicherung.
+
+### Gate E — Netzwerkidentität und Konnektivität
+
+Die Migration muss den bestehenden `network-identity`-Vertrag ausdrücklich erhalten oder bewusst durch einen gleichwertigen neuen Vertrag ersetzen. Vor permanenter Aktivierung werden mindestens geprüft:
+
+- der erwartete statische Hostname und dessen lokale Auflösung ohne unnötigen DNS-Zugriff;
+- die freigegebene Default-Route beziehungsweise bewusst migrierte Schnittstellenidentität;
+- mindestens die vertraglich geforderte Ethernet-Linkgeschwindigkeit oder eine explizit akzeptierte neue Netzwerktopologie;
+- DNS-Auflösung über den vorgesehenen Heimnetzpfad;
+- lokale und externe Konnektivität der für Betrieb und Recovery erforderlichen Ziele;
+- kein unbeabsichtigter Verlust der bestehenden fail-closed Netzwerkdiagnostik.
+
+Ein grüner GPU-/Audio-/Boot-Test kompensiert kein degradiertes oder falsch geroutetes Netzwerk.
+
+### Gate F — Datenträger-, Dateisystem- und Stabilitätsbasis
+
+Vor permanentem Cutover werden mindestens dokumentiert und geprüft:
+
+- aktueller NVMe-/SMART-Health-Readback und ein geeigneter Selbsttest, soweit das Gerät ihn unterstützt;
+- nach Anlage des Btrfs-Zieldateisystems ein erfolgreicher Scrub beziehungsweise ein gleichwertiger Integritätsreadback ohne unkorrektierbare Fehler;
+- eine zur Hardwareänderung passende Speicher-/Systemstabilitätsprüfung, insbesondere wenn UEFI-, RAM-, Kernel- oder Energieeinstellungen geändert wurden;
+- der gewählte LUKS-/TPM-/FIDO2-Entsperrpfad gegen ein explizites Threat Model: Komfort-Unlock darf nicht still als Schutz gegen physischen Zugriff ausgegeben werden.
+
+Diese Gates diagnostizieren keine perfekte Hardware; sie verhindern nur, dass eine bereits sichtbare Baseline-Regressionslage als erfolgreiche OS-Migration abgenommen wird.
 
 ## 13. Desktop und Update-Takt
 

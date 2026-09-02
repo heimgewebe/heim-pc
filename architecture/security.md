@@ -2,7 +2,7 @@
 id: security
 role: norm
 status: canonical
-last_reviewed: 2026-02-28
+last_reviewed: 2026-09-02
 depends_on: []
 verifies_with: []
 ---
@@ -33,19 +33,23 @@ verifies_with: []
 * **Sensible Pfade**: `.ssh`, `.gnupg`, Browser-Profile ausgeschlossen
 * **Personenbezogene Daten**: Keine E-Mails, Chat-Historie, etc.
 
-### Zwei-Schichten-Architektur
+### Drei Schutz- und Zustandsflächen
 
-1. **Git-Repository (klein, reviewbar)**:
-   - `state/*.json` – Strukturierte Metadaten (< 100 KB)
-   - `config/*.yml` – Konfiguration
-   - `docs/` – Dokumentation
+1. **Öffentliches Git-Repository (klein, reviewbar)**:
+   - normative Architektur, Policies und kleine Maschinenverträge;
+   - Konfiguration ohne Secret-Material;
+   - `state/` nur soweit `architecture/model.md` das konkrete Artefakt ausdrücklich als quellengebundene Projektion oder historische Fixture zulässt. `state/index.json` und `state/repos.json` sind insbesondere keine aktuelle Hostwahrheit.
 
-2. **Externe Storage (groß, ephemeral)**:
-   - Vollständige Snapshots als GitHub Artifacts (90-Tage-Retention)
-   - Oder als Release Assets für langfristige Archivierung
-   - Oder lokal in `~/vault-gewebe/` für persönliche Backups
+2. **Lokaler quellengebundener Betriebszustand außerhalb Git**:
+   - Receipts, Driftberichte und volatile Inventare unter `~/.local/state/heim-pc/`;
+   - jedes aktuelle Artefakt mit Quelle, Zeitpunkt, Hashbindung und Frischegrenze gemäß `architecture/model.md`.
 
-**Goldene Regel**: Klein committen, groß auslagern.
+3. **Große Daten, Backups und externe Artefakte**:
+   - Nutzdaten und Backups außerhalb der Git-Historie;
+   - CI-/Release-Artefakte nur für dafür geeignete, nicht-sensitive Daten;
+   - Off-host-Backups folgen einem eigenen Recovery-Vertrag und sind keine Runtime-Wahrheit.
+
+**Goldene Regel**: Klein committen, groß auslagern. Git ist Soll-/Normquelle, nicht Livezustand.
 
 ## Root-Grenzen
 
@@ -161,10 +165,14 @@ return {"error": f"Failed to read /home/alex/.ssh/id_rsa: Permission denied"}
 
 #### Im Git-Repository (öffentlich)
 
-* Pfad-Strukturen (ohne sensible Namen)
-* Dateigrößen, Timestamps
-* Repository-Namen (öffentliche Repos)
-* Aggregierte Statistiken
+Das Repository `heimgewebe/heim-pc` ist öffentlich. Die Bezeichnung „lokaler/privater Maschinen-Einstieg“ in der Architektur beschreibt den Gegenstand und die lokale Operatorrolle, **nicht** eine Vertraulichkeitsgrenze des Git-Repositorys. Repository-Sichtbarkeit darf niemals als Schutz für sensitive Hostdetails vorausgesetzt werden.
+
+* kleine normative Verträge und Konfiguration ohne Secrets;
+* abstrahierte Pfad-Strukturen ohne sensible Namen;
+* aggregierte Größen/Timestamps nur, wenn sie keine private Nutzung offenlegen;
+* öffentliche Repository-Referenzen.
+
+Nicht versionieren: Geräte-Seriennummern, MAC-Adressen, private LAN-Topologie, konkrete interne Listener/Ports, private Hostnamen oder andere hochauflösende Recon-Daten, sofern sie nicht für einen ausdrücklich geprüften öffentlichen Vertrag unvermeidbar und minimiert sind.
 
 #### NICHT im Git-Repository
 
@@ -176,18 +184,19 @@ return {"error": f"Failed to read /home/alex/.ssh/id_rsa: Permission denied"}
 
 ### Snapshot-Artefakte
 
-Vollständige Snapshots (als GitHub Artifacts):
+Das öffentliche Repository ist **keine Vertraulichkeitsgrenze für CI-/Release-Artefakte**. Vollständige oder sensitive Hostsnapshots dürfen deshalb nicht allein aufgrund eines GitHub-Artifact-/Release-Mechanismus als „privat“ gelten.
 
-* **Privat**: Nur für Repo-Collaborators
-* **Ephemeral**: Auto-Delete nach 90 Tagen
-* **Optional**: Können deaktiviert werden
+* Sensitive Vollsnapshots werden nicht in GitHub Actions oder Releases publiziert, solange kein separat belegter Zugriffsschutz und eine dafür freigegebene Datenklassifikation existiert.
+* Zulässige CI-Artefakte enthalten nur bereits freigegebene, minimierte oder nicht-sensitive Daten.
+* Retention begrenzt Lebensdauer, ersetzt aber keine Zugriffskontrolle.
+* Private Backups und Recovery-Artefakte gehören in den separaten Off-host-Backup-Vertrag, nicht in die öffentliche Repo-/CI-Fläche.
 
 ## Compliance
 
 ### GDPR
 
 * Keine personenbezogenen Daten im Repository
-* Snapshots privat und ephemeral
+* Keine sensitiven Snapshots in öffentlichen Repo-/CI-Flächen ohne separat belegte Zugriffskontrolle
 * Opt-in für Telemetrie (keine Standard-Aktivierung)
 
 ### Best Practices
@@ -221,4 +230,4 @@ Vollständige Snapshots (als GitHub Artifacts):
 - [ ] Exception-Handling ohne Details
 - [ ] `.gitignore` für lokale Configs
 - [ ] Regelmäßige Security-Reviews
-- [ ] Snapshot-Artefakte auf "Private"
+- [ ] CI-/Release-Artefakte gegen öffentliche Repo-Sichtbarkeit und Datenklassifikation geprüft

@@ -14,31 +14,38 @@ verifies_with:
   - scripts/generate-system-map.py
 ---
 
-# Heim-PC Systemverfassung
+# Heim-PC Host-Verfassung
 
 ## Zweck
 
-Diese Verfassung definiert die langfristigen Systemgrenzen des Heim-PC. Sie ist keine Installationsanleitung und keine Momentaufnahme der laufenden Maschine.
+Diese Verfassung definiert ausschließlich die langfristigen **host-lokalen** Soll-, Zustands-, Trust-, Daten- und Recovery-Grenzen des Heim-PC. Sie ist keine Installationsanleitung, keine Momentaufnahme der laufenden Maschine und keine zweite Ökosystemkarte.
 
-**Strategische Wette:** das Nix-Modell als bevorzugte Beschreibungsschicht für reproduzierbaren Sollzustand.
+**Strategische Wette für den Host:** das Nix-Modell als bevorzugte Beschreibungsschicht für reproduzierbaren Sollzustand.
 
 **Aktueller Executor, Stand 2026:** NixOS. Die konkrete NixOS-Ausprägung steht in `nixos-executor-2026` und ist austauschbar.
 
-Das langfristige Asset ist der versionierte Sollzustand samt Verträgen, Tests, Trust-, Daten- und Recovery-Modell. Nix ist 2026 die bevorzugte Sprache und Auswertungslogik dieses Assets; die Verfassung bindet die Semantik nicht dauerhaft an eine einzelne Distribution oder Entrypoint-Technik.
+Das langfristige Host-Asset ist der versionierte Sollzustand samt lokalen Verträgen, Tests, Trust-, Daten- und Recovery-Modell. Nix ist 2026 die bevorzugte Sprache und Auswertungslogik dieses Assets; die Verfassung bindet die Host-Semantik nicht dauerhaft an eine einzelne Distribution oder Entrypoint-Technik.
 
-## Wahrheitsordnung statt globaler Single Source of Truth
+## Autoritätsgrenze
 
-Git ist die kanonische Quelle für **deklarierte Sollzustände und normative Verträge**. Git ist ausdrücklich keine globale Livewahrheit.
+Diese Datei **definiert keine systemweiten Zwecke, Beziehungen oder Wahrheitszuständigkeiten**. Dafür bleibt der Systemkatalog kanonisch. `heim-pc` konsumiert diese Zuordnungen nur und darf sie nicht lokal neu erfinden.
 
-Für aktuelle Tatsachen gelten weiterhin die vorhandenen Primärquellen aus `model` und `operatorium-entry`:
+Innerhalb dieses Repositories ist Git die kanonische Quelle für **deklarierte host-lokale Sollzustände und normative Host-Verträge**. Git ist ausdrücklich keine globale oder laufende Livewahrheit. Aktuelle Tatsachen werden weiterhin aus den in `model`, `operatorium-entry` und dem Systemkatalog ausgewiesenen Primärquellen gelesen.
 
-- Git/GitHub und CI für Revision, Pull Request und technische Checks;
-- systemd, Hardware-Readbacks, Logs und Healthchecks für den laufenden Host;
-- Grabowski für Operator-Runtime, Ausführung und Leases;
-- Bureau für Aufgaben, Claims und Lifecycle-Receipts;
-- Systemkatalog für stabile Ökosystemsemantik.
+Eine statische Projektion dieser Host-Verfassung darf keine externe Autorität ersetzen oder neue Ökosystemautorität begründen.
 
-Eine statische Projektion darf keine dieser Autoritäten ersetzen.
+### Konflikt- und Zuständigkeitsregel
+
+Diese Verfassung ergänzt bestehende kanonische Normen, sie überschreibt sie nicht still:
+
+- `model` definiert die Trennung von statischem Einstieg, quellengebundenen Betriebsartefakten und Live-Primärquellen;
+- `security` definiert Daten-, Disclosure- und Secret-Grenzen;
+- `storage-lifecycle` definiert Schutz-, Plan-/Apply- und Löschautorität für verwaltete Speicherressourcen;
+- `managed-builds` definiert die bestehende Build-/Cache-Lifecycle-Semantik;
+- `operatorium-entry` definiert die Rolle dieses Repositorys;
+- der Systemkatalog bleibt kanonisch für systemweite Zwecke, Beziehungen und Wahrheitszuständigkeiten.
+
+Bei einer Überschneidung gilt ohne einen ausdrücklich reviewten engeren Vertrag die **strengere Sicherheits- und Nichtmutationsregel**. Ein Executor-Profil darf diese Normen nur konkretisieren, nicht lockern.
 
 ## Topologie
 
@@ -90,9 +97,9 @@ Ein anderer Executor darf NixOS ersetzen, wenn er die geforderten **beobachtbare
 
 Ein zukünftiger Executor muss NixOS-Module nicht wörtlich auswerten. Bei einem Wechsel wird der Sollvertrag portiert; das Logo oder Dateiformat ist kein Selbstzweck.
 
-### 4. Autorität bleibt quellengebunden
+### 4. Externe Autorität wird konsumiert, nicht neu definiert
 
-Git definiert Sollzustand. Runtime-Fakten stammen aus Runtime-Primärquellen. Bureau bleibt Taskwahrheit. Grabowski bleibt Operatorwahrheit. CI belegt nur den geprüften Head. Keine Projektion darf daraus eine globale Ersatzwahrheit erzeugen.
+Diese Host-Verfassung besitzt keine Ökosystem-Wahrheitsdomäne. Sie bindet nur, dass host-lokaler Sollzustand nicht mit beobachtetem Runtime-Zustand vermischt werden darf. Welche externen Systeme für Git-, CI-, Task-, Operator- oder Ökosystemzustand autoritativ sind, wird aus dem Systemkatalog und den dort gebundenen Primärquellen übernommen.
 
 ### 5. Control Plane ist ein getestetes Release-Set
 
@@ -168,6 +175,8 @@ Normale Systemänderungen, bootkritische Änderungen und destruktive Storage-/Fi
 
 Ein normaler Agenten-Deploy springt nie direkt von Quelländerung zu permanenter Aktivierung. Er durchläuft Evaluation, Build, geeignete isolierte Tests, temporäre Aktivierung und zielbezogene Runtime-/Hardware-Gates.
 
+Privilegierte Aktivierung besitzt eine **enge, allowlist- und receipt-gebundene Wirkungsschnittstelle**. Ein allgemeiner Root-Shell-Zugang, pauschales `NOPASSWD` oder eine gleichwertige ungebundene Eskalation ist kein zulässiger Agenten-Deploy-Vertrag.
+
 Bootkritische Änderungen benötigen Reboot- und Post-Boot-Gates. Destruktive Storage- oder Firmware-Operationen benötigen einen eigenen expliziten Plan mit Backup-/Recovery-Beleg und dürfen niemals als gewöhnlicher System-Switch getarnt werden.
 
 ### 16. Recovery darf nicht vom Operator-Ökosystem abhängen
@@ -239,7 +248,7 @@ Diese Details dürfen optimiert oder ersetzt werden, solange die Invarianten und
 
 ## Verhältnis zum Repository
 
-`heim-pc` bleibt das kleine versionierte Operatorium-Entrée des lokalen Rechners. Diese Verfassung erweitert diese Rolle um einen normativen Sollvertrag, ohne das Repository zu einer Live-Runtime-Datenbank, einem Home-Spiegel oder einer zweiten Ökosystemkarte zu machen.
+`heim-pc` bleibt das kleine versionierte Operatorium-Entrée des lokalen Rechners. Diese Verfassung erweitert diese Rolle nur um den **host-lokalen** Sollvertrag des Rechners. Systemweite Zwecke, stabile Beziehungen, Wahrheitszuständigkeiten und Einstiegspunkte bleiben im Systemkatalog; diese Datei darf davon höchstens referenzieren oder lokale Konsequenzen ableiten.
 
 Volatile Belege bleiben bei ihren Primärquellen oder als quellengebundene lokale Receipts außerhalb Git. Private Inhalte und Secret-Material bleiben tabu.
 
