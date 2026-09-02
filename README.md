@@ -11,7 +11,7 @@
 * Welche lokalen Flächen bleiben tabu?
 * Wo liegt die kanonische Ökosystemkarte?
 
-Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-Rolle eingeordnet.
+Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-Rolle eingeordnet. Der zusätzliche Host-Sollvertrag (`system-constitution`) bleibt auf genau diesen Rechner begrenzt und ersetzt weder Systemkatalog noch Live-Primärquellen.
 
 ## These / Antithese / Synthese
 
@@ -85,7 +85,9 @@ und lokale Health-Listener; API-Schlüssel, Header und MCP-Konfiguration bleiben
 außerhalb der Ausgabe. Die kanonischen lokalen Zuweisungen sind `grabowski` auf
 `127.0.0.1:18080`, `heim-pc-dashboard` auf `127.0.0.1:18081` und
 `grabowski-johannes` auf `127.0.0.1:18083`. Doppelte Listener oder Abweichungen
-führen zu einem Nichtnullstatus.
+führen zu einem Nichtnullstatus. Diese loopback-only Zuordnung ist die in
+`architecture/security.md` ausdrücklich reviewte öffentliche Diagnosekonstante;
+sie ist keine Authentisierungs- oder Vertrauensgrenze.
 
 ```bash
 python3 scripts/tunnel_profile_diagnostics.py

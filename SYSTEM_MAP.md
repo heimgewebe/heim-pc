@@ -17,11 +17,11 @@ It provides a complete overview of the canonical documentation zones and their c
 
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
-| operatorium-entry | [architecture/operatorium-entry.md](architecture/operatorium-entry.md) | canonical | 2026-07-13 | model, security, zones, drift-policy |
+| operatorium-entry | [architecture/operatorium-entry.md](architecture/operatorium-entry.md) | canonical | 2026-09-02 | model, security, zones, drift-policy |
 | asr-engine | [architecture/asr-engine.md](architecture/asr-engine.md) | canonical | 2026-08-13 | operatorium-entry, security |
 | document-text-engine | [architecture/document-text-engine.md](architecture/document-text-engine.md) | canonical | 2026-08-24 | operatorium-entry, security |
 | asr-golden-corpus | [architecture/asr-golden-corpus.md](architecture/asr-golden-corpus.md) | canonical | 2026-08-13 | asr-engine |
-| model | [architecture/model.md](architecture/model.md) | canonical | 2026-08-26 | security |
+| model | [architecture/model.md](architecture/model.md) | canonical | 2026-09-02 | security |
 | system-constitution | [architecture/system-constitution.md](architecture/system-constitution.md) | canonical | 2026-09-02 | model, security, storage-lifecycle, managed-builds, operatorium-entry |
 | nixos-executor-2026 | [architecture/nixos-executor-2026.md](architecture/nixos-executor-2026.md) | canonical | 2026-09-02 | system-constitution, model, security, storage-lifecycle, managed-builds, network-identity |
 | security | [architecture/security.md](architecture/security.md) | canonical | 2026-09-02 | - |

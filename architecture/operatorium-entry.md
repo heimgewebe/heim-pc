@@ -2,7 +2,7 @@
 id: operatorium-entry
 role: norm
 status: canonical
-last_reviewed: 2026-07-13
+last_reviewed: 2026-09-02
 depends_on:
   - model
   - security
@@ -25,14 +25,14 @@ Ein lokales Entrée kann leicht zu viel wollen: eine zweite Systemkarte, ein Hom
 
 ## Synthese
 
-`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind. Der Systemkatalog bleibt die kanonische Quelle stabiler Ökosystemsemantik. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern.
+`heim-pc` wird als kleine, versionierte Empfangshalle gepflegt. Es erklärt, wo Agenten starten, welche Quellen gelten und welche Grenzen einzuhalten sind, und darf einen schmalen host-lokalen Sollvertrag für genau diesen Rechner tragen. Der Systemkatalog bleibt die kanonische Quelle stabiler Ökosystemsemantik. `/home/alex` bleibt lokale Landefläche mit kurzen Pointern.
 
 ## Rolle im Ökosystem
 
 `heim-pc` verbindet drei Ebenen:
 
 1. **Lokaler Einstieg:** Agenten können über lokale Pointer aus `/home/alex` hierher geführt werden.
-2. **Versionierte Orientierung:** Die Repo-Dokumente beschreiben stabile Regeln, Zonen, Sicherheitsgrenzen und Drift-Mechanik.
+2. **Versionierte Orientierung und Host-Sollvertrag:** Die Repo-Dokumente beschreiben stabile Regeln, Zonen, Sicherheitsgrenzen, Drift-Mechanik sowie die host-lokalen Invarianten und das austauschbare Ziel-Executor-Profil.
 3. **Aktuelle Prüfung:** GitHub, CI, PR-Diffs und Runtime-Belege bleiben nötig, wenn Aktualität zählt.
 
 Das Repository ersetzt weder den Systemkatalog noch aktuelle Runtime-Primärquellen.
@@ -40,6 +40,8 @@ Das Repository ersetzt weder den Systemkatalog noch aktuelle Runtime-Primärquel
 ## Abgrenzung zum Systemkatalog
 
 Der Systemkatalog ist der kanonische Ort für Systemzwecke, Grenzen, Wahrheitsbesitz, stabile Beziehungen und Einstiegspunkte. `heim-pc` darf darauf verweisen und einen unabhängigen Driftalarm betreiben, aber keine konkurrierende Semantik pflegen.
+
+Die `system-constitution` ist deshalb **kein zweiter Systemkatalog**: Sie besitzt ausschließlich den Sollvertrag des einzelnen Heim-PC-Hosts. Sie darf festlegen, wie dieser Host reproduzierbar, sicher, recoverbar und testbar sein soll, aber keine systemweiten Zuständigkeiten oder Zwecke anderer Komponenten neu definieren.
 
 `SYSTEM_MAP.md` in diesem Repository ist enger geschnitten: Es ist eine generierte Karte der kanonischen heim-pc-Dokumentation aus `manifest/repo-index.yaml` und Frontmatter. Es ist keine vollständige Karte des Heimgewebe-Systems.
 
@@ -54,6 +56,7 @@ Der Systemkatalog ist der kanonische Ort für Systemzwecke, Grenzen, Wahrheitsbe
 Geeignet für dieses Repository sind:
 
 * normative Einstiegs- und Sicherheitsregeln,
+* der schmale host-lokale Sollvertrag und austauschbare Executor-Profile,
 * kleine, reviewbare Runtime-Hinweise,
 * Manifest- und System-Map-Metadaten,
 * Pointer auf kanonische Quellen,

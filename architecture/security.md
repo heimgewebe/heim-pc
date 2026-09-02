@@ -115,18 +115,20 @@ excludes:
     reason: "Large backup directory"
 ```
 
-## Token-Sicherheit
+## Lokale Endpunkt- und Token-Sicherheit
 
-### Regel: Tokens nur für non-loopback
+### Regel: Loopback ist lokal, aber nicht automatisch vertrauenswürdig
 
-* **Loopback** (localhost, 127.0.0.1): Kein Token nötig
-* **Non-loopback** (Netzwerk, Internet): Token erforderlich
+* **Non-loopback** (LAN, Tailnet, Internet): Authentisierung ist grundsätzlich erforderlich.
+* **Loopback** (`localhost`, `127.0.0.1`, `::1`) und lokale Unix-Sockets sind nur eine Transportgrenze. Auf demselben Host kann nicht vertrauenswürdiger Projekt-, Build- oder Containercode laufen; die lokale Adresse allein erteilt daher keine Autorität.
+* Operator-, Secret-, Mutations- oder privilegierte Endpunkte benötigen auch lokal eine geeignete Capability, Authentisierung/Peer-Bindung oder eine nachweisbare Netzwerk-/Prozessisolation.
+* Ein unauthentisierter Loopback-Health-Endpunkt ist nur zulässig, wenn er read-only, datensparsam und ausdrücklich als niedriges Risiko klassifiziert ist und keine privilegierte Folgeaktion auslösen kann.
 
-### Warum?
+### Explizite öffentliche Diagnosekonstante
 
-* Loopback ist per Definition sicher (nur lokaler Zugriff)
-* Netzwerk-Zugriff benötigt Authentifizierung
-* Verhindert unautorisierten Remote-Zugriff
+Die festen **loopback-only** Health-Listener-Zuordnungen in `scripts/tunnel_profile_diagnostics.py` und die dazugehörige README-Dokumentation sind eine bewusst minimierte öffentliche Ausnahme von der allgemeinen Regel gegen konkrete interne Listener-Mappings. Sie enthalten weder Non-loopback-Adressen noch Tokens und dienen ausschließlich deterministischer Kollisions-/Profilprüfung.
+
+Diese Veröffentlichung ist **keine Sicherheitsgrenze und keine Authentisierungsfreigabe**. Sobald ein solcher Listener Non-loopback erreichbar, operatorfähig, secrettragend oder mutierend wird, erlischt die Ausnahme; dann sind Zieladresse und Authentisierungsvertrag separat zu reviewen.
 
 ### Token-Storage
 

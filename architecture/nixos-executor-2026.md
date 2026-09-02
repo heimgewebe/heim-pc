@@ -203,6 +203,12 @@ Das Zielprofil verlangt zwei verschiedene Recovery-Ebenen:
 
 Der Restore-Test misst nicht nur „Datei vorhanden“, sondern beweist einen repräsentativen Wiederanlauf und dokumentiert RPO/RTO beziehungsweise bewusst akzeptierte Grenzen.
 
+### Offline-Systemrekonstruktionssatz
+
+Zusätzlich wird off-host ein verifizierter, **netzunabhängiger Rekonstruktionssatz** gehalten. Er enthält mindestens ein bootfähiges Recovery-/Installationsmedium, die gepinnte Host-Konfiguration beziehungsweise einen hashgebundenen Source-Snapshot, das zugehörige Control-Release-Set/Lock, die notwendigen Trust-Roots und genug verifizierten System-Payload (z. B. bekannte funktionierende System-Closure oder gleichwertiges Closure-Archiv), um einen bekannten Hostzustand ohne Zugriff auf das ausgefallene Systemlaufwerk und ohne Netzwerk wiederherzustellen.
+
+Der Satz wird nach materiellen Control-Release-Änderungen erneuert und regelmäßig auf einem entbehrlichen Ziel oder einer gleichwertig isolierten Recovery-Fläche mit **Netzwerk aus und produktiver System-SSD nicht verfügbar** restore-getestet. Ein Bootmedium, das erst online Nixpkgs, Caches oder die Hostkonfiguration nachladen muss, erfüllt den Break-glass-Vertrag nicht.
+
 Eine Recovery-Partition auf demselben Datenträger kann die erste Ebene unterstützen, ersetzt aber keinen Off-host-Backup-Pfad gegen Datenträgerausfall.
 
 Vor jeder destruktiven Neuaufteilung des einzigen produktiven Datenträgers müssen mindestens erfüllt sein:
@@ -276,18 +282,20 @@ Deshalb gilt fail-closed: **Bis ein reviewter Nix-Buildpfad in `managed-builds` 
 
 Vor Freigabe automatisierter NixOS-Änderungen muss der Managed-Nix-Buildvertrag mindestens Repository-/Revision-Bindung, Control-Release-Identität, Store-/Cache-Budgets, Prozess-/Lease-Schutz, bounded Receipts, zulässige Privilegien und den Übergang in die nachfolgenden Aktivierungs-Gates definieren. Menschliche Diagnose oder ein separat autorisierter Migrationslauf bleibt davon unterscheidbar und darf nicht als verwalteter Agentenlauf ausgegeben werden.
 
+Der Build-Receipt bindet zusätzlich die **exakte gebaute System-Closure** (`/nix/store/...-nixos-system-*` oder gleichwertige unveränderliche Identität) und den Control-Release-Set-Digest. Jede privilegierte Aktivierungsstufe nimmt ausschließlich diese vorab geprüfte Closure entgegen. Sie darf weder den Git-Checkout neu auswerten noch einen Branch, Lock oder Input erneut auflösen. Eine Source-/Lock-/Release-Set-Abweichung nach dem Build blockiert die Aktivierung statt still eine andere Closure zu erzeugen.
+
 ### Normale Hoständerung
 
 ```text
 Entrypoint-spezifische Evaluation/Checks
   (z. B. `nix flake check` und gezieltes `nix eval` beim Flake-Adapter)
--> nixos-rebuild build
--> nixos-rebuild dry-activate
--> nixos-rebuild build-vm / Integrationstest, wenn aussagekräftig
--> nixos-rebuild test
+-> verwalteter Control-Build
+-> Receipt: exakte System-Closure + Control-Release-Set-Digest
+-> isolierter/virtueller Test, soweit aussagekräftig
+-> closure-gebundene Dry-/Test-Aktivierung ohne Re-Evaluation
 -> Runtime-/Hardware-Gates
--> nixos-rebuild switch
--> Readback
+-> closure-gebundene persistente Aktivierung ohne Re-Evaluation
+-> Readback: laufende Closure == freigegebene Closure
 ```
 
 Es gibt bewusst keinen Pseudobefehl `nix evaluate/check`: Der freigegebene Entrypoint muss die tatsächlich verwendeten `nix eval`-/`nix flake check`-Ziele beziehungsweise einen äquivalenten nicht-Flake-Prüfpfad explizit definieren.
@@ -388,6 +396,17 @@ Vor permanentem Cutover werden mindestens dokumentiert und geprüft:
 - der gewählte LUKS-/TPM-/FIDO2-Entsperrpfad gegen ein explizites Threat Model: Komfort-Unlock darf nicht still als Schutz gegen physischen Zugriff ausgegeben werden.
 
 Diese Gates diagnostizieren keine perfekte Hardware; sie verhindern nur, dass eine bereits sichtbare Baseline-Regressionslage als erfolgreiche OS-Migration abgenommen wird.
+
+### Gate G — Lokale Workload-Isolation
+
+Vor Freigabe automatisierter Projekt-/Build-Hooks wird mit einem repräsentativen nicht vertrauenswürdigen Testprozess belegt:
+
+- kein Zugriff auf Secret-Verzeichnisse oder Host-Administrationspfade;
+- kein unautorisierter Zugriff auf operatorfähige Loopback-/Unix-Socket-Endpunkte;
+- read-only Health-Endpunkte geben nur die ausdrücklich minimierte Information preis;
+- Container-/Namespace-Isolation oder Endpoint-Authentisierung bleibt nach Suspend/Restart beziehungsweise Service-Neustart wirksam.
+
+Loopback-Erreichbarkeit allein gilt ausdrücklich nicht als bestandenes Authentisierungs-Gate.
 
 ## 13. Desktop und Update-Takt
 
