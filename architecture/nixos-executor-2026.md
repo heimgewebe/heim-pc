@@ -268,6 +268,14 @@ Agenten vergleichen Soll und Ist. Sie schreiben Runtime-Beobachtungen niemals al
 
 ## 11. NixOS-Deployment-Pfade
 
+### Automatisierungs-Gate: Managed Nix Builds
+
+Die folgenden `nixos-rebuild`-Schritte beschreiben den **semantischen Executor-Pfad**, erteilen aber noch keine eigenständige Ausführungsautorität für Agenten. Der bestehende kanonische Vertrag `managed-builds` verlangt für automatisierte Operatorläufe einen verwalteten Build-Einstieg; dieser unterstützt derzeit Cargo, Node, Python und Playwright, aber noch keinen Nix/NixOS-Build.
+
+Deshalb gilt fail-closed: **Bis ein reviewter Nix-Buildpfad in `managed-builds` oder ein dort ausdrücklich als gleichwertig gebundener Nachfolgevertrag existiert, dürfen autonome Operatoren `nix build`, `nixos-rebuild build`, `build-vm`, `test`, `boot` oder `switch` nicht direkt als produktiven Host-Deploy ausführen.**
+
+Vor Freigabe automatisierter NixOS-Änderungen muss der Managed-Nix-Buildvertrag mindestens Repository-/Revision-Bindung, Control-Release-Identität, Store-/Cache-Budgets, Prozess-/Lease-Schutz, bounded Receipts, zulässige Privilegien und den Übergang in die nachfolgenden Aktivierungs-Gates definieren. Menschliche Diagnose oder ein separat autorisierter Migrationslauf bleibt davon unterscheidbar und darf nicht als verwalteter Agentenlauf ausgegeben werden.
+
 ### Normale Hoständerung
 
 ```text
