@@ -22,7 +22,7 @@ Diese Verfassung definiert ausschließlich die langfristigen **host-lokalen** So
 
 **Strategische Wette für den Host:** das Nix-Modell als bevorzugte Beschreibungsschicht für reproduzierbaren Sollzustand.
 
-**Aktueller Executor, Stand 2026:** NixOS. Die konkrete NixOS-Ausprägung steht in `nixos-executor-2026` und ist austauschbar.
+**Ausgewählter Ziel-Executor, Stand 2026:** NixOS. Der laufende Host bleibt bis zum belegten Cutover eine separate Runtime-Wahrheit. Die konkrete NixOS-Ausprägung steht in `nixos-executor-2026` und ist austauschbar.
 
 Das langfristige Host-Asset ist der versionierte Sollzustand samt lokalen Verträgen, Tests, Trust-, Daten- und Recovery-Modell. Nix ist 2026 die bevorzugte Sprache und Auswertungslogik dieses Assets; die Verfassung bindet die Host-Semantik nicht dauerhaft an eine einzelne Distribution oder Entrypoint-Technik.
 
@@ -87,9 +87,9 @@ Die Ebenen besitzen unterschiedliche Änderungsraten, Fehlerdomänen und Wahrhei
 
 Primäres Asset sind semantische Sollverträge, Konfiguration, Tests und Recovery-Regeln. Der installierte Host ist eine Ausführung davon, nicht deren Quelle.
 
-### 2. Nix ist die strategische Wette, NixOS der aktuelle Executor
+### 2. Nix ist die strategische Wette, NixOS der ausgewählte Ziel-Executor
 
-NixOS ist 2026 bevorzugter Host, weil es das Nix-Modell auf Systemebene vollständig auswertet. Diese Entscheidung ist bewusst weicher als die Wette auf das Modell.
+NixOS ist 2026 der ausgewählte Ziel-Host, weil es das Nix-Modell auf Systemebene vollständig auswertet. Bis zum erfolgreich abgenommenen Cutover beschreibt das keinen aktuellen Runtime-Zustand. Diese Entscheidung ist bewusst weicher als die Wette auf das Modell.
 
 ### 3. Semantische Exit-Klausel
 
@@ -256,4 +256,4 @@ Volatile Belege bleiben bei ihren Primärquellen oder als quellengebundene lokal
 
 > Der Heim-PC ist kein historisch gewachsener Installationszustand, sondern ein reproduzierbares System mit explizit getrennten Soll-, Runtime-, Workload-, Daten-, Trust- und Recovery-Domänen.
 
-Nix ist die strategische Wette. NixOS ist der aktuelle Executor. Der dauerhafte Vertrag steht über beiden.
+Nix ist die strategische Wette. NixOS ist der ausgewählte Ziel-Executor; welcher Executor tatsächlich läuft, wird ausschließlich aus frischer Runtime-Wahrheit bestimmt. Der dauerhafte Vertrag steht über beiden.
