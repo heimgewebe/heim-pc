@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_managed_deployment_contract",
+  "build": {
+    "effect_class": "build",
+    "required_bindings": [
+      "repository",
+      "source_revision",
+      "control_release_set",
+      "nix_inputs",
+      "budgets",
+      "leases",
+      "possible_effects",
+      "entrypoint"
+    ],
+    "canonical_entrypoint": [
+      "nix",
+      "build",
+      ".#nixosConfigurations.heim-pc.config.system.build.toplevel",
+      "--no-link",
+      "--print-out-paths"
+    ],
+    "receipt_kind": "heim_pc.nixos_build_receipt",
+    "receipt_requires": [
+      "source_revision",
+      "control_release_set",
+      "system_closure",
+      "build_request_sha256"
+    ],
+    "activation_authorized": false
+  },
+  "activation": {
+    "effect_class": "activation",
+    "authority_kind": "heim_pc.nixos_activation_authority",
+    "receipt_kind": "heim_pc.nixos_activation_receipt",
+    "allowed_modes": [
+      "test",
+      "next-boot",
+      "persistent"
+    ],
+    "boot_critical_persistent_directly_allowed": false,
+    "requires_exact_build_receipt": true,
+    "requires_exact_system_closure": true,
+    "requires_exact_target": true,
+    "requires_independent_live_closure_readback": true,
+    "source_reevaluation_allowed": false,
+    "branch_resolution_allowed": false,
+    "lock_resolution_allowed": false,
+    "remote_input_resolution_allowed": false,
+    "broad_root_shell_allowed": false,
+    "runtime_executor_implemented_here": false,
+    "runtime_proof_task": "HEIM-PC-NIXOS-MIGRATION-V1-T004",
+    "requires_external_authority_sha256": true,
+    "self_asserted_review_flag_allowed": false
+  },
+  "effect_classifier": {
+    "unknown_effect": "destructive",
+    "destructive_path": "separate-explicit-storage-or-firmware-plan",
+    "boot_critical_requires_next_boot_path": true
+  },
+  "rollback": {
+    "requires_prior_closure": true,
+    "requires_recovery_path": true,
+    "source_reevaluation_allowed": false
+  },
+  "implementation_boundary": {
+    "live_activation": false,
+    "service_restart": false,
+    "runtime_rollback": false,
+    "production_storage_mutation": false,
+    "efi_mutation": false,
+    "secure_boot_mutation": false,
+    "firmware_mutation": false,
+    "reboot": false
+  }
+}
