@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from scripts.managed_nix import (
     MAX_AUTHORITY_LIFETIME_SECONDS,
     NORMAL_EFFECTS,
     ManagedNixError,
+    authorize_activation_plan_execution,
     canonical_build_request_payload,
     classify_effect,
     make_activation_receipt,
@@ -63,12 +65,23 @@ def request(**updates):
     return value
 
 
-def receipt():
+def make_receipt(build_request=None, **kwargs):
+    build_request = build_request or request()
     return make_build_receipt(
-        request(),
-        system_closure=CLOSURE,
-        declared_capabilities={"boot": {"uefi": True}, "gpu": {"nvidia": True}},
+        build_request,
+        observed_repository=kwargs.pop("observed_repository", "heimgewebe/heim-pc"),
+        observed_source_revision=kwargs.pop("observed_source_revision", REVISION),
+        system_closure=kwargs.pop("system_closure", CLOSURE),
+        declared_capabilities=kwargs.pop(
+            "declared_capabilities",
+            {"boot": {"uefi": True}, "gpu": {"nvidia": True}},
+        ),
+        **kwargs,
     )
+
+
+def receipt():
+    return make_receipt()
 
 
 def authority(build_receipt=None, **updates):
@@ -142,11 +155,7 @@ def test_build_request_hashes_only_canonical_contract_input_not_derived_scope() 
     raw = request(possible_effects=["KERNEL", "INITRD"])
     normalized = validate_build_request(raw)
     payload = canonical_build_request_payload(raw)
-    built = make_build_receipt(
-        raw,
-        system_closure=CLOSURE,
-        declared_capabilities={"boot": {"uefi": True}},
-    )
+    built = make_receipt(raw, declared_capabilities={"boot": {"uefi": True}})
     assert set(payload) == set(MANAGED_DEPLOYMENT_CONTRACT["build"]["request_fields"])
     assert "effect_scope" not in payload
     assert payload["possible_effects"] == ["initrd", "kernel"]
@@ -191,6 +200,21 @@ def test_build_source_context_requires_observed_exact_repository_and_revision() 
             observed_repository="heimgewebe/heim-pc",
             observed_source_revision="d" * 40,
         )
+
+
+def test_build_receipt_requires_and_hash_binds_observed_source_context() -> None:
+    context = validate_build_source_context(
+        request(),
+        observed_repository="heimgewebe/heim-pc",
+        observed_source_revision=REVISION,
+    )
+    built = receipt()
+    assert built["build_source_context_sha256"] == sha256_json(context)
+
+    with pytest.raises(ManagedNixError, match="observed repository"):
+        make_receipt(observed_repository="heimgewebe/other")
+    with pytest.raises(ManagedNixError, match="observed source revision"):
+        make_receipt(observed_source_revision="d" * 40)
 
 
 def test_build_request_rejects_mutable_or_noncanonical_identity_and_adapter() -> None:
@@ -297,11 +321,7 @@ def test_closure_binding_rejects_traversal_short_non_nix_illegal_or_wrong_host_n
         "/nix/store/00000000000000000000000000000000-nixos-system-heim-pc-",
     ):
         with pytest.raises(ManagedNixError, match="canonical immutable"):
-            make_build_receipt(
-                request(),
-                system_closure=bad,
-                declared_capabilities={"boot": {"uefi": True}},
-            )
+            make_receipt(system_closure=bad, declared_capabilities={"boot": {"uefi": True}})
 
 
 def test_successful_build_receipt_binds_exact_closure_and_does_not_authorize_activation() -> None:
@@ -313,6 +333,7 @@ def test_successful_build_receipt_binds_exact_closure_and_does_not_authorize_act
     assert built["possible_effects"] == ["initrd", "kernel"]
     assert built["activation_authorized"] is False
     assert len(built["build_request_sha256"]) == 64
+    assert len(built["build_source_context_sha256"]) == 64
     assert validate_build_receipt(built) == built
 
 
@@ -337,6 +358,11 @@ def test_build_receipt_revalidates_budgets_exact_shape_and_effect_scope() -> Non
     with pytest.raises(ManagedNixError, match="destructive or ambiguous"):
         validate_build_receipt(built)
 
+    built = receipt()
+    built["build_source_context_sha256"] = "bad"
+    with pytest.raises(ManagedNixError, match="build_source_context_sha256"):
+        validate_build_receipt(built)
+
 
 def test_activation_accepts_only_externally_bound_receipt_authority() -> None:
     built = receipt()
@@ -348,6 +374,8 @@ def test_activation_accepts_only_externally_bound_receipt_authority() -> None:
     assert plan["broad_root_shell_allowed"] is False
     assert plan["authority_sha256"] == sha256_json(candidate)
     assert plan["executor_authority"] == "successor-task-typed-activation-only"
+    assert plan["issued_at"] == candidate["issued_at"]
+    assert plan["expires_at"] == candidate["expires_at"]
     assert validate_activation_plan(plan) == plan
 
 
@@ -407,6 +435,51 @@ def test_activation_requires_external_digest_binding_and_fresh_bounded_authority
         validate_authority(built, too_long)
 
 
+def test_activation_plan_execution_revalidates_fresh_authority_receipt_target_and_clock() -> None:
+    built = receipt()
+    candidate = authority(built)
+    plan = validate_authority(built, candidate)
+    assert authorize_activation_plan_execution(
+        built,
+        candidate,
+        plan,
+        expected_authority_sha256=sha256_json(candidate),
+        expected_target="sandbox:nixos-activation-1",
+        now="2026-09-04T08:00:00Z",
+    ) == plan
+
+    with pytest.raises(ManagedNixError, match="expired"):
+        authorize_activation_plan_execution(
+            built,
+            candidate,
+            plan,
+            expected_authority_sha256=sha256_json(candidate),
+            expected_target="sandbox:nixos-activation-1",
+            now="2026-09-04T09:00:00Z",
+        )
+    with pytest.raises(ManagedNixError, match="reserved target"):
+        authorize_activation_plan_execution(
+            built,
+            candidate,
+            plan,
+            expected_authority_sha256=sha256_json(candidate),
+            expected_target="sandbox:other",
+            now="2026-09-04T08:00:00Z",
+        )
+
+    drifted = dict(plan)
+    drifted["recovery_path"] = "other-rescue"
+    with pytest.raises(ManagedNixError, match="does not match fresh"):
+        authorize_activation_plan_execution(
+            built,
+            candidate,
+            drifted,
+            expected_authority_sha256=sha256_json(candidate),
+            expected_target="sandbox:nixos-activation-1",
+            now="2026-09-04T08:00:00Z",
+        )
+
+
 def test_boot_critical_build_cannot_skip_directly_to_persistent_activation() -> None:
     built = receipt()
     candidate = authority(built, mode="persistent")
@@ -462,6 +535,11 @@ def test_activation_helpers_reject_partial_forged_or_drifted_plans() -> None:
             readback_evidence_sha256="f" * 64,
         )
 
+    plan = validate_authority(built, authority(built))
+    plan["expires_at"] = "2026-09-04T11:00:00Z"
+    with pytest.raises(ManagedNixError, match="lifetime exceeds"):
+        validate_activation_plan(plan)
+
 
 def test_activation_receipt_requires_independent_live_closure_readback() -> None:
     built = receipt()
@@ -513,6 +591,27 @@ def test_cli_semantic_validation_error_is_compact_without_argparse_usage(
     assert "managed-nix validation error:" in completed.stderr
     assert "usage:" not in completed.stderr.lower()
     assert completed.stdout == ""
+
+
+def test_cli_contract_error_is_compact_without_traceback(tmp_path: Path) -> None:
+    root = tmp_path / "copy"
+    script_dir = root / "scripts"
+    contract_dir = root / "nixos" / "deployment"
+    script_dir.mkdir(parents=True)
+    contract_dir.mkdir(parents=True)
+    source_script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
+    shutil.copy2(source_script, script_dir / "managed_nix.py")
+    (contract_dir / "contract-v1.json").write_text("{}", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(script_dir / "managed_nix.py"), "--help"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "managed-nix contract error:" in completed.stderr
+    assert "Traceback" not in completed.stderr
 
 
 def test_cli_can_emit_canonical_json_for_hash_sensitive_automation(tmp_path: Path) -> None:
@@ -570,6 +669,40 @@ def test_contract_loader_rejects_v1_semantic_policy_drift(
             managed_nix._load_managed_contract()
 
 
+def test_contract_loader_rejects_effect_reclassification_or_inventory_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "contract-v1.json"
+    monkeypatch.setattr(managed_nix, "_CONTRACT_PATH", contract_path)
+
+    candidates = []
+
+    firmware_normal = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    firmware_normal["effect_classifier"]["destructive_effects"].remove("firmware-flash")
+    firmware_normal["effect_classifier"]["normal_effects"].append("firmware-flash")
+    candidates.append((firmware_normal, "destructive_effects"))
+
+    kernel_normal = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    kernel_normal["effect_classifier"]["boot_critical_effects"].remove("kernel")
+    kernel_normal["effect_classifier"]["normal_effects"].append("kernel")
+    candidates.append((kernel_normal, "boot_critical_effects"))
+
+    added_normal = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    added_normal["effect_classifier"]["normal_effects"].append("new-normal-effect")
+    candidates.append((added_normal, "normal_effects"))
+
+    removed_destructive = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    removed_destructive["effect_classifier"]["destructive_effects"].remove(
+        "filesystem-create-destroy"
+    )
+    candidates.append((removed_destructive, "destructive_effects"))
+
+    for candidate, error_fragment in candidates:
+        contract_path.write_text(json.dumps(candidate), encoding="utf-8")
+        with pytest.raises(RuntimeError, match=error_fragment):
+            managed_nix._load_managed_contract()
+
+
 def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() -> None:
     contract_path = Path(__file__).parents[1] / "nixos" / "deployment" / "contract-v1.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -578,6 +711,7 @@ def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() ->
     assert set(contract["build"]["receipt_fields"]) == set(
         contract["build"]["receipt_requires"]
     )
+    assert "build_source_context_sha256" in contract["build"]["receipt_fields"]
     assert contract["build"]["request_digest_semantics"] == "canonical-validated-input-v1"
     assert contract["build"]["request_digest_excludes_derived_fields"] == ["effect_scope"]
     assert contract["activation"]["requires_external_authority_sha256"] is True
@@ -585,6 +719,8 @@ def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() ->
     assert contract["activation"]["runtime_executor_implemented_here"] is False
     assert contract["activation"]["runtime_proof_task"] == "HEIM-PC-NIXOS-MIGRATION-V1-T004"
     assert contract["activation"]["requires_independent_live_closure_readback"] is True
+    assert "issued_at" in contract["activation"]["plan_fields"]
+    assert "expires_at" in contract["activation"]["plan_fields"]
     assert contract["execution_context"] == {
         "build_context_kind": "heim_pc.nixos_build_source_context",
         "build_context_fields": [
@@ -596,8 +732,10 @@ def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() ->
         ],
         "build_repository_must_match_observed_repository": True,
         "build_source_revision_must_match_observed_checkout": True,
+        "build_receipt_must_bind_source_context_sha256": True,
         "activation_target_must_come_from_reserved_runtime_target": True,
         "current_time_must_come_from_trusted_runtime_clock": True,
+        "activation_plan_execution_requires_fresh_authority_window": True,
         "caller_supplied_values_are_authority": False,
     }
     assert contract["implementation_boundary"] == {

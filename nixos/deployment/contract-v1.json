@@ -57,6 +57,7 @@
       "system_closure",
       "declared_capabilities",
       "build_request_sha256",
+      "build_source_context_sha256",
       "activation_authorized"
     ],
     "receipt_requires": [
@@ -75,6 +76,7 @@
       "system_closure",
       "declared_capabilities",
       "build_request_sha256",
+      "build_source_context_sha256",
       "activation_authorized"
     ],
     "request_digest_semantics": "canonical-validated-input-v1",
@@ -82,7 +84,7 @@
       "effect_scope"
     ],
     "activation_authorized": false,
-    "receipt_validation_establishes": "exact shape and internal consistency only; provenance/authenticity belongs to the managed-build successor boundary",
+    "receipt_validation_establishes": "exact shape and internal consistency including a digest-bound observed build-source context; provenance/authenticity belongs to the managed-build successor boundary",
     "declared_capabilities_schema": "non-empty canonical JSON object; capability taxonomy is supplied by a separate canonical hardware/facts contract rather than invented here",
     "budget_policy": "warning and hard are non-negative integers with warning strictly below hard"
   },
@@ -116,6 +118,8 @@
       "prior_closure",
       "recovery_path",
       "authority_sha256",
+      "issued_at",
+      "expires_at",
       "executor_authority",
       "source_reevaluation_allowed",
       "broad_root_shell_allowed"
@@ -203,8 +207,10 @@
     ],
     "build_repository_must_match_observed_repository": true,
     "build_source_revision_must_match_observed_checkout": true,
+    "build_receipt_must_bind_source_context_sha256": true,
     "activation_target_must_come_from_reserved_runtime_target": true,
     "current_time_must_come_from_trusted_runtime_clock": true,
+    "activation_plan_execution_requires_fresh_authority_window": true,
     "caller_supplied_values_are_authority": false
   }
 }
