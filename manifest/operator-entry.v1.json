@@ -386,10 +386,6 @@
       "fleetRegistry": "${HOME}/repos/metarepo/fleet/repos.yml",
       "contractsRoot": "${HOME}/repos/metarepo/contracts"
     },
-    "repositoryReadiness": {
-      "repository": "${HOME}/repos/reposkop",
-      "authority": "read_only_observation"
-    },
     "generalObservability": {
       "repository": "${HOME}/repos/leitstand",
       "authority": "read_only_projection"
