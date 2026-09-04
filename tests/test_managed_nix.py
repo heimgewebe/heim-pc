@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.managed_nix as managed_nix
 from scripts.managed_nix import (
     ACTIVATION_AUTHORITY_KIND,
     ACTIVATION_PLAN_KIND,
@@ -539,6 +541,33 @@ def test_cli_can_emit_canonical_json_for_hash_sensitive_automation(tmp_path: Pat
         ensure_ascii=False,
         allow_nan=False,
     ) + "\n"
+
+
+def test_contract_loader_rejects_v1_semantic_policy_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "contract-v1.json"
+    monkeypatch.setattr(managed_nix, "_CONTRACT_PATH", contract_path)
+
+    cases = [
+        (("closure", "nix_base32_alphabet"), "0123456789abcdfghijklmnpqrsvwxye", "nix_base32_alphabet"),
+        (("build", "canonical_entrypoint"), ["nixos-rebuild", "switch"], "canonical_entrypoint"),
+        (("build", "effect_class"), "activation", "build.effect_class"),
+        (("activation", "allowed_modes"), ["test", "next-boot", "persistent", "direct-switch"], "allowed_modes"),
+        (("activation", "executor_authority"), "caller", "executor_authority"),
+        (("activation", "max_authority_lifetime_seconds"), 86_400, "max_authority_lifetime_seconds"),
+        (("activation", "runtime_proof_task"), "HEIM-PC-NIXOS-MIGRATION-V1-T999", "runtime_proof_task"),
+        (("execution_context", "build_context_kind"), "caller_context", "build_context_kind"),
+    ]
+    for path, replacement, error_fragment in cases:
+        candidate = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+        target = candidate
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        contract_path.write_text(json.dumps(candidate), encoding="utf-8")
+        with pytest.raises(RuntimeError, match=error_fragment):
+            managed_nix._load_managed_contract()
 
 
 def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() -> None:

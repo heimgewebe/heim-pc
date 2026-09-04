@@ -72,6 +72,29 @@ _SUPPORTED_ACTIVATION_PLAN_FIELDS = frozenset(
 _SUPPORTED_BUILD_SOURCE_CONTEXT_FIELDS = frozenset(
     {"schema_version", "kind", "repository", "source_revision", "build_request_sha256"}
 )
+_SUPPORTED_STORE_ROOT = "/nix/store"
+_SUPPORTED_SYSTEM_NAME_PREFIX = "nixos-system-heim-pc-"
+_SUPPORTED_NIX_BASE32_ALPHABET = "0123456789abcdfghijklmnpqrsvwxyz"
+_SUPPORTED_BUILD_EFFECT_CLASS = "build"
+_SUPPORTED_BUILD_REQUEST_KIND = "heim_pc.nixos_build_request"
+_SUPPORTED_BUILD_RECEIPT_KIND = "heim_pc.nixos_build_receipt"
+_SUPPORTED_REQUEST_DIGEST_SEMANTICS = "canonical-validated-input-v1"
+_SUPPORTED_CANONICAL_BUILD_ENTRYPOINT = (
+    "nix",
+    "build",
+    ".#nixosConfigurations.heim-pc.config.system.build.toplevel",
+    "--no-link",
+    "--print-out-paths",
+)
+_SUPPORTED_ACTIVATION_EFFECT_CLASS = "activation"
+_SUPPORTED_ACTIVATION_AUTHORITY_KIND = "heim_pc.nixos_activation_authority"
+_SUPPORTED_ACTIVATION_PLAN_KIND = "heim_pc.nixos_activation_plan"
+_SUPPORTED_ACTIVATION_RECEIPT_KIND = "heim_pc.nixos_activation_receipt"
+_SUPPORTED_ACTIVATION_MODES = frozenset({"test", "next-boot", "persistent"})
+_SUPPORTED_ACTIVATION_EXECUTOR_AUTHORITY = "successor-task-typed-activation-only"
+_SUPPORTED_MAX_AUTHORITY_LIFETIME_SECONDS = 7200
+_SUPPORTED_RUNTIME_PROOF_TASK = "HEIM-PC-NIXOS-MIGRATION-V1-T004"
+_SUPPORTED_BUILD_SOURCE_CONTEXT_KIND = "heim_pc.nixos_build_source_context"
 
 
 def _contract_error(message: str) -> RuntimeError:
@@ -158,13 +181,19 @@ def _load_managed_contract() -> dict[str, Any]:
             }
         ),
     )
-    _contract_string(closure.get("store_root"), "closure.store_root")
-    _contract_string(closure.get("system_name_prefix"), "closure.system_name_prefix")
+    store_root = _contract_string(closure.get("store_root"), "closure.store_root")
+    system_prefix = _contract_string(
+        closure.get("system_name_prefix"), "closure.system_name_prefix"
+    )
     alphabet = _contract_string(
         closure.get("nix_base32_alphabet"), "closure.nix_base32_alphabet"
     )
-    if len(alphabet) != 32 or len(set(alphabet)) != 32:
-        raise _contract_error("closure.nix_base32_alphabet must contain 32 unique characters")
+    if store_root != _SUPPORTED_STORE_ROOT:
+        raise _contract_error("closure.store_root is unsupported for contract v1")
+    if system_prefix != _SUPPORTED_SYSTEM_NAME_PREFIX:
+        raise _contract_error("closure.system_name_prefix is unsupported for contract v1")
+    if alphabet != _SUPPORTED_NIX_BASE32_ALPHABET:
+        raise _contract_error("closure.nix_base32_alphabet is unsupported for contract v1")
     _contract_string(closure.get("validation_scope"), "closure.validation_scope")
 
     build = _require_contract_object(
@@ -199,11 +228,23 @@ def _load_managed_contract() -> dict[str, Any]:
         "budget_policy",
     ):
         _contract_string(build.get(key), f"build.{key}")
+    if build.get("effect_class") != _SUPPORTED_BUILD_EFFECT_CLASS:
+        raise _contract_error("build.effect_class is unsupported for contract v1")
+    if build.get("request_kind") != _SUPPORTED_BUILD_REQUEST_KIND:
+        raise _contract_error("build.request_kind is unsupported for contract v1")
+    if build.get("receipt_kind") != _SUPPORTED_BUILD_RECEIPT_KIND:
+        raise _contract_error("build.receipt_kind is unsupported for contract v1")
+    if build.get("request_digest_semantics") != _SUPPORTED_REQUEST_DIGEST_SEMANTICS:
+        raise _contract_error("build.request_digest_semantics is unsupported for contract v1")
     request_fields = _contract_strings(build.get("request_fields"), "build.request_fields")
     required_bindings = _contract_strings(
         build.get("required_bindings"), "build.required_bindings"
     )
-    _contract_strings(build.get("canonical_entrypoint"), "build.canonical_entrypoint")
+    canonical_entrypoint = _contract_strings(
+        build.get("canonical_entrypoint"), "build.canonical_entrypoint"
+    )
+    if tuple(canonical_entrypoint) != _SUPPORTED_CANONICAL_BUILD_ENTRYPOINT:
+        raise _contract_error("build.canonical_entrypoint is unsupported for contract v1")
     receipt_fields = _contract_strings(build.get("receipt_fields"), "build.receipt_fields")
     receipt_requires = _contract_strings(
         build.get("receipt_requires"), "build.receipt_requires"
@@ -269,6 +310,17 @@ def _load_managed_contract() -> dict[str, Any]:
         "runtime_proof_task",
     ):
         _contract_string(activation.get(key), f"activation.{key}")
+    supported_activation_values = {
+        "effect_class": _SUPPORTED_ACTIVATION_EFFECT_CLASS,
+        "authority_kind": _SUPPORTED_ACTIVATION_AUTHORITY_KIND,
+        "plan_kind": _SUPPORTED_ACTIVATION_PLAN_KIND,
+        "receipt_kind": _SUPPORTED_ACTIVATION_RECEIPT_KIND,
+        "executor_authority": _SUPPORTED_ACTIVATION_EXECUTOR_AUTHORITY,
+        "runtime_proof_task": _SUPPORTED_RUNTIME_PROOF_TASK,
+    }
+    for key, expected_value in supported_activation_values.items():
+        if activation.get(key) != expected_value:
+            raise _contract_error(f"activation.{key} is unsupported for contract v1")
     authority_fields = _contract_strings(
         activation.get("authority_fields"), "activation.authority_fields"
     )
@@ -277,13 +329,19 @@ def _load_managed_contract() -> dict[str, Any]:
         raise _contract_error("activation.authority_fields contain unsupported schema drift")
     if set(plan_fields) != _SUPPORTED_ACTIVATION_PLAN_FIELDS:
         raise _contract_error("activation.plan_fields contain unsupported schema drift")
-    _contract_strings(activation.get("allowed_modes"), "activation.allowed_modes")
+    allowed_modes = _contract_strings(
+        activation.get("allowed_modes"), "activation.allowed_modes"
+    )
+    if set(allowed_modes) != _SUPPORTED_ACTIVATION_MODES:
+        raise _contract_error("activation.allowed_modes are unsupported for contract v1")
     lifetime = _contract_int(
         activation.get("max_authority_lifetime_seconds"),
         "activation.max_authority_lifetime_seconds",
     )
-    if lifetime <= 0:
-        raise _contract_error("activation.max_authority_lifetime_seconds must be positive")
+    if lifetime != _SUPPORTED_MAX_AUTHORITY_LIFETIME_SECONDS:
+        raise _contract_error(
+            "activation.max_authority_lifetime_seconds is unsupported for contract v1"
+        )
     required_true = (
         "requires_exact_build_receipt",
         "requires_exact_system_closure",
@@ -393,7 +451,13 @@ def _load_managed_contract() -> dict[str, Any]:
             }
         ),
     )
-    _contract_string(execution.get("build_context_kind"), "execution_context.build_context_kind")
+    build_context_kind = _contract_string(
+        execution.get("build_context_kind"), "execution_context.build_context_kind"
+    )
+    if build_context_kind != _SUPPORTED_BUILD_SOURCE_CONTEXT_KIND:
+        raise _contract_error(
+            "execution_context.build_context_kind is unsupported for contract v1"
+        )
     context_fields = _contract_strings(
         execution.get("build_context_fields"), "execution_context.build_context_fields"
     )
