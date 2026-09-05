@@ -20,6 +20,7 @@ from scripts.managed_nix import (
     DESTRUCTIVE_EFFECTS,
     MANAGED_DEPLOYMENT_CONTRACT,
     MAX_AUTHORITY_LIFETIME_SECONDS,
+    MINIMUM_MANAGED_BUILD_SCOPE,
     NORMAL_EFFECTS,
     ManagedNixError,
     authorize_activation_plan_execution,
@@ -127,6 +128,17 @@ def test_effect_classifier_uses_possible_effect_not_filename_or_intent() -> None
     assert classify_effect(["luks-keyslot-mutation"]) == "destructive"
     assert classify_effect(["sounds-harmless-but-is-unknown"]) == "destructive"
     assert classify_effect(("package-set",)) == "normal"
+
+
+def test_managed_build_scope_cannot_be_underdeclared_below_boot_critical() -> None:
+    raw = request(possible_effects=["package-set"])
+    assert classify_effect(raw["possible_effects"]) == "normal"
+    assert MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical"
+    normalized = validate_build_request(raw)
+    assert normalized["effect_scope"] == "boot-critical"
+    built = make_receipt(raw)
+    assert built["effect_scope"] == "boot-critical"
+    assert validate_build_receipt(built) == built
 
 
 def test_effect_classifier_contract_sets_are_disjoint() -> None:
@@ -348,8 +360,8 @@ def test_build_receipt_revalidates_budgets_exact_shape_and_effect_scope() -> Non
     with pytest.raises(ManagedNixError, match="fields mismatch"):
         validate_build_receipt(built)
 
-    built = receipt()
-    built["possible_effects"] = ["package-set"]
+    built = make_receipt(request(possible_effects=["package-set"]))
+    built["effect_scope"] = "normal"
     with pytest.raises(ManagedNixError, match="effect_scope"):
         validate_build_receipt(built)
 
@@ -478,6 +490,13 @@ def test_activation_plan_execution_revalidates_fresh_authority_receipt_target_an
             expected_target="sandbox:nixos-activation-1",
             now="2026-09-04T08:00:00Z",
         )
+
+
+def test_underdeclared_normal_build_still_cannot_skip_to_persistent_activation() -> None:
+    built = make_receipt(request(possible_effects=["package-set"]))
+    candidate = authority(built, mode="persistent")
+    with pytest.raises(ManagedNixError, match="test/next-boot"):
+        validate_authority(built, candidate)
 
 
 def test_boot_critical_build_cannot_skip_directly_to_persistent_activation() -> None:
@@ -719,6 +738,7 @@ def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() ->
     assert contract["activation"]["runtime_executor_implemented_here"] is False
     assert contract["activation"]["runtime_proof_task"] == "HEIM-PC-NIXOS-MIGRATION-V1-T004"
     assert contract["activation"]["requires_independent_live_closure_readback"] is True
+    assert contract["effect_classifier"]["minimum_managed_build_scope"] == "boot-critical"
     assert "issued_at" in contract["activation"]["plan_fields"]
     assert "expires_at" in contract["activation"]["plan_fields"]
     assert contract["execution_context"] == {

@@ -179,6 +179,7 @@
       "audio-userspace",
       "network-userspace"
     ],
+    "minimum_managed_build_scope": "boot-critical",
     "boot_critical_requires_next_boot_path": true
   },
   "rollback": {

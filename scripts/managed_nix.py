@@ -132,6 +132,7 @@ _SUPPORTED_NORMAL_EFFECTS = frozenset(
         "network-userspace",
     }
 )
+_SUPPORTED_MINIMUM_MANAGED_BUILD_SCOPE = "boot-critical"
 
 
 def _contract_error(message: str) -> ManagedNixContractError:
@@ -354,7 +355,7 @@ def _load_managed_contract() -> dict[str, Any]:
             {
                 "unknown_effect", "destructive_path", "destructive_effects",
                 "boot_critical_effects", "normal_effects",
-                "boot_critical_requires_next_boot_path",
+                "minimum_managed_build_scope", "boot_critical_requires_next_boot_path",
             }
         ),
     )
@@ -373,6 +374,14 @@ def _load_managed_contract() -> dict[str, Any]:
         raise _contract_error("effect_classifier.boot_critical_effects are unsupported for contract v1")
     if effect_sets["normal_effects"] != _SUPPORTED_NORMAL_EFFECTS:
         raise _contract_error("effect_classifier.normal_effects are unsupported for contract v1")
+    minimum_scope = _contract_string(
+        classifier.get("minimum_managed_build_scope"),
+        "effect_classifier.minimum_managed_build_scope",
+    )
+    if minimum_scope != _SUPPORTED_MINIMUM_MANAGED_BUILD_SCOPE:
+        raise _contract_error(
+            "effect_classifier.minimum_managed_build_scope is unsupported for contract v1"
+        )
     flattened = [item for group in effect_sets.values() for item in group]
     if len(set(flattened)) != len(flattened):
         raise _contract_error("effect classes must be pairwise disjoint")
@@ -478,6 +487,7 @@ BUILD_SOURCE_CONTEXT_KIND = str(_EXECUTION_CONTEXT_CONTRACT["build_context_kind"
 DESTRUCTIVE_EFFECTS = frozenset(_EFFECT_CONTRACT["destructive_effects"])
 BOOT_CRITICAL_EFFECTS = frozenset(_EFFECT_CONTRACT["boot_critical_effects"])
 NORMAL_EFFECTS = frozenset(_EFFECT_CONTRACT["normal_effects"])
+MINIMUM_MANAGED_BUILD_SCOPE = str(_EFFECT_CONTRACT["minimum_managed_build_scope"])
 ALLOWED_ACTIVATION_MODES = frozenset(_ACTIVATION_CONTRACT["allowed_modes"])
 MAX_AUTHORITY_LIFETIME_SECONDS = int(_ACTIVATION_CONTRACT["max_authority_lifetime_seconds"])
 ACTIVATION_EXECUTOR_AUTHORITY = str(_ACTIVATION_CONTRACT["executor_authority"])
@@ -672,8 +682,16 @@ def _classify_normalized_effects(normalized: Sequence[str]) -> str:
 
 
 def classify_effect(possible_effects: Sequence[str]) -> str:
-    """Classify by possible effect. Unknown effects fail closed as destructive."""
+    """Classify the declared effect taxonomy without granting build authority."""
     return _classify_normalized_effects(_normalize_effects(possible_effects))
+
+
+def _managed_build_effect_scope(normalized_effects: Sequence[str]) -> str:
+    """Apply the conservative v1 floor to caller-declared managed Nix effects."""
+    classified = _classify_normalized_effects(normalized_effects)
+    if classified == "normal" and MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical":
+        return "boot-critical"
+    return classified
 
 
 def _validate_build_entrypoint(value: Any) -> list[str]:
@@ -719,7 +737,7 @@ def validate_build_request(request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(possible_effects, list):
         raise ManagedNixError("possible_effects must be a list")
     normalized_effects = _normalize_effects(possible_effects)
-    effect_scope = _classify_normalized_effects(normalized_effects)
+    effect_scope = _managed_build_effect_scope(normalized_effects)
     if effect_scope == "destructive":
         raise ManagedNixError("destructive or ambiguous effects require the separate destructive plan")
     entrypoint = _validate_build_entrypoint(request.get("entrypoint"))
@@ -845,7 +863,7 @@ def validate_build_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(possible_effects, list):
         raise ManagedNixError("build receipt possible_effects must be a list")
     normalized_effects = _normalize_effects(possible_effects)
-    recomputed_scope = _classify_normalized_effects(normalized_effects)
+    recomputed_scope = _managed_build_effect_scope(normalized_effects)
     if recomputed_scope == "destructive":
         raise ManagedNixError("build receipt possible_effects are destructive or ambiguous")
     if receipt.get("effect_scope") != recomputed_scope:
