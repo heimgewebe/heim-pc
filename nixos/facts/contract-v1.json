@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "heim-pc:nixos:facts:contract:v1",
+  "title": "Heim-PC NixOS facts boundary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "declared", "runtime", "truth_policy"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "declared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "derivation", "required_bindings"],
+      "properties": {
+        "api_version": {"const": "heim-pc.nixos.declared-facts/v1"},
+        "derivation": {"const": "managed-nixos-build-receipt"},
+        "required_bindings": {
+          "const": ["sourceRevision", "controlReleaseSet", "systemClosure", "binding.buildReceiptSha256"]
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "storage", "required_bindings"],
+      "properties": {
+        "api_version": {"const": "heim-pc.nixos.runtime-facts/v1"},
+        "storage": {"const": "outside-git"},
+        "required_bindings": {
+          "const": ["sourceRevision", "source", "observedAt", "freshnessSeconds", "binding.observationsSha256"]
+        }
+      }
+    },
+    "truth_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared_facts_current_file_in_git", "runtime_may_rewrite_declared_truth", "fixtures_are_current_truth"],
+      "properties": {
+        "declared_facts_current_file_in_git": {"const": false},
+        "runtime_may_rewrite_declared_truth": {"const": false},
+        "fixtures_are_current_truth": {"const": false}
+      }
+    }
+  },
+  "x-heim-pc-example": {
+    "schema_version": 1,
+    "declared": {
+      "api_version": "heim-pc.nixos.declared-facts/v1",
+      "derivation": "managed-nixos-build-receipt",
+      "required_bindings": ["sourceRevision", "controlReleaseSet", "systemClosure", "binding.buildReceiptSha256"]
+    },
+    "runtime": {
+      "api_version": "heim-pc.nixos.runtime-facts/v1",
+      "storage": "outside-git",
+      "required_bindings": ["sourceRevision", "source", "observedAt", "freshnessSeconds", "binding.observationsSha256"]
+    },
+    "truth_policy": {
+      "declared_facts_current_file_in_git": false,
+      "runtime_may_rewrite_declared_truth": false,
+      "fixtures_are_current_truth": false
+    }
+  }
+}
