@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,15 @@ except ModuleNotFoundError:  # Direct execution from scripts/.
     from nixos_facts import FactsError, runtime_facts, sha256_json, validate_runtime_facts
 
 HARDWARE_SOURCE_ID = "heim-pc:read-only-hardware-probe:v1"
+TRUSTED_PROBE_EXECUTABLE_DIRS = (
+    Path("/run/current-system/sw/bin"),
+    Path("/usr/bin"),
+)
+PROBE_ENVIRONMENT = {
+    "PATH": ":".join(str(path) for path in TRUSTED_PROBE_EXECUTABLE_DIRS),
+    "LANG": "C",
+    "LC_ALL": "C",
+}
 PROBE_DEFINITION = {
     "schema_version": 1,
     "kind": "heim_pc.nixos_hardware_probe_definition",
@@ -32,9 +42,17 @@ PROBE_DEFINITION = {
     ],
     "audio": {"read": "/proc/asound/cards"},
     "midi": ["aconnect", "-l"],
+    "trusted_executable_dirs": [str(path) for path in TRUSTED_PROBE_EXECUTABLE_DIRS],
+    "environment": PROBE_ENVIRONMENT.copy(),
     "shell": False,
     "mutating": False,
 }
+_PROBE_EXECUTABLES = frozenset(
+    {
+        PROBE_DEFINITION["gpu"][0],
+        PROBE_DEFINITION["midi"][0],
+    }
+)
 HISTORICAL_PHYSICAL_EVIDENCE = {
     "classification": "historical-only",
     "archive_id": "20260902T112439Z-5eabac896f53",
@@ -54,9 +72,11 @@ ANCHORS = {
         "label": "MOTU M2",
     },
     "midi": {
-        # USB enumeration alone is not enough; this requires the ALSA MIDI surface.
+        # A user-space ALSA client can choose its own name. Require the FP-30X
+        # identity and the kernel/card markers on the same client header line.
         "observation_keys": ("midi",),
         "needles": ("fp-30x",),
+        "same_line_needles": ("fp-30x", "type=kernel", "card="),
         "label": "Roland FP-30X MIDI path",
     },
 }
@@ -70,25 +90,46 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _run_probe_command(argv: list[str]) -> str:
-    """Run one fixed read-only probe without shell interpretation."""
+def _resolve_probe_executable(executable: str) -> str:
+    """Resolve an allowlisted probe binary without consulting caller-controlled PATH."""
 
+    if executable not in _PROBE_EXECUTABLES or "/" in executable:
+        raise FileNotFoundError(executable)
+    for directory in TRUSTED_PROBE_EXECUTABLE_DIRS:
+        candidate = directory / executable
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
+    raise FileNotFoundError(executable)
+
+
+def _run_probe_command(argv: list[str]) -> str:
+    """Run one fixed read-only probe with a bounded trusted execution environment."""
+
+    if not argv:
+        return "ERROR:probe-empty-command"
+    display_executable = argv[0]
     try:
+        executable = _resolve_probe_executable(display_executable)
         completed = subprocess.run(
-            argv,
+            [executable, *argv[1:]],
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=PROBE_ENVIRONMENT.copy(),
         )
     except FileNotFoundError:
-        return f"ERROR:command-not-found:{argv[0]}"
+        return f"ERROR:command-not-found:{display_executable}"
     except (OSError, subprocess.SubprocessError) as exc:
-        return f"ERROR:probe-failed:{argv[0]}:{type(exc).__name__}"
+        return f"ERROR:probe-failed:{display_executable}:{type(exc).__name__}"
     if completed.returncode != 0:
-        return f"ERROR:probe-returncode:{argv[0]}:{completed.returncode}"
+        return f"ERROR:probe-returncode:{display_executable}:{completed.returncode}"
     text = completed.stdout.strip()
-    return text if text else f"ERROR:probe-empty:{argv[0]}"
+    return text if text else f"ERROR:probe-empty:{display_executable}"
 
 
 def _read_probe_file(path: Path) -> str:
@@ -136,6 +177,19 @@ def _observation_text(facts: Mapping[str, Any], keys: tuple[str, ...]) -> str:
     return "\n".join(values).casefold()
 
 
+def _matches_anchor(haystack: str, spec: Mapping[str, Any]) -> bool:
+    needles = tuple(spec.get("needles", ()))
+    if not all(needle in haystack for needle in needles):
+        return False
+    same_line_needles = tuple(spec.get("same_line_needles", ()))
+    if not same_line_needles:
+        return True
+    return any(
+        all(needle in line for needle in same_line_needles)
+        for line in haystack.splitlines()
+    )
+
+
 def evaluate_hardware_acceptance(
     facts: Mapping[str, Any],
     *,
@@ -162,7 +216,7 @@ def evaluate_hardware_acceptance(
     checks: dict[str, dict[str, Any]] = {}
     for name, spec in ANCHORS.items():
         haystack = _observation_text(facts, spec["observation_keys"])
-        matched = all(needle in haystack for needle in spec["needles"])
+        matched = _matches_anchor(haystack, spec)
         checks[name] = {
             "label": spec["label"],
             "status": "pass" if matched else "fail",
