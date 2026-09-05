@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_storage_rehearsal_contract",
+  "profile": "nixos-executor-2026",
+  "target": {
+    "allowed_device_kinds": ["loop", "nbd"],
+    "minimum_size_bytes": 17179869184,
+    "max_evidence_age_seconds": 300,
+    "requires_blank": true,
+    "requires_unmounted": true,
+    "requires_no_partition_table": true,
+    "requires_no_filesystem_signatures": true,
+    "production_identity_match_forbidden": true,
+    "production_backing_match_forbidden": true,
+    "production_mount_match_forbidden": true
+  },
+  "topology": {
+    "partition_table": "gpt",
+    "partitions": [
+      {
+        "number": 1,
+        "role": "efi-system-partition",
+        "label": "EFI",
+        "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+        "rehearsal_size_mib": 1024,
+        "filesystem": "vfat"
+      },
+      {
+        "number": 2,
+        "role": "recovery-surface",
+        "label": "RECOVERY",
+        "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+        "rehearsal_size_mib": 4096,
+        "filesystem": "ext4"
+      },
+      {
+        "number": 3,
+        "role": "encrypted-system",
+        "label": "NIXOS_CRYPT",
+        "type_guid": "CA7D7CCB-63ED-4C53-861C-1742536059CC",
+        "rehearsal_size_mib": "remainder",
+        "encryption": "luks2",
+        "filesystem": "btrfs"
+      }
+    ],
+    "luks": {
+      "version": 2,
+      "mapper_name": "nixos-rehearsal-crypt"
+    },
+    "btrfs": {
+      "label": "NIXOS_SYSTEM",
+      "subvolumes": [
+        {"name": "@root", "mountpoint": "/"},
+        {"name": "@nix", "mountpoint": "/nix"},
+        {"name": "@persist", "mountpoint": "/persist"},
+        {"name": "@home", "mountpoint": "/home"},
+        {"name": "@data", "mountpoint": "/var/lib/heim-pc-data"},
+        {"name": "@containers", "mountpoint": "/var/lib/containers"}
+      ]
+    }
+  },
+  "runtime_effect_boundary": {
+    "executor_task": "HEIM-PC-NIXOS-MIGRATION-V1-T003",
+    "exclusive_resource": "service.heim-pc-nixos-storage-rehearsal-sandbox",
+    "repository_task_may_execute": false,
+    "effect_plan_execution_authorized": false,
+    "requires_break_glass_runtime_authority": true,
+    "forbidden_production_effects": [
+      "production-block-device-write",
+      "production-efi-write",
+      "secure-boot-key-write",
+      "firmware-write",
+      "productive-nixos-install",
+      "productive-switch",
+      "reboot"
+    ]
+  },
+  "recovery_evidence_domains": [
+    "backup-coverage",
+    "restore-usability",
+    "bootable-recovery-media",
+    "offline-source-lock-trust",
+    "luks-recovery-material"
+  ],
+  "offline_reconstruction": {
+    "network_required": false,
+    "production_system_ssd_required": false,
+    "grabowski_required": false,
+    "bureau_required": false,
+    "stages": [
+      "verify-offhost-evidence",
+      "prepare-disposable-target",
+      "restore-critical-data",
+      "restore-storage-recovery-material",
+      "restore-source-lock-trust",
+      "restore-known-control-closure",
+      "activate-known-control-closure",
+      "boot-and-readback-exact-closure"
+    ]
+  }
+}
