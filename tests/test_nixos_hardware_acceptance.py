@@ -73,6 +73,27 @@ def test_missing_anchor_fails_without_turning_history_into_current_truth() -> No
     assert result["historicalEvidenceIsCurrent"] is False
 
 
+def test_midi_anchor_requires_fp30x_kernel_client_on_same_line() -> None:
+    facts = current_hardware_facts()
+    midi = (
+        "client 24: 'FP-30X' [type=user,pid=1234]\n"
+        "client 32: 'Other Hardware' [type=kernel,card=2]"
+    )
+    import hashlib
+
+    facts["observations"]["midi"]["value"] = midi
+    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
+    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+
+    result = evaluate_hardware_acceptance(
+        facts,
+        expected_revision=REVISION,
+        now="2026-09-04T07:05:00Z",
+    )
+    assert result["status"] == "fail"
+    assert result["checks"]["midi"]["status"] == "fail"
+
+
 def test_wrong_probe_source_is_not_hardware_authority() -> None:
     facts = current_hardware_facts()
     facts["source"] = "caller-supplied:looks-valid"
@@ -133,6 +154,30 @@ def test_live_probe_owns_commands_source_and_clock(monkeypatch) -> None:
         tuple(PROBE_DEFINITION["midi"]),
     ]
     assert facts["observations"]["audio"]["value"].endswith("MOTU M2")
+
+
+def test_probe_command_ignores_caller_path_and_loader_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return hardware.subprocess.CompletedProcess(argv, 0, stdout="trusted output", stderr="")
+
+    monkeypatch.setenv("PATH", "/tmp/attacker-controlled")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/attacker.so")
+    monkeypatch.setattr(
+        hardware,
+        "_resolve_probe_executable",
+        lambda executable: f"/trusted/{executable}",
+    )
+    monkeypatch.setattr(hardware.subprocess, "run", fake_subprocess_run)
+
+    assert hardware._run_probe_command(["nvidia-smi", "--query-gpu=name"]) == "trusted output"
+    assert captured["argv"] == ["/trusted/nvidia-smi", "--query-gpu=name"]
+    assert captured["env"] == PROBE_DEFINITION["environment"]
+    assert "LD_PRELOAD" not in captured["env"]
+    assert "/tmp/attacker-controlled" not in captured["env"]["PATH"]
 
 
 def test_probe_failure_becomes_explicit_fail_closed_observation(monkeypatch) -> None:
