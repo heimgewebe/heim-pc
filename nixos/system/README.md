@@ -29,7 +29,7 @@ The hard security assumption is that an arbitrary coding agent may become root i
 - `modules/storage-layout.nix`: contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles.
 - `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
 - `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
-- `tests/integration.nix`: original whole-host VM integration proof.
+- `tests/integration.nix`: scoped Grabowski/Bureau VM integration proof.
 - `tests/trust-zones.nix`: adversarial trust-zone proof.
 - `tests/vsock-broker.nix`: test-only no-IP AF_VSOCK broker handshake.
 - `../../tests/test_nixos_system_source.py`: repository-level static safety and source-snapshot checks.
@@ -46,7 +46,9 @@ The host-shaped configurations have deliberately different roles:
 
 The physical host profiles enable AMD microcode for the Ryzen platform. The VM proof does not. `alex` is in the `networkmanager` group so the desktop user can manage NetworkManager connections.
 
-A secure credential/first-boot bootstrap is **not yet defined** for a fresh physical installation. No password or password hash is embedded in Git or the Nix Store. Therefore the storage target is a build/proof candidate, not yet a login-ready bare-metal install. This is a blocking pre-bare-metal successor gate, not something this publication PR may silently invent.
+A secure credential/first-boot bootstrap is **not yet defined** for a fresh physical installation. No password or password hash is embedded in Git or the Nix Store. Therefore the storage target is a build/proof candidate, not yet a login-ready bare-metal install. This is a blocking pre-bare-metal successor gate, tracked as `HEIM-PC-NIXOS-MIGRATION-V1-FIRST-BOOT-CREDENTIALS`, not something this publication PR may silently invent.
+
+Managed activation v1 supports only `test` and `next-boot`. Receipt-bound persistent promotion is separate v2 work tracked as `HEIM-PC-NIXOS-MIGRATION-V1-PERSISTENT-V2`.
 
 ## Agent-zone contract
 
@@ -67,7 +69,9 @@ This manifest is an architecture contract, not yet the final production authoriz
 
 ## Current snapshot evidence status
 
-The current snapshot has not re-established Nix/QEMU/KVM execution evidence yet. The source now carries a dedicated `heim-pc-nix` CI lane. It is designed to run `nix flake check --no-build`, evaluate the storage target, both gated physical profiles and the VM profile, assert the evaluated storage/boot/microcode/user-group/gate values, and build the storage-target and VM system closures without activating either. Presence of that workflow is **not** itself a passing result: PR metadata may claim current Nix evidence only after GitHub reports the exact PR head green.
+Workflow presence alone has not re-established Nix/QEMU/KVM execution evidence. Current acceptance comes only from the exact checked-out revision and completed step results below. The source now carries a dedicated `heim-pc-nix` CI lane. It is designed to run `nix flake check --no-build`, evaluate the storage target, both gated physical profiles and the VM profile, assert the evaluated storage/boot/microcode/user-group/gate values, and build the storage-target and VM system closures without activating either. Presence of that workflow is **not** itself a passing result: PR metadata may claim current Nix evidence only after GitHub reports the exact PR head green.
+
+The `profile-contract` report is evaluated configuration metadata, not a system-build receipt. Its VM derivation path deliberately carries no build dependency; the separate storage-target/VM closure build remains mandatory. `live-block-inventory.jq` is exercised by executable JSON and shell-failure tests; the CI also builds the live safety script and runs the scoped VM checks. None of these establishes a physical live-ISO boot.
 
 Historical Store paths, QEMU/KVM runs and earlier Nix evaluations remain historical. They cannot be promoted to evidence for a later source revision after NixOS modules, storage profiles, tests or workflow definitions change. Exact-head CI/review evidence and historical architecture evidence must remain separately labelled.
 

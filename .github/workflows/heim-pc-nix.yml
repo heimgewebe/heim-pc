@@ -44,3 +44,14 @@ jobs:
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
           .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel
+
+      - name: Build live safety script
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.heimPcLiveSafety
+
+      - name: Run scoped VM checks
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#checks.x86_64-linux.integration
+          .#checks.x86_64-linux.trust-zones

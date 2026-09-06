@@ -304,13 +304,18 @@
             && c.fileSystems."/".fsType == "tmpfs"
           ) live;
           pkgs.runCommand "heim-pc-profile-contract" {
-            report = builtins.toJSON {
-              storageTarget = storage target;
-              physicalGateProprietary = storage proprietary;
-              physicalGateOpen = storage open;
-              vmSystem = vm.system.build.toplevel.drvPath;
-              sourceRevision = sourceRevision;
-            };
+            report =
+              let value = builtins.toJSON {
+                evidenceClass = "evaluated-configuration-only";
+                storageTarget = storage target;
+                physicalGateProprietary = storage proprietary;
+                physicalGateOpen = storage open;
+                # Metadata, not a dependency on every VM build-time output.
+                # The separate CI build still realizes the actual systems.
+                vmSystem = builtins.unsafeDiscardStringContext vm.system.build.toplevel.drvPath;
+                sourceRevision = sourceRevision;
+              };
+              in assert !builtins.hasContext value; value;
             passAsFile = [ "report" ];
           } ''
             mkdir -p "$out"

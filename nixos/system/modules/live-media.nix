@@ -223,6 +223,9 @@ in
     };
   };
 
+  # Build the safety script independently without realizing the full ISO.
+  system.build.heimPcLiveSafety = liveSafety;
+
   systemd.services.heim-pc-live-safety = {
     description = "Fail closed before Heim-PC physical Gate A/B desktop";
     wantedBy = [ "multi-user.target" ];
