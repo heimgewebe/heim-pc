@@ -14,6 +14,9 @@ jobs:
     timeout-minutes: 90
     env:
       EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Fresh derivations: the CI evaluator cache retained an unrealized drv
+      # after flake check --no-build (run 34050033409). No gate is weakened.
+      NIX_CONFIG: "eval-cache = false"
     steps:
       - name: Checkout exact source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
