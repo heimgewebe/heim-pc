@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "59a2ee52410692992bac0b8a69f1ba8d7e48056c9ea8e2c7960b1ebef47c31db"
+SOURCE_SNAPSHOT_SHA256 = "15f5fa62b57bd5b7b1529ecbfb15b4af75d7ff6a29a48237109a315db0cd202a"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 
 
@@ -68,6 +68,12 @@ class T(unittest.TestCase):
         self.assertIn("modelRuntime = false", live)
         self.assertIn('"networkmanager"', live)
         self.assertIn('fail "persistent-disk-mount-inventory"', live)
+        self.assertIn("findmnt --json -o SOURCE", live)
+        self.assertIn(".. | objects | .source? // empty", live)
+        self.assertIn("/dev/mmcblk*", live)
+        self.assertIn("/dev/mapper/*", live)
+        self.assertIn("disk|part|crypt|lvm|raid*|mpath", live)
+        self.assertNotIn("grep -E ' /dev/(nvme|sd|vd|xvd)'", live)
         self.assertIn("lib.optional cfg.bootReadiness gateDReport", gates)
         self.assertIn("lib.optional cfg.modelRuntime llamaCuda", gates)
         self.assertIn("services.ollama = lib.mkIf cfg.modelRuntime", gates)

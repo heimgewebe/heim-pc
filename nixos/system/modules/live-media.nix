@@ -16,6 +16,7 @@ let
     runtimeInputs = with pkgs; [
       coreutils
       gnugrep
+      jq
       shadow
       systemd
       util-linux
@@ -45,17 +46,32 @@ let
       fi
 
       mount_inventory=""
-      if mount_inventory="$(${pkgs.util-linux}/bin/findmnt -rn -o TARGET,SOURCE 2>&1)"; then
-        pass "persistent-disk-mount-inventory"
-        unexpected_mounts="$(
+      if mount_inventory="$(${pkgs.util-linux}/bin/findmnt --json -o SOURCE 2>&1)"; then
+        mount_sources=""
+        if mount_sources="$(
           printf '%s\n' "$mount_inventory" |
-            ${pkgs.gnugrep}/bin/grep -E ' /dev/(nvme|sd|vd|xvd)' || true
-        )"
-        if [ -z "$unexpected_mounts" ]; then
-          pass "no-persistent-disk-mounts"
+            ${pkgs.jq}/bin/jq -r '.. | objects | .source? // empty' 2>&1
+        )"; then
+          pass "persistent-disk-mount-inventory"
+          persistent_mount_found=0
+          while IFS= read -r source; do
+            [ -n "$source" ] || continue
+            case "$source" in
+              /dev/loop*) ;;
+              /dev/*)
+                printf 'persistent block-backed mount source: %s\n' "$source" >&2
+                persistent_mount_found=1
+                ;;
+            esac
+          done <<< "$mount_sources"
+          if [ "$persistent_mount_found" -eq 0 ]; then
+            pass "no-persistent-disk-mounts"
+          else
+            fail "no-persistent-disk-mounts"
+          fi
         else
-          printf '%s\n' "$unexpected_mounts" >&2
-          fail "no-persistent-disk-mounts"
+          printf '%s\n' "$mount_sources" >&2
+          fail "persistent-disk-mount-inventory"
         fi
       else
         printf '%s\n' "$mount_inventory" >&2
@@ -65,10 +81,14 @@ let
       raw_access=0
       while read -r device kind; do
         case "$device" in
-          /dev/nvme*|/dev/sd*|/dev/vd*|/dev/xvd*) ;;
+          /dev/loop*|/dev/zram*) continue ;;
+          /dev/nvme*|/dev/sd*|/dev/vd*|/dev/xvd*|/dev/mmcblk*|/dev/mapper/*|/dev/dm-*|/dev/md*) ;;
           *) continue ;;
         esac
-        [ "$kind" = "disk" ] || continue
+        case "$kind" in
+          disk|part|crypt|lvm|raid*|mpath) ;;
+          *) continue ;;
+        esac
         if runuser -u ${liveUser} -- test -r "$device" || runuser -u ${liveUser} -- test -w "$device"; then
           printf 'live user has raw block access: %s\n' "$device" >&2
           raw_access=1
