@@ -158,6 +158,8 @@ def runtime_facts(
     bound: dict[str, dict[str, str]] = {}
     for name, value in sorted(observations.items()):
         key = _require_nonempty_string(name, "observation name")
+        if key in bound:
+            raise FactsError("observation names must be unique after trimming")
         text = _require_nonempty_string(value, f"observation {key}")
         encoded = text.encode("utf-8")
         bound[key] = {

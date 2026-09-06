@@ -102,6 +102,17 @@ def test_runtime_facts_are_separate_source_freshness_and_hash_bound() -> None:
     assert validation["ageSeconds"] == 300
 
 
+def test_runtime_facts_reject_observation_names_that_collide_after_trimming() -> None:
+    with pytest.raises(FactsError, match="unique after trimming"):
+        runtime_facts(
+            source_revision=REVISION,
+            source="probe",
+            observed_at="2026-09-04T07:00:00Z",
+            freshness_seconds=900,
+            observations={" pci ": "first", "pci": "second"},
+        )
+
+
 def test_runtime_facts_reject_stale_revision_and_tampered_observation() -> None:
     result = runtime_facts(
         source_revision=REVISION,
