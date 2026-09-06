@@ -45,67 +45,54 @@ let
         fail "copytoram-live-media"
       fi
 
-      mount_inventory=""
-      if mount_inventory="$(${pkgs.util-linux}/bin/findmnt --json -o SOURCE 2>&1)"; then
-        mount_sources=""
-        if mount_sources="$(
-          printf '%s\n' "$mount_inventory" |
-            ${pkgs.jq}/bin/jq -r '.. | objects | .source? // empty' 2>&1
-        )"; then
-          pass "persistent-disk-mount-inventory"
-          persistent_mount_found=0
-          while IFS= read -r source; do
-            [ -n "$source" ] || continue
-            case "$source" in
-              /dev/loop*) ;;
-              /dev/*)
-                printf 'persistent block-backed mount source: %s\n' "$source" >&2
-                persistent_mount_found=1
-                ;;
-            esac
-          done <<< "$mount_sources"
-          if [ "$persistent_mount_found" -eq 0 ]; then
-            pass "no-persistent-disk-mounts"
-          else
-            fail "no-persistent-disk-mounts"
-          fi
-        else
-          printf '%s\n' "$mount_sources" >&2
-          fail "persistent-disk-mount-inventory"
-        fi
-      else
-        printf '%s\n' "$mount_inventory" >&2
-        fail "persistent-disk-mount-inventory"
-      fi
+      # All three probes and their JSON schemas must succeed before an empty
+      # device list can count as safe. The loop exception is bound to the pinned
+      # ISO module's RAM-backed /iso/nix-store.squashfs, not a name prefix.
+      mount_inventory="$(findmnt --json --list -o TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN)" || {
+        fail "persistent-disk-mount-inventory"; exit 1;
+      }
+      block_inventory="$(lsblk --json --list --paths -o PATH,TYPE,MAJ:MIN)" || {
+        fail "raw-block-device-inventory"; exit 1;
+      }
+      loop_inventory="$(losetup --json --list -o NAME,BACK-FILE)" || {
+        fail "loop-backing-inventory"; exit 1;
+      }
+      checked_devices="$(
+        printf '%s\n' "$mount_inventory" "$block_inventory" "$loop_inventory" |
+          jq --compact-output --exit-status --slurp --from-file ${./live-block-inventory.jq}
+      )" || { fail "persistent-disk-mount-inventory"; exit 1; }
+      raw_devices="$(printf '%s\n' "$checked_devices" | jq -r '.[]')" || {
+        fail "raw-block-device-inventory"; exit 1;
+      }
+      pass "persistent-disk-mount-inventory"
+      pass "no-persistent-disk-mounts"
 
+      groups="$(id -nG ${liveUser})" || {
+        fail "live-user-identity"; exit 1;
+      }
+      if [ -z "$groups" ] || printf '%s\n' "$groups" | tr ' ' '\n' | grep -Eq '^(wheel|disk)$'; then
+        fail "live-user-not-privileged-storage-admin"
+      else
+        pass "live-user-not-privileged-storage-admin"
+      fi
+      # A failed privilege drop is an observation failure, never a denial proof.
+      runuser -u ${liveUser} -- true || { fail "live-user-probe"; exit 1; }
       raw_access=0
-      while read -r device kind; do
-        case "$device" in
-          /dev/loop*|/dev/zram*) continue ;;
-          /dev/nvme*|/dev/sd*|/dev/vd*|/dev/xvd*|/dev/mmcblk*|/dev/mapper/*|/dev/dm-*|/dev/md*) ;;
-          *) continue ;;
-        esac
-        case "$kind" in
-          disk|part|crypt|lvm|raid*|mpath) ;;
-          *) continue ;;
-        esac
-        if runuser -u ${liveUser} -- test -r "$device" || runuser -u ${liveUser} -- test -w "$device"; then
-          printf 'live user has raw block access: %s\n' "$device" >&2
+      while IFS= read -r device; do
+        [ -n "$device" ] || continue
+        if [ ! -b "$device" ]; then
+          fail "block-device-disappeared"; raw_access=1; continue
+        fi
+        if ! runuser -u ${liveUser} -- ${pkgs.runtimeShell} -c \
+          'if test -r "$1" || test -w "$1"; then exit 42; fi' live-block-probe "$device"; then
+          printf 'raw block access or failed user probe: %s\n' "$device" >&2
           raw_access=1
         fi
-      done < <(lsblk -nrpo PATH,TYPE)
+      done <<< "$raw_devices"
       if [ "$raw_access" -eq 0 ]; then
         pass "raw-block-devices-inaccessible-to-live-user"
       else
         fail "raw-block-devices-inaccessible-to-live-user"
-      fi
-
-      groups="$(id -nG ${liveUser} 2>/dev/null || true)"
-      if printf '%s\n' "$groups" | tr ' ' '\n' | grep -Eq '^(wheel|disk)$'; then
-        printf 'groups=%s\n' "$groups" >&2
-        fail "live-user-not-privileged-storage-admin"
-      else
-        pass "live-user-not-privileged-storage-admin"
       fi
 
       # Keep the boot-safety path limited to its declared runtime inputs. Avoid

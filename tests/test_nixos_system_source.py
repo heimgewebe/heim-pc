@@ -5,7 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "15f5fa62b57bd5b7b1529ecbfb15b4af75d7ff6a29a48237109a315db0cd202a"
+SOURCE_SNAPSHOT_SHA256 = "cd7c9c76c64369d8e6832966a488bab4dad676e5cd35656bb889e7dc365e7cda"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 
 
@@ -41,7 +41,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 20)
+        self.assertEqual(len(files), 21)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -88,12 +88,11 @@ class T(unittest.TestCase):
         self.assertIn("modelRuntime = false", live)
         self.assertIn('"networkmanager"', live)
         self.assertIn('fail "persistent-disk-mount-inventory"', live)
-        self.assertIn("findmnt --json -o SOURCE", live)
-        self.assertIn(".. | objects | .source? // empty", live)
-        self.assertIn("/dev/mmcblk*", live)
-        self.assertIn("/dev/mapper/*", live)
-        self.assertIn("disk|part|crypt|lvm|raid*|mpath", live)
-        self.assertNotIn("grep -E ' /dev/(nvme|sd|vd|xvd)'", live)
+        self.assertIn("findmnt --json --list -o TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN", live)
+        self.assertIn("lsblk --json --list --paths", live)
+        self.assertIn("${./live-block-inventory.jq}", live)
+        self.assertNotIn("done < <(lsblk", live)
+        self.assertIn('fail "raw-block-device-inventory"; exit 1;', live)
         self.assertIn("lib.optional cfg.bootReadiness gateDReport", gates)
         self.assertIn("lib.optional cfg.modelRuntime llamaCuda", gates)
         self.assertIn("services.ollama = lib.mkIf cfg.modelRuntime", gates)
