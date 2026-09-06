@@ -10,7 +10,11 @@ ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719
 
 class T(unittest.TestCase):
     def test_root_flake_is_thin_adapter(self):
-        self.assertEqual((ROOT / "flake.nix").read_text(), "import ./nixos/system/flake.nix\n")
+        root_flake = (ROOT / "flake.nix").read_text()
+        self.assertTrue(root_flake.startswith("{\n"))
+        self.assertIn("(import ./nixos/system/flake.nix).description", root_flake)
+        self.assertIn("(import ./nixos/system/flake.nix).inputs", root_flake)
+        self.assertIn("(import ./nixos/system/flake.nix).outputs", root_flake)
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
