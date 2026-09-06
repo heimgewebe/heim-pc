@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,10 +12,25 @@ ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719
 class T(unittest.TestCase):
     def test_root_flake_is_thin_adapter(self):
         root_flake = (ROOT / "flake.nix").read_text()
+        nested = (SOURCE / "flake.nix").read_text()
         self.assertTrue(root_flake.startswith("{\n"))
-        self.assertIn("(import ./nixos/system/flake.nix).description", root_flake)
-        self.assertIn("(import ./nixos/system/flake.nix).inputs", root_flake)
-        self.assertIn("(import ./nixos/system/flake.nix).outputs", root_flake)
+        # Static drift guard only; the Nix CI lane proves actual evaluation.
+        metadata = r'description = "[^"\n]+";'
+        inputs = r"  inputs = \{.*?\n  \};"
+        self.assertEqual(re.search(metadata, root_flake).group(), re.search(metadata, nested).group())
+        self.assertEqual(re.search(inputs, root_flake, re.S).group(), re.search(inputs, nested, re.S).group())
+        self.assertIn("outputs = inputs@{ self, nixpkgs, microvm }:", root_flake)
+        self.assertIn("(import ./nixos/system/flake.nix).outputs inputs", root_flake)
+        self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
+        self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
+
+    def test_nix_workflow_binds_exact_source_without_lock_update(self):
+        workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
+        self.assertIn("nix flake check --no-build --no-update-lock-file", workflow)
+        self.assertIn(".#checks.x86_64-linux.profile-contract", workflow)
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
