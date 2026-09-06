@@ -44,12 +44,22 @@ let
         fail "copytoram-live-media"
       fi
 
-      unexpected_mounts="$(${pkgs.util-linux}/bin/findmnt -rn -o TARGET,SOURCE | ${pkgs.gnugrep}/bin/grep -E ' /dev/(nvme|sd|vd|xvd)' || true)"
-      if [ -z "$unexpected_mounts" ]; then
-        pass "no-persistent-disk-mounts"
+      mount_inventory=""
+      if mount_inventory="$(${pkgs.util-linux}/bin/findmnt -rn -o TARGET,SOURCE 2>&1)"; then
+        pass "persistent-disk-mount-inventory"
+        unexpected_mounts="$(
+          printf '%s\n' "$mount_inventory" |
+            ${pkgs.gnugrep}/bin/grep -E ' /dev/(nvme|sd|vd|xvd)' || true
+        )"
+        if [ -z "$unexpected_mounts" ]; then
+          pass "no-persistent-disk-mounts"
+        else
+          printf '%s\n' "$unexpected_mounts" >&2
+          fail "no-persistent-disk-mounts"
+        fi
       else
-        printf '%s\n' "$unexpected_mounts" >&2
-        fail "no-persistent-disk-mounts"
+        printf '%s\n' "$mount_inventory" >&2
+        fail "persistent-disk-mount-inventory"
       fi
 
       raw_access=0
@@ -227,7 +237,10 @@ in
       enable = true;
       openKernelModule = heimPcLiveProfile.nvidiaOpen;
     };
-    physicalGates.enable = true;
+    physicalGates = {
+      enable = true;
+      bootReadiness = false;
+    };
   };
 
   environment.systemPackages = with pkgs; [

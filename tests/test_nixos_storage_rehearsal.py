@@ -187,6 +187,10 @@ def test_contract_is_digest_bound_and_exact_topology():
         "encrypted-system",
     ]
     assert contract["topology"]["luks"]["version"] == 2
+    surfaces = {item["role"]: item.get("mountpoint") for item in contract["topology"]["partitions"]}
+    assert surfaces["efi-system-partition"] == "/boot"
+    assert surfaces["recovery-surface"] == "/recovery"
+    assert surfaces["encrypted-system"] is None
     assert [item["name"] for item in contract["topology"]["btrfs"]["subvolumes"]] == [
         "@root", "@nix", "@persist", "@home", "@data", "@containers"
     ]
@@ -476,6 +480,13 @@ def test_plan_declares_same_luks_secret_binding_and_teardown():
     assert {item["effect"] for item in secret_commands} == {"luks-format", "luks-open"}
     assert {item["secret_binding"] for item in secret_commands} == {"luks-key-v1"}
     assert plan["teardown_required"] is True
+    command_effects = [item["effect"] for item in plan["commands"]]
+    assert "btrfs-stage-unmount" not in command_effects
+    teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
+    assert "btrfs-stage-unmount" in teardown_effects
+    assert teardown_effects.index("btrfs-stage-unmount") < teardown_effects.index("luks-close")
+    stage = next(item for item in plan["teardown_commands"] if item["effect"] == "btrfs-stage-unmount")
+    assert stage["argv"] == ["umount", m.BTRFS_STAGE_ROOT]
     assert plan["teardown_commands"][-1]["effect"] == "luks-close"
     assert all(item["argv"][0] in {"umount", "cryptsetup"} for item in plan["teardown_commands"])
 

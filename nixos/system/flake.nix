@@ -68,6 +68,26 @@
         modules = [ ./hosts/heim-pc ];
       };
 
+      # Build-only closure for T011/T003. Unlike the deliberately impossible
+      # prototype host, its boot filesystems are derived from the exact storage
+      # rehearsal contract so the built closure can be booted on that topology.
+      nixosConfigurations.heim-pc-storage-target = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcProfile = {
+            nvidia = true;
+            nvidiaOpen = false;
+            desktop = true;
+            physicalGates = false;
+          };
+        };
+        modules = [
+          ./hosts/heim-pc
+          ./modules/storage-layout.nix
+        ];
+      };
+
       # Build-only physical Gate-A/B/D profiles. Both retain the deliberately
       # impossible root label and cannot be installed as-is. The only difference
       # between the two is NVIDIA's proprietary vs open kernel-module path, so a
@@ -215,6 +235,7 @@
 
       packages.${system} = {
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
+        heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;
         physical-gate-proprietary-system = self.nixosConfigurations.heim-pc-physical-gate-proprietary.config.system.build.toplevel;
         physical-gate-open-system = self.nixosConfigurations.heim-pc-physical-gate-open.config.system.build.toplevel;
         physical-gate-live-proprietary-iso = self.nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.isoImage;

@@ -98,7 +98,7 @@ _SUPPORTED_REQUEST_DIGEST_SEMANTICS = "canonical-validated-input-v1"
 _SUPPORTED_CANONICAL_BUILD_ENTRYPOINT = (
     "nix",
     "build",
-    ".#nixosConfigurations.heim-pc.config.system.build.toplevel",
+    ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
     "--no-link",
     "--print-out-paths",
 )
@@ -1033,6 +1033,10 @@ def validate_activation_plan(activation_plan: Mapping[str, Any]) -> dict[str, An
     mode = activation_plan.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation plan mode is invalid")
+    if MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical" and mode == "persistent":
+        raise ManagedNixError(
+            "boot-critical managed activation plan must use test/next-boot before persistent activation"
+        )
     target = _require_canonical_string(activation_plan.get("target"), "target")
     source_revision = _require_revision(activation_plan.get("source_revision"))
     closure = _require_closure(activation_plan.get("system_closure"))
@@ -1142,6 +1146,10 @@ def validate_activation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     mode = receipt.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation receipt mode is invalid")
+    if MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical" and mode == "persistent":
+        raise ManagedNixError(
+            "boot-critical managed activation receipt cannot claim persistent activation"
+        )
     target = _require_canonical_string(receipt.get("target"), "target")
     source_revision = _require_revision(receipt.get("source_revision"))
     system_closure = _require_closure(receipt.get("system_closure"))

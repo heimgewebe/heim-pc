@@ -269,7 +269,14 @@ EOF
   };
 in
 {
-  options.heimPc.physicalGates.enable = lib.mkEnableOption "read-only physical NixOS vNext acceptance tooling";
+  options.heimPc.physicalGates = {
+    enable = lib.mkEnableOption "read-only physical NixOS vNext acceptance tooling";
+    bootReadiness = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Include Gate D boot/encryption readiness tooling";
+    };
+  };
 
   config = lib.mkIf cfg.enable {
     # RTX 4070 Ti SUPER is Ada Lovelace / SM 8.9. Keep the physical proof
@@ -285,11 +292,12 @@ in
       loadModels = [ ];
     };
 
-    environment.systemPackages = [
-      gateAReport
-      gateBReport
-      gateDReport
-      llamaCuda
-    ];
+    environment.systemPackages =
+      [
+        gateAReport
+        gateBReport
+      ]
+      ++ lib.optional cfg.bootReadiness gateDReport
+      ++ [ llamaCuda ];
   };
 }

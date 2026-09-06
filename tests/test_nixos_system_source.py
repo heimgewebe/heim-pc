@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "dddb2942eee571e28172b750ecf3396c3114db9918bd5d8a70bab32726c7d3a7"
+SOURCE_SNAPSHOT_SHA256 = "9a0d460930dd1a8b7599d0894421c5ff5bb9233bacbb97c1ef1bcdea4f84e43f"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 
 class T(unittest.TestCase):
@@ -20,7 +20,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 19)
+        self.assertEqual(len(files), 20)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -30,6 +30,7 @@ class T(unittest.TestCase):
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nvidia.nix", "modules/observability.nix", "modules/physical-gates.nix",
+            "modules/storage-layout.nix",
             "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
@@ -42,6 +43,29 @@ class T(unittest.TestCase):
         self.assertIn("system.configurationRevision = sourceRevision", host)
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)
         self.assertIn("boot.loader.efi.canTouchEfiVariables = false", host)
+
+    def test_storage_target_build_is_contract_derived_and_separate_from_prototype(self):
+        flake = (SOURCE / "flake.nix").read_text()
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        layout = (SOURCE / "modules/storage-layout.nix").read_text()
+        deployment = (ROOT / "nixos" / "deployment" / "contract-v1.json").read_text()
+        self.assertIn("nixosConfigurations.heim-pc-storage-target", flake)
+        self.assertIn("./modules/storage-layout.nix", flake)
+        self.assertIn("../../rehearsal/contract-v1.json", layout)
+        self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
+        self.assertIn("fileSystems = lib.mkForce", layout)
+        self.assertIn(
+            ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+            deployment,
+        )
+        self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)
+
+    def test_live_media_excludes_boot_gate_and_fails_closed_on_mount_inventory(self):
+        live = (SOURCE / "modules/live-media.nix").read_text()
+        gates = (SOURCE / "modules/physical-gates.nix").read_text()
+        self.assertIn("bootReadiness = false", live)
+        self.assertIn('fail "persistent-disk-mount-inventory"', live)
+        self.assertIn("lib.optional cfg.bootReadiness gateDReport", gates)
 
     def test_declarative_nixos_system_source_remains_non_destructive(self):
         content = "\n".join(

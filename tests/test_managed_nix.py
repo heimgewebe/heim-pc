@@ -163,6 +163,9 @@ def test_build_request_binds_revision_release_inputs_budgets_leases_and_exact_ad
     assert normalized["effect_scope"] == "boot-critical"
     assert normalized["leases"] == sorted(normalized["leases"])
     assert normalized["entrypoint"] == list(CANONICAL_BUILD_ENTRYPOINT)
+    assert normalized["entrypoint"][2] == (
+        ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel"
+    )
 
 
 def test_build_request_hashes_only_canonical_contract_input_not_derived_scope() -> None:
@@ -506,6 +509,31 @@ def test_boot_critical_build_cannot_skip_directly_to_persistent_activation() -> 
     candidate = authority(built, mode="persistent")
     with pytest.raises(ManagedNixError, match="test/next-boot"):
         validate_authority(built, candidate)
+
+
+def test_forged_plan_or_receipt_cannot_bypass_boot_critical_persistent_rule() -> None:
+    built = receipt()
+    plan = validate_authority(built, authority(built))
+    forged_plan = dict(plan)
+    forged_plan["mode"] = "persistent"
+    with pytest.raises(ManagedNixError, match="test/next-boot"):
+        validate_activation_plan(forged_plan)
+    with pytest.raises(ManagedNixError, match="test/next-boot"):
+        make_activation_receipt(
+            forged_plan,
+            live_closure=CLOSURE,
+            readback_evidence_sha256="f" * 64,
+        )
+
+    valid_receipt = make_activation_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256="f" * 64,
+    )
+    forged_receipt = dict(valid_receipt)
+    forged_receipt["mode"] = "persistent"
+    with pytest.raises(ManagedNixError, match="cannot claim persistent"):
+        validate_activation_receipt(forged_receipt)
 
 
 def test_activation_fails_before_effect_on_closure_source_target_or_receipt_mismatch() -> None:

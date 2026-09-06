@@ -36,7 +36,7 @@
     "canonical_entrypoint": [
       "nix",
       "build",
-      ".#nixosConfigurations.heim-pc.config.system.build.toplevel",
+      ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
       "--no-link",
       "--print-out-paths"
     ],

@@ -23,7 +23,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "nixos" / "rehearsal" / "contract-v1.json"
-CONTRACT_SHA256 = "3510e57aebb9bb98f410c7908f0e737a473488f4a3f9b15c2748f31089d52f94"
+CONTRACT_SHA256 = "f9d6a40cbc3653770958283aaba90e7ded9965f67f1c3a24f33fea7954f1a98f"
 TARGET_KIND = "heim_pc.storage_target_observation"
 AUTHORITY_KIND = "heim_pc.nixos_storage_sandbox_authority"
 READBACK_KIND = "heim_pc.storage_rehearsal_readback"
@@ -198,10 +198,13 @@ def load_contract() -> dict[str, Any]:
         raise RehearsalError("contract topology must define a GPT partition list")
     numbers: set[int] = set()
     roles: set[str] = set()
+    partition_mountpoints: dict[str, str] = {}
     for index, item in enumerate(topology["partitions"]):
         allowed = {"number", "role", "label", "type_guid", "size", "filesystem"}
         if isinstance(item, dict) and "encryption" in item:
             allowed.add("encryption")
+        if isinstance(item, dict) and "mountpoint" in item:
+            allowed.add("mountpoint")
         partition = _exact_keys(item, allowed, f"contract.topology.partitions[{index}]")
         number = _positive_int(partition["number"], f"contract partition {index}.number")
         role = _nonempty_text(partition["role"], f"contract partition {index}.role", 64)
@@ -212,6 +215,13 @@ def load_contract() -> dict[str, Any]:
         _nonempty_text(partition["label"], f"contract partition {index}.label", 64)
         _nonempty_text(partition["type_guid"], f"contract partition {index}.type_guid", 64)
         _nonempty_text(partition["filesystem"], f"contract partition {index}.filesystem", 32)
+        if "mountpoint" in partition:
+            mountpoint = _canonical_absolute_nondevice(
+                partition["mountpoint"], f"contract partition {index}.mountpoint"
+            )
+            if mountpoint in partition_mountpoints.values():
+                raise RehearsalError("contract partition mountpoints must be unique")
+            partition_mountpoints[role] = mountpoint
         size = partition["size"]
         if not isinstance(size, dict) or size.get("kind") not in {"fixed_mib", "remainder"}:
             raise RehearsalError("contract partition size must be fixed_mib or remainder")
@@ -222,6 +232,13 @@ def load_contract() -> dict[str, Any]:
             _exact_keys(size, {"kind"}, f"contract partition {index}.size")
     if roles != {"efi-system-partition", "recovery-surface", "encrypted-system"}:
         raise RehearsalError("contract partition roles are unsupported")
+    if partition_mountpoints != {
+        "efi-system-partition": "/boot",
+        "recovery-surface": "/recovery",
+    }:
+        raise RehearsalError(
+            "contract partition mountpoints must bind EFI to /boot and recovery to /recovery"
+        )
     luks = _exact_keys(topology["luks"], {"version", "mapper_name"}, "contract.topology.luks")
     if _positive_int(luks["version"], "contract.topology.luks.version") != 2:
         raise RehearsalError("contract LUKS version must remain 2")
@@ -560,7 +577,9 @@ def compile_effect_plan(
                 "subvolume": name,
             }
         )
-    commands.append({"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]})
+    # Keep the top-level Btrfs stage mounted through setup/readback. The single
+    # teardown stage-unmount then works both after success and after a partial
+    # subvolume-creation failure without a duplicate unmount.
     logical_mounts = {item["name"]: item["mountpoint"] for item in btrfs["subvolumes"]}
     for name in subvolumes:
         commands.append(
@@ -576,6 +595,9 @@ def compile_effect_plan(
         {"effect": "btrfs-subvolume-unmount", "argv": ["umount", sandbox_mounts[name]], "subvolume": name}
         for name in reversed(subvolumes)
     ]
+    teardown_commands.append(
+        {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]}
+    )
     teardown_commands.extend([
         {"effect": "efi-surface-unmount", "argv": ["umount", EFI_MOUNT]},
         {"effect": "recovery-surface-unmount", "argv": ["umount", RECOVERY_MOUNT]},
