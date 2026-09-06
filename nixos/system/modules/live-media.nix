@@ -83,6 +83,8 @@ let
         if [ ! -b "$device" ]; then
           fail "block-device-disappeared"; raw_access=1; continue
         fi
+        # $1 is intentionally expanded by the inner shell, not this outer script.
+        # shellcheck disable=SC2016
         if ! runuser -u ${liveUser} -- ${pkgs.runtimeShell} -c \
           'if test -r "$1" || test -w "$1"; then exit 42; fi' live-block-probe "$device"; then
           printf 'raw block access or failed user probe: %s\n' "$device" >&2
