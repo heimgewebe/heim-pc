@@ -31,7 +31,7 @@ The hard security assumption is that an arbitrary coding agent may become root i
 - `tests/integration.nix`: original whole-host VM integration proof.
 - `tests/trust-zones.nix`: adversarial trust-zone proof.
 - `tests/vsock-broker.nix`: test-only no-IP AF_VSOCK broker handshake.
-- `../../tests/test_nixos_heim_pc_prototype.py`: repository-level static safety checks.
+- `../../tests/test_nixos_system_source.py`: repository-level static safety and source-snapshot checks.
 
 ## Agent-zone contract
 
@@ -50,15 +50,21 @@ The embedded capability manifest currently permits only named broker/workspace/g
 
 This manifest is an architecture contract, not yet the final production authorization protocol.
 
-## Real evidence established
+## Current snapshot evidence status
 
-### Whole host
+The current protected-publication snapshot is source- and Python-test-bound, but it has not re-established Nix/QEMU/KVM execution evidence. The repository CI for this snapshot does not install Nix or run `nix flake check`, NixOS builds, NixOS VM tests or the AF_VSOCK handshake. The current review environment likewise has no Nix executable.
 
-- NixOS 26.05 host configuration evaluates and builds.
-- Repeated build produced the same system closure.
-- Real QEMU integration test passed.
-- Regular `nix flake check --no-build` passes.
-- The intentional pre-deployment failure is now exported as `nixosModules.intentionalBreak` and is instantiated explicitly, so it proves the negative path without making the normal Flake unhealthy.
+This matters because this snapshot changes NixOS modules and test definitions, including `modules/grabowski.nix`, `modules/physical-gates.nix` and `tests/integration.nix`, and adds/changes physical/live proof configurations. Historical Store paths and VM results therefore cannot be promoted to evidence for this source revision. They remain useful architecture evidence only until the exact current source is evaluated, built and boot-tested again.
+
+The current source does statically export `nixosModules.intentionalBreak` as an explicit negative-path module, but even that source shape is not an execution claim until evaluated by Nix.
+
+## Historical evidence from earlier revisions — not re-established for this snapshot
+
+Every result below is historical evidence from the explicitly named revision/artifact where one is given, or from an earlier prototype run where the old record did not bind a revision in this file. None of these results establishes that the current PR head evaluates, builds, boots, reproduces the same Store path or passes the current test definitions.
+
+### Whole host (historical)
+
+Earlier prototype runs recorded successful NixOS 26.05 host evaluation/build, repeated closure realization, a QEMU integration pass and a normal `nix flake check --no-build` pass. Those runs predate the current NixOS-module/test changes and are **not** current-snapshot acceptance evidence.
 
 ### Foreign-binary corpus
 
@@ -133,7 +139,7 @@ response: broker-ok
 
 The host listener observed CID 445 and the exact request while the guest had no configured IP interface, host directory share or raw device passthrough.
 
-This proves the transport primitive. Production authorization, authentication, replay protection, structured schemas, task binding and workspace artifact transfer remain future work.
+That historical run proved the transport primitive for its tested source. It has not been re-established for the current snapshot. Production authorization, authentication, replay protection, structured schemas, task binding and workspace artifact transfer remain future work.
 
 ### Git→build→runtime provenance
 
@@ -162,12 +168,14 @@ The booted guest reported the same Git revision and exactly the bundle's runtime
 
 The declarative Grabowski runtime-readback completed, multi-user was reached, and a control-code-neutral validation returned nine successful checks plus `GIT_BUILD_RUNTIME_PROVENANCE_PASS`.
 
-This closes Git→build→runtime identity for the prototype. Bureau approval/promotion and physical bare-metal activation/readback remain separate production integration work.
+That run closed Git→build→runtime identity for the historical prototype revision named above. It does **not** close Git→build→runtime identity for the current PR head; that requires a fresh exact-source Nix build and runtime readback. Bureau approval/promotion and physical bare-metal activation/readback remain separate production integration work.
 
 ## What this prototype does not prove
 
 It does not yet establish:
 
+- Nix evaluation/build success, `nix flake check`, NixOS VM boot or current integration-test success for this exact PR head;
+- a current guest→host AF_VSOCK handshake or no-IP runtime proof for this exact PR head;
 - real RTX 4070 Ti SUPER + KDE/Wayland reliability;
 - CUDA/Ollama/llama.cpp/GPU-container behavior on the physical card;
 - repeated suspend/resume;

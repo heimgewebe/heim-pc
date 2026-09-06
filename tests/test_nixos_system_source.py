@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "1dda0443c355dfd05a0b270e75dcb8e3e489bf92860c1cc632e513d82fedcb9c"
+SOURCE_SNAPSHOT_SHA256 = "dddb2942eee571e28172b750ecf3396c3114db9918bd5d8a70bab32726c7d3a7"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 
 class T(unittest.TestCase):
@@ -56,7 +56,17 @@ class T(unittest.TestCase):
         self.assertIn("lib.getExe' config.hardware.nvidia.package \"nvidia-smi\"", gate)
         self.assertIn("/run/cdi/nvidia-container-toolkit.json", gate)
         self.assertIn("/etc/cdi/nvidia-container-toolkit.json", gate)
+        self.assertIn('any(.devices[]?; .name == "all")', gate)
+        self.assertNotIn('.devices[]?.name == "all"', gate)
         self.assertNotIn('gpu_info="$(nvidia-smi ', gate)
+
+    def test_readme_separates_current_snapshot_from_historical_runtime_evidence(self):
+        readme = (SOURCE / "README.md").read_text()
+        self.assertIn("## Current snapshot evidence status", readme)
+        self.assertIn("not re-established Nix/QEMU/KVM execution evidence", readme)
+        self.assertIn("## Historical evidence from earlier revisions", readme)
+        self.assertIn("../../tests/test_nixos_system_source.py", readme)
+        self.assertNotIn("../../tests/test_nixos_heim_pc_prototype.py", readme)
 
     def test_grabowski_operator_readback_is_nonsecret_and_user_readable(self):
         module = (SOURCE / "modules/grabowski.nix").read_text()

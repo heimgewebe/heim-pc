@@ -5,7 +5,7 @@ import copy
 import hashlib
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -311,6 +311,25 @@ def test_effect_plan_is_argv_only_and_never_authorizes_execution():
     assert secret_commands
     assert all(item["secret_input"] == "stdin" for item in secret_commands)
     assert all("password" not in " ".join(item["argv"]).lower() for item in secret_commands)
+
+
+def test_plan_digest_is_stable_across_revalidation_clock():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    later = NOW + timedelta(seconds=45)
+
+    first = m.compile_effect_plan(evidence, authority, now=NOW)
+    second = m.compile_effect_plan(evidence, authority, now=later)
+
+    assert first["target_preflight"]["age_seconds"] != second["target_preflight"]["age_seconds"]
+    assert first["plan_sha256"] == second["plan_sha256"]
+
+    # A readback produced for the original plan must remain bound when it is
+    # independently validated a little later, while all evidence is still fresh.
+    result = m.validate_topology_readback(
+        topology_readback(evidence, authority), evidence, authority, now=later
+    )
+    assert result["status"] == "passed"
 
 
 def test_topology_readback_passes_only_exact_contract():

@@ -465,6 +465,17 @@ def _partition_path(target_path: str, number: int) -> str:
     return f"{target_path}{suffix}"
 
 
+def _effect_plan_sha256(material: dict[str, Any]) -> str:
+    # ``age_seconds`` is a diagnostic derived from the validation clock, not
+    # part of the target-evidence identity.  Excluding only that derived value
+    # keeps a plan stable while the same still-fresh evidence and authority are
+    # revalidated at a later instant; observed_at and the evidence/authority
+    # digests remain bound into the plan.
+    digest_material = _copy_json(material)
+    digest_material["target_preflight"].pop("age_seconds", None)
+    return sha256_json(digest_material)
+
+
 def compile_effect_plan(
     target_evidence: Any,
     sandbox_authority: Any,
@@ -602,7 +613,7 @@ def compile_effect_plan(
         "production_effects_authorized": False,
         "requires_runtime_executor_reauthentication": True,
     }
-    return {**material, "plan_sha256": sha256_json(material)}
+    return {**material, "plan_sha256": _effect_plan_sha256(material)}
 
 
 def validate_topology_readback(

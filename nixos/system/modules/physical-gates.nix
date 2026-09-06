@@ -103,7 +103,7 @@ EOF
           break
         fi
       done
-      if [ -n "$cdi_json" ] && jq -e '.devices[]?.name == "all"' "$cdi_json" >/dev/null; then
+      if [ -n "$cdi_json" ] && jq -e 'any(.devices[]?; .name == "all")' "$cdi_json" >/dev/null; then
         pass "nvidia-cdi-all-device"
       else
         fail "nvidia-cdi-all-device"
