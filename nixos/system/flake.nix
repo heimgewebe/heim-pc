@@ -36,6 +36,9 @@
       # toplevel and /etc closure. Preserve both identities instead of pretending
       # that the declarative proof configuration and its transformed VM runtime
       # are the same Store object.
+      # One storage/boot base for the candidate and both physical proof variants.
+      physicalHostModules = [ ./hosts/heim-pc ./modules/storage-layout.nix ];
+
       proofConfig = self.nixosConfigurations.heim-pc-vm.config;
       proofVmConfig = proofConfig.virtualisation.vmVariant;
 
@@ -59,6 +62,7 @@
         specialArgs = {
           inherit self;
           heimPcProfile = {
+            physical = true;
             nvidia = true;
             nvidiaOpen = false;
             desktop = true;
@@ -76,34 +80,32 @@
         specialArgs = {
           inherit self;
           heimPcProfile = {
+            physical = true;
             nvidia = true;
             nvidiaOpen = false;
             desktop = true;
             physicalGates = false;
           };
         };
-        modules = [
-          ./hosts/heim-pc
-          ./modules/storage-layout.nix
-        ];
+        modules = physicalHostModules;
       };
 
-      # Build-only physical Gate-A/B/D profiles. Both retain the deliberately
-      # impossible root label and cannot be installed as-is. The only difference
-      # between the two is NVIDIA's proprietary vs open kernel-module path, so a
-      # future second-disk test can falsify that choice causally on the RTX 4070 Ti SUPER.
+      # Build-only physical Gate-A/B/D variants of the same storage candidate.
+      # Gates add proof tooling; the paired variants differ only in the NVIDIA
+      # kernel-module choice. Neither authorizes physical installation or boot.
       nixosConfigurations.heim-pc-physical-gate-proprietary = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
           inherit self;
           heimPcProfile = {
+            physical = true;
             nvidia = true;
             nvidiaOpen = false;
             desktop = true;
             physicalGates = true;
           };
         };
-        modules = [ ./hosts/heim-pc ];
+        modules = physicalHostModules;
       };
 
       nixosConfigurations.heim-pc-physical-gate-open = nixpkgs.lib.nixosSystem {
@@ -111,13 +113,14 @@
         specialArgs = {
           inherit self;
           heimPcProfile = {
+            physical = true;
             nvidia = true;
             nvidiaOpen = true;
             desktop = true;
             physicalGates = true;
           };
         };
-        modules = [ ./hosts/heim-pc ];
+        modules = physicalHostModules;
       };
 
       # Non-installing physical Gate-A/B live media. These import only the
@@ -138,7 +141,6 @@
           ./modules/desktop.nix
           ./modules/nvidia.nix
           ./modules/audio.nix
-          ./modules/containers.nix
           ./modules/physical-gates.nix
           ./modules/live-media.nix
         ];
@@ -158,7 +160,6 @@
           ./modules/desktop.nix
           ./modules/nvidia.nix
           ./modules/audio.nix
-          ./modules/containers.nix
           ./modules/physical-gates.nix
           ./modules/live-media.nix
         ];
@@ -249,6 +250,72 @@
       };
 
       checks.${system} = {
+        # These assertions force real NixOS module evaluation, not text matching.
+        profile-contract =
+          let
+            configs = self.nixosConfigurations;
+            target = configs.heim-pc-storage-target.config;
+            proprietary = configs.heim-pc-physical-gate-proprietary.config;
+            open = configs.heim-pc-physical-gate-open.config;
+            vm = configs.heim-pc-vm.config;
+            live = map (name: configs.${name}.config) [
+              "heim-pc-live-gate-proprietary" "heim-pc-live-gate-open"
+            ];
+            contract = builtins.fromJSON (builtins.readFile ../rehearsal/contract-v1.json);
+            topology = contract.topology;
+            byRole = role: builtins.head (builtins.filter (p: p.role == role) topology.partitions);
+            mapperName = topology.luks.mapper_name;
+            mapper = "/dev/mapper/${mapperName}";
+            storage = c: {
+              mounts = builtins.mapAttrs (_: fs: {
+                inherit (fs) device fsType options;
+              }) c.fileSystems;
+              luks = builtins.mapAttrs (_: device: device.device) c.boot.initrd.luks.devices;
+              systemdBoot = c.boot.loader.systemd-boot.enable;
+              touchEfi = c.boot.loader.efi.canTouchEfiVariables;
+            };
+            fsMatches = builtins.all (subvolume:
+              target.fileSystems.${subvolume.mountpoint}.device == mapper
+              && target.fileSystems.${subvolume.mountpoint}.fsType == "btrfs"
+              && builtins.elem "subvol=${subvolume.name}" target.fileSystems.${subvolume.mountpoint}.options
+            ) topology.btrfs.subvolumes;
+            surfaceMatches = builtins.all (role:
+              let p = byRole role; fs = target.fileSystems.${p.mountpoint};
+              in fs.device == "/dev/disk/by-partlabel/${p.label}" && fs.fsType == p.filesystem
+            ) [ "efi-system-partition" "recovery-surface" ];
+          in
+          assert fsMatches && surfaceMatches;
+          assert target.boot.initrd.luks.devices.${mapperName}.device
+            == "/dev/disk/by-partlabel/${(byRole "encrypted-system").label}";
+          assert target.boot.loader.systemd-boot.enable;
+          assert !target.boot.loader.efi.canTouchEfiVariables;
+          assert storage target == storage proprietary && storage target == storage open;
+          assert !target.heimPc.physicalGates.enable;
+          assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;
+          assert builtins.all (c: c.hardware.cpu.amd.updateMicrocode
+            && c.networking.networkmanager.enable
+            && builtins.elem "networkmanager" c.users.users.alex.extraGroups
+          ) [ target proprietary open ];
+          assert !vm.hardware.cpu.amd.updateMicrocode;
+          assert !vm.heimPc.hardware.nvidia.enable && !vm.heimPc.physicalGates.enable;
+          assert configs.heim-pc.config.fileSystems."/".device
+            == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
+          assert builtins.all (c: !c.virtualisation.podman.enable
+            && c.fileSystems."/".fsType == "tmpfs"
+          ) live;
+          pkgs.runCommand "heim-pc-profile-contract" {
+            report = builtins.toJSON {
+              storageTarget = storage target;
+              physicalGateProprietary = storage proprietary;
+              physicalGateOpen = storage open;
+              vmSystem = vm.system.build.toplevel.drvPath;
+              sourceRevision = sourceRevision;
+            };
+            passAsFile = [ "report" ];
+          } ''
+            mkdir -p "$out"
+            cp "$reportPath" "$out/profile-contract.json"
+          '';
         integration = import ./tests/integration.nix { inherit pkgs; };
         trust-zones = import ./tests/trust-zones.nix { inherit pkgs; };
       };

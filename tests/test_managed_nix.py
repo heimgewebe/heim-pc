@@ -500,25 +500,25 @@ def test_activation_plan_execution_revalidates_fresh_authority_receipt_target_an
 def test_underdeclared_normal_build_still_cannot_skip_to_persistent_activation() -> None:
     built = make_receipt(request(possible_effects=["package-set"]))
     candidate = authority(built, mode="persistent")
-    with pytest.raises(ManagedNixError, match="test/next-boot"):
+    with pytest.raises(ManagedNixError, match="mode is invalid"):
         validate_authority(built, candidate)
 
 
 def test_boot_critical_build_cannot_skip_directly_to_persistent_activation() -> None:
     built = receipt()
     candidate = authority(built, mode="persistent")
-    with pytest.raises(ManagedNixError, match="test/next-boot"):
+    with pytest.raises(ManagedNixError, match="mode is invalid"):
         validate_authority(built, candidate)
 
 
-def test_forged_plan_or_receipt_cannot_bypass_boot_critical_persistent_rule() -> None:
+def test_v1_plan_and_receipt_reject_unsupported_persistent_mode() -> None:
     built = receipt()
     plan = validate_authority(built, authority(built))
     forged_plan = dict(plan)
     forged_plan["mode"] = "persistent"
-    with pytest.raises(ManagedNixError, match="test/next-boot"):
+    with pytest.raises(ManagedNixError, match="mode is invalid"):
         validate_activation_plan(forged_plan)
-    with pytest.raises(ManagedNixError, match="test/next-boot"):
+    with pytest.raises(ManagedNixError, match="mode is invalid"):
         make_activation_receipt(
             forged_plan,
             live_closure=CLOSURE,
@@ -532,7 +532,7 @@ def test_forged_plan_or_receipt_cannot_bypass_boot_critical_persistent_rule() ->
     )
     forged_receipt = dict(valid_receipt)
     forged_receipt["mode"] = "persistent"
-    with pytest.raises(ManagedNixError, match="cannot claim persistent"):
+    with pytest.raises(ManagedNixError, match="mode is invalid"):
         validate_activation_receipt(forged_receipt)
 
 
@@ -701,7 +701,7 @@ def test_contract_loader_rejects_v1_semantic_policy_drift(
         (("closure", "nix_base32_alphabet"), "0123456789abcdfghijklmnpqrsvwxye", "nix_base32_alphabet"),
         (("build", "canonical_entrypoint"), ["nixos-rebuild", "switch"], "canonical_entrypoint"),
         (("build", "effect_class"), "activation", "build.effect_class"),
-        (("activation", "allowed_modes"), ["test", "next-boot", "persistent", "direct-switch"], "allowed_modes"),
+        (("activation", "allowed_modes"), ["test", "next-boot", "persistent"], "allowed_modes"),
         (("activation", "executor_authority"), "caller", "executor_authority"),
         (("activation", "max_authority_lifetime_seconds"), 86_400, "max_authority_lifetime_seconds"),
         (("activation", "runtime_proof_task"), "HEIM-PC-NIXOS-MIGRATION-V1-T999", "runtime_proof_task"),
@@ -877,3 +877,15 @@ def test_contract_loader_rejects_activation_receipt_or_rollback_schema_drift(
     contract_path.write_text(json.dumps(rollback_drift), encoding="utf-8")
     with pytest.raises(RuntimeError, match="rollback.plan_fields"):
         managed_nix._load_managed_contract()
+
+
+@pytest.mark.parametrize("mode", ["test", "next-boot"])
+def test_every_advertised_v1_activation_mode_is_reachable(mode: str) -> None:
+    built = receipt()
+    plan = validate_authority(built, authority(built, mode=mode))
+    assert plan["mode"] == mode
+    assert validate_activation_plan(plan) == plan
+    result = make_activation_receipt(
+        plan, live_closure=CLOSURE, readback_evidence_sha256="f" * 64
+    )
+    assert validate_activation_receipt(result)["mode"] == mode

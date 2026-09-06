@@ -161,12 +161,10 @@
     ],
     "allowed_modes": [
       "test",
-      "next-boot",
-      "persistent"
+      "next-boot"
     ],
     "executor_authority": "successor-task-typed-activation-only",
     "max_authority_lifetime_seconds": 7200,
-    "boot_critical_persistent_directly_allowed": false,
     "requires_exact_build_receipt": true,
     "requires_exact_system_closure": true,
     "requires_exact_target": true,

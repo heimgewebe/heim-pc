@@ -31,9 +31,8 @@ RECOVERY_KIND = "heim_pc.offline_recovery_evidence"
 EXECUTOR_TASK = "HEIM-PC-NIXOS-MIGRATION-V1-T003"
 SANDBOX_RESOURCE = "service.heim-pc-nixos-storage-rehearsal-sandbox"
 MOUNT_ROOT = "/mnt/nixos-rehearsal"
-BTRFS_STAGE_ROOT = f"{MOUNT_ROOT}/.btrfs-root"
-EFI_MOUNT = f"{MOUNT_ROOT}/efi"
-RECOVERY_MOUNT = f"{MOUNT_ROOT}/recovery"
+# Keep staging outside the target root: mounting @root must not hide it.
+BTRFS_STAGE_ROOT = f"{MOUNT_ROOT}-btrfs-stage"
 FUTURE_SKEW_SECONDS = 5
 
 
@@ -276,14 +275,24 @@ def _mapper_path(contract: dict[str, Any]) -> str:
     return f"/dev/mapper/{contract['topology']['luks']['mapper_name']}"
 
 
+def _sandbox_mountpoint(logical_mountpoint: str) -> str:
+    logical = _canonical_absolute_nondevice(logical_mountpoint, "logical mountpoint")
+    if logical.startswith("//"):
+        raise RehearsalError("logical mountpoint must have one root slash")
+    return str(PurePosixPath(MOUNT_ROOT) / logical.lstrip("/"))
+
+
 def _sandbox_mounts(contract: dict[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     for item in contract["topology"]["btrfs"]["subvolumes"]:
         name = item["name"]
         suffix = name[1:] if name.startswith("@") else name
-        if re.fullmatch(r"[A-Za-z0-9._-]+", suffix) is None:
-            raise RehearsalError(f"subvolume name cannot form a sandbox mount: {name}")
-        result[name] = f"{MOUNT_ROOT}/mounts/{suffix}"
+        if re.fullmatch(r"[A-Za-z0-9._-]+", suffix) is None or suffix in {".", ".."}:
+            raise RehearsalError(f"subvolume name is not canonical: {name}")
+        target = _sandbox_mountpoint(item["mountpoint"])
+        if target in result.values():
+            raise RehearsalError("Btrfs logical mountpoints must be unique")
+        result[name] = target
     return result
 
 
@@ -518,7 +527,9 @@ def compile_effect_plan(
     sandbox_mounts = _sandbox_mounts(contract)
     subvolumes = [item["name"] for item in btrfs["subvolumes"]]
 
-    mount_targets = [EFI_MOUNT, RECOVERY_MOUNT, BTRFS_STAGE_ROOT, *sandbox_mounts.values()]
+    efi_mount = _sandbox_mountpoint(efi["mountpoint"])
+    recovery_mount = _sandbox_mountpoint(recovery["mountpoint"])
+    mount_targets = [MOUNT_ROOT, BTRFS_STAGE_ROOT]
     commands: list[dict[str, Any]] = [
         {"effect": "partition-table", "argv": ["sgdisk", "--clear", target]},
     ]
@@ -565,8 +576,6 @@ def compile_effect_plan(
             "secret_binding": "luks-key-v1",
         },
         {"effect": "btrfs-filesystem", "argv": ["mkfs.btrfs", "-f", "-L", btrfs["label"], mapper]},
-        {"effect": "efi-surface-mount", "argv": ["mount", efi_device, EFI_MOUNT]},
-        {"effect": "recovery-surface-mount", "argv": ["mount", recovery_device, RECOVERY_MOUNT]},
         {"effect": "btrfs-stage-mount", "argv": ["mount", mapper, BTRFS_STAGE_ROOT]},
     ])
     for name in subvolumes:
@@ -577,30 +586,56 @@ def compile_effect_plan(
                 "subvolume": name,
             }
         )
-    # Keep the top-level Btrfs stage mounted through setup/readback. The single
-    # teardown stage-unmount then works both after success and after a partial
-    # subvolume-creation failure without a duplicate unmount.
-    logical_mounts = {item["name"]: item["mountpoint"] for item in btrfs["subvolumes"]}
-    for name in subvolumes:
-        commands.append(
-            {
-                "effect": "btrfs-subvolume-mount",
-                "argv": ["mount", "-o", f"subvol={name}", mapper, sandbox_mounts[name]],
-                "subvolume": name,
-                "logical_mountpoint": logical_mounts[name],
-            }
-        )
+    # Derive every mount from the same logical topology. Mount parents first,
+    # creating each directory after its parent filesystem has become visible.
+    mounts: list[dict[str, Any]] = []
+    for item in btrfs["subvolumes"]:
+        name = item["name"]
+        mounts.append({
+            "effect": "btrfs-subvolume-mount",
+            "argv": ["mount", "-o", f"subvol={name}", mapper, sandbox_mounts[name]],
+            "subvolume": name,
+            "logical_mountpoint": item["mountpoint"],
+            "sandbox_mountpoint": sandbox_mounts[name],
+        })
+    for role, partition, device, mountpoint in (
+        ("efi", efi, efi_device, efi_mount),
+        ("recovery", recovery, recovery_device, recovery_mount),
+    ):
+        mounts.append({
+            "effect": f"{role}-surface-mount",
+            "argv": ["mount", device, mountpoint],
+            "logical_mountpoint": partition["mountpoint"],
+            "sandbox_mountpoint": mountpoint,
+        })
+    if len({item["sandbox_mountpoint"] for item in mounts}) != len(mounts):
+        raise RehearsalError("logical mountpoints overlap")
+    mounts.sort(key=lambda item: (
+        len(PurePosixPath(item["logical_mountpoint"]).parts),
+        item["logical_mountpoint"],
+    ))
+    if not mounts or mounts[0]["logical_mountpoint"] != "/":
+        raise RehearsalError("rehearsal topology must contain a root mount")
+    for item in mounts:
+        commands.append({
+            "effect": "sandbox-mountpoint-create",
+            "argv": ["mkdir", "-p", item["sandbox_mountpoint"]],
+        })
+        commands.append(item)
 
-    teardown_commands = [
-        {"effect": "btrfs-subvolume-unmount", "argv": ["umount", sandbox_mounts[name]], "subvolume": name}
-        for name in reversed(subvolumes)
-    ]
-    teardown_commands.append(
-        {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]}
-    )
+    # Reverse the complete mount hierarchy, not merely the subvolume list.
+    # Staging stays visible throughout and is unmounted exactly once at the end.
+    teardown_commands = []
+    for item in reversed(mounts):
+        teardown = {
+            "effect": item["effect"].removesuffix("-mount") + "-unmount",
+            "argv": ["umount", item["sandbox_mountpoint"]],
+        }
+        if "subvolume" in item:
+            teardown["subvolume"] = item["subvolume"]
+        teardown_commands.append(teardown)
     teardown_commands.extend([
-        {"effect": "efi-surface-unmount", "argv": ["umount", EFI_MOUNT]},
-        {"effect": "recovery-surface-unmount", "argv": ["umount", RECOVERY_MOUNT]},
+        {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]},
         {"effect": "luks-close", "argv": ["cryptsetup", "close", mapper_name]},
     ])
 
@@ -623,12 +658,14 @@ def compile_effect_plan(
             "efi": {
                 "device": efi_device,
                 "filesystem": efi["filesystem"],
-                "sandbox_mountpoint": EFI_MOUNT,
+                "sandbox_mountpoint": efi_mount,
+                "logical_mountpoint": efi["mountpoint"],
             },
             "recovery": {
                 "device": recovery_device,
                 "filesystem": recovery["filesystem"],
-                "sandbox_mountpoint": RECOVERY_MOUNT,
+                "sandbox_mountpoint": recovery_mount,
+                "logical_mountpoint": recovery["mountpoint"],
             },
         },
         "execution_authorized": False,
@@ -760,7 +797,7 @@ def validate_topology_readback(
 
     efi = _exact_keys(
         readback["efi"],
-        {"device", "filesystem", "sandbox_mountpoint"},
+        {"device", "filesystem", "sandbox_mountpoint", "logical_mountpoint"},
         "topology readback.efi",
     )
     expected_efi = _partition_by_role(contract, "efi-system-partition")
@@ -769,12 +806,16 @@ def validate_topology_readback(
     )
     if _canonical_device(efi["device"], "efi.device") != expected_efi_device:
         raise RehearsalError("EFI partition device mismatch")
-    if efi["filesystem"] != expected_efi["filesystem"] or efi["sandbox_mountpoint"] != EFI_MOUNT:
+    if (
+        efi["filesystem"] != expected_efi["filesystem"]
+        or efi["logical_mountpoint"] != expected_efi["mountpoint"]
+        or efi["sandbox_mountpoint"] != _sandbox_mountpoint(expected_efi["mountpoint"])
+    ):
         raise RehearsalError("EFI surface readback mismatch")
 
     recovery = _exact_keys(
         readback["recovery"],
-        {"device", "filesystem", "surface_present", "sandbox_mountpoint"},
+        {"device", "filesystem", "surface_present", "sandbox_mountpoint", "logical_mountpoint"},
         "topology readback.recovery",
     )
     expected_recovery = _partition_by_role(contract, "recovery-surface")
@@ -786,7 +827,8 @@ def validate_topology_readback(
     if (
         recovery["filesystem"] != expected_recovery["filesystem"]
         or recovery["surface_present"] is not True
-        or recovery["sandbox_mountpoint"] != RECOVERY_MOUNT
+        or recovery["logical_mountpoint"] != expected_recovery["mountpoint"]
+        or recovery["sandbox_mountpoint"] != _sandbox_mountpoint(expected_recovery["mountpoint"])
     ):
         raise RehearsalError("recovery surface readback mismatch")
 

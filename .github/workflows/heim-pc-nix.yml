@@ -1,0 +1,32 @@
+name: heim-pc-nix
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout heim-pc
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Evaluate complete flake without building checks
+        run: nix flake check --no-build --print-build-logs
+
+      - name: Prove evaluated Heim-PC profile contract
+        run: nix build --no-link --print-build-logs .#checks.x86_64-linux.profile-contract
+
+      - name: Build storage-target and VM closures
+        run: >-
+          nix build --no-link --print-build-logs
+          .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
+          .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel

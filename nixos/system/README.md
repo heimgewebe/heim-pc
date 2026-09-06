@@ -25,13 +25,28 @@ The hard security assumption is that an arbitrary coding agent may become root i
 ## Important files
 
 - `flake.nix`: host, VM, MicroVM, lifecycle and check graph.
-- `hosts/heim-pc/default.nix`: non-production Heim-PC host assembly.
+- `hosts/heim-pc/default.nix`: shared Heim-PC host assembly; the default root remains a non-installing placeholder unless `storage-layout.nix` is explicitly layered in.
+- `modules/storage-layout.nix`: contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles.
 - `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
 - `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
 - `tests/integration.nix`: original whole-host VM integration proof.
 - `tests/trust-zones.nix`: adversarial trust-zone proof.
 - `tests/vsock-broker.nix`: test-only no-IP AF_VSOCK broker handshake.
 - `../../tests/test_nixos_system_source.py`: repository-level static safety and source-snapshot checks.
+
+## Configuration graph
+
+The host-shaped configurations have deliberately different roles:
+
+- `heim-pc` is the desktop-shaped placeholder. Its root uses `NIXOS_PROTOTYPE_DO_NOT_INSTALL`, so it is not a bare-metal install target.
+- `heim-pc-storage-target` is the managed-build candidate. It layers `storage-layout.nix`, which derives `/`, `/nix`, `/boot`, `/recovery` and the LUKS mapper from the rehearsal contract. Physical proof gates are disabled.
+- `heim-pc-physical-gate-proprietary` and `heim-pc-physical-gate-open` layer the **same** `storage-layout.nix` and enable the physical proof gates. Their intended A/B difference is only the NVIDIA kernel-module path.
+- `heim-pc-live-gate-*` are non-installing tmpfs ISO proof media. They do not use the storage target and no longer import the container module because Gate A/B does not require Podman/Docker.
+- `heim-pc-vm` keeps the placeholder root, disables physical hardware policy and evaluates without NVIDIA hardware enablement.
+
+The physical host profiles enable AMD microcode for the Ryzen platform. The VM proof does not. `alex` is in the `networkmanager` group so the desktop user can manage NetworkManager connections.
+
+A secure credential/first-boot bootstrap is **not yet defined** for a fresh physical installation. No password or password hash is embedded in Git or the Nix Store. Therefore the storage target is a build/proof candidate, not yet a login-ready bare-metal install. This is a blocking pre-bare-metal successor gate, not something this publication PR may silently invent.
 
 ## Agent-zone contract
 
@@ -52,11 +67,11 @@ This manifest is an architecture contract, not yet the final production authoriz
 
 ## Current snapshot evidence status
 
-The current protected-publication snapshot is source- and Python-test-bound, but it has not re-established Nix/QEMU/KVM execution evidence. The repository CI for this snapshot does not install Nix or run `nix flake check`, NixOS builds, NixOS VM tests or the AF_VSOCK handshake. The current review environment likewise has no Nix executable.
+The current snapshot has not re-established Nix/QEMU/KVM execution evidence yet. The source now carries a dedicated `heim-pc-nix` CI lane. It is designed to run `nix flake check --no-build`, evaluate the storage target, both gated physical profiles and the VM profile, assert the evaluated storage/boot/microcode/user-group/gate values, and build the storage-target and VM system closures without activating either. Presence of that workflow is **not** itself a passing result: PR metadata may claim current Nix evidence only after GitHub reports the exact PR head green.
 
-This matters because this snapshot changes NixOS modules and test definitions, including `modules/grabowski.nix`, `modules/physical-gates.nix` and `tests/integration.nix`, and adds/changes physical/live proof configurations. Historical Store paths and VM results therefore cannot be promoted to evidence for this source revision. They remain useful architecture evidence only until the exact current source is evaluated, built and boot-tested again.
+Historical Store paths, QEMU/KVM runs and earlier Nix evaluations remain historical. They cannot be promoted to evidence for a later source revision after NixOS modules, storage profiles, tests or workflow definitions change. Exact-head CI/review evidence and historical architecture evidence must remain separately labelled.
 
-The current source does statically export `nixosModules.intentionalBreak` as an explicit negative-path module, but even that source shape is not an execution claim until evaluated by Nix.
+The current source statically exports `nixosModules.intentionalBreak` as an explicit negative-path module. That source shape is not an execution claim until the exact revision has actually passed the Nix evaluation lane.
 
 ## Historical evidence from earlier revisions — not re-established for this snapshot
 
@@ -174,7 +189,7 @@ That run closed Git→build→runtime identity for the historical prototype revi
 
 It does not yet establish:
 
-- Nix evaluation/build success, `nix flake check`, NixOS VM boot or current integration-test success for this exact PR head;
+- a successful exact-head Nix CI result until GitHub has actually completed the `heim-pc-nix` lane for that revision; workflow presence alone is not evidence;
 - a current guest→host AF_VSOCK handshake or no-IP runtime proof for this exact PR head;
 - real RTX 4070 Ti SUPER + KDE/Wayland reliability;
 - CUDA/Ollama/llama.cpp/GPU-container behavior on the physical card;
@@ -184,7 +199,7 @@ It does not yet establish:
 - Secure Boot + LUKS + recovery on the real UEFI machine; blank-disk reconstruction and manual passphrase unlock already pass in KVM, but physical enrollment, current firmware boot selection, independent recovery/rollback and production secret handling do not;
 - Bureau approval/promotion -> physical host activation -> exact runtime identity readback;
 - production Rootbroker capability protocol;
-- bare-metal installability of the placeholder disk layout.
+- secure credential/first-boot bootstrap and login readiness for a fresh bare-metal installation.
 
 Those are migration gates, not details to hand-wave away.
 

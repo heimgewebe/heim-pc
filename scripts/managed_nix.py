@@ -107,7 +107,7 @@ _SUPPORTED_ACTIVATION_AUTHORITY_KIND = "heim_pc.nixos_activation_authority"
 _SUPPORTED_ACTIVATION_PLAN_KIND = "heim_pc.nixos_activation_plan"
 _SUPPORTED_ACTIVATION_RECEIPT_KIND = "heim_pc.nixos_activation_receipt"
 _SUPPORTED_ROLLBACK_PLAN_KIND = "heim_pc.nixos_rollback_plan"
-_SUPPORTED_ACTIVATION_MODES = frozenset({"test", "next-boot", "persistent"})
+_SUPPORTED_ACTIVATION_MODES = frozenset({"test", "next-boot"})
 _SUPPORTED_ACTIVATION_EXECUTOR_AUTHORITY = "successor-task-typed-activation-only"
 _SUPPORTED_MAX_AUTHORITY_LIFETIME_SECONDS = 7200
 _SUPPORTED_RUNTIME_PROOF_TASK = "HEIM-PC-NIXOS-MIGRATION-V1-T004"
@@ -302,7 +302,7 @@ def _load_managed_contract() -> dict[str, Any]:
                 "effect_class", "authority_kind", "authority_fields", "plan_kind",
                 "plan_fields", "receipt_kind", "receipt_fields", "receipt_requires",
                 "allowed_modes", "executor_authority",
-                "max_authority_lifetime_seconds", "boot_critical_persistent_directly_allowed",
+                "max_authority_lifetime_seconds",
                 "requires_exact_build_receipt", "requires_exact_system_closure",
                 "requires_exact_target", "requires_independent_live_closure_readback",
                 "source_reevaluation_allowed", "branch_resolution_allowed",
@@ -362,7 +362,7 @@ def _load_managed_contract() -> dict[str, Any]:
         "requires_external_authority_sha256",
     )
     required_false = (
-        "boot_critical_persistent_directly_allowed", "source_reevaluation_allowed",
+        "source_reevaluation_allowed",
         "branch_resolution_allowed", "lock_resolution_allowed",
         "remote_input_resolution_allowed", "broad_root_shell_allowed",
         "runtime_executor_implemented_here", "self_asserted_review_flag_allowed",
@@ -953,8 +953,6 @@ def validate_activation_authority(
     mode = authority.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation mode is invalid")
-    if receipt["effect_scope"] == "boot-critical" and mode == "persistent":
-        raise ManagedNixError("boot-critical build must use test/next-boot before persistent activation")
 
     source_revision = _require_revision(authority.get("source_revision"))
     closure = _require_closure(authority.get("system_closure"))
@@ -1033,10 +1031,6 @@ def validate_activation_plan(activation_plan: Mapping[str, Any]) -> dict[str, An
     mode = activation_plan.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation plan mode is invalid")
-    if MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical" and mode == "persistent":
-        raise ManagedNixError(
-            "boot-critical managed activation plan must use test/next-boot before persistent activation"
-        )
     target = _require_canonical_string(activation_plan.get("target"), "target")
     source_revision = _require_revision(activation_plan.get("source_revision"))
     closure = _require_closure(activation_plan.get("system_closure"))
@@ -1146,10 +1140,6 @@ def validate_activation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     mode = receipt.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation receipt mode is invalid")
-    if MINIMUM_MANAGED_BUILD_SCOPE == "boot-critical" and mode == "persistent":
-        raise ManagedNixError(
-            "boot-critical managed activation receipt cannot claim persistent activation"
-        )
     target = _require_canonical_string(receipt.get("target"), "target")
     source_revision = _require_revision(receipt.get("source_revision"))
     system_closure = _require_closure(receipt.get("system_closure"))

@@ -139,13 +139,15 @@ def topology_readback(evidence=None, authority=None):
         "efi": {
             "device": "/dev/loop7p1",
             "filesystem": "vfat",
-            "sandbox_mountpoint": m.EFI_MOUNT,
+            "sandbox_mountpoint": "/mnt/nixos-rehearsal/boot",
+            "logical_mountpoint": "/boot",
         },
         "recovery": {
             "device": "/dev/loop7p2",
             "filesystem": "ext4",
             "surface_present": True,
-            "sandbox_mountpoint": m.RECOVERY_MOUNT,
+            "sandbox_mountpoint": "/mnt/nixos-rehearsal/recovery",
+            "logical_mountpoint": "/recovery",
         },
         "readback_sha256": "0" * 64,
     }
@@ -520,3 +522,53 @@ def test_canonical_contract_digest_ignores_json_whitespace(tmp_path, monkeypatch
     alternate.write_text(json.dumps(contract, ensure_ascii=False, separators=(",", ":")))
     monkeypatch.setattr(m, "CONTRACT_PATH", alternate)
     assert m.load_contract() == contract
+
+
+def test_sandbox_mounts_follow_logical_contract_not_subvolume_names():
+    assert m._sandbox_mounts(m.load_contract()) == {
+        "@root": "/mnt/nixos-rehearsal",
+        "@nix": "/mnt/nixos-rehearsal/nix",
+        "@persist": "/mnt/nixos-rehearsal/persist",
+        "@home": "/mnt/nixos-rehearsal/home",
+        "@data": "/mnt/nixos-rehearsal/var/lib/heim-pc-data",
+        "@containers": "/mnt/nixos-rehearsal/var/lib/containers",
+    }
+    changed = copy.deepcopy(m.load_contract())
+    changed["topology"]["btrfs"]["subvolumes"][1]["name"] = "@renamed-nix"
+    assert m._sandbox_mounts(changed)["@renamed-nix"] == "/mnt/nixos-rehearsal/nix"
+
+
+def test_parent_mounts_precede_children_and_teardown_reverses_all_mounts():
+    from pathlib import PurePosixPath
+    evidence = target_evidence()
+    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    mounts = [item for item in plan["commands"] if "logical_mountpoint" in item]
+    assert mounts[0]["logical_mountpoint"] == "/"
+    assert len(mounts) == 8
+    for index, item in enumerate(mounts):
+        logical = PurePosixPath(item["logical_mountpoint"])
+        assert item["sandbox_mountpoint"] == str(PurePosixPath(m.MOUNT_ROOT) / str(logical).lstrip("/"))
+        assert not any(PurePosixPath(later["logical_mountpoint"]) in logical.parents for later in mounts[index + 1:])
+        command_index = plan["commands"].index(item)
+        assert plan["commands"][command_index - 1]["argv"] == ["mkdir", "-p", item["sandbox_mountpoint"]]
+    assert PurePosixPath(m.MOUNT_ROOT) not in PurePosixPath(m.BTRFS_STAGE_ROOT).parents
+    unmounts = [item["argv"][-1] for item in plan["teardown_commands"] if item["argv"][0] == "umount"]
+    assert unmounts == [item["sandbox_mountpoint"] for item in reversed(mounts)] + [m.BTRFS_STAGE_ROOT]
+
+
+@pytest.mark.parametrize("surface", ["efi", "recovery"])
+def test_surface_readback_requires_both_logical_and_sandbox_mountpoints(surface):
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    for key, value in [("logical_mountpoint", "/wrong"), ("sandbox_mountpoint", "/mnt/nixos-rehearsal/wrong")]:
+        readback = topology_readback(evidence, authority)
+        readback[surface][key] = value
+        readback = _digest(readback, "readback_sha256")
+        with pytest.raises(m.RehearsalError, match="surface readback"):
+            m.validate_topology_readback(readback, evidence, authority, now=NOW)
+
+
+@pytest.mark.parametrize("logical", ["relative", "/a/../b", "//boot", "/dev/disk"])
+def test_invalid_logical_mountpoint_cannot_escape_mount_root(logical):
+    with pytest.raises(m.RehearsalError):
+        m._sandbox_mountpoint(logical)

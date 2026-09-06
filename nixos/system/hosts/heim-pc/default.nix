@@ -10,9 +10,9 @@ in
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
 
-  # Prototype-only boot surface. The deliberately impossible label prevents
-  # accidental use as a real installer configuration; bare-metal validation
-  # must replace this with hardware-configuration.nix generated on test media.
+  # Placeholder boot surface for heim-pc and the VM proof only. The physical
+  # storage target and gate profiles replace it with storage-layout.nix, derived
+  # from the same rehearsal contract. Neither profile authorizes installation.
   fileSystems."/" = {
     device = "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
     fsType = "ext4";
@@ -20,6 +20,9 @@ in
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = false;
   system.stateVersion = "26.05";
+
+  # Physical hardware policy must not leak into the hardware-neutral VM proof.
+  hardware.cpu.amd.updateMicrocode = heimPcProfile.physical or false;
 
   # Runtime identity is always observable. The explicit provenance bundle in
   # flake.nix is the fail-closed gate that rejects dirty or path-only sources.
@@ -33,6 +36,8 @@ in
   };
   heimPc.physicalGates.enable = heimPcProfile.physicalGates or false;
 
-  users.users.alex = { isNormalUser = true; extraGroups = [ "wheel" "audio" "video" ]; };
+  # A secure first-boot credential bootstrap remains a pre-bare-metal gate.
+  # No password or password hash is embedded in this build-only source.
+  users.users.alex = { isNormalUser = true; extraGroups = [ "wheel" "audio" "video" "networkmanager" ]; };
   services.getty.autologinUser = lib.mkIf (!(heimPcProfile.desktop or false)) "alex";
 }
