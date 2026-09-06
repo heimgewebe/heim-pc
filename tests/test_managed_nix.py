@@ -32,6 +32,8 @@ from scripts.managed_nix import (
     sha256_json,
     validate_activation_authority,
     validate_activation_plan,
+    validate_activation_receipt,
+    validate_rollback_plan,
     validate_build_receipt,
     validate_build_request,
     validate_build_source_context,
@@ -768,3 +770,82 @@ def test_contract_file_is_runtime_source_and_keeps_t012_implementation_only() ->
         "firmware_mutation": False,
         "reboot": False,
     }
+
+def test_managed_revision_contract_matches_nix_provenance_guard_at_40_hex() -> None:
+    with pytest.raises(ManagedNixError, match="40-character"):
+        validate_build_request(request(source_revision="a" * 64))
+    with pytest.raises(ManagedNixError, match="40-character"):
+        validate_build_source_context(
+            request(),
+            observed_repository="heimgewebe/heim-pc",
+            observed_source_revision="a" * 64,
+        )
+
+
+def test_activation_receipt_is_exactly_schema_bound_and_revalidated() -> None:
+    built = receipt()
+    plan = validate_authority(built, authority(built))
+    result = make_activation_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256="f" * 64,
+    )
+    contract = MANAGED_DEPLOYMENT_CONTRACT["activation"]
+    assert set(result) == set(contract["receipt_fields"])
+    assert set(contract["receipt_fields"]) == set(contract["receipt_requires"])
+    assert validate_activation_receipt(result) == result
+
+    forged = dict(result)
+    forged["surprise"] = True
+    with pytest.raises(ManagedNixError, match="fields mismatch"):
+        validate_activation_receipt(forged)
+
+    drifted = dict(result)
+    drifted["live_closure"] = PRIOR
+    with pytest.raises(ManagedNixError, match="live closure"):
+        validate_activation_receipt(drifted)
+
+    reevaluated = dict(result)
+    reevaluated["source_reevaluation_used"] = True
+    with pytest.raises(ManagedNixError, match="reevaluation"):
+        validate_activation_receipt(reevaluated)
+
+
+def test_rollback_plan_is_exactly_schema_bound_and_revalidated() -> None:
+    built = receipt()
+    plan = validate_authority(built, authority(built))
+    result = rollback_plan(plan)
+    contract = MANAGED_DEPLOYMENT_CONTRACT["rollback"]
+    assert result["kind"] == contract["plan_kind"]
+    assert set(result) == set(contract["plan_fields"])
+    assert validate_rollback_plan(result) == result
+
+    forged = dict(result)
+    forged["surprise"] = True
+    with pytest.raises(ManagedNixError, match="fields mismatch"):
+        validate_rollback_plan(forged)
+
+    reevaluating = dict(result)
+    reevaluating["source_reevaluation_allowed"] = True
+    with pytest.raises(ManagedNixError, match="forbid source reevaluation"):
+        validate_rollback_plan(reevaluating)
+
+
+def test_contract_loader_rejects_activation_receipt_or_rollback_schema_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "contract-v1.json"
+    monkeypatch.setattr(managed_nix, "_CONTRACT_PATH", contract_path)
+
+    receipt_drift = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    receipt_drift["activation"]["receipt_fields"].append("caller_authorized")
+    receipt_drift["activation"]["receipt_requires"].append("caller_authorized")
+    contract_path.write_text(json.dumps(receipt_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="receipt_fields"):
+        managed_nix._load_managed_contract()
+
+    rollback_drift = copy.deepcopy(MANAGED_DEPLOYMENT_CONTRACT)
+    rollback_drift["rollback"]["plan_fields"].append("source_revision")
+    contract_path.write_text(json.dumps(rollback_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="rollback.plan_fields"):
+        managed_nix._load_managed_contract()

@@ -3,7 +3,10 @@
   "kind": "heim_pc.nixos_storage_rehearsal_contract",
   "profile": "nixos-executor-2026",
   "target": {
-    "allowed_device_kinds": ["loop", "nbd"],
+    "allowed_device_kinds": [
+      "loop",
+      "nbd"
+    ],
     "minimum_size_bytes": 17179869184,
     "max_evidence_age_seconds": 300,
     "requires_blank": true,
@@ -22,25 +25,33 @@
         "role": "efi-system-partition",
         "label": "EFI",
         "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
-        "rehearsal_size_mib": 1024,
-        "filesystem": "vfat"
+        "filesystem": "vfat",
+        "size": {
+          "kind": "fixed_mib",
+          "value": 1024
+        }
       },
       {
         "number": 2,
         "role": "recovery-surface",
         "label": "RECOVERY",
         "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
-        "rehearsal_size_mib": 4096,
-        "filesystem": "ext4"
+        "filesystem": "ext4",
+        "size": {
+          "kind": "fixed_mib",
+          "value": 4096
+        }
       },
       {
         "number": 3,
         "role": "encrypted-system",
         "label": "NIXOS_CRYPT",
         "type_guid": "CA7D7CCB-63ED-4C53-861C-1742536059CC",
-        "rehearsal_size_mib": "remainder",
         "encryption": "luks2",
-        "filesystem": "btrfs"
+        "filesystem": "btrfs",
+        "size": {
+          "kind": "remainder"
+        }
       }
     ],
     "luks": {
@@ -50,12 +61,30 @@
     "btrfs": {
       "label": "NIXOS_SYSTEM",
       "subvolumes": [
-        {"name": "@root", "mountpoint": "/"},
-        {"name": "@nix", "mountpoint": "/nix"},
-        {"name": "@persist", "mountpoint": "/persist"},
-        {"name": "@home", "mountpoint": "/home"},
-        {"name": "@data", "mountpoint": "/var/lib/heim-pc-data"},
-        {"name": "@containers", "mountpoint": "/var/lib/containers"}
+        {
+          "name": "@root",
+          "mountpoint": "/"
+        },
+        {
+          "name": "@nix",
+          "mountpoint": "/nix"
+        },
+        {
+          "name": "@persist",
+          "mountpoint": "/persist"
+        },
+        {
+          "name": "@home",
+          "mountpoint": "/home"
+        },
+        {
+          "name": "@data",
+          "mountpoint": "/var/lib/heim-pc-data"
+        },
+        {
+          "name": "@containers",
+          "mountpoint": "/var/lib/containers"
+        }
       ]
     }
   },
@@ -73,7 +102,8 @@
       "productive-nixos-install",
       "productive-switch",
       "reboot"
-    ]
+    ],
+    "teardown_required": true
   },
   "recovery_evidence_domains": [
     "backup-coverage",
@@ -82,6 +112,7 @@
     "offline-source-lock-trust",
     "luks-recovery-material"
   ],
+  "recovery_max_evidence_age_seconds": 604800,
   "offline_reconstruction": {
     "network_required": false,
     "production_system_ssd_required": false,

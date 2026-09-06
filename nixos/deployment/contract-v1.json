@@ -125,6 +125,40 @@
       "broad_root_shell_allowed"
     ],
     "receipt_kind": "heim_pc.nixos_activation_receipt",
+    "receipt_fields": [
+      "schema_version",
+      "kind",
+      "effect_class",
+      "result",
+      "mode",
+      "target",
+      "source_revision",
+      "system_closure",
+      "live_closure",
+      "build_receipt_sha256",
+      "authority_sha256",
+      "readback_evidence_sha256",
+      "prior_closure",
+      "recovery_path",
+      "source_reevaluation_used"
+    ],
+    "receipt_requires": [
+      "schema_version",
+      "kind",
+      "effect_class",
+      "result",
+      "mode",
+      "target",
+      "source_revision",
+      "system_closure",
+      "live_closure",
+      "build_receipt_sha256",
+      "authority_sha256",
+      "readback_evidence_sha256",
+      "prior_closure",
+      "recovery_path",
+      "source_reevaluation_used"
+    ],
     "allowed_modes": [
       "test",
       "next-boot",
@@ -183,6 +217,15 @@
     "boot_critical_requires_next_boot_path": true
   },
   "rollback": {
+    "plan_kind": "heim_pc.nixos_rollback_plan",
+    "plan_fields": [
+      "schema_version",
+      "kind",
+      "target",
+      "system_closure",
+      "recovery_path",
+      "source_reevaluation_allowed"
+    ],
     "requires_prior_closure": true,
     "requires_recovery_path": true,
     "source_reevaluation_allowed": false

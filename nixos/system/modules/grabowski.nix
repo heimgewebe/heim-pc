@@ -2,7 +2,7 @@
 let
   readback = pkgs.writeShellApplication {
     name = "grabowski-demo-readback";
-    runtimeInputs = [ pkgs.coreutils ];
+    runtimeInputs = [ pkgs.coreutils pkgs.jq ];
     text = ''
       set -eu
       generation="$(readlink -f /run/current-system)"
@@ -11,8 +11,13 @@ let
       else
         source_revision="prototype-unbound"
       fi
-      printf '{"service":"grabowski-demo","source_revision":"%s","generation":"%s"}\n' \
-        "$source_revision" "$generation" > "$RUNTIME_DIRECTORY/readback.json"
+      jq -cn \
+        --arg service "grabowski-demo" \
+        --arg source_revision "$source_revision" \
+        --arg generation "$generation" \
+        '{service: $service, source_revision: $source_revision, generation: $generation}' \
+        > "$RUNTIME_DIRECTORY/readback.json"
+      chmod 0644 "$RUNTIME_DIRECTORY/readback.json"
       printf 'HEIM_PC_RUNTIME_IDENTITY source_revision=%s generation=%s\n' \
         "$source_revision" "$generation"
     '';
@@ -44,7 +49,7 @@ in
       ExecStart = "${readback}/bin/grabowski-demo-readback";
       DynamicUser = true;
       RuntimeDirectory = "grabowski-demo";
-      RuntimeDirectoryMode = "0750";
+      RuntimeDirectoryMode = "0755";
       NoNewPrivileges = true;
       PrivateTmp = true;
       PrivateDevices = true;

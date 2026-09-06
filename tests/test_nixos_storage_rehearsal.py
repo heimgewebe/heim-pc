@@ -89,6 +89,7 @@ def topology_readback(evidence=None, authority=None):
             "label": "EFI",
             "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
             "device": "/dev/loop7p1",
+            "size_bytes": 1024 * 1024**2,
         },
         {
             "number": 2,
@@ -96,6 +97,7 @@ def topology_readback(evidence=None, authority=None):
             "label": "RECOVERY",
             "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
             "device": "/dev/loop7p2",
+            "size_bytes": 4096 * 1024**2,
         },
         {
             "number": 3,
@@ -103,6 +105,7 @@ def topology_readback(evidence=None, authority=None):
             "label": "NIXOS_CRYPT",
             "type_guid": "CA7D7CCB-63ED-4C53-861C-1742536059CC",
             "device": "/dev/loop7p3",
+            "size_bytes": 27 * 1024**3,
         },
     ]
     value = {
@@ -131,7 +134,7 @@ def topology_readback(evidence=None, authority=None):
                 "/var/lib/heim-pc-data": "@data",
                 "/var/lib/containers": "@containers",
             },
-            "sandbox_mounts": dict(m.SANDBOX_MOUNT_BY_SUBVOLUME),
+            "sandbox_mounts": m._sandbox_mounts(m.load_contract()),
         },
         "efi": {
             "device": "/dev/loop7p1",
@@ -176,7 +179,7 @@ def recovery_evidence():
 
 def test_contract_is_digest_bound_and_exact_topology():
     contract = m.load_contract()
-    assert m.sha256_bytes(m.CONTRACT_PATH.read_bytes()) == m.CONTRACT_SHA256
+    assert m.sha256_json(json.loads(m.CONTRACT_PATH.read_text())) == m.CONTRACT_SHA256
     assert contract["topology"]["partition_table"] == "gpt"
     assert [item["role"] for item in contract["topology"]["partitions"]] == [
         "efi-system-partition",
@@ -297,8 +300,9 @@ def test_effect_plan_is_argv_only_and_never_authorizes_execution():
         item for item in plan["commands"] if item["effect"] == "btrfs-subvolume-mount"
     ]
     assert len(mounted_subvolumes) == 6
-    assert {item["subvolume"] for item in mounted_subvolumes} == set(m.SANDBOX_MOUNT_BY_SUBVOLUME)
-    assert {item["argv"][-1] for item in mounted_subvolumes} == set(m.SANDBOX_MOUNT_BY_SUBVOLUME.values())
+    sandbox_mounts = m._sandbox_mounts(m.load_contract())
+    assert {item["subvolume"] for item in mounted_subvolumes} == set(sandbox_mounts)
+    assert {item["argv"][-1] for item in mounted_subvolumes} == set(sandbox_mounts.values())
     for command in plan["commands"]:
         assert isinstance(command["argv"], list)
         assert command["argv"]
@@ -427,3 +431,62 @@ def test_harness_does_not_hardcode_historical_production_device_identity():
     assert "SN850X" not in source
     assert "/dev/nvme0n1" not in source
     assert "historical nvme0n1" not in source
+
+def test_partition_argv_is_compiled_from_contract_values():
+    evidence = target_evidence()
+    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    contract = m.load_contract()
+    partition_commands = {
+        item["partition_role"]: item["argv"]
+        for item in plan["commands"]
+        if "partition_role" in item
+    }
+    for partition in contract["topology"]["partitions"]:
+        argv = partition_commands[partition["role"]]
+        assert f"--typecode={partition['number']}:{partition['type_guid']}" in argv
+        assert f"--change-name={partition['number']}:{partition['label']}" in argv
+        size = partition["size"]
+        expected_end = f"+{size['value']}MiB" if size["kind"] == "fixed_mib" else "0"
+        assert f"--new={partition['number']}:0:{expected_end}" in argv
+
+
+def test_plan_declares_same_luks_secret_binding_and_teardown():
+    evidence = target_evidence()
+    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    secret_commands = [item for item in plan["commands"] if "secret_binding" in item]
+    assert {item["effect"] for item in secret_commands} == {"luks-format", "luks-open"}
+    assert {item["secret_binding"] for item in secret_commands} == {"luks-key-v1"}
+    assert plan["teardown_required"] is True
+    assert plan["teardown_commands"][-1]["effect"] == "luks-close"
+    assert all(item["argv"][0] in {"umount", "cryptsetup"} for item in plan["teardown_commands"])
+
+
+def test_topology_readback_rejects_fixed_partition_size_drift():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    value = topology_readback(evidence, authority)
+    value["gpt"]["partitions"][0]["size_bytes"] += 1024**2
+    value = _digest(value, "readback_sha256")
+    with pytest.raises(m.RehearsalError, match="partition size"):
+        m.validate_topology_readback(value, evidence, authority, now=NOW)
+
+
+def test_recovery_evidence_rejects_stale_outer_or_domain_timestamp():
+    stale_now = datetime(2026, 9, 20, 0, 30, 0, tzinfo=timezone.utc)
+    with pytest.raises(m.RehearsalError, match="stale"):
+        m.validate_recovery_evidence(recovery_evidence(), now=stale_now)
+
+    value = recovery_evidence()
+    value["observed_at"] = "2026-09-05T00:00:00Z"
+    value["domains"]["backup-coverage"]["observed_at"] = "2026-08-01T00:00:00Z"
+    value = _digest(value, "evidence_sha256")
+    with pytest.raises(m.RehearsalError, match="backup-coverage.*stale"):
+        m.validate_recovery_evidence(value, now=NOW)
+
+
+def test_canonical_contract_digest_ignores_json_whitespace(tmp_path, monkeypatch):
+    contract = m.load_contract()
+    alternate = tmp_path / "contract.json"
+    alternate.write_text(json.dumps(contract, ensure_ascii=False, separators=(",", ":")))
+    monkeypatch.setattr(m, "CONTRACT_PATH", alternate)
+    assert m.load_contract() == contract

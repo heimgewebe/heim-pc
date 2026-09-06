@@ -23,7 +23,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "nixos" / "rehearsal" / "contract-v1.json"
-CONTRACT_SHA256 = "40fda917530ee0a78426bb6c4f1ce53f48f2108c5cc5b12afed314340d9cc263"
+CONTRACT_SHA256 = "3510e57aebb9bb98f410c7908f0e737a473488f4a3f9b15c2748f31089d52f94"
 TARGET_KIND = "heim_pc.storage_target_observation"
 AUTHORITY_KIND = "heim_pc.nixos_storage_sandbox_authority"
 READBACK_KIND = "heim_pc.storage_rehearsal_readback"
@@ -34,15 +34,6 @@ MOUNT_ROOT = "/mnt/nixos-rehearsal"
 BTRFS_STAGE_ROOT = f"{MOUNT_ROOT}/.btrfs-root"
 EFI_MOUNT = f"{MOUNT_ROOT}/efi"
 RECOVERY_MOUNT = f"{MOUNT_ROOT}/recovery"
-MAPPER_PATH = "/dev/mapper/nixos-rehearsal-crypt"
-SANDBOX_MOUNT_BY_SUBVOLUME = {
-    "@root": f"{MOUNT_ROOT}/mounts/root",
-    "@nix": f"{MOUNT_ROOT}/mounts/nix",
-    "@persist": f"{MOUNT_ROOT}/mounts/persist",
-    "@home": f"{MOUNT_ROOT}/mounts/home",
-    "@data": f"{MOUNT_ROOT}/mounts/data",
-    "@containers": f"{MOUNT_ROOT}/mounts/containers",
-}
 FUTURE_SKEW_SECONDS = 5
 
 
@@ -54,14 +45,22 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def sha256_json(value: Any) -> str:
-    return sha256_bytes(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    )
+    return sha256_bytes(canonical_json(value))
 
 
 def _copy_json(value: Any) -> Any:
-    return json.loads(json.dumps(value))
+    return json.loads(canonical_json(value))
 
 
 def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
@@ -147,11 +146,12 @@ def _string_list(value: Any, label: str, *, devices: bool = False) -> list[str]:
 
 
 def load_contract() -> dict[str, Any]:
-    raw = CONTRACT_PATH.read_bytes()
-    observed = sha256_bytes(raw)
-    if observed != CONTRACT_SHA256:
+    try:
+        value = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RehearsalError(f"cannot read storage rehearsal contract: {exc}") from exc
+    if sha256_json(value) != CONTRACT_SHA256:
         raise RehearsalError("storage rehearsal contract digest mismatch")
-    value = json.loads(raw)
     _exact_keys(
         value,
         {
@@ -162,13 +162,119 @@ def load_contract() -> dict[str, Any]:
             "topology",
             "runtime_effect_boundary",
             "recovery_evidence_domains",
+            "recovery_max_evidence_age_seconds",
             "offline_reconstruction",
         },
         "contract",
     )
     if value["schema_version"] != 1 or value["kind"] != "heim_pc.nixos_storage_rehearsal_contract":
         raise RehearsalError("storage rehearsal contract identity mismatch")
+    target = _exact_keys(
+        value["target"],
+        {
+            "allowed_device_kinds", "minimum_size_bytes", "max_evidence_age_seconds",
+            "requires_blank", "requires_unmounted", "requires_no_partition_table",
+            "requires_no_filesystem_signatures", "production_identity_match_forbidden",
+            "production_backing_match_forbidden", "production_mount_match_forbidden",
+        },
+        "contract.target",
+    )
+    allowed_kinds = _string_list(target["allowed_device_kinds"], "contract.target.allowed_device_kinds")
+    if allowed_kinds != ["loop", "nbd"]:
+        raise RehearsalError("contract target kinds must remain loop and nbd")
+    _positive_int(target["minimum_size_bytes"], "contract.target.minimum_size_bytes")
+    _positive_int(target["max_evidence_age_seconds"], "contract.target.max_evidence_age_seconds")
+    for key in (
+        "requires_blank", "requires_unmounted", "requires_no_partition_table",
+        "requires_no_filesystem_signatures", "production_identity_match_forbidden",
+        "production_backing_match_forbidden", "production_mount_match_forbidden",
+    ):
+        _bool(target[key], f"contract.target.{key}")
+
+    topology = _exact_keys(
+        value["topology"], {"partition_table", "partitions", "luks", "btrfs"}, "contract.topology"
+    )
+    if topology["partition_table"] != "gpt" or not isinstance(topology["partitions"], list):
+        raise RehearsalError("contract topology must define a GPT partition list")
+    numbers: set[int] = set()
+    roles: set[str] = set()
+    for index, item in enumerate(topology["partitions"]):
+        allowed = {"number", "role", "label", "type_guid", "size", "filesystem"}
+        if isinstance(item, dict) and "encryption" in item:
+            allowed.add("encryption")
+        partition = _exact_keys(item, allowed, f"contract.topology.partitions[{index}]")
+        number = _positive_int(partition["number"], f"contract partition {index}.number")
+        role = _nonempty_text(partition["role"], f"contract partition {index}.role", 64)
+        if number in numbers or role in roles:
+            raise RehearsalError("contract partition numbers and roles must be unique")
+        numbers.add(number)
+        roles.add(role)
+        _nonempty_text(partition["label"], f"contract partition {index}.label", 64)
+        _nonempty_text(partition["type_guid"], f"contract partition {index}.type_guid", 64)
+        _nonempty_text(partition["filesystem"], f"contract partition {index}.filesystem", 32)
+        size = partition["size"]
+        if not isinstance(size, dict) or size.get("kind") not in {"fixed_mib", "remainder"}:
+            raise RehearsalError("contract partition size must be fixed_mib or remainder")
+        if size["kind"] == "fixed_mib":
+            _exact_keys(size, {"kind", "value"}, f"contract partition {index}.size")
+            _positive_int(size["value"], f"contract partition {index}.size.value")
+        else:
+            _exact_keys(size, {"kind"}, f"contract partition {index}.size")
+    if roles != {"efi-system-partition", "recovery-surface", "encrypted-system"}:
+        raise RehearsalError("contract partition roles are unsupported")
+    luks = _exact_keys(topology["luks"], {"version", "mapper_name"}, "contract.topology.luks")
+    if _positive_int(luks["version"], "contract.topology.luks.version") != 2:
+        raise RehearsalError("contract LUKS version must remain 2")
+    mapper_name = _nonempty_text(luks["mapper_name"], "contract.topology.luks.mapper_name", 64)
+    if re.fullmatch(r"[A-Za-z0-9._-]+", mapper_name) is None:
+        raise RehearsalError("contract mapper_name is not canonical")
+    btrfs = _exact_keys(topology["btrfs"], {"label", "subvolumes"}, "contract.topology.btrfs")
+    _nonempty_text(btrfs["label"], "contract.topology.btrfs.label", 64)
+    if not isinstance(btrfs["subvolumes"], list) or not btrfs["subvolumes"]:
+        raise RehearsalError("contract Btrfs subvolumes must be a non-empty list")
+    seen_subvolumes: set[str] = set()
+    for index, item in enumerate(btrfs["subvolumes"]):
+        subvolume = _exact_keys(item, {"name", "mountpoint"}, f"contract btrfs subvolume {index}")
+        name = _nonempty_text(subvolume["name"], f"contract btrfs subvolume {index}.name", 64)
+        _canonical_absolute_nondevice(subvolume["mountpoint"], f"contract btrfs subvolume {index}.mountpoint")
+        if name in seen_subvolumes:
+            raise RehearsalError("contract Btrfs subvolume names must be unique")
+        seen_subvolumes.add(name)
+
+    boundary = value["runtime_effect_boundary"]
+    if not isinstance(boundary, dict) or _bool(boundary.get("teardown_required"), "contract.runtime_effect_boundary.teardown_required") is not True:
+        raise RehearsalError("contract must require rehearsal teardown")
+    _positive_int(value["recovery_max_evidence_age_seconds"], "contract.recovery_max_evidence_age_seconds")
     return value
+
+
+def _partition_by_role(contract: dict[str, Any], role: str) -> dict[str, Any]:
+    matches = [item for item in contract["topology"]["partitions"] if item["role"] == role]
+    if len(matches) != 1:
+        raise RehearsalError(f"contract must contain exactly one {role} partition")
+    return matches[0]
+
+
+def _mapper_path(contract: dict[str, Any]) -> str:
+    return f"/dev/mapper/{contract['topology']['luks']['mapper_name']}"
+
+
+def _sandbox_mounts(contract: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in contract["topology"]["btrfs"]["subvolumes"]:
+        name = item["name"]
+        suffix = name[1:] if name.startswith("@") else name
+        if re.fullmatch(r"[A-Za-z0-9._-]+", suffix) is None:
+            raise RehearsalError(f"subvolume name cannot form a sandbox mount: {name}")
+        result[name] = f"{MOUNT_ROOT}/mounts/{suffix}"
+    return result
+
+
+def _partition_new_arg(partition: dict[str, Any]) -> str:
+    number = partition["number"]
+    size = partition["size"]
+    end = f"+{size['value']}MiB" if size["kind"] == "fixed_mib" else "0"
+    return f"--new={number}:0:{end}"
 
 
 def _validate_self_digest(value: dict[str, Any], digest_field: str, label: str) -> str:
@@ -239,13 +345,19 @@ def validate_target_evidence(
     if size_bytes < int(target_contract["minimum_size_bytes"]):
         raise RehearsalError("target is too small for the rehearsal topology")
     backing_file = _canonical_absolute_nondevice(target["backing_file"], "target.backing_file")
-    if _bool(target["blank"], "target.blank") is not True:
+    blank = _bool(target["blank"], "target.blank")
+    mounted = _bool(target["mounted"], "target.mounted")
+    has_partition_table = _bool(target["has_partition_table"], "target.has_partition_table")
+    has_filesystem_signatures = _bool(
+        target["has_filesystem_signatures"], "target.has_filesystem_signatures"
+    )
+    if target_contract["requires_blank"] and not blank:
         raise RehearsalError("target is not explicitly blank")
-    if _bool(target["mounted"], "target.mounted") is not False:
+    if target_contract["requires_unmounted"] and mounted:
         raise RehearsalError("target or descendant is mounted")
-    if _bool(target["has_partition_table"], "target.has_partition_table") is not False:
+    if target_contract["requires_no_partition_table"] and has_partition_table:
         raise RehearsalError("blank target already has a partition table")
-    if _bool(target["has_filesystem_signatures"], "target.has_filesystem_signatures") is not False:
+    if target_contract["requires_no_filesystem_signatures"] and has_filesystem_signatures:
         raise RehearsalError("blank target already has filesystem signatures")
 
     production = _exact_keys(
@@ -256,13 +368,13 @@ def validate_target_evidence(
     root_backing = _string_list(production["root_backing_devices"], "production.root_backing_devices", devices=True)
     mounted_devices = _string_list(production["mounted_devices"], "production.mounted_devices", devices=True)
     production_identities = _string_list(production["device_identities"], "production.device_identities")
-    if not root_backing:
+    if target_contract["production_backing_match_forbidden"] and not root_backing:
         raise RehearsalError("production root backing evidence must not be empty")
-    if target_path in root_backing:
+    if target_contract["production_backing_match_forbidden"] and target_path in root_backing:
         raise RehearsalError("target matches productive root backing")
-    if target_path in mounted_devices:
+    if target_contract["production_mount_match_forbidden"] and target_path in mounted_devices:
         raise RehearsalError("target matches a mounted production device")
-    if identity in production_identities:
+    if target_contract["production_identity_match_forbidden"] and identity in production_identities:
         raise RehearsalError("target identity matches a production device identity")
 
     exclusion_material = {
@@ -363,58 +475,72 @@ def compile_effect_plan(
     preflight = validate_target_evidence(target_evidence, now=now)
     authority = validate_sandbox_authority(sandbox_authority, preflight, now=now)
     target = preflight["target_path"]
-    p1, p2, p3 = (_partition_path(target, number) for number in (1, 2, 3))
-    mapper = MAPPER_PATH
-    subvolumes = [item["name"] for item in contract["topology"]["btrfs"]["subvolumes"]]
+    partitions = sorted(contract["topology"]["partitions"], key=lambda item: item["number"])
+    efi = _partition_by_role(contract, "efi-system-partition")
+    recovery = _partition_by_role(contract, "recovery-surface")
+    encrypted = _partition_by_role(contract, "encrypted-system")
+    efi_device = _partition_path(target, efi["number"])
+    recovery_device = _partition_path(target, recovery["number"])
+    encrypted_device = _partition_path(target, encrypted["number"])
+    luks = contract["topology"]["luks"]
+    luks_type = f"luks{luks['version']}"
+    mapper_name = luks["mapper_name"]
+    mapper = _mapper_path(contract)
+    btrfs = contract["topology"]["btrfs"]
+    sandbox_mounts = _sandbox_mounts(contract)
+    subvolumes = [item["name"] for item in btrfs["subvolumes"]]
 
-    mount_targets = [
-        EFI_MOUNT,
-        RECOVERY_MOUNT,
-        BTRFS_STAGE_ROOT,
-        *SANDBOX_MOUNT_BY_SUBVOLUME.values(),
-    ]
+    mount_targets = [EFI_MOUNT, RECOVERY_MOUNT, BTRFS_STAGE_ROOT, *sandbox_mounts.values()]
     commands: list[dict[str, Any]] = [
         {"effect": "partition-table", "argv": ["sgdisk", "--clear", target]},
-        {
-            "effect": "partition-efi",
-            "argv": [
-                "sgdisk", "--new=1:1MiB:+1024MiB", "--typecode=1:EF00", "--change-name=1:EFI", target,
-            ],
-        },
-        {
-            "effect": "partition-recovery",
-            "argv": [
-                "sgdisk", "--new=2:0:+4096MiB", "--typecode=2:8300", "--change-name=2:RECOVERY", target,
-            ],
-        },
-        {
-            "effect": "partition-luks",
-            "argv": [
-                "sgdisk", "--new=3:0:0", "--typecode=3:8309", "--change-name=3:NIXOS_CRYPT", target,
-            ],
-        },
+    ]
+    for partition in partitions:
+        number = partition["number"]
+        commands.append(
+            {
+                "effect": f"partition-{partition['role']}",
+                "argv": [
+                    "sgdisk",
+                    _partition_new_arg(partition),
+                    f"--typecode={number}:{partition['type_guid']}",
+                    f"--change-name={number}:{partition['label']}",
+                    target,
+                ],
+                "partition_role": partition["role"],
+            }
+        )
+    commands.extend([
         {"effect": "partition-table-reread", "argv": ["partprobe", target]},
         {"effect": "udev-settle", "argv": ["udevadm", "settle"]},
         {"effect": "sandbox-mountpoint-create", "argv": ["mkdir", "-p", *mount_targets]},
-        {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", "EFI", p1]},
-        {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", "RECOVERY", p2]},
+        {
+            "effect": "efi-filesystem",
+            "argv": ["mkfs.fat", "-F", "32", "-n", efi["label"], efi_device],
+        },
+        {
+            "effect": "recovery-filesystem",
+            "argv": ["mkfs.ext4", "-F", "-L", recovery["label"], recovery_device],
+        },
         {
             "effect": "luks-format",
-            "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--key-file", "-", p3],
+            "argv": ["cryptsetup", "luksFormat", "--type", luks_type, "--key-file", "-", encrypted_device],
             "secret_input": "stdin",
+            "secret_binding": "luks-key-v1",
         },
         {
             "effect": "luks-open",
             "argv": [
-                "cryptsetup", "open", "--type", "luks2", "--key-file", "-", p3, "nixos-rehearsal-crypt",
+                "cryptsetup", "open", "--type", luks_type, "--key-file", "-",
+                encrypted_device, mapper_name,
             ],
             "secret_input": "stdin",
+            "secret_binding": "luks-key-v1",
         },
-        {"effect": "btrfs-filesystem", "argv": ["mkfs.btrfs", "-f", "-L", "NIXOS_SYSTEM", mapper]},
-        {"effect": "efi-surface-mount", "argv": ["mount", p1, EFI_MOUNT]},
-        {"effect": "recovery-surface-mount", "argv": ["mount", p2, RECOVERY_MOUNT]},
+        {"effect": "btrfs-filesystem", "argv": ["mkfs.btrfs", "-f", "-L", btrfs["label"], mapper]},
+        {"effect": "efi-surface-mount", "argv": ["mount", efi_device, EFI_MOUNT]},
+        {"effect": "recovery-surface-mount", "argv": ["mount", recovery_device, RECOVERY_MOUNT]},
         {"effect": "btrfs-stage-mount", "argv": ["mount", mapper, BTRFS_STAGE_ROOT]},
-    ]
+    ])
     for name in subvolumes:
         commands.append(
             {
@@ -423,28 +549,27 @@ def compile_effect_plan(
                 "subvolume": name,
             }
         )
-    commands.append(
-        {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]}
-    )
-    logical_mounts = {
-        item["name"]: item["mountpoint"]
-        for item in contract["topology"]["btrfs"]["subvolumes"]
-    }
+    commands.append({"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]})
+    logical_mounts = {item["name"]: item["mountpoint"] for item in btrfs["subvolumes"]}
     for name in subvolumes:
         commands.append(
             {
                 "effect": "btrfs-subvolume-mount",
-                "argv": [
-                    "mount",
-                    "-o",
-                    f"subvol={name}",
-                    mapper,
-                    SANDBOX_MOUNT_BY_SUBVOLUME[name],
-                ],
+                "argv": ["mount", "-o", f"subvol={name}", mapper, sandbox_mounts[name]],
                 "subvolume": name,
                 "logical_mountpoint": logical_mounts[name],
             }
         )
+
+    teardown_commands = [
+        {"effect": "btrfs-subvolume-unmount", "argv": ["umount", sandbox_mounts[name]], "subvolume": name}
+        for name in reversed(subvolumes)
+    ]
+    teardown_commands.extend([
+        {"effect": "efi-surface-unmount", "argv": ["umount", EFI_MOUNT]},
+        {"effect": "recovery-surface-unmount", "argv": ["umount", RECOVERY_MOUNT]},
+        {"effect": "luks-close", "argv": ["cryptsetup", "close", mapper_name]},
+    ])
 
     material = {
         "schema_version": 1,
@@ -455,22 +580,21 @@ def compile_effect_plan(
         "runtime_executor_task": EXECUTOR_TASK,
         "exclusive_resource": SANDBOX_RESOURCE,
         "commands": commands,
+        "teardown_commands": teardown_commands,
+        "teardown_required": contract["runtime_effect_boundary"]["teardown_required"],
         "expected_readback": {
-            "partition_table": "gpt",
-            "partitions": _copy_json(contract["topology"]["partitions"]),
-            "luks": _copy_json(contract["topology"]["luks"]),
-            "btrfs": {
-                **_copy_json(contract["topology"]["btrfs"]),
-                "sandbox_mounts": dict(SANDBOX_MOUNT_BY_SUBVOLUME),
-            },
+            "partition_table": contract["topology"]["partition_table"],
+            "partitions": _copy_json(partitions),
+            "luks": _copy_json(luks),
+            "btrfs": {**_copy_json(btrfs), "sandbox_mounts": dict(sandbox_mounts)},
             "efi": {
-                "device": p1,
-                "filesystem": "vfat",
+                "device": efi_device,
+                "filesystem": efi["filesystem"],
                 "sandbox_mountpoint": EFI_MOUNT,
             },
             "recovery": {
-                "device": p2,
-                "filesystem": "ext4",
+                "device": recovery_device,
+                "filesystem": recovery["filesystem"],
                 "sandbox_mountpoint": RECOVERY_MOUNT,
             },
         },
@@ -531,7 +655,7 @@ def validate_topology_readback(
     for index, item in enumerate(gpt["partitions"]):
         partition = _exact_keys(
             item,
-            {"number", "role", "label", "type_guid", "device"},
+            {"number", "role", "label", "type_guid", "device", "size_bytes"},
             f"topology readback.gpt.partitions[{index}]",
         )
         normalized_partitions.append(
@@ -541,6 +665,7 @@ def validate_topology_readback(
                 "label": _nonempty_text(partition["label"], f"partition[{index}].label"),
                 "type_guid": _nonempty_text(partition["type_guid"], f"partition[{index}].type_guid", 64).upper(),
                 "device": _canonical_device(partition["device"], f"partition[{index}].device"),
+                "size_bytes": _positive_int(partition["size_bytes"], f"partition[{index}].size_bytes"),
             }
         )
     normalized_partitions.sort(key=lambda item: item["number"])
@@ -554,13 +679,27 @@ def validate_topology_readback(
         }
         for item in expected_partitions
     ]
-    if normalized_partitions != expected_summary:
+    observed_metadata = [{key: item[key] for key in ("number", "role", "label", "type_guid", "device")} for item in normalized_partitions]
+    if observed_metadata != expected_summary:
         raise RehearsalError("partition topology readback differs from contract")
+    for observed_partition, expected_partition in zip(normalized_partitions, expected_partitions):
+        size = expected_partition["size"]
+        if size["kind"] == "fixed_mib" and observed_partition["size_bytes"] != size["value"] * 1024**2:
+            raise RehearsalError("partition size readback differs from contract")
 
+    expected_luks = contract["topology"]["luks"]
+    encrypted_partition = _partition_by_role(contract, "encrypted-system")
+    encrypted_device = _partition_path(
+        plan["target_preflight"]["target_path"], encrypted_partition["number"]
+    )
     luks = _exact_keys(readback["luks"], {"version", "container_device", "mapper_name", "unlocked"}, "topology readback.luks")
-    if luks["version"] != 2 or luks["mapper_name"] != "nixos-rehearsal-crypt" or luks["unlocked"] is not True:
-        raise RehearsalError("LUKS2 readback is not unlocked as expected")
-    if _canonical_device(luks["container_device"], "luks.container_device") != expected_summary[2]["device"]:
+    if (
+        luks["version"] != expected_luks["version"]
+        or luks["mapper_name"] != expected_luks["mapper_name"]
+        or luks["unlocked"] is not True
+    ):
+        raise RehearsalError(f"LUKS{expected_luks['version']} readback is not unlocked as expected")
+    if _canonical_device(luks["container_device"], "luks.container_device") != encrypted_device:
         raise RehearsalError("LUKS container device mismatch")
 
     btrfs = _exact_keys(
@@ -568,9 +707,14 @@ def validate_topology_readback(
         {"label", "device", "subvolumes", "mounts", "sandbox_mounts"},
         "topology readback.btrfs",
     )
-    if btrfs["label"] != "NIXOS_SYSTEM" or _canonical_device(btrfs["device"], "btrfs.device") != MAPPER_PATH:
+    expected_btrfs = contract["topology"]["btrfs"]
+    sandbox_mounts = _sandbox_mounts(contract)
+    if (
+        btrfs["label"] != expected_btrfs["label"]
+        or _canonical_device(btrfs["device"], "btrfs.device") != _mapper_path(contract)
+    ):
         raise RehearsalError("Btrfs readback identity mismatch")
-    expected_subvolumes = [item["name"] for item in contract["topology"]["btrfs"]["subvolumes"]]
+    expected_subvolumes = [item["name"] for item in expected_btrfs["subvolumes"]]
     if _string_list(btrfs["subvolumes"], "btrfs.subvolumes") != sorted(expected_subvolumes):
         raise RehearsalError("Btrfs subvolume readback mismatch")
     if not isinstance(btrfs["mounts"], dict):
@@ -578,7 +722,7 @@ def validate_topology_readback(
     expected_mounts = {item["mountpoint"]: item["name"] for item in contract["topology"]["btrfs"]["subvolumes"]}
     if btrfs["mounts"] != expected_mounts:
         raise RehearsalError("Btrfs mount readback mismatch")
-    if btrfs["sandbox_mounts"] != SANDBOX_MOUNT_BY_SUBVOLUME:
+    if btrfs["sandbox_mounts"] != sandbox_mounts:
         raise RehearsalError("Btrfs sandbox mount readback mismatch")
 
     efi = _exact_keys(
@@ -586,9 +730,13 @@ def validate_topology_readback(
         {"device", "filesystem", "sandbox_mountpoint"},
         "topology readback.efi",
     )
-    if _canonical_device(efi["device"], "efi.device") != expected_summary[0]["device"]:
+    expected_efi = _partition_by_role(contract, "efi-system-partition")
+    expected_efi_device = _partition_path(
+        plan["target_preflight"]["target_path"], expected_efi["number"]
+    )
+    if _canonical_device(efi["device"], "efi.device") != expected_efi_device:
         raise RehearsalError("EFI partition device mismatch")
-    if efi["filesystem"] != "vfat" or efi["sandbox_mountpoint"] != EFI_MOUNT:
+    if efi["filesystem"] != expected_efi["filesystem"] or efi["sandbox_mountpoint"] != EFI_MOUNT:
         raise RehearsalError("EFI surface readback mismatch")
 
     recovery = _exact_keys(
@@ -596,10 +744,14 @@ def validate_topology_readback(
         {"device", "filesystem", "surface_present", "sandbox_mountpoint"},
         "topology readback.recovery",
     )
-    if _canonical_device(recovery["device"], "recovery.device") != expected_summary[1]["device"]:
+    expected_recovery = _partition_by_role(contract, "recovery-surface")
+    expected_recovery_device = _partition_path(
+        plan["target_preflight"]["target_path"], expected_recovery["number"]
+    )
+    if _canonical_device(recovery["device"], "recovery.device") != expected_recovery_device:
         raise RehearsalError("recovery partition device mismatch")
     if (
-        recovery["filesystem"] != "ext4"
+        recovery["filesystem"] != expected_recovery["filesystem"]
         or recovery["surface_present"] is not True
         or recovery["sandbox_mountpoint"] != RECOVERY_MOUNT
     ):
@@ -629,8 +781,11 @@ def validate_recovery_evidence(value: Any, *, now: datetime | None = None) -> di
     evidence_sha = _validate_self_digest(evidence, "evidence_sha256", "recovery evidence")
     observed = _parse_utc(evidence["observed_at"], "recovery evidence.observed_at")
     current = (now or _now_utc()).astimezone(timezone.utc)
-    if (current - observed).total_seconds() < -FUTURE_SKEW_SECONDS:
+    recovery_age = (current - observed).total_seconds()
+    if recovery_age < -FUTURE_SKEW_SECONDS:
         raise RehearsalError("recovery evidence is from the future")
+    if recovery_age > contract["recovery_max_evidence_age_seconds"]:
+        raise RehearsalError("recovery evidence is stale")
     domains = evidence["domains"]
     required = list(contract["recovery_evidence_domains"])
     if not isinstance(domains, dict) or set(domains) != set(required):
@@ -644,14 +799,23 @@ def validate_recovery_evidence(value: Any, *, now: datetime | None = None) -> di
         )
         if item["status"] != "verified" or item["source"] != "off-host":
             raise RehearsalError(f"recovery domain {name} is not verified off-host")
-        _parse_utc(item["observed_at"], f"recovery domain {name}.observed_at")
+        domain_observed = _parse_utc(item["observed_at"], f"recovery domain {name}.observed_at")
+        domain_age = (current - domain_observed).total_seconds()
+        if domain_age < -FUTURE_SKEW_SECONDS or domain_age > contract["recovery_max_evidence_age_seconds"]:
+            raise RehearsalError(f"recovery domain {name} is stale or from the future")
+        if (domain_observed - observed).total_seconds() > FUTURE_SKEW_SECONDS:
+            raise RehearsalError(f"recovery domain {name} is newer than the containing observation")
         domain_sha = _sha256(item["evidence_sha256"], f"recovery domain {name}.evidence_sha256")
         independence = _exact_keys(
             item["independence"],
             {"network_required", "production_system_ssd_required", "grabowski_required", "bureau_required"},
             f"recovery domain {name}.independence",
         )
-        if any(independence.values()):
+        normalized_independence = {
+            key: _bool(value, f"recovery domain {name}.independence.{key}")
+            for key, value in independence.items()
+        }
+        if any(normalized_independence.values()):
             raise RehearsalError(f"recovery domain {name} is not offline/host-independent")
         normalized[name] = {"evidence_sha256": domain_sha, "observed_at": item["observed_at"]}
     return {

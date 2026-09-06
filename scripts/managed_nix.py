@@ -71,6 +71,20 @@ _SUPPORTED_ACTIVATION_PLAN_FIELDS = frozenset(
         "broad_root_shell_allowed",
     }
 )
+_SUPPORTED_ACTIVATION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version", "kind", "effect_class", "result", "mode", "target",
+        "source_revision", "system_closure", "live_closure",
+        "build_receipt_sha256", "authority_sha256", "readback_evidence_sha256",
+        "prior_closure", "recovery_path", "source_reevaluation_used",
+    }
+)
+_SUPPORTED_ROLLBACK_PLAN_FIELDS = frozenset(
+    {
+        "schema_version", "kind", "target", "system_closure",
+        "recovery_path", "source_reevaluation_allowed",
+    }
+)
 _SUPPORTED_BUILD_SOURCE_CONTEXT_FIELDS = frozenset(
     {"schema_version", "kind", "repository", "source_revision", "build_request_sha256"}
 )
@@ -92,6 +106,7 @@ _SUPPORTED_ACTIVATION_EFFECT_CLASS = "activation"
 _SUPPORTED_ACTIVATION_AUTHORITY_KIND = "heim_pc.nixos_activation_authority"
 _SUPPORTED_ACTIVATION_PLAN_KIND = "heim_pc.nixos_activation_plan"
 _SUPPORTED_ACTIVATION_RECEIPT_KIND = "heim_pc.nixos_activation_receipt"
+_SUPPORTED_ROLLBACK_PLAN_KIND = "heim_pc.nixos_rollback_plan"
 _SUPPORTED_ACTIVATION_MODES = frozenset({"test", "next-boot", "persistent"})
 _SUPPORTED_ACTIVATION_EXECUTOR_AUTHORITY = "successor-task-typed-activation-only"
 _SUPPORTED_MAX_AUTHORITY_LIFETIME_SECONDS = 7200
@@ -285,7 +300,8 @@ def _load_managed_contract() -> dict[str, Any]:
         keys=frozenset(
             {
                 "effect_class", "authority_kind", "authority_fields", "plan_kind",
-                "plan_fields", "receipt_kind", "allowed_modes", "executor_authority",
+                "plan_fields", "receipt_kind", "receipt_fields", "receipt_requires",
+                "allowed_modes", "executor_authority",
                 "max_authority_lifetime_seconds", "boot_critical_persistent_directly_allowed",
                 "requires_exact_build_receipt", "requires_exact_system_closure",
                 "requires_exact_target", "requires_independent_live_closure_readback",
@@ -317,11 +333,21 @@ def _load_managed_contract() -> dict[str, Any]:
         activation.get("authority_fields"), "activation.authority_fields"
     )
     plan_fields = _contract_strings(activation.get("plan_fields"), "activation.plan_fields")
+    receipt_fields = _contract_strings(
+        activation.get("receipt_fields"), "activation.receipt_fields"
+    )
+    receipt_requires = _contract_strings(
+        activation.get("receipt_requires"), "activation.receipt_requires"
+    )
     allowed_modes = _contract_strings(activation.get("allowed_modes"), "activation.allowed_modes")
     if set(authority_fields) != _SUPPORTED_ACTIVATION_AUTHORITY_FIELDS:
         raise _contract_error("activation.authority_fields contain unsupported schema drift")
     if set(plan_fields) != _SUPPORTED_ACTIVATION_PLAN_FIELDS:
         raise _contract_error("activation.plan_fields contain unsupported schema drift")
+    if set(receipt_fields) != _SUPPORTED_ACTIVATION_RECEIPT_FIELDS:
+        raise _contract_error("activation.receipt_fields contain unsupported schema drift")
+    if set(receipt_requires) != set(receipt_fields):
+        raise _contract_error("activation.receipt_requires must describe the exact receipt shape")
     if set(allowed_modes) != _SUPPORTED_ACTIVATION_MODES:
         raise _contract_error("activation.allowed_modes are unsupported for contract v1")
     lifetime = _contract_int(
@@ -394,8 +420,18 @@ def _load_managed_contract() -> dict[str, Any]:
     rollback = _require_contract_object(
         root.get("rollback"),
         "rollback",
-        keys=frozenset({"requires_prior_closure", "requires_recovery_path", "source_reevaluation_allowed"}),
+        keys=frozenset(
+            {
+                "plan_kind", "plan_fields", "requires_prior_closure",
+                "requires_recovery_path", "source_reevaluation_allowed",
+            }
+        ),
     )
+    if _contract_string(rollback.get("plan_kind"), "rollback.plan_kind") != _SUPPORTED_ROLLBACK_PLAN_KIND:
+        raise _contract_error("rollback.plan_kind is unsupported for contract v1")
+    rollback_plan_fields = _contract_strings(rollback.get("plan_fields"), "rollback.plan_fields")
+    if set(rollback_plan_fields) != _SUPPORTED_ROLLBACK_PLAN_FIELDS:
+        raise _contract_error("rollback.plan_fields contain unsupported schema drift")
     if _contract_bool(rollback.get("requires_prior_closure"), "rollback.requires_prior_closure") is not True:
         raise _contract_error("rollback must require prior closure")
     if _contract_bool(rollback.get("requires_recovery_path"), "rollback.requires_recovery_path") is not True:
@@ -473,6 +509,7 @@ except ManagedNixContractError as exc:
 
 _BUILD_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["build"]
 _ACTIVATION_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["activation"]
+_ROLLBACK_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["rollback"]
 _EFFECT_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["effect_classifier"]
 _CLOSURE_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["closure"]
 _EXECUTION_CONTEXT_CONTRACT = MANAGED_DEPLOYMENT_CONTRACT["execution_context"]
@@ -482,6 +519,7 @@ BUILD_RECEIPT_KIND = str(_BUILD_CONTRACT["receipt_kind"])
 ACTIVATION_AUTHORITY_KIND = str(_ACTIVATION_CONTRACT["authority_kind"])
 ACTIVATION_PLAN_KIND = str(_ACTIVATION_CONTRACT["plan_kind"])
 ACTIVATION_RECEIPT_KIND = str(_ACTIVATION_CONTRACT["receipt_kind"])
+ROLLBACK_PLAN_KIND = str(_ROLLBACK_CONTRACT["plan_kind"])
 BUILD_SOURCE_CONTEXT_KIND = str(_EXECUTION_CONTEXT_CONTRACT["build_context_kind"])
 
 DESTRUCTIVE_EFFECTS = frozenset(_EFFECT_CONTRACT["destructive_effects"])
@@ -497,6 +535,8 @@ _BUILD_REQUEST_KEYS = frozenset(_BUILD_CONTRACT["request_fields"])
 _BUILD_RECEIPT_KEYS = frozenset(_BUILD_CONTRACT["receipt_fields"])
 _ACTIVATION_AUTHORITY_KEYS = frozenset(_ACTIVATION_CONTRACT["authority_fields"])
 _ACTIVATION_PLAN_KEYS = frozenset(_ACTIVATION_CONTRACT["plan_fields"])
+_ACTIVATION_RECEIPT_KEYS = frozenset(_ACTIVATION_CONTRACT["receipt_fields"])
+_ROLLBACK_PLAN_KEYS = frozenset(_ROLLBACK_CONTRACT["plan_fields"])
 _BUILD_SOURCE_CONTEXT_KEYS = frozenset(_EXECUTION_CONTEXT_CONTRACT["build_context_fields"])
 
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
@@ -573,8 +613,8 @@ def _require_sha256(value: Any, name: str) -> str:
 
 
 def _require_revision(value: Any, name: str = "source_revision") -> str:
-    if not isinstance(value, str) or len(value) not in {40, 64} or not _HEX_RE.fullmatch(value):
-        raise ManagedNixError(f"{name} must be an immutable 40/64-character Git object id")
+    if not isinstance(value, str) or len(value) != 40 or not _HEX_RE.fullmatch(value):
+        raise ManagedNixError(f"{name} must be an immutable 40-character Git object id")
     return value
 
 
@@ -1069,7 +1109,7 @@ def make_activation_receipt(
     if live != approved:
         raise ManagedNixError("live closure does not match the approved activation closure")
     evidence = _require_sha256(readback_evidence_sha256, "readback_evidence_sha256")
-    return {
+    result = {
         "schema_version": CONTRACT_VERSION,
         "kind": ACTIVATION_RECEIPT_KIND,
         "effect_class": str(_ACTIVATION_CONTRACT["effect_class"]),
@@ -1086,18 +1126,83 @@ def make_activation_receipt(
         "recovery_path": plan["recovery_path"],
         "source_reevaluation_used": False,
     }
+    return validate_activation_receipt(result)
+
+
+def validate_activation_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate exact post-effect receipt shape and independent live-readback binding."""
+    if not isinstance(receipt, Mapping):
+        raise ManagedNixError("activation receipt must be an object")
+    _require_exact_keys(receipt, _ACTIVATION_RECEIPT_KEYS, "activation receipt")
+    _require_contract_version(receipt.get("schema_version"))
+    if receipt.get("kind") != ACTIVATION_RECEIPT_KIND:
+        raise ManagedNixError("unsupported activation receipt")
+    if receipt.get("effect_class") != _ACTIVATION_CONTRACT["effect_class"] or receipt.get("result") != "succeeded":
+        raise ManagedNixError("activation receipt is not a successful activation result")
+    mode = receipt.get("mode")
+    if mode not in ALLOWED_ACTIVATION_MODES:
+        raise ManagedNixError("activation receipt mode is invalid")
+    target = _require_canonical_string(receipt.get("target"), "target")
+    source_revision = _require_revision(receipt.get("source_revision"))
+    system_closure = _require_closure(receipt.get("system_closure"))
+    live_closure = _require_closure(receipt.get("live_closure"), "live_closure")
+    if live_closure != system_closure:
+        raise ManagedNixError("activation receipt live closure does not match system closure")
+    prior_closure = _require_closure(receipt.get("prior_closure"), "prior_closure")
+    if prior_closure == system_closure:
+        raise ManagedNixError("activation receipt prior_closure must differ from system_closure")
+    result = {
+        "schema_version": CONTRACT_VERSION,
+        "kind": ACTIVATION_RECEIPT_KIND,
+        "effect_class": str(_ACTIVATION_CONTRACT["effect_class"]),
+        "result": "succeeded",
+        "mode": mode,
+        "target": target,
+        "source_revision": source_revision,
+        "system_closure": system_closure,
+        "live_closure": live_closure,
+        "build_receipt_sha256": _require_sha256(receipt.get("build_receipt_sha256"), "build_receipt_sha256"),
+        "authority_sha256": _require_sha256(receipt.get("authority_sha256"), "authority_sha256"),
+        "readback_evidence_sha256": _require_sha256(receipt.get("readback_evidence_sha256"), "readback_evidence_sha256"),
+        "prior_closure": prior_closure,
+        "recovery_path": _require_canonical_string(receipt.get("recovery_path"), "recovery_path"),
+        "source_reevaluation_used": False,
+    }
+    if receipt.get("source_reevaluation_used") is not False:
+        raise ManagedNixError("activation receipt must prove source reevaluation was not used")
+    return result
+
+
+def validate_rollback_plan(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the exact no-reevaluation rollback document defined by contract v1."""
+    if not isinstance(value, Mapping):
+        raise ManagedNixError("rollback plan must be an object")
+    _require_exact_keys(value, _ROLLBACK_PLAN_KEYS, "rollback plan")
+    _require_contract_version(value.get("schema_version"))
+    if value.get("kind") != ROLLBACK_PLAN_KIND:
+        raise ManagedNixError("unsupported rollback plan")
+    if value.get("source_reevaluation_allowed") is not False:
+        raise ManagedNixError("rollback plan must forbid source reevaluation")
+    return {
+        "schema_version": CONTRACT_VERSION,
+        "kind": ROLLBACK_PLAN_KIND,
+        "target": _require_canonical_string(value.get("target"), "target"),
+        "system_closure": _require_closure(value.get("system_closure")),
+        "recovery_path": _require_canonical_string(value.get("recovery_path"), "recovery_path"),
+        "source_reevaluation_allowed": False,
+    }
 
 
 def rollback_plan(activation_plan: Mapping[str, Any]) -> dict[str, Any]:
     plan = validate_activation_plan(activation_plan)
-    return {
-        "kind": "heim_pc.nixos_rollback_plan",
+    return validate_rollback_plan({
+        "kind": ROLLBACK_PLAN_KIND,
         "schema_version": CONTRACT_VERSION,
         "target": plan["target"],
         "system_closure": plan["prior_closure"],
         "recovery_path": plan["recovery_path"],
         "source_reevaluation_allowed": False,
-    }
+    })
 
 
 def _load(path: Path) -> dict[str, Any]:

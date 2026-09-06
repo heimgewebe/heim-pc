@@ -2,6 +2,7 @@
 let
   cfg = config.heimPc.physicalGates;
   llamaCuda = pkgs.llama-cpp.override { cudaSupport = true; };
+  nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
 
   gateARuntimeInputs = (with pkgs; [
     coreutils
@@ -45,7 +46,7 @@ let
 
       printf 'GATE A — NVIDIA/CUDA/DESKTOP READINESS\n'
 
-      gpu_info="$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1)" || {
+      gpu_info="$(${nvidiaSmi} --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1)" || {
         printf '%s\n' "$gpu_info" >&2
         fail "nvidia-smi"
         gpu_info=""
@@ -95,8 +96,14 @@ EOF
       else
         fail "nvidia-cdi-generator-service"
       fi
-      if [ -r /var/run/cdi/nvidia-container-toolkit.json ] \
-        && jq -e '.devices[]?.name == "all"' /var/run/cdi/nvidia-container-toolkit.json >/dev/null; then
+      cdi_json=""
+      for candidate in /run/cdi/nvidia-container-toolkit.json /etc/cdi/nvidia-container-toolkit.json; do
+        if [ -r "$candidate" ]; then
+          cdi_json="$candidate"
+          break
+        fi
+      done
+      if [ -n "$cdi_json" ] && jq -e '.devices[]?.name == "all"' "$cdi_json" >/dev/null; then
         pass "nvidia-cdi-all-device"
       else
         fail "nvidia-cdi-all-device"
