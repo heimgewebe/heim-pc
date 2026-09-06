@@ -149,6 +149,14 @@ in
       assertion = lib.elem "copytoram" config.boot.kernelParams;
       message = "physical gate live media must copy itself to RAM before hardware testing";
     }
+    {
+      assertion = !config.heimPc.physicalGates.bootReadiness;
+      message = "physical gate live media must not expose Gate D against its tmpfs root";
+    }
+    {
+      assertion = !config.heimPc.physicalGates.modelRuntime;
+      message = "physical gate live media must keep Ollama/llama CUDA out of the copytoram image";
+    }
   ];
 
   nixpkgs.config.allowUnfree = true;
@@ -180,7 +188,9 @@ in
 
   # This intentionally acknowledges NixOS' lockout assertion. The live system
   # has no administrative password or wheel user by design; SDDM autologin is
-  # only for the unprivileged hardware-test user below.
+  # only for the unprivileged hardware-test user below. NetworkManager control
+  # is allowed so the live user can reach test resources without gaining disk
+  # or administrative privileges.
   users.allowNoPasswordLogin = true;
   users.mutableUsers = false;
   users.users.root.hashedPassword = "!";
@@ -190,6 +200,7 @@ in
     extraGroups = [
       "audio"
       "video"
+      "networkmanager"
     ];
   };
 
@@ -240,6 +251,7 @@ in
     physicalGates = {
       enable = true;
       bootReadiness = false;
+      modelRuntime = false;
     };
   };
 
@@ -249,7 +261,6 @@ in
     usbutils
     pciutils
     vulkan-tools
-    mesa-demos
     alsa-utils
     pipewire
     wireplumber

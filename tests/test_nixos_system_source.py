@@ -4,8 +4,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9a0d460930dd1a8b7599d0894421c5ff5bb9233bacbb97c1ef1bcdea4f84e43f"
+SOURCE_SNAPSHOT_SHA256 = "d2ac2b21adad79664b9119f96ec0a92b9763fbf7e6537a61e4affd17c5aff436"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
+
 
 class T(unittest.TestCase):
     def test_root_flake_is_thin_adapter(self):
@@ -60,12 +61,17 @@ class T(unittest.TestCase):
         )
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)
 
-    def test_live_media_excludes_boot_gate_and_fails_closed_on_mount_inventory(self):
+    def test_live_media_excludes_boot_and_heavy_model_gates(self):
         live = (SOURCE / "modules/live-media.nix").read_text()
         gates = (SOURCE / "modules/physical-gates.nix").read_text()
         self.assertIn("bootReadiness = false", live)
+        self.assertIn("modelRuntime = false", live)
+        self.assertIn('"networkmanager"', live)
         self.assertIn('fail "persistent-disk-mount-inventory"', live)
         self.assertIn("lib.optional cfg.bootReadiness gateDReport", gates)
+        self.assertIn("lib.optional cfg.modelRuntime llamaCuda", gates)
+        self.assertIn("services.ollama = lib.mkIf cfg.modelRuntime", gates)
+        self.assertNotIn("mesa-demos", live)
 
     def test_declarative_nixos_system_source_remains_non_destructive(self):
         content = "\n".join(
@@ -75,14 +81,34 @@ class T(unittest.TestCase):
         for marker in ("/dev/nvme0", "parted ", "mkfs.", "nixos-install", "efibootmgr"):
             self.assertNotIn(marker, content)
 
-    def test_gate_a_uses_pinned_nvidia_binary_and_bounded_cdi_locations(self):
+    def test_gate_a_uses_pinned_nvidia_binary_and_exact_pinned_cdi_contract(self):
         gate = (SOURCE / "modules/physical-gates.nix").read_text()
         self.assertIn("lib.getExe' config.hardware.nvidia.package \"nvidia-smi\"", gate)
         self.assertIn("/run/cdi/nvidia-container-toolkit.json", gate)
-        self.assertIn("/etc/cdi/nvidia-container-toolkit.json", gate)
+        self.assertNotIn("/etc/cdi/nvidia-container-toolkit.json", gate)
         self.assertIn('any(.devices[]?; .name == "all")', gate)
         self.assertNotIn('.devices[]?.name == "all"', gate)
         self.assertNotIn('gpu_info="$(nvidia-smi ', gate)
+        self.assertIn("c5c4a43b0e8056328ec4529f735cabdb8f1942bb", gate)
+        self.assertIn("for _attempt in $(seq 1 90)", gate)
+        self.assertIn("systemctl is-failed --quiet nvidia-container-toolkit-cdi-generator.service", gate)
+        self.assertNotIn("mesa-demos", gate)
+
+    def test_integration_test_is_scoped_to_grabowski_and_bureau(self):
+        integration = (SOURCE / "tests/integration.nix").read_text()
+        self.assertIn("../modules/grabowski.nix", integration)
+        self.assertIn("../modules/bureau.nix", integration)
+        for unrelated in (
+            "../modules/audio.nix",
+            "../modules/development.nix",
+            "../modules/containers.nix",
+            "../modules/networking.nix",
+            "../modules/backup.nix",
+            "../modules/observability.nix",
+        ):
+            self.assertNotIn(unrelated, integration)
+        self.assertIn("virtualisation.memorySize = 1024", integration)
+        self.assertIn("virtualisation.cores = 1", integration)
 
     def test_readme_separates_current_snapshot_from_historical_runtime_evidence(self):
         readme = (SOURCE / "README.md").read_text()
@@ -106,6 +132,7 @@ class T(unittest.TestCase):
         self.assertIn("^[0-9a-f]{40}$", flake)
         self.assertIn("len(value) != 40", managed)
         self.assertNotIn("len(value) not in {40, 64}", managed)
+
 
 if __name__ == "__main__":
     unittest.main()

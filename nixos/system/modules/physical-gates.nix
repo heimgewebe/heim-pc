@@ -4,17 +4,19 @@ let
   llamaCuda = pkgs.llama-cpp.override { cudaSupport = true; };
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
 
-  gateARuntimeInputs = (with pkgs; [
-    coreutils
-    gnugrep
-    jq
-    curl
-    pciutils
-    vulkan-tools
-    mesa-demos
-    systemd
-    ollama-cuda
-  ]) ++ [ llamaCuda ];
+  gateARuntimeInputs =
+    (with pkgs; [
+      coreutils
+      gnugrep
+      jq
+      vulkan-tools
+      systemd
+    ])
+    ++ lib.optionals cfg.modelRuntime [
+      pkgs.curl
+      pkgs.ollama-cuda
+      llamaCuda
+    ];
 
   gateBRuntimeInputs = with pkgs; [
     coreutils
@@ -91,40 +93,60 @@ EOF
         fail "vulkan-nvidia"
       fi
 
-      if systemctl is-active --quiet nvidia-container-toolkit-cdi-generator.service; then
-        pass "nvidia-cdi-generator-service"
-      else
-        fail "nvidia-cdi-generator-service"
-      fi
-      cdi_json=""
-      for candidate in /run/cdi/nvidia-container-toolkit.json /etc/cdi/nvidia-container-toolkit.json; do
-        if [ -r "$candidate" ]; then
-          cdi_json="$candidate"
+      # The pinned Nixpkgs module itself may spend up to 180 seconds waiting for
+      # the udev queue before generating the CDI spec. A manual Gate-A run must
+      # therefore wait for that oneshot to settle instead of racing boot.
+      cdi_generator_ready=0
+      for _attempt in $(seq 1 90); do
+        if systemctl is-active --quiet nvidia-container-toolkit-cdi-generator.service; then
+          cdi_generator_ready=1
           break
         fi
+        if systemctl is-failed --quiet nvidia-container-toolkit-cdi-generator.service; then
+          break
+        fi
+        sleep 2
       done
-      if [ -n "$cdi_json" ] && jq -e 'any(.devices[]?; .name == "all")' "$cdi_json" >/dev/null; then
+      if [ "$cdi_generator_ready" -eq 1 ]; then
+        pass "nvidia-cdi-generator-service"
+      else
+        systemctl --no-pager status nvidia-container-toolkit-cdi-generator.service >&2 || true
+        fail "nvidia-cdi-generator-service"
+      fi
+
+      # Nixpkgs c5c4a43b0e8056328ec4529f735cabdb8f1942bb generates JSON at
+      # $RUNTIME_DIRECTORY/nvidia-container-toolkit.json, i.e. /run/cdi here,
+      # and its own module test uses the aggregate device name "all".
+      cdi_json="/run/cdi/nvidia-container-toolkit.json"
+      if [ -r "$cdi_json" ] && jq -e 'any(.devices[]?; .name == "all")' "$cdi_json" >/dev/null; then
         pass "nvidia-cdi-all-device"
       else
         fail "nvidia-cdi-all-device"
       fi
 
-      if systemctl is-active --quiet ollama.service; then
-        pass "ollama-service"
-      else
-        fail "ollama-service"
-      fi
-      if curl --fail --silent --show-error --max-time 3 http://127.0.0.1:11434/api/version >/dev/null; then
-        pass "ollama-loopback-api"
-      else
-        fail "ollama-loopback-api"
-      fi
+      ${lib.optionalString cfg.modelRuntime ''
+        if systemctl is-active --quiet ollama.service; then
+          pass "ollama-service"
+        else
+          fail "ollama-service"
+        fi
+        if curl --fail --silent --show-error --max-time 3 http://127.0.0.1:11434/api/version >/dev/null; then
+          pass "ollama-loopback-api"
+        else
+          fail "ollama-loopback-api"
+        fi
 
-      if llama-server --version >/dev/null 2>&1; then
-        pass "llama-cpp-cuda-binary"
-      else
-        fail "llama-cpp-cuda-binary"
-      fi
+        if llama-server --version >/dev/null 2>&1; then
+          pass "llama-cpp-cuda-binary"
+        else
+          fail "llama-cpp-cuda-binary"
+        fi
+      ''}
+      ${lib.optionalString (!cfg.modelRuntime) ''
+        defer "ollama-service-lightweight-profile"
+        defer "ollama-loopback-api-lightweight-profile"
+        defer "llama-cpp-cuda-binary-lightweight-profile"
+      ''}
 
       defer "local-model-gpu-inference"
       defer "gpu-container-runtime-smoke-with-cached-image"
@@ -276,6 +298,11 @@ in
       default = true;
       description = "Include Gate D boot/encryption readiness tooling";
     };
+    modelRuntime = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Include Ollama CUDA and llama.cpp CUDA runtime checks in Gate A";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -283,7 +310,7 @@ in
     # explicitly tied to the current hardware rather than compiling every CUDA arch.
     nixpkgs.config.cudaCapabilities = [ "8.9" ];
 
-    services.ollama = {
+    services.ollama = lib.mkIf cfg.modelRuntime {
       enable = true;
       package = pkgs.ollama-cuda;
       host = "127.0.0.1";
@@ -298,6 +325,6 @@ in
         gateBReport
       ]
       ++ lib.optional cfg.bootReadiness gateDReport
-      ++ [ llamaCuda ];
+      ++ lib.optional cfg.modelRuntime llamaCuda;
   };
 }
