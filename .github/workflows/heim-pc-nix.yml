@@ -1,0 +1,57 @@
+name: heim-pc-nix
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Fresh derivations: the CI evaluator cache retained an unrealized drv
+      # after flake check --no-build (run 34050033409). No gate is weakened.
+      NIX_CONFIG: "eval-cache = false"
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_REVISION=%s\n' "$EXPECTED_SOURCE_REVISION"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Evaluate complete flake without building checks
+        run: nix flake check --no-build --no-update-lock-file --print-build-logs
+
+      - name: Prove evaluated Heim-PC profile contract
+        run: nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs .#checks.x86_64-linux.profile-contract
+
+      - name: Build storage-target and VM closures
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
+          .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel
+
+      - name: Build live safety script
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.heimPcLiveSafety
+
+      - name: Run scoped VM checks
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#checks.x86_64-linux.integration
+          .#checks.x86_64-linux.trust-zones
