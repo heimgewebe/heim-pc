@@ -121,6 +121,14 @@ let
     # Keep the greeter on Wayland while using SDDM's supported Weston path;
     # the authenticated desktop session remains the real Plasma Wayland session.
     services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";
+    # Keep the real Breeze greeter while using its deterministic username-prompt
+    # path. Hiding alex only affects user-list enumeration; SDDM still accepts
+    # an explicit alex login. Forget the last user so the username field stays
+    # empty and source-defined focus behavior is identical after every reboot.
+    services.displayManager.sddm.settings.Users = {
+      HideUsers = "alex";
+      RememberLastUser = false;
+    };
 
     # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
     # unrelated services stay disabled below, but retain normal NixOS package
@@ -174,28 +182,10 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-    def activate_greeter_view(node):
-        # QEMU exposes a tablet that Weston recognizes as a real pointer. Send
-        # one absolute centre click through QMP to activate the 1280x800 view;
-        # Breeze itself then focuses the first visible form control.
-        centre = 0x7FFFF // 2
-        node.qmp_client.send(
-            "input-send-event",
-            {
-                "events": [
-                    {"type": "abs", "data": {"axis": "x", "value": centre}},
-                    {"type": "abs", "data": {"axis": "y", "value": centre}},
-                    {"type": "btn", "data": {"down": True, "button": "left"}},
-                    {"type": "btn", "data": {"down": False, "button": "left"}},
-                ]
-            },
-        )
-
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
         node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
-        # Breeze 6.6 focuses the password field when the normal user list is
-        # shown. Bind input readiness to the actual greeter lifecycle rather
+        # Bind readiness to the actual Breeze/Wayland greeter lifecycle rather
         # than OCR text from NixOS' unrelated X11/IceWM SDDM fixture.
         node.wait_until_succeeds(
             "journalctl -b --no-pager -o cat | grep -Fq 'Adding view for \"Virtual-1\" QRect(0,0 1280x800)'",
@@ -206,7 +196,13 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-        activate_greeter_view(node)
+        # HideUsers forces Breeze 6.6 into its username-prompt path. Login.qml
+        # focuses the first visible control when its StackView activates, and
+        # accepting the username explicitly focuses the password field.
+        for char in "alex":
+            node.send_key(char, log=False)
+        node.send_key("ret")
+        node.sleep(0.2)
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.

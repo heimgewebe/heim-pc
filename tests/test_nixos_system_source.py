@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "969149bc6eba24ce48075ab4a1d66300fe25e187254b87f8855bd95a53c1cff0"
+SOURCE_SNAPSHOT_SHA256 = "3a1b27579e713859a4a5df64bf551b7a5cd83d1fde0a2159f6488bcb972e42a8"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -69,11 +69,12 @@ class T(unittest.TestCase):
         self.assertIn(r'Adding view for \"Virtual-1\" QRect(0,0 1280x800)', proof)
         self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
         self.assertNotIn('ydotool', proof)
-        self.assertIn('node.qmp_client.send(', proof)
-        self.assertIn('centre = 0x7FFFF // 2', proof)
-        self.assertIn('"input-send-event"', proof)
-        self.assertIn('"type": "abs"', proof)
-        self.assertIn('"type": "btn"', proof)
+        self.assertIn('services.displayManager.sddm.settings.Users = {', proof)
+        self.assertIn('HideUsers = "alex";', proof)
+        self.assertIn('RememberLastUser = false;', proof)
+        self.assertIn('for char in "alex":', proof)
+        self.assertNotIn('node.qmp_client.send(', proof)
+        self.assertNotIn('"input-send-event"', proof)
         self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
         self.assertNotIn('zlib_rgb_b64', proof)
         self.assertNotIn('_managed_screenshot', proof)
