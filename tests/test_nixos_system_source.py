@@ -12,7 +12,7 @@ from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "137e1f2ddb94ffb0bc2c7b854c2498058102299115187053b23e0661ae2c367c"
+SOURCE_SNAPSHOT_SHA256 = "400e19065fa8ea54ed6870906bbb93cd1209d02e528890ab8d8bfc2b8f78332d"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -76,7 +76,7 @@ class T(unittest.TestCase):
         self.assertNotIn('RememberLastUser = false;', proof)
         self.assertNotIn('for char in "alex":', proof)
         self.assertIn('user_delegate_x = display_width // 2', proof)
-        self.assertIn('user_delegate_y = display_height // 2 - 1', proof)
+        self.assertIn('user_delegate_y = display_height // 2 - 32', proof)
         self.assertIn('maximum = 0x7FFF', proof)
         self.assertNotIn('0x7FFFF', proof)
         self.assertIn('qmp = node.qmp_client', proof)

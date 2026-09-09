@@ -177,13 +177,13 @@ pkgs.testers.runNixOSTest {
     def select_alex_user(node):
         # Breeze 6.6 anchors UserList.bottom to the 1280x800 view's vertical
         # center. Its StrictlyEnforceRange current delegate is horizontally
-        # centered and has a full-size MouseArea; clicking one pixel above the
-        # list bottom therefore emits userSelected(), which Login.qml handles by
-        # clearing and force-focusing the visible password field.
+        # centered and has a full-size MouseArea. Stay well inside the delegate
+        # instead of relying on a one-pixel boundary hit; the click still emits
+        # userSelected(), which Login.qml uses to focus the password field.
         display_width = 1280
         display_height = 800
         user_delegate_x = display_width // 2
-        user_delegate_y = display_height // 2 - 1
+        user_delegate_y = display_height // 2 - 32
         maximum = 0x7FFF
         qmp = node.qmp_client
         assert qmp is not None
