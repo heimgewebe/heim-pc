@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import fcntl
 import hashlib
 import os
@@ -7,10 +8,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "fa705bee6db410c3b8a6daa42a334be2ec18ef9ca7ad9ab22217ac9164834243"
+SOURCE_SNAPSHOT_SHA256 = "ae811c116282401a5c2a7026d19ef61ef7ccf10d5ff7786eb1a01db55aa06e85"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -50,15 +52,100 @@ class T(unittest.TestCase):
         self.assertNotIn('.send_chars(', proof)
         self.assertIn('systemctl is-failed heim-pc-firstboot-credentials.service', proof)
         self.assertIn('display-manager.service', proof)
-        self.assertIn('show-session $id -p Type --value', proof)
+        self.assertIn('show-session \"$id\" -p Type --value', proof)
         self.assertIn('= wayland &&', proof)
         self.assertIn('.alex-password-initialized.pending', proof)
         self.assertIn('heim-pc-test-chpasswd-count', proof)
-        self.assertIn('machine.start()', proof)
+        self.assertIn('machine.start(allow_reboot=True)', proof)
+        self.assertNotIn('machine.start()', proof)
         self.assertIn('interrupted.start()', proof)
         self.assertNotIn('start_all()', proof)
         self.assertIn('virtualisation.memorySize = 3072;', proof)
+        self.assertIn('virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];', proof)
+        self.assertIn('hardware.graphics.enable = true;', proof)
+        self.assertIn('services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";', proof)
         self.assertIn('pkgs.coreutils', proof)
+        self.assertIn('pkgs.getent', proof)
+        self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
+        self.assertNotIn("enableOCR = true;", proof)
+        self.assertNotIn("node.wait_for_text(", proof)
+        self.assertIn(r'Adding view for \"Virtual-1\" QRect(0,0 1280x800)', proof)
+        self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
+        self.assertNotIn('ydotool', proof)
+        self.assertNotIn('HideUsers = "alex";', proof)
+        self.assertNotIn('RememberLastUser = false;', proof)
+        self.assertNotIn('for char in "alex":', proof)
+        self.assertIn('user_delegate_x = display_width // 2', proof)
+        self.assertIn('user_delegate_y = display_height // 2 - 32', proof)
+        self.assertIn('maximum = 0x7FFF', proof)
+        self.assertNotIn('0x7FFFF', proof)
+        self.assertIn('qmp = node.qmp_client', proof)
+        self.assertIn('"input-send-event"', proof)
+        self.assertIn('select_alex_user(node)', proof)
+        self.assertIn("grep -Fc 'Message received from greeter: Login'", proof)
+        self.assertIn('for attempt in range(2):', proof)
+        self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
+        self.assertNotIn('zlib_rgb_b64', proof)
+        self.assertNotIn('_managed_screenshot', proof)
+        self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
+        test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
+        self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))
+        compile(textwrap.dedent(test_script_source), "firstboot-testScript", "exec")
+        self.assertNotIn("WAYLAND_DEBUG", proof)
+
+    def test_firstboot_login_helper_reaches_session_with_secret_safe_keys(self):
+        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
+        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
+        tree = ast.parse(textwrap.dedent(script))
+        helpers = ast.Module(
+            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
+            type_ignores=[],
+        )
+        namespace = {}
+        exec(compile(helpers, "firstboot-login-helpers", "exec"), namespace)
+        node = Mock()
+        node.succeed.side_effect = ["00ab\n", "0\n", "1\n"]
+        namespace["graphical_login"](node, "/run/test-only-password")
+        self.assertEqual(node.succeed.call_args_list, [
+            call("cat /run/test-only-password"),
+            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
+            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
+        ])
+        self.assertEqual(node.send_key.call_args_list, [
+            call(char, log=False) for char in "00ab"
+        ] + [call("ret")])
+        node.qmp_client.send.assert_called_once()
+        command, payload = node.qmp_client.send.call_args.args
+        self.assertEqual(command, "input-send-event")
+        for event in payload["events"]:
+            if event["type"] == "abs":
+                self.assertGreaterEqual(event["data"]["value"], 0)
+                self.assertLessEqual(event["data"]["value"], 0x7FFF)
+        # Detect dead proof code: returning after typing is not a session proof.
+        final_call = node.method_calls[-1]
+        self.assertEqual(final_call[0], "wait_until_succeeds")
+        self.assertIn("= wayland &&", final_call[1][0])
+        self.assertIn("= yes && exit 0", final_call[1][0])
+
+    def test_firstboot_login_helper_refocuses_once_only_before_backend_submission(self):
+        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
+        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
+        tree = ast.parse(textwrap.dedent(script))
+        helpers = ast.Module(
+            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
+            type_ignores=[],
+        )
+        namespace = {}
+        exec(compile(helpers, "firstboot-login-refocus", "exec"), namespace)
+        node = Mock()
+        node.succeed.side_effect = ["00ab\n", "0\n"] + ["0\n"] * 20 + ["1\n"]
+        namespace["graphical_login"](node, "/run/test-only-password")
+        self.assertEqual(node.qmp_client.send.call_count, 2)
+        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
+        self.assertEqual(node.send_key.call_args_list, expected_keys * 2)
+        final_call = node.method_calls[-1]
+        self.assertEqual(final_call[0], "wait_until_succeeds")
+        self.assertIn("= wayland &&", final_call[1][0])
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
