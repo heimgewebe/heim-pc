@@ -105,6 +105,10 @@ let
 
     virtualisation.memorySize = 3072;
     virtualisation.cores = 2;
+    # The physical desktop profile runs SDDM itself on Wayland. QEMU's default
+    # std VGA produces a corrupt greeter framebuffer under that path, so use
+    # the virtio GPU shape used by upstream NixOS Wayland VM tests.
+    virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];
     documentation.enable = false;
     hardware.enableAllFirmware = lib.mkForce false;
 
