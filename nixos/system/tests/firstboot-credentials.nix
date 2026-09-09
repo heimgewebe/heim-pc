@@ -115,6 +115,12 @@ let
     # This test deliberately disables NVIDIA, so enable generic Mesa/DRM support
     # explicitly for the virtio GPU used by the disposable Wayland VM.
     hardware.graphics.enable = true;
+    # Plasma defaults SDDM's Wayland greeter compositor to KWin. The QEMU
+    # virtio display is sufficient for a real SDDM/PAM login proof but exposes
+    # a KWin-specific empty-DRM-node failure unrelated to credential bootstrap.
+    # Keep the greeter on Wayland while using SDDM's supported Weston path;
+    # the authenticated desktop session remains the real Plasma Wayland session.
+    services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";
 
     # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
     # unrelated services stay disabled below, but retain normal NixOS package

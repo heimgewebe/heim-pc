@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d6ca8587ddef30f6028b326c49305bb79b5420066aba8c5fae11734d9ad8dacd"
+SOURCE_SNAPSHOT_SHA256 = "b2cbf5007215e6919b876608cfa52c03616896378617ece974eb360424805d6d"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -60,6 +60,7 @@ class T(unittest.TestCase):
         self.assertIn('virtualisation.memorySize = 3072;', proof)
         self.assertIn('virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];', proof)
         self.assertIn('hardware.graphics.enable = true;', proof)
+        self.assertIn('services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";', proof)
         self.assertIn('pkgs.coreutils', proof)
         self.assertIn('pkgs.getent', proof)
         self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
