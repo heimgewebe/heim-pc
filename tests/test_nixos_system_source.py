@@ -12,7 +12,7 @@ from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "400e19065fa8ea54ed6870906bbb93cd1209d02e528890ab8d8bfc2b8f78332d"
+SOURCE_SNAPSHOT_SHA256 = "ae811c116282401a5c2a7026d19ef61ef7ccf10d5ff7786eb1a01db55aa06e85"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -82,6 +82,8 @@ class T(unittest.TestCase):
         self.assertIn('qmp = node.qmp_client', proof)
         self.assertIn('"input-send-event"', proof)
         self.assertIn('select_alex_user(node)', proof)
+        self.assertIn("grep -Fc 'Message received from greeter: Login'", proof)
+        self.assertIn('for attempt in range(2):', proof)
         self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
         self.assertNotIn('zlib_rgb_b64', proof)
         self.assertNotIn('_managed_screenshot', proof)
@@ -102,9 +104,13 @@ class T(unittest.TestCase):
         namespace = {}
         exec(compile(helpers, "firstboot-login-helpers", "exec"), namespace)
         node = Mock()
-        node.succeed.return_value = "00ab\n"
+        node.succeed.side_effect = ["00ab\n", "0\n", "1\n"]
         namespace["graphical_login"](node, "/run/test-only-password")
-        node.succeed.assert_called_once_with("cat /run/test-only-password")
+        self.assertEqual(node.succeed.call_args_list, [
+            call("cat /run/test-only-password"),
+            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
+            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
+        ])
         self.assertEqual(node.send_key.call_args_list, [
             call(char, log=False) for char in "00ab"
         ] + [call("ret")])
@@ -120,6 +126,26 @@ class T(unittest.TestCase):
         self.assertEqual(final_call[0], "wait_until_succeeds")
         self.assertIn("= wayland &&", final_call[1][0])
         self.assertIn("= yes && exit 0", final_call[1][0])
+
+    def test_firstboot_login_helper_refocuses_once_only_before_backend_submission(self):
+        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
+        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
+        tree = ast.parse(textwrap.dedent(script))
+        helpers = ast.Module(
+            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
+            type_ignores=[],
+        )
+        namespace = {}
+        exec(compile(helpers, "firstboot-login-refocus", "exec"), namespace)
+        node = Mock()
+        node.succeed.side_effect = ["00ab\n", "0\n"] + ["0\n"] * 20 + ["1\n"]
+        namespace["graphical_login"](node, "/run/test-only-password")
+        self.assertEqual(node.qmp_client.send.call_count, 2)
+        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
+        self.assertEqual(node.send_key.call_args_list, expected_keys * 2)
+        final_call = node.method_calls[-1]
+        self.assertEqual(final_call[0], "wait_until_succeeds")
+        self.assertIn("= wayland &&", final_call[1][0])
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)

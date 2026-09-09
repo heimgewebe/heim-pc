@@ -225,17 +225,36 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-        select_alex_user(node)
-        node.sleep(0.2)
+        # Bind submission to a fresh backend request, not merely to injected
+        # key events. Breeze's onUserSelected handler clears the password field
+        # and force-focuses the first visible form control; if that focus event
+        # is lost, retry it once only while SDDM proves that no login request
+        # reached PAM. This cannot duplicate an authentication attempt.
+        def login_request_count():
+            return int(node.succeed(
+                "journalctl -b --no-pager -o cat | "
+                "grep -Fc 'Message received from greeter: Login' || true"
+            ).strip() or "0")
+
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.
         password = node.succeed(f"cat {password_path}").strip()
         assert password
-        for char in password:
-            node.send_key(char, log=False)
-        node.send_key("ret")
-        wait_for_alex_wayland(node)
+        requests_before = login_request_count()
+        for attempt in range(2):
+            select_alex_user(node)
+            node.sleep(0.2 if attempt == 0 else 0.5)
+            for char in password:
+                node.send_key(char, log=False)
+            node.send_key("ret")
+            for _ in range(20):
+                if login_request_count() > requests_before:
+                    wait_for_alex_wayland(node)
+                    return
+                node.sleep(0.25)
+
+        raise AssertionError("SDDM greeter never submitted the graphical login request")
 
     with subtest("missing bootstrap staging fails closed before login"):
         machine.wait_until_succeeds("systemctl is-failed heim-pc-firstboot-credentials.service", timeout=180)
