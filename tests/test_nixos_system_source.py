@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2f50598740252cd261fef58c6dc27dda3c4e2dad8fddfbbb9b8dec73609f938e"
+SOURCE_SNAPSHOT_SHA256 = "acaed745c1797c7c4e692d2f4aea9de3b2f1ddea2ec59429de8b3823a18c3477"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -66,11 +66,16 @@ class T(unittest.TestCase):
         self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
         self.assertNotIn("enableOCR = true;", proof)
         self.assertNotIn("node.wait_for_text(", proof)
-        self.assertIn("grep -Fq 'Adding view for '", proof)
+        self.assertIn(r'Adding view for \"Virtual-1\" QRect(0,0 1280x800)', proof)
         self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
-        self.assertIn('programs.ydotool.enable = true;', proof)
-        self.assertIn('node.succeed("ydotool mousemove --absolute -- 600 445")', proof)
-        self.assertIn('node.succeed("ydotool click 0xC0")', proof)
+        self.assertNotIn('ydotool', proof)
+        self.assertIn('node.qmp_client.send(', proof)
+        self.assertIn('"input-send-event"', proof)
+        self.assertIn('"type": "abs"', proof)
+        self.assertIn('"type": "btn"', proof)
+        self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
+        self.assertNotIn('zlib_rgb_b64', proof)
+        self.assertNotIn('_managed_screenshot', proof)
         self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
         test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))

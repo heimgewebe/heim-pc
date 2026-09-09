@@ -132,9 +132,6 @@ let
     programs.nix-ld.enable = lib.mkForce false;
     programs.appimage.enable = lib.mkForce false;
     programs.appimage.binfmt = lib.mkForce false;
-    # Test-only deterministic pointer injection for focusing the real Breeze
-    # password field before secret-safe keyboard input.
-    programs.ydotool.enable = true;
     environment.systemPackages = [
       stageTool
       pkgs.bashInteractive
@@ -162,9 +159,6 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import base64
-    import zlib
-
     machine.start()
 
     def shadow_field(node):
@@ -180,6 +174,23 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
+    def activate_greeter_view(node):
+        # QEMU exposes a tablet that Weston recognizes as a real pointer. Send
+        # one absolute centre click through QMP to activate the 1280x800 view;
+        # Breeze itself then focuses the first visible form control.
+        centre = 0x7FFF // 2
+        node.qmp_client.send(
+            "input-send-event",
+            {
+                "events": [
+                    {"type": "abs", "data": {"axis": "x", "value": centre}},
+                    {"type": "abs", "data": {"axis": "y", "value": centre}},
+                    {"type": "btn", "data": {"down": True, "button": "left"}},
+                    {"type": "btn", "data": {"down": False, "button": "left"}},
+                ]
+            },
+        )
+
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
         node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
@@ -187,7 +198,7 @@ pkgs.testers.runNixOSTest {
         # shown. Bind input readiness to the actual greeter lifecycle rather
         # than OCR text from NixOS' unrelated X11/IceWM SDDM fixture.
         node.wait_until_succeeds(
-            "journalctl -b --no-pager -o cat | grep -Fq 'Adding view for '",
+            "journalctl -b --no-pager -o cat | grep -Fq 'Adding view for \"Virtual-1\" QRect(0,0 1280x800)'",
             timeout=180,
         )
         node.wait_until_succeeds(
@@ -195,54 +206,7 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-        def emit_frame(label):
-            # Diagnostic-only framebuffer probe. It runs before any password is
-            # read or injected, downsamples the raw PPM deterministically, and
-            # emits only compressed RGB pixels plus dimensions.
-            with node._managed_screenshot() as frame_path:
-                data = frame_path.read_bytes()
-            tokens = []
-            index = 0
-            while len(tokens) < 4:
-                while index < len(data) and data[index:index + 1].isspace():
-                    index += 1
-                if data[index:index + 1] == b"#":
-                    index = data.index(b"\n", index) + 1
-                    continue
-                end = index
-                while end < len(data) and not data[end:end + 1].isspace():
-                    end += 1
-                tokens.append(data[index:end])
-                index = end
-            while index < len(data) and data[index:index + 1].isspace():
-                index += 1
-            magic, width_raw, height_raw, maxval_raw = tokens
-            assert magic == b"P6" and maxval_raw == b"255"
-            width, height = int(width_raw), int(height_raw)
-            pixels = data[index:]
-            assert len(pixels) == width * height * 3
-            step = max(1, (width + 319) // 320, (height + 199) // 200)
-            sampled = bytearray()
-            for y in range(0, height, step):
-                for x in range(0, width, step):
-                    offset = (y * width + x) * 3
-                    sampled.extend(pixels[offset:offset + 3])
-            sample_width = (width + step - 1) // step
-            sample_height = (height + step - 1) // step
-            encoded = base64.b64encode(zlib.compress(bytes(sampled), 9)).decode()
-            print(
-                f"GREETER_FRAME {label} source={width}x{height} "
-                f"sample={sample_width}x{sample_height} step={step} zlib_rgb_b64={encoded}"
-            )
-
-        emit_frame("before-pointer-attempt")
-        # Breeze places the login form immediately below the vertical center.
-        # The VM display is fixed at 1280x800; click inside the password field
-        # so Wayland window activation cannot make secret input depend on focus.
-        node.succeed("ydotool mousemove --absolute -- 600 445")
-        node.succeed("ydotool click 0xC0")
-        emit_frame("after-pointer-attempt")
-        raise RuntimeError("GREETER_DIAGNOSTIC_CAPTURE_COMPLETE")
+        activate_greeter_view(node)
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.
