@@ -178,7 +178,7 @@ pkgs.testers.runNixOSTest {
         # QEMU exposes a tablet that Weston recognizes as a real pointer. Send
         # one absolute centre click through QMP to activate the 1280x800 view;
         # Breeze itself then focuses the first visible form control.
-        centre = 0x7FFF // 2
+        centre = 0x7FFFF // 2
         node.qmp_client.send(
             "input-send-event",
             {

@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "acaed745c1797c7c4e692d2f4aea9de3b2f1ddea2ec59429de8b3823a18c3477"
+SOURCE_SNAPSHOT_SHA256 = "969149bc6eba24ce48075ab4a1d66300fe25e187254b87f8855bd95a53c1cff0"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -70,6 +70,7 @@ class T(unittest.TestCase):
         self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
         self.assertNotIn('ydotool', proof)
         self.assertIn('node.qmp_client.send(', proof)
+        self.assertIn('centre = 0x7FFFF // 2', proof)
         self.assertIn('"input-send-event"', proof)
         self.assertIn('"type": "abs"', proof)
         self.assertIn('"type": "btn"', proof)
