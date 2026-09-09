@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import fcntl
 import hashlib
 import os
@@ -7,10 +8,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "3f100047f20062f45d58b70746ede34b77878997ec7e98a9ad328d32a0a1bb44"
+SOURCE_SNAPSHOT_SHA256 = "137e1f2ddb94ffb0bc2c7b854c2498058102299115187053b23e0661ae2c367c"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -54,7 +56,8 @@ class T(unittest.TestCase):
         self.assertIn('= wayland &&', proof)
         self.assertIn('.alex-password-initialized.pending', proof)
         self.assertIn('heim-pc-test-chpasswd-count', proof)
-        self.assertIn('machine.start()', proof)
+        self.assertIn('machine.start(allow_reboot=True)', proof)
+        self.assertNotIn('machine.start()', proof)
         self.assertIn('interrupted.start()', proof)
         self.assertNotIn('start_all()', proof)
         self.assertIn('virtualisation.memorySize = 3072;', proof)
@@ -85,6 +88,38 @@ class T(unittest.TestCase):
         self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
         test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))
+        compile(textwrap.dedent(test_script_source), "firstboot-testScript", "exec")
+        self.assertNotIn("WAYLAND_DEBUG", proof)
+
+    def test_firstboot_login_helper_reaches_session_with_secret_safe_keys(self):
+        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
+        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
+        tree = ast.parse(textwrap.dedent(script))
+        helpers = ast.Module(
+            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
+            type_ignores=[],
+        )
+        namespace = {}
+        exec(compile(helpers, "firstboot-login-helpers", "exec"), namespace)
+        node = Mock()
+        node.succeed.return_value = "00ab\n"
+        namespace["graphical_login"](node, "/run/test-only-password")
+        node.succeed.assert_called_once_with("cat /run/test-only-password")
+        self.assertEqual(node.send_key.call_args_list, [
+            call(char, log=False) for char in "00ab"
+        ] + [call("ret")])
+        node.qmp_client.send.assert_called_once()
+        command, payload = node.qmp_client.send.call_args.args
+        self.assertEqual(command, "input-send-event")
+        for event in payload["events"]:
+            if event["type"] == "abs":
+                self.assertGreaterEqual(event["data"]["value"], 0)
+                self.assertLessEqual(event["data"]["value"], 0x7FFF)
+        # Detect dead proof code: returning after typing is not a session proof.
+        final_call = node.method_calls[-1]
+        self.assertEqual(final_call[0], "wait_until_succeeds")
+        self.assertIn("= wayland &&", final_call[1][0])
+        self.assertIn("= yes && exit 0", final_call[1][0])
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)

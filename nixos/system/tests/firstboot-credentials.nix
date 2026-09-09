@@ -158,7 +158,8 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    machine.start()
+    # Both persistence scenarios reboot this same VM; keep QEMU alive across resets.
+    machine.start(allow_reboot=True)
 
     def shadow_field(node):
         return node.succeed("getent shadow alex | cut -d: -f2").strip()
