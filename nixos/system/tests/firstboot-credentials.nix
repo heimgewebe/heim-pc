@@ -152,8 +152,6 @@ assert builtins.hashFile "sha256" ../hosts/heim-pc/firstboot-credentials.py == e
 pkgs.testers.runNixOSTest {
   name = "heim-pc-firstboot-credentials";
   globalTimeout = 3600;
-  enableOCR = true;
-
   nodes.machine = commonNode;
   nodes.interrupted = { lib, pkgs, ... }: {
     imports = [ commonNode ];
@@ -179,7 +177,17 @@ pkgs.testers.runNixOSTest {
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
         node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
-        node.wait_for_text("(?i)select your user", timeout=180)
+        # Breeze 6.6 focuses the password field when the normal user list is
+        # shown. Bind input readiness to the actual greeter lifecycle rather
+        # than OCR text from NixOS' unrelated X11/IceWM SDDM fixture.
+        node.wait_until_succeeds(
+            "journalctl -b --no-pager -o cat | grep -Fq 'Adding view for '",
+            timeout=180,
+        )
+        node.wait_until_succeeds(
+            "journalctl -b --no-pager -o cat | grep -Fq 'Message received from daemon: HostName'",
+            timeout=180,
+        )
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.

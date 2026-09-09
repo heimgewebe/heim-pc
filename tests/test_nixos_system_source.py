@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "b2cbf5007215e6919b876608cfa52c03616896378617ece974eb360424805d6d"
+SOURCE_SNAPSHOT_SHA256 = "98588b12ff481a41fef8be796e0370ce24bef411ef773fdd37ec85276e7836d9"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -64,9 +64,10 @@ class T(unittest.TestCase):
         self.assertIn('pkgs.coreutils', proof)
         self.assertIn('pkgs.getent', proof)
         self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
-        self.assertIn("enableOCR = true;", proof)
-        self.assertIn('node.wait_for_text("(?i)select your user", timeout=180)', proof)
-        self.assertNotIn("grep -Fq 'Adding view for '", proof)
+        self.assertNotIn("enableOCR = true;", proof)
+        self.assertNotIn("node.wait_for_text(", proof)
+        self.assertIn("grep -Fq 'Adding view for '", proof)
+        self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
         self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
         test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))
