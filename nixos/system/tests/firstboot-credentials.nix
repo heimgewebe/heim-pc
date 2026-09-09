@@ -121,15 +121,6 @@ let
     # Keep the greeter on Wayland while using SDDM's supported Weston path;
     # the authenticated desktop session remains the real Plasma Wayland session.
     services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";
-    # Keep the real Breeze greeter while using its deterministic username-prompt
-    # path. Hiding alex only affects user-list enumeration; SDDM still accepts
-    # an explicit alex login. Forget the last user so the username field stays
-    # empty and source-defined focus behavior is identical after every reboot.
-    services.displayManager.sddm.settings.Users = {
-      HideUsers = "alex";
-      RememberLastUser = false;
-    };
-
     # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
     # unrelated services stay disabled below, but retain normal NixOS package
     # composition because SDDM and Plasma publish runtime dependencies through
@@ -182,6 +173,43 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
+    def select_alex_user(node):
+        # Breeze 6.6 anchors UserList.bottom to the 1280x800 view's vertical
+        # center. Its StrictlyEnforceRange current delegate is horizontally
+        # centered and has a full-size MouseArea; clicking one pixel above the
+        # list bottom therefore emits userSelected(), which Login.qml handles by
+        # clearing and force-focusing the visible password field.
+        display_width = 1280
+        display_height = 800
+        user_delegate_x = display_width // 2
+        user_delegate_y = display_height // 2 - 1
+        maximum = 0x7FFF
+        qmp = node.qmp_client
+        assert qmp is not None
+        qmp.send(
+            "input-send-event",
+            {
+                "events": [
+                    {
+                        "type": "abs",
+                        "data": {
+                            "axis": "x",
+                            "value": round(user_delegate_x * maximum / (display_width - 1)),
+                        },
+                    },
+                    {
+                        "type": "abs",
+                        "data": {
+                            "axis": "y",
+                            "value": round(user_delegate_y * maximum / (display_height - 1)),
+                        },
+                    },
+                    {"type": "btn", "data": {"down": True, "button": "left"}},
+                    {"type": "btn", "data": {"down": False, "button": "left"}},
+                ]
+            },
+        )
+
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
         node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
@@ -196,12 +224,7 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-        # HideUsers forces Breeze 6.6 into its username-prompt path. Login.qml
-        # focuses the first visible control when its StackView activates, and
-        # accepting the username explicitly focuses the password field.
-        for char in "alex":
-            node.send_key(char, log=False)
-        node.send_key("ret")
+        select_alex_user(node)
         node.sleep(0.2)
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
