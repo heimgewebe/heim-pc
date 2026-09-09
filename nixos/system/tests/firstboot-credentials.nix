@@ -111,6 +111,10 @@ let
     virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];
     documentation.enable = false;
     hardware.enableAllFirmware = lib.mkForce false;
+    # The production NVIDIA profile normally enables the NixOS graphics stack.
+    # This test deliberately disables NVIDIA, so enable generic Mesa/DRM support
+    # explicitly for the virtio GPU used by the disposable Wayland VM.
+    hardware.graphics.enable = true;
 
     # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
     # unrelated services stay disabled below, but retain normal NixOS package

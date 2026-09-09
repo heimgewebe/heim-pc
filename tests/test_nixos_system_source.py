@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "32423ea7f49dffdf1d1e075ca49bdafcb4e0b82f7f9d2ef37196f8fdefd49ab6"
+SOURCE_SNAPSHOT_SHA256 = "d6ca8587ddef30f6028b326c49305bb79b5420066aba8c5fae11734d9ad8dacd"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -59,6 +59,7 @@ class T(unittest.TestCase):
         self.assertNotIn('start_all()', proof)
         self.assertIn('virtualisation.memorySize = 3072;', proof)
         self.assertIn('virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];', proof)
+        self.assertIn('hardware.graphics.enable = true;', proof)
         self.assertIn('pkgs.coreutils', proof)
         self.assertIn('pkgs.getent', proof)
         self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
