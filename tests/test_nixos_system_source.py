@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "98588b12ff481a41fef8be796e0370ce24bef411ef773fdd37ec85276e7836d9"
+SOURCE_SNAPSHOT_SHA256 = "cadb6c64a1796ff58a0025c95b9b970612aa6cc202a9ab91145b84bfd709d765"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -68,6 +68,9 @@ class T(unittest.TestCase):
         self.assertNotIn("node.wait_for_text(", proof)
         self.assertIn("grep -Fq 'Adding view for '", proof)
         self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
+        self.assertIn('programs.ydotool.enable = true;', proof)
+        self.assertIn('node.succeed("ydotool mousemove --absolute -- 600 445")', proof)
+        self.assertIn('node.succeed("ydotool click 0xC0")', proof)
         self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
         test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))

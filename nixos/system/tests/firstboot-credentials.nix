@@ -132,6 +132,9 @@ let
     programs.nix-ld.enable = lib.mkForce false;
     programs.appimage.enable = lib.mkForce false;
     programs.appimage.binfmt = lib.mkForce false;
+    # Test-only deterministic pointer injection for focusing the real Breeze
+    # password field before secret-safe keyboard input.
+    programs.ydotool.enable = true;
     environment.systemPackages = [
       stageTool
       pkgs.bashInteractive
@@ -188,6 +191,11 @@ pkgs.testers.runNixOSTest {
             "journalctl -b --no-pager -o cat | grep -Fq 'Message received from daemon: HostName'",
             timeout=180,
         )
+        # Breeze places the login form immediately below the vertical center.
+        # The VM display is fixed at 1280x800; click inside the password field
+        # so Wayland window activation cannot make secret input depend on focus.
+        node.succeed("ydotool mousemove --absolute -- 600 445")
+        node.succeed("ydotool click 0xC0")
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.
