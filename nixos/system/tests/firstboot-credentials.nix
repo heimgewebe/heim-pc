@@ -121,14 +121,10 @@ let
     # Keep the greeter on Wayland while using SDDM's supported Weston path;
     # the authenticated desktop session remains the real Plasma Wayland session.
     services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";
-    # Keep the real Breeze greeter while using its deterministic username-prompt
-    # path. Hiding alex only affects user-list enumeration; SDDM still accepts
-    # an explicit alex login. Forget the last user so the username field stays
-    # empty and source-defined focus behavior is identical after every reboot.
-    services.displayManager.sddm.settings.Users = {
-      HideUsers = "alex";
-      RememberLastUser = false;
-    };
+    # Keep the real Breeze greeter and its normal single-user path. Breeze
+    # selects alex from SDDM's user model and focuses the visible password
+    # field when the login StackView activates; no pointer or username prompt
+    # is needed for the credential/PAM proof.
 
     # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
     # unrelated services stay disabled below, but retain normal NixOS package
@@ -196,13 +192,10 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-        # HideUsers forces Breeze 6.6 into its username-prompt path. Login.qml
-        # focuses the first visible control when its StackView activates, and
-        # accepting the username explicitly focuses the password field.
-        for char in "alex":
-            node.send_key(char, log=False)
-        node.send_key("ret")
-        node.sleep(0.2)
+        # In Breeze's normal single-user path the selected alex entry makes
+        # the password field the first visible form control. StackView
+        # activation gives it focus, so keyboard input can stay entirely on
+        # QEMU's existing keyboard path without pointer/coordinate guesses.
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.
