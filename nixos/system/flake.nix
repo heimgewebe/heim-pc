@@ -355,10 +355,19 @@
           assert !vm.hardware.cpu.amd.updateMicrocode;
           assert !vm.heimPc.hardware.nvidia.enable && !vm.heimPc.physicalGates.enable;
           assert builtins.all (c:
-            c.systemd.sleep.settings.Sleep.AllowSuspend == "no"
-            && c.systemd.sleep.settings.Sleep.AllowHibernation == "no"
-            && c.systemd.sleep.settings.Sleep.AllowSuspendThenHibernate == "no"
-            && c.systemd.sleep.settings.Sleep.AllowHybridSleep == "no"
+            c.services.logind.settings.Login.IdleAction == "ignore"
+            && c.environment.etc."xdg/powerdevilrc".text == ''
+              [AC][SuspendAndShutdown]
+              AutoSuspendAction[$i]=0
+              [Battery][SuspendAndShutdown]
+              AutoSuspendAction[$i]=0
+              [LowBattery][SuspendAndShutdown]
+              AutoSuspendAction[$i]=0
+            ''
+            && !(c.systemd.sleep.settings.Sleep ? AllowSuspend)
+            && !(c.systemd.sleep.settings.Sleep ? AllowHibernation)
+            && !(c.systemd.sleep.settings.Sleep ? AllowSuspendThenHibernate)
+            && !(c.systemd.sleep.settings.Sleep ? AllowHybridSleep)
           ) ([ configs.heim-pc.config target proprietary open ] ++ live);
           assert configs.heim-pc.config.fileSystems."/".device
             == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";

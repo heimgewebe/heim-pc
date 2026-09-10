@@ -226,11 +226,10 @@ pkgs.testers.runNixOSTest {
         )
 
         # Bind submission to a fresh backend request, not merely to injected
-        # key events. Breeze's onUserSelected handler clears the password field
-        # and force-focuses the first visible form control. Reassert that focus
-        # before entering the credential, while the field is still empty. Submit
-        # the credential only once; if SDDM never exposes a backend request, fail
-        # diagnostically instead of injecting a second password submission.
+        # key events. Select the user exactly once and let Breeze's onUserSelected
+        # handler clear/focus the password field before typing. Re-clicking the
+        # selected delegate can lose userList.selectedUser; credential submission
+        # itself remains single-shot and fails diagnostically when no request appears.
         def login_request_count():
             journal = node.succeed("journalctl -b --no-pager -o cat")
             return journal.count("Message received from greeter: Login")
@@ -241,8 +240,6 @@ pkgs.testers.runNixOSTest {
         password = node.succeed(f"cat {password_path}").strip()
         assert password
         requests_before = login_request_count()
-        select_alex_user(node)
-        node.sleep(0.2)
         select_alex_user(node)
         node.sleep(0.5)
         for char in password:

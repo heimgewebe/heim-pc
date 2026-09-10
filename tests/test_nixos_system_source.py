@@ -12,7 +12,7 @@ from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "a6e45c4edf19033a5da9f79c2d39827315ec96ba9c0d2750f69d08db2d8e87d9"
+SOURCE_SNAPSHOT_SHA256 = "208e2116ace802729dd5edb516ee2cf6b3db4bf25f0604fd94dec9c06ae02cb1"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -120,7 +120,7 @@ class T(unittest.TestCase):
         ])
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(node.qmp_client.send.call_count, 2)
+        self.assertEqual(node.qmp_client.send.call_count, 1)
         for qmp_call in node.qmp_client.send.call_args_list:
             command, payload = qmp_call.args
             self.assertEqual(command, "input-send-event")
@@ -149,7 +149,7 @@ class T(unittest.TestCase):
         # Baseline + five polling reads see no request; the sixth polling read does.
         node.succeed.side_effect = ["00ab\n"] + [""] * 6 + [login_marker + "\n"]
         namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.qmp_client.send.call_count, 2)
+        self.assertEqual(node.qmp_client.send.call_count, 1)
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
         self.assertEqual(
@@ -163,7 +163,7 @@ class T(unittest.TestCase):
         node.succeed.side_effect = ["00ab\n"] + [""] * 21
         with self.assertRaisesRegex(AssertionError, "never submitted the graphical login request"):
             namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.qmp_client.send.call_count, 2)
+        self.assertEqual(node.qmp_client.send.call_count, 1)
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
 
@@ -183,7 +183,19 @@ class T(unittest.TestCase):
             namespace["graphical_login"](node, "/run/test-only-password")
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(node.qmp_client.send.call_count, 2)
+        self.assertEqual(node.qmp_client.send.call_count, 1)
+
+    def test_desktop_disables_automatic_sleep_without_blocking_manual_suspend(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('services.logind.settings.Login.IdleAction = "ignore";', desktop)
+        self.assertIn('environment.etc."xdg/powerdevilrc".text', desktop)
+        self.assertEqual(desktop.count("AutoSuspendAction[$i]=0"), 3)
+        self.assertNotIn("systemd.sleep.settings.Sleep =", desktop)
+        for key in ("AllowSuspend", "AllowHibernation", "AllowSuspendThenHibernate", "AllowHybridSleep"):
+            self.assertNotIn(f'{key} = "no";', desktop)
+        self.assertIn('c.services.logind.settings.Login.IdleAction == "ignore"', flake)
+        self.assertIn('!(c.systemd.sleep.settings.Sleep ? AllowSuspend)', flake)
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
