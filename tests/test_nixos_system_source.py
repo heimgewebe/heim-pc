@@ -12,7 +12,7 @@ from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "4a955891df402b92fd33317e443fcdad19f8fd74dc518040a9a18c1bc979ac51"
+SOURCE_SNAPSHOT_SHA256 = "22fbfc3db0892150fae178f87d545f573fec5ac24105c0f6f83f32c4bc09fec6"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -75,10 +75,12 @@ class T(unittest.TestCase):
         self.assertNotIn('HideUsers = "alex";', proof)
         self.assertNotIn('RememberLastUser = false;', proof)
         self.assertNotIn('for char in "alex":', proof)
-        self.assertNotIn('qmp_client', proof)
-        self.assertNotIn('"input-send-event"', proof)
+        self.assertIn('qmp = node.qmp_client', proof)
+        self.assertIn('"input-send-event"', proof)
         self.assertNotIn('select_alex_user', proof)
-        self.assertIn('Main.qml has a 200 ms post-show forceActiveFocus timer', proof)
+        self.assertIn('activate_greeter_and_focus_password(node)', proof)
+        self.assertIn('click_greeter(node, 32, 32)', proof)
+        self.assertIn('click_greeter(node, 1280 // 2, 800 // 2 - 32)', proof)
         self.assertIn('latest_journal = node.succeed("journalctl -b --no-pager -o cat")', proof)
         self.assertIn('latest_journal.count("Message received from greeter: Login")', proof)
         self.assertIn('recent SDDM/greeter/PAM journal follows', proof)
@@ -118,7 +120,13 @@ class T(unittest.TestCase):
         ])
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
-        node.qmp_client.send.assert_not_called()
+        self.assertEqual(node.qmp_client.send.call_count, 2)
+        first_events = node.qmp_client.send.call_args_list[0].args[1]["events"]
+        second_events = node.qmp_client.send.call_args_list[1].args[1]["events"]
+        self.assertNotEqual(
+            [event["data"].get("value") for event in first_events if event["type"] == "abs"],
+            [event["data"].get("value") for event in second_events if event["type"] == "abs"],
+        )
         # Detect dead proof code: returning after typing is not a session proof.
         final_call = node.wait_until_succeeds.call_args_list[-1]
         self.assertIn("= wayland &&", final_call.args[0])
@@ -140,7 +148,7 @@ class T(unittest.TestCase):
         # Baseline + five polling reads see no request; the sixth polling read does.
         node.succeed.side_effect = ["00ab\n"] + [""] * 6 + [login_marker + "\n"]
         namespace["graphical_login"](node, "/run/test-only-password")
-        node.qmp_client.send.assert_not_called()
+        self.assertEqual(node.qmp_client.send.call_count, 2)
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
         self.assertEqual(
@@ -158,7 +166,7 @@ class T(unittest.TestCase):
             "(?s)never submitted.*synthetic focus diagnostic",
         ):
             namespace["graphical_login"](node, "/run/test-only-password")
-        node.qmp_client.send.assert_not_called()
+        self.assertEqual(node.qmp_client.send.call_count, 2)
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
 
@@ -178,7 +186,7 @@ class T(unittest.TestCase):
             namespace["graphical_login"](node, "/run/test-only-password")
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
         self.assertEqual(node.send_key.call_args_list, expected_keys)
-        node.qmp_client.send.assert_not_called()
+        self.assertEqual(node.qmp_client.send.call_count, 2)
 
     def test_desktop_disables_automatic_sleep_without_blocking_manual_suspend(self):
         desktop = (SOURCE / "modules/desktop.nix").read_text()
