@@ -174,7 +174,7 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-    def click_greeter(node, x, y):
+    def move_greeter_pointer(node, x, y):
         display_width = 1280
         display_height = 800
         maximum = 0x7FFF
@@ -198,22 +198,32 @@ pkgs.testers.runNixOSTest {
                             "value": round(y * maximum / (display_height - 1)),
                         },
                     },
+                ]
+            },
+        )
+
+    def click_greeter_pointer(node):
+        qmp = node.qmp_client
+        assert qmp is not None
+        qmp.send(
+            "input-send-event",
+            {
+                "events": [
                     {"type": "btn", "data": {"down": True, "button": "left"}},
                     {"type": "btn", "data": {"down": False, "button": "left"}},
                 ]
             },
         )
 
-    def activate_greeter_and_focus_password(node):
-        # Under the Weston QEMU greeter, Breeze can have internal QML focus
-        # before the compositor has delivered keyboard focus to the surface.
-        # Make those transitions explicit: first activate an inert corner of
-        # loginScreenRoot, then select the already-current user exactly once.
-        # UserList.qml keeps currentIndex on that delegate and emits userSelected;
-        # Login.qml handles that signal by clearing/focusing passwordBox.
-        click_greeter(node, 32, 32)
+    def focus_password_field(node):
+        # QEMU/Weston evidence shows that combining the first absolute tablet
+        # move and button press can leave the Breeze greeter without keyboard
+        # delivery. Settle the pointer on the already-current user first, then
+        # emit exactly one semantic delegate click. UserList.qml emits
+        # userSelected(), and Login.qml clears/focuses passwordBox.
+        move_greeter_pointer(node, 1280 // 2, 800 // 2 - 32)
         node.sleep(0.2)
-        click_greeter(node, 1280 // 2, 800 // 2 - 32)
+        click_greeter_pointer(node)
         node.sleep(0.5)
 
     def graphical_login(node, password_path):
@@ -231,10 +241,9 @@ pkgs.testers.runNixOSTest {
         )
 
         # Bind submission to a fresh backend request, not merely to injected
-        # key events. QEMU evidence shows that Breeze's internal focus alone does
-        # not establish compositor keyboard focus, while a user-delegate click
-        # does reach the real SDDM backend. Separate surface activation from the
-        # one semantic user selection instead of retrying the delegate click.
+        # key events. Keep pointer positioning separate from the single semantic
+        # Breeze user click so the QEMU tablet move has settled before focus is
+        # requested; never retry the delegate or replay credentials.
         latest_journal = ""
 
         def login_request_count():
@@ -248,7 +257,7 @@ pkgs.testers.runNixOSTest {
         password = node.succeed(f"cat {password_path}").strip()
         assert password
         requests_before = login_request_count()
-        activate_greeter_and_focus_password(node)
+        focus_password_field(node)
         for char in password:
             node.send_key(char, log=False)
         node.send_key("ret")
