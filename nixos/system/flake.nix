@@ -354,6 +354,12 @@
           ) [ target proprietary open ];
           assert !vm.hardware.cpu.amd.updateMicrocode;
           assert !vm.heimPc.hardware.nvidia.enable && !vm.heimPc.physicalGates.enable;
+          assert builtins.all (c:
+            c.systemd.sleep.settings.Sleep.AllowSuspend == "no"
+            && c.systemd.sleep.settings.Sleep.AllowHibernation == "no"
+            && c.systemd.sleep.settings.Sleep.AllowSuspendThenHibernate == "no"
+            && c.systemd.sleep.settings.Sleep.AllowHybridSleep == "no"
+          ) ([ configs.heim-pc.config target proprietary open ] ++ live);
           assert configs.heim-pc.config.fileSystems."/".device
             == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
           assert builtins.all (c: !c.virtualisation.podman.enable

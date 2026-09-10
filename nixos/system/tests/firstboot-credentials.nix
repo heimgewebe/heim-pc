@@ -227,14 +227,13 @@ pkgs.testers.runNixOSTest {
 
         # Bind submission to a fresh backend request, not merely to injected
         # key events. Breeze's onUserSelected handler clears the password field
-        # and force-focuses the first visible form control; if that focus event
-        # is lost, retry it once only while SDDM proves that no login request
-        # reached PAM. This cannot duplicate an authentication attempt.
+        # and force-focuses the first visible form control. Reassert that focus
+        # before entering the credential, while the field is still empty. Submit
+        # the credential only once; if SDDM never exposes a backend request, fail
+        # diagnostically instead of injecting a second password submission.
         def login_request_count():
-            return int(node.succeed(
-                "journalctl -b --no-pager -o cat | "
-                "grep -Fc 'Message received from greeter: Login' || true"
-            ).strip() or "0")
+            journal = node.succeed("journalctl -b --no-pager -o cat")
+            return journal.count("Message received from greeter: Login")
 
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
@@ -242,17 +241,18 @@ pkgs.testers.runNixOSTest {
         password = node.succeed(f"cat {password_path}").strip()
         assert password
         requests_before = login_request_count()
-        for attempt in range(2):
-            select_alex_user(node)
-            node.sleep(0.2 if attempt == 0 else 0.5)
-            for char in password:
-                node.send_key(char, log=False)
-            node.send_key("ret")
-            for _ in range(20):
-                if login_request_count() > requests_before:
-                    wait_for_alex_wayland(node)
-                    return
-                node.sleep(0.25)
+        select_alex_user(node)
+        node.sleep(0.2)
+        select_alex_user(node)
+        node.sleep(0.5)
+        for char in password:
+            node.send_key(char, log=False)
+        node.send_key("ret")
+        for _ in range(20):
+            if login_request_count() > requests_before:
+                wait_for_alex_wayland(node)
+                return
+            node.sleep(0.25)
 
         raise AssertionError("SDDM greeter never submitted the graphical login request")
 

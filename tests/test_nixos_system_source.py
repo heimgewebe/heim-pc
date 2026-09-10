@@ -12,7 +12,7 @@ from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "ae811c116282401a5c2a7026d19ef61ef7ccf10d5ff7786eb1a01db55aa06e85"
+SOURCE_SNAPSHOT_SHA256 = "a6e45c4edf19033a5da9f79c2d39827315ec96ba9c0d2750f69d08db2d8e87d9"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -82,8 +82,9 @@ class T(unittest.TestCase):
         self.assertIn('qmp = node.qmp_client', proof)
         self.assertIn('"input-send-event"', proof)
         self.assertIn('select_alex_user(node)', proof)
-        self.assertIn("grep -Fc 'Message received from greeter: Login'", proof)
-        self.assertIn('for attempt in range(2):', proof)
+        self.assertIn('journal = node.succeed("journalctl -b --no-pager -o cat")', proof)
+        self.assertIn('journal.count("Message received from greeter: Login")', proof)
+        self.assertNotIn("cannot duplicate an authentication attempt", proof)
         self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
         self.assertNotIn('zlib_rgb_b64', proof)
         self.assertNotIn('_managed_screenshot', proof)
@@ -93,7 +94,7 @@ class T(unittest.TestCase):
         compile(textwrap.dedent(test_script_source), "firstboot-testScript", "exec")
         self.assertNotIn("WAYLAND_DEBUG", proof)
 
-    def test_firstboot_login_helper_reaches_session_with_secret_safe_keys(self):
+    def _firstboot_login_helpers(self):
         proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
         script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         tree = ast.parse(textwrap.dedent(script))
@@ -103,49 +104,86 @@ class T(unittest.TestCase):
         )
         namespace = {}
         exec(compile(helpers, "firstboot-login-helpers", "exec"), namespace)
+        return namespace
+
+    def test_firstboot_login_helper_reaches_session_with_secret_safe_keys(self):
+        namespace = self._firstboot_login_helpers()
         node = Mock()
-        node.succeed.side_effect = ["00ab\n", "0\n", "1\n"]
+        journal_command = "journalctl -b --no-pager -o cat"
+        login_marker = "Message received from greeter: Login"
+        node.succeed.side_effect = ["00ab\n", "", login_marker + "\n"]
         namespace["graphical_login"](node, "/run/test-only-password")
         self.assertEqual(node.succeed.call_args_list, [
             call("cat /run/test-only-password"),
-            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
-            call("journalctl -b --no-pager -o cat | grep -Fc 'Message received from greeter: Login' || true"),
+            call(journal_command),
+            call(journal_command),
         ])
-        self.assertEqual(node.send_key.call_args_list, [
-            call(char, log=False) for char in "00ab"
-        ] + [call("ret")])
-        node.qmp_client.send.assert_called_once()
-        command, payload = node.qmp_client.send.call_args.args
-        self.assertEqual(command, "input-send-event")
-        for event in payload["events"]:
-            if event["type"] == "abs":
-                self.assertGreaterEqual(event["data"]["value"], 0)
-                self.assertLessEqual(event["data"]["value"], 0x7FFF)
+        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
+        self.assertEqual(node.send_key.call_args_list, expected_keys)
+        self.assertEqual(node.qmp_client.send.call_count, 2)
+        for qmp_call in node.qmp_client.send.call_args_list:
+            command, payload = qmp_call.args
+            self.assertEqual(command, "input-send-event")
+            for event in payload["events"]:
+                if event["type"] == "abs":
+                    self.assertGreaterEqual(event["data"]["value"], 0)
+                    self.assertLessEqual(event["data"]["value"], 0x7FFF)
         # Detect dead proof code: returning after typing is not a session proof.
-        final_call = node.method_calls[-1]
-        self.assertEqual(final_call[0], "wait_until_succeeds")
-        self.assertIn("= wayland &&", final_call[1][0])
-        self.assertIn("= yes && exit 0", final_call[1][0])
+        final_call = node.wait_until_succeeds.call_args_list[-1]
+        self.assertIn("= wayland &&", final_call.args[0])
+        self.assertIn("= yes && exit 0", final_call.args[0])
 
-    def test_firstboot_login_helper_refocuses_once_only_before_backend_submission(self):
-        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
-        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
-        tree = ast.parse(textwrap.dedent(script))
-        helpers = ast.Module(
-            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
-            type_ignores=[],
-        )
-        namespace = {}
-        exec(compile(helpers, "firstboot-login-refocus", "exec"), namespace)
+    def test_firstboot_login_helper_propagates_journal_failure_before_input(self):
+        namespace = self._firstboot_login_helpers()
         node = Mock()
-        node.succeed.side_effect = ["00ab\n", "0\n"] + ["0\n"] * 20 + ["1\n"]
+        node.succeed.side_effect = ["00ab\n", RuntimeError("journal unavailable")]
+        with self.assertRaisesRegex(RuntimeError, "journal unavailable"):
+            namespace["graphical_login"](node, "/run/test-only-password")
+        node.qmp_client.send.assert_not_called()
+        node.send_key.assert_not_called()
+
+    def test_firstboot_login_helper_tolerates_delayed_request_without_resubmitting(self):
+        namespace = self._firstboot_login_helpers()
+        node = Mock()
+        login_marker = "Message received from greeter: Login"
+        # Baseline + five polling reads see no request; the sixth polling read does.
+        node.succeed.side_effect = ["00ab\n"] + [""] * 6 + [login_marker + "\n"]
         namespace["graphical_login"](node, "/run/test-only-password")
         self.assertEqual(node.qmp_client.send.call_count, 2)
         expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
-        self.assertEqual(node.send_key.call_args_list, expected_keys * 2)
-        final_call = node.method_calls[-1]
-        self.assertEqual(final_call[0], "wait_until_succeeds")
-        self.assertIn("= wayland &&", final_call[1][0])
+        self.assertEqual(node.send_key.call_args_list, expected_keys)
+        self.assertEqual(
+            [c for c in node.succeed.call_args_list if c.args == ("journalctl -b --no-pager -o cat",)],
+            [call("journalctl -b --no-pager -o cat")] * 7,
+        )
+
+    def test_firstboot_login_helper_missing_request_fails_after_one_submission(self):
+        namespace = self._firstboot_login_helpers()
+        node = Mock()
+        node.succeed.side_effect = ["00ab\n"] + [""] * 21
+        with self.assertRaisesRegex(AssertionError, "never submitted the graphical login request"):
+            namespace["graphical_login"](node, "/run/test-only-password")
+        self.assertEqual(node.qmp_client.send.call_count, 2)
+        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
+        self.assertEqual(node.send_key.call_args_list, expected_keys)
+
+    def test_firstboot_login_helper_does_not_resubmit_after_backend_request(self):
+        namespace = self._firstboot_login_helpers()
+        node = Mock()
+        login_marker = "Message received from greeter: Login"
+        node.succeed.side_effect = ["00ab\n", "", login_marker + "\n"]
+
+        def wait_until_succeeds(command, timeout=None):
+            if "loginctl list-sessions" in command:
+                raise TimeoutError("Wayland session did not appear")
+            return None
+
+        node.wait_until_succeeds.side_effect = wait_until_succeeds
+        with self.assertRaisesRegex(TimeoutError, "Wayland session did not appear"):
+            namespace["graphical_login"](node, "/run/test-only-password")
+        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
+        self.assertEqual(node.send_key.call_args_list, expected_keys)
+        self.assertEqual(node.qmp_client.send.call_count, 2)
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
@@ -221,6 +259,28 @@ class T(unittest.TestCase):
         )
         for marker in ("/dev/nvme0", "parted ", "mkfs.", "nixos-install", "efibootmgr"):
             self.assertNotIn(marker, content)
+
+    def test_gate_d_strips_btrfs_filesystem_root_before_cryptsetup_lookup(self):
+        gate = (SOURCE / "modules/physical-gates.nix").read_text()
+        self.assertIn(
+            'root_source="$(findmnt --nofsroot -rn -o SOURCE / 2>/dev/null || true)"',
+            gate,
+        )
+        with tempfile.NamedTemporaryFile(mode="w") as mountinfo:
+            mountinfo.write(
+                "29 1 253:0 /@root / rw,relatime - btrfs "
+                "/dev/mapper/audit-crypt rw,subvolid=256,subvol=/@root\n"
+            )
+            mountinfo.flush()
+            command = [
+                "findmnt", "--kernel", "--tab-file", mountinfo.name,
+                "--mountpoint", "/", "-rn", "-o", "SOURCE",
+            ]
+            filesystem_source = subprocess.check_output(command, text=True).strip()
+            device_source = subprocess.check_output(command + ["--nofsroot"], text=True).strip()
+        self.assertEqual(filesystem_source, "/dev/mapper/audit-crypt[/@root]")
+        self.assertEqual(device_source, "/dev/mapper/audit-crypt")
+        self.assertEqual(device_source.removeprefix("/dev/mapper/"), "audit-crypt")
 
     def test_gate_a_uses_pinned_nvidia_binary_and_exact_pinned_cdi_contract(self):
         gate = (SOURCE / "modules/physical-gates.nix").read_text()
