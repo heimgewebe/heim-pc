@@ -174,43 +174,6 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-    def select_alex_user(node):
-        # Breeze 6.6 anchors UserList.bottom to the 1280x800 view's vertical
-        # center. Its StrictlyEnforceRange current delegate is horizontally
-        # centered and has a full-size MouseArea. Stay well inside the delegate
-        # instead of relying on a one-pixel boundary hit; the click still emits
-        # userSelected(), which Login.qml uses to focus the password field.
-        display_width = 1280
-        display_height = 800
-        user_delegate_x = display_width // 2
-        user_delegate_y = display_height // 2 - 32
-        maximum = 0x7FFF
-        qmp = node.qmp_client
-        assert qmp is not None
-        qmp.send(
-            "input-send-event",
-            {
-                "events": [
-                    {
-                        "type": "abs",
-                        "data": {
-                            "axis": "x",
-                            "value": round(user_delegate_x * maximum / (display_width - 1)),
-                        },
-                    },
-                    {
-                        "type": "abs",
-                        "data": {
-                            "axis": "y",
-                            "value": round(user_delegate_y * maximum / (display_height - 1)),
-                        },
-                    },
-                    {"type": "btn", "data": {"down": True, "button": "left"}},
-                    {"type": "btn", "data": {"down": False, "button": "left"}},
-                ]
-            },
-        )
-
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
         node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
@@ -226,13 +189,16 @@ pkgs.testers.runNixOSTest {
         )
 
         # Bind submission to a fresh backend request, not merely to injected
-        # key events. Select the user exactly once and let Breeze's onUserSelected
-        # handler clear/focus the password field before typing. Re-clicking the
-        # selected delegate can lose userList.selectedUser; credential submission
-        # itself remains single-shot and fails diagnostically when no request appears.
+        # key events. Breeze 6.6 already initializes userListCurrentIndex to the
+        # last user (or index 0) and focuses the password field when the user list
+        # is visible. Keep this path keyboard-only: a synthetic pointer click can
+        # steal focus from the already-selected single-user greeter.
+        latest_journal = ""
+
         def login_request_count():
-            journal = node.succeed("journalctl -b --no-pager -o cat")
-            return journal.count("Message received from greeter: Login")
+            nonlocal latest_journal
+            latest_journal = node.succeed("journalctl -b --no-pager -o cat")
+            return latest_journal.count("Message received from greeter: Login")
 
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
@@ -240,7 +206,9 @@ pkgs.testers.runNixOSTest {
         password = node.succeed(f"cat {password_path}").strip()
         assert password
         requests_before = login_request_count()
-        select_alex_user(node)
+        # Main.qml has a 200 ms post-show forceActiveFocus timer. The lifecycle
+        # markers above can race that timer, so wait beyond that exact upstream
+        # focus bound without injecting a pointer event.
         node.sleep(0.5)
         for char in password:
             node.send_key(char, log=False)
@@ -251,7 +219,15 @@ pkgs.testers.runNixOSTest {
                 return
             node.sleep(0.25)
 
-        raise AssertionError("SDDM greeter never submitted the graphical login request")
+        diagnostic_lines = [
+            line for line in latest_journal.splitlines()
+            if any(token in line.lower() for token in ("sddm", "greeter", "pam"))
+        ]
+        diagnostic = "\n".join(diagnostic_lines[-80:])
+        raise AssertionError(
+            "SDDM greeter never submitted the graphical login request; "
+            "recent SDDM/greeter/PAM journal follows:\n" + diagnostic
+        )
 
     with subtest("missing bootstrap staging fails closed before login"):
         machine.wait_until_succeeds("systemctl is-failed heim-pc-firstboot-credentials.service", timeout=180)
