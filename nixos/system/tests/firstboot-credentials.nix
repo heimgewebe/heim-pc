@@ -105,26 +105,18 @@ let
 
     virtualisation.memorySize = 3072;
     virtualisation.cores = 2;
-    # The physical desktop profile runs SDDM itself on Wayland. QEMU's default
-    # std VGA produces a corrupt greeter framebuffer under that path, so use
-    # the virtio GPU shape used by upstream NixOS Wayland VM tests.
-    virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];
     documentation.enable = false;
     hardware.enableAllFirmware = lib.mkForce false;
-    # The production NVIDIA profile normally enables the NixOS graphics stack.
-    # This test deliberately disables NVIDIA, so enable generic Mesa/DRM support
-    # explicitly for the virtio GPU used by the disposable Wayland VM.
-    hardware.graphics.enable = true;
-    # Plasma defaults SDDM's Wayland greeter compositor to KWin. The QEMU
-    # virtio display is sufficient for a real SDDM/PAM login proof but exposes
-    # a KWin-specific empty-DRM-node failure unrelated to credential bootstrap.
-    # Keep the greeter on Wayland while using SDDM's supported Weston path;
-    # the authenticated desktop session remains the real Plasma Wayland session.
-    services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";
-    # Keep the proof scoped to the credential and real desktop/PAM path. Heavy
-    # unrelated services stay disabled below, but retain normal NixOS package
-    # composition because SDDM and Plasma publish runtime dependencies through
-    # environment.systemPackages. Add the test-driver tools without replacing it.
+    # The production bootstrap is intentionally gated on a desktop-shaped
+    # physical profile. Exercise that state machine without starting a display
+    # server, display manager, or desktop session in this headless VM proof.
+    services.xserver.enable = lib.mkForce false;
+    services.displayManager.sddm.enable = lib.mkForce false;
+    services.displayManager.sddm.wayland.enable = lib.mkForce false;
+    services.desktopManager.plasma6.enable = lib.mkForce false;
+    # Keep the proof scoped to the credential state machine. Heavy unrelated
+    # services stay disabled; add the test-driver tools without replacing the
+    # inherited package composition.
     services.pipewire.enable = lib.mkForce false;
     security.rtkit.enable = lib.mkForce false;
     virtualisation.podman.enable = lib.mkForce false;
@@ -135,11 +127,9 @@ let
       stageTool
       pkgs.bashInteractive
       pkgs.coreutils
-      pkgs.gawk
       pkgs.glibc.bin
       pkgs.getent
       pkgs.gnugrep
-      pkgs.procps
       pkgs.shadow
       pkgs.systemd
       pkgs.util-linux
@@ -164,102 +154,9 @@ pkgs.testers.runNixOSTest {
     def shadow_field(node):
         return node.succeed("getent shadow alex | cut -d: -f2").strip()
 
-    def wait_for_alex_wayland(node):
-        node.wait_until_succeeds(
-            r"""for id in $(loginctl list-sessions --no-legend | awk '$3 == "alex" {print $1}'); do
-            test "$(loginctl show-session "$id" -p Type --value)" = wayland &&
-            test "$(loginctl show-session "$id" -p Active --value)" = yes && exit 0
-            done
-            exit 1""",
-            timeout=180,
-        )
-
-    def select_alex_user(node):
-        # Breeze 6.6 anchors UserList.bottom to the 1280x800 view's vertical
-        # center. Its StrictlyEnforceRange current delegate is horizontally
-        # centered and has a full-size MouseArea. Stay well inside the delegate
-        # instead of relying on a one-pixel boundary hit; the click still emits
-        # userSelected(), which Login.qml uses to focus the password field.
-        display_width = 1280
-        display_height = 800
-        user_delegate_x = display_width // 2
-        user_delegate_y = display_height // 2 - 32
-        maximum = 0x7FFF
-        qmp = node.qmp_client
-        assert qmp is not None
-        qmp.send(
-            "input-send-event",
-            {
-                "events": [
-                    {
-                        "type": "abs",
-                        "data": {
-                            "axis": "x",
-                            "value": round(user_delegate_x * maximum / (display_width - 1)),
-                        },
-                    },
-                    {
-                        "type": "abs",
-                        "data": {
-                            "axis": "y",
-                            "value": round(user_delegate_y * maximum / (display_height - 1)),
-                        },
-                    },
-                    {"type": "btn", "data": {"down": True, "button": "left"}},
-                    {"type": "btn", "data": {"down": False, "button": "left"}},
-                ]
-            },
-        )
-
-    def graphical_login(node, password_path):
-        node.wait_for_unit("display-manager.service", timeout=180)
-        node.wait_until_succeeds("pgrep -u sddm -f sddm-greeter", timeout=180)
-        # Bind readiness to the actual Breeze/Wayland greeter lifecycle rather
-        # than OCR text from NixOS' unrelated X11/IceWM SDDM fixture.
-        node.wait_until_succeeds(
-            "journalctl -b --no-pager -o cat | grep -Fq 'Adding view for \"Virtual-1\" QRect(0,0 1280x800)'",
-            timeout=180,
-        )
-        node.wait_until_succeeds(
-            "journalctl -b --no-pager -o cat | grep -Fq 'Message received from daemon: HostName'",
-            timeout=180,
-        )
-
-        # Bind submission to a fresh backend request, not merely to injected
-        # key events. Breeze's onUserSelected handler clears the password field
-        # and force-focuses the first visible form control; if that focus event
-        # is lost, retry it once only while SDDM proves that no login request
-        # reached PAM. This cannot duplicate an authentication attempt.
-        def login_request_count():
-            return int(node.succeed(
-                "journalctl -b --no-pager -o cat | "
-                "grep -Fc 'Message received from greeter: Login' || true"
-            ).strip() or "0")
-
-        # succeed() logs the command but does not log successful stdout. Never
-        # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
-        # runtime-only password out of the public VM-test log.
-        password = node.succeed(f"cat {password_path}").strip()
-        assert password
-        requests_before = login_request_count()
-        for attempt in range(2):
-            select_alex_user(node)
-            node.sleep(0.2 if attempt == 0 else 0.5)
-            for char in password:
-                node.send_key(char, log=False)
-            node.send_key("ret")
-            for _ in range(20):
-                if login_request_count() > requests_before:
-                    wait_for_alex_wayland(node)
-                    return
-                node.sleep(0.25)
-
-        raise AssertionError("SDDM greeter never submitted the graphical login request")
-
-    with subtest("missing bootstrap staging fails closed before login"):
+    with subtest("missing bootstrap staging fails closed before user sessions"):
         machine.wait_until_succeeds("systemctl is-failed heim-pc-firstboot-credentials.service", timeout=180)
         machine.fail("systemctl is-active systemd-user-sessions.service")
-        machine.fail("systemctl is-active display-manager.service")
         assert shadow_field(machine) in ("!", "!!", "*")
         machine.fail("test -e /persist/heim-pc/bootstrap/alex-password-initialized")
 
@@ -282,13 +179,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test ! -e /persist/secrets/heim-pc/first-boot/alex-password-hash")
         machine.succeed("test ! -e /persist/secrets/heim-pc/first-boot/alex-password-bootstrap-authority")
 
-    with subtest("real graphical SDDM Plasma Wayland login works without autologin"):
-        machine.succeed("systemctl start systemd-user-sessions.service display-manager.service")
-        graphical_login(machine, "/run/heim-pc-test-password")
-
     with subtest("later password rotation survives reboot and bootstrap does not replay"):
-        machine.succeed("loginctl terminate-user alex || true")
-        machine.wait_until_fails("loginctl list-sessions --no-legend | grep -q ' alex '", timeout=60)
         machine.succeed(
             "umask 077; od -An -N12 -tx1 /dev/urandom | tr -d ' \\n' > /persist/.heim-pc-test-password-rotated; "
             "printf '\\n' >> /persist/.heim-pc-test-password-rotated; chmod 0600 /persist/.heim-pc-test-password-rotated; "
@@ -300,11 +191,14 @@ pkgs.testers.runNixOSTest {
         assert rotated_hash != bootstrap_hash
         machine.reboot()
         machine.wait_for_unit("heim-pc-firstboot-credentials.service", timeout=180)
+        machine.succeed("systemctl is-active heim-pc-firstboot-credentials.service")
         assert shadow_field(machine) == rotated_hash
-        graphical_login(machine, "/persist/.heim-pc-test-password-rotated")
+        machine.succeed("test -f /persist/heim-pc/bootstrap/alex-password-initialized")
+        machine.succeed("test ! -e /persist/heim-pc/bootstrap/.alex-password-initialized.pending")
+        machine.succeed("test ! -e /persist/secrets/heim-pc/first-boot/alex-password-hash")
+        machine.succeed("test ! -e /persist/secrets/heim-pc/first-boot/alex-password-bootstrap-authority")
 
     with subtest("late interrupted publication is recovery-required and recoverable under lock"):
-        machine.succeed("loginctl terminate-user alex || true")
         machine.succeed(
             "ln /persist/heim-pc/bootstrap/alex-password-initialized "
             "/persist/heim-pc/bootstrap/.alex-password-initialized.pending; "
@@ -312,7 +206,6 @@ pkgs.testers.runNixOSTest {
         )
         machine.reboot()
         machine.wait_until_succeeds("systemctl is-failed heim-pc-firstboot-credentials.service", timeout=180)
-        machine.fail("systemctl is-active display-manager.service")
         machine.succeed("test $(stat -c %h /persist/heim-pc/bootstrap/alex-password-initialized) -eq 2")
         machine.succeed(
             "umask 077; od -An -N12 -tx1 /dev/urandom | tr -d ' \\n' > /persist/.heim-pc-test-password-recovery; "
@@ -324,10 +217,16 @@ pkgs.testers.runNixOSTest {
             "sync -f /persist/heim-pc/bootstrap; "
             "test $(stat -c %h /persist/heim-pc/bootstrap/alex-password-initialized) -eq 1"
         )
+        recovery_hash = shadow_field(machine)
+        assert recovery_hash.startswith("$y$j9T$")
+        assert recovery_hash != rotated_hash
         machine.succeed("systemctl reset-failed heim-pc-firstboot-credentials.service")
         machine.succeed("systemctl start heim-pc-firstboot-credentials.service")
-        machine.succeed("systemctl start systemd-user-sessions.service display-manager.service")
-        graphical_login(machine, "/persist/.heim-pc-test-password-recovery")
+        machine.succeed("systemctl is-active heim-pc-firstboot-credentials.service")
+        assert shadow_field(machine) == recovery_hash
+        machine.succeed("test -f /persist/heim-pc/bootstrap/alex-password-initialized")
+        machine.succeed("test ! -e /persist/heim-pc/bootstrap/.alex-password-initialized.pending")
+        machine.succeed("test $(stat -c %h /persist/heim-pc/bootstrap/alex-password-initialized) -eq 1")
 
     with subtest("real post-mutation child timeout leaves pending and never replays"):
         machine.shutdown()

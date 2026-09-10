@@ -259,7 +259,7 @@ EOF
         fail "secure-boot-enabled"
       fi
 
-      root_source="$(findmnt -rn -o SOURCE / 2>/dev/null || true)"
+      root_source="$(findmnt --nofsroot -rn -o SOURCE / 2>/dev/null || true)"
       case "$root_source" in
         /dev/mapper/*)
           pass "encrypted-root-mapper"
