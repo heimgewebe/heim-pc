@@ -1,5 +1,4 @@
 from pathlib import Path
-import ast
 import fcntl
 import hashlib
 import os
@@ -8,23 +7,12 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
-from unittest.mock import Mock, call
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9b6854ef20b058753c9235c936a6a9aba284d1ada7dd434c9f3802ec030e3b52"
+SOURCE_SNAPSHOT_SHA256 = "f7b26e546329c6e90600f25dd676d1a3bc32d08653aebc1ddd7092220f02e4a3"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
-LOGIN_MARKER_QUERY = (
-    "set -o pipefail; "
-    "journalctl -b --quiet --no-pager -o cat _COMM=sddm | "
-    "{ grep -Fxc 'Message received from greeter: Login' || test $? -eq 1; }"
-)
-LOGIN_DIAGNOSTIC_QUERY = (
-    'sddm_uid=$(id -u sddm) && '
-    'journalctl -b --quiet --no-pager -n 120 -o short-monotonic '
-    '_COMM=sddm + _COMM=sddm-helper + _UID="$sddm_uid"'
-)
 
 
 class T(unittest.TestCase):
@@ -51,19 +39,14 @@ class T(unittest.TestCase):
         self.assertIn(".#checks.x86_64-linux.profile-contract", workflow)
         self.assertIn(".#checks.x86_64-linux.firstboot-credentials", workflow)
 
-    def test_firstboot_vm_proof_is_exact_source_and_secret_log_safe(self):
+    def test_firstboot_vm_proof_is_exact_source_headless_and_input_free(self):
         flake = (SOURCE / "flake.nix").read_text()
         proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
         self.assertIn("eb260b0b82199e380d881b2436e403dcda64ca32", flake)
         self.assertIn("expectedHostSha256", proof)
         self.assertIn("expectedHelperSha256", proof)
         self.assertIn('${pkgs.shadow}/bin/chpasswd "$@"', proof)
-        self.assertIn('node.send_key(char, log=False)', proof)
-        self.assertNotIn('.send_chars(', proof)
         self.assertIn('systemctl is-failed heim-pc-firstboot-credentials.service', proof)
-        self.assertIn('display-manager.service', proof)
-        self.assertIn('show-session \"$id\" -p Type --value', proof)
-        self.assertIn('= wayland &&', proof)
         self.assertIn('.alex-password-initialized.pending', proof)
         self.assertIn('heim-pc-test-chpasswd-count', proof)
         self.assertIn('machine.start(allow_reboot=True)', proof)
@@ -71,185 +54,81 @@ class T(unittest.TestCase):
         self.assertIn('interrupted.start()', proof)
         self.assertNotIn('start_all()', proof)
         self.assertIn('virtualisation.memorySize = 3072;', proof)
-        self.assertRegex(
-            proof,
-            r"virtualisation\.resolution = \{\s+x = 1280;\s+y = 800;\s+\};",
-        )
-        self.assertIn('virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];', proof)
-        self.assertIn('hardware.graphics.enable = true;', proof)
-        self.assertIn('services.displayManager.sddm.wayland.compositor = lib.mkForce "weston";', proof)
+        self.assertIn('services.xserver.enable = lib.mkForce false;', proof)
+        self.assertIn('services.displayManager.sddm.enable = lib.mkForce false;', proof)
+        self.assertIn('services.displayManager.sddm.wayland.enable = lib.mkForce false;', proof)
+        self.assertIn('services.desktopManager.plasma6.enable = lib.mkForce false;', proof)
         self.assertIn('pkgs.coreutils', proof)
         self.assertIn('pkgs.getent', proof)
-        self.assertIn('awk \'$3 == "alex" {print $1}\'', proof)
-        self.assertNotIn("enableOCR = true;", proof)
-        self.assertNotIn("node.wait_for_text(", proof)
-        self.assertIn(r'Adding view for \"Virtual-1\" QRect(0,0 1280x800)', proof)
-        self.assertIn("grep -Fq 'Message received from daemon: HostName'", proof)
-        self.assertNotIn('ydotool', proof)
-        self.assertNotIn('HideUsers = "alex";', proof)
-        self.assertNotIn('RememberLastUser = false;', proof)
-        self.assertNotIn('for char in "alex":', proof)
-        self.assertIn('qmp = node.qmp_client', proof)
-        self.assertIn('"input-send-event"', proof)
-        self.assertEqual(proof.count('select_alex_user(node)'), 3)
-        self.assertNotIn('focus_password_field', proof)
-        self.assertNotIn('move_greeter_pointer', proof)
-        self.assertNotIn('click_greeter_pointer', proof)
-        self.assertNotIn('click_greeter(node, 32, 32)', proof)
-        self.assertIn('set -o pipefail;', proof)
-        self.assertIn('journalctl -b --quiet --no-pager -o cat _COMM=sddm |', proof)
-        self.assertIn("grep -Fxc 'Message received from greeter: Login'", proof)
-        self.assertIn('test $? -eq 1;', proof)
-        self.assertNotIn(
-            "grep -Fxc 'Message received from greeter: Login' || true",
-            proof,
+        state_machine_subtests = (
+            "missing bootstrap staging fails closed before user sessions",
+            "invalid authority fails closed without mutating shadow",
+            "real chpasswd bootstrap publishes durable marker and consumes staging",
+            "later password rotation survives reboot and bootstrap does not replay",
+            "late interrupted publication is recovery-required and recoverable under lock",
+            "real post-mutation child timeout leaves pending and never replays",
         )
-        self.assertNotIn('latest_journal', proof)
-        self.assertIn('sddm_uid=$(id -u sddm)', proof)
-        self.assertIn('journalctl -b --quiet --no-pager -n 120 -o short-monotonic', proof)
-        self.assertIn('_COMM=sddm + _COMM=sddm-helper + _UID="$sddm_uid"', proof)
-        self.assertNotIn('grep', LOGIN_DIAGNOSTIC_QUERY)
-        self.assertNotIn('pam', LOGIN_DIAGNOSTIC_QUERY.lower())
-        self.assertNotIn('line.lower()', proof)
-        self.assertIn('recent SDDM/greeter/PAM journal follows', proof)
-        self.assertEqual(proof.count('node.sleep('), 1)
-        self.assertEqual(proof.count('node.sleep(0.25)'), 1)
-        self.assertEqual(proof.count('for char in password:'), 1)
-        self.assertEqual(proof.count('node.send_key("ret")'), 1)
-        self.assertNotIn("cannot duplicate an authentication attempt", proof)
-        self.assertNotIn('GREETER_DIAGNOSTIC_CAPTURE_COMPLETE', proof)
-        self.assertNotIn('zlib_rgb_b64', proof)
-        self.assertNotIn('_managed_screenshot', proof)
-        self.assertNotIn('screenshot', proof.lower())
+        self.assertEqual(proof.count('with subtest("'), len(state_machine_subtests))
+        for name in state_machine_subtests:
+            self.assertIn(f'with subtest("{name}"):', proof)
+        self.assertIn('machine.fail("systemctl is-active systemd-user-sessions.service")', proof)
+        self.assertIn('heim-pc-firstboot-test-stage invalid-authority', proof)
+        self.assertIn('assert shadow_field(machine) in ("!", "!!", "*")', proof)
+        self.assertIn('assert bootstrap_hash.startswith("$y$j9T$")', proof)
+        self.assertGreaterEqual(
+            proof.count('test -f /persist/heim-pc/bootstrap/alex-password-initialized'),
+            3,
+        )
+        self.assertGreaterEqual(
+            proof.count('test ! -e /persist/secrets/heim-pc/first-boot/alex-password-hash'),
+            2,
+        )
+        self.assertGreaterEqual(
+            proof.count('test ! -e /persist/secrets/heim-pc/first-boot/alex-password-bootstrap-authority'),
+            2,
+        )
+        self.assertEqual(proof.count('machine.reboot()'), 2)
+        self.assertIn('assert rotated_hash != bootstrap_hash', proof)
+        self.assertIn('assert shadow_field(machine) == rotated_hash', proof)
+        self.assertIn('ln /persist/heim-pc/bootstrap/alex-password-initialized', proof)
+        self.assertIn('exec 9>/persist/heim-pc/bootstrap/.alex-password-bootstrap.lock; flock -n 9;', proof)
+        self.assertIn('assert recovery_hash != rotated_hash', proof)
+        self.assertIn('assert shadow_field(machine) == recovery_hash', proof)
+        self.assertIn('interrupted.fail("systemctl start heim-pc-firstboot-credentials.service", timeout=30)', proof)
+        self.assertIn('interrupted.fail("systemctl start heim-pc-firstboot-credentials.service", timeout=10)', proof)
+        self.assertGreaterEqual(proof.count('test $(cat /run/heim-pc-test-chpasswd-count) -eq 1'), 2)
+        self.assertIn('assert shadow_field(interrupted) == interrupted_hash', proof)
+        forbidden = (
+            "qmp",
+            "input-send-event",
+            ".send_key(",
+            ".send_chars(",
+            "graphical_login",
+            "select_alex_user",
+            "wait_for_alex_wayland",
+            "Message received from greeter: Login",
+            "journalctl",
+            "loginctl",
+            "node.sleep(",
+            "enableOCR",
+            "node.wait_for_text(",
+            "ocr",
+            "screenshot",
+            "ydotool",
+            "display-manager.service",
+            "virtualisation.resolution",
+            "virtualisation.qemu.options",
+            "hardware.graphics.enable",
+            "services.displayManager.sddm.wayland.compositor",
+        )
+        for marker in forbidden:
+            with self.subTest(forbidden=marker):
+                self.assertNotIn(marker.lower(), proof.lower())
         self.assertNotIn('environment.systemPackages = lib.mkForce', proof)
         test_script_source = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
         self.assertTrue(all(not line.strip() or line.startswith("    ") for line in test_script_source.splitlines()))
         compile(textwrap.dedent(test_script_source), "firstboot-testScript", "exec")
         self.assertNotIn("WAYLAND_DEBUG", proof)
-
-    def _firstboot_login_helpers(self):
-        proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
-        script = proof.split("  testScript = ''\n", 1)[1].rsplit("  '';\n}", 1)[0]
-        tree = ast.parse(textwrap.dedent(script))
-        helpers = ast.Module(
-            body=[node for node in tree.body if isinstance(node, ast.FunctionDef)],
-            type_ignores=[],
-        )
-        namespace = {}
-        exec(compile(helpers, "firstboot-login-helpers", "exec"), namespace)
-        return namespace
-
-    def test_firstboot_login_helper_reaches_session_with_secret_safe_keys(self):
-        namespace = self._firstboot_login_helpers()
-        node = Mock()
-        timeline = []
-        node.qmp_client.send.side_effect = (
-            lambda command, _arguments: timeline.append(("qmp", command))
-        )
-
-        def record_key(key, **kwargs):
-            timeline.append(("key", key, kwargs.get("log")))
-
-        node.send_key.side_effect = record_key
-        node.succeed.side_effect = ["0\n", "00ab\n", "1\n"]
-        namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.succeed.call_args_list, [
-            call(LOGIN_MARKER_QUERY),
-            call("cat /run/test-only-password"),
-            call(LOGIN_MARKER_QUERY),
-        ])
-        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
-        self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(node.qmp_client.send.call_count, 2)
-        for qmp_call in node.qmp_client.send.call_args_list:
-            self.assertEqual(qmp_call.args[0], "input-send-event")
-            self.assertEqual(
-                [event["type"] for event in qmp_call.args[1]["events"]],
-                ["abs", "abs", "btn", "btn"],
-            )
-        self.assertEqual(
-            timeline,
-            [("qmp", "input-send-event"), ("qmp", "input-send-event")]
-            + [("key", char, False) for char in "00ab"]
-            + [("key", "ret", None)],
-        )
-        # Detect dead proof code: returning after typing is not a session proof.
-        final_call = node.wait_until_succeeds.call_args_list[-1]
-        self.assertIn("= wayland &&", final_call.args[0])
-        self.assertIn("= yes && exit 0", final_call.args[0])
-
-    def test_firstboot_login_helper_propagates_journal_failure_before_input(self):
-        namespace = self._firstboot_login_helpers()
-        node = Mock()
-        node.succeed.side_effect = RuntimeError("journal unavailable")
-        with self.assertRaisesRegex(RuntimeError, "journal unavailable"):
-            namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.succeed.call_args_list, [call(LOGIN_MARKER_QUERY)])
-        node.qmp_client.send.assert_not_called()
-        node.send_key.assert_not_called()
-
-    def test_firstboot_login_helper_tolerates_delayed_request_without_resubmitting(self):
-        namespace = self._firstboot_login_helpers()
-        node = Mock()
-        # Baseline + five polling queries see no request; the sixth sees one.
-        node.succeed.side_effect = ["0\n", "00ab\n"] + ["0\n"] * 5 + ["1\n"]
-        namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.qmp_client.send.call_count, 2)
-        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
-        self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(
-            [c for c in node.succeed.call_args_list if c.args == (LOGIN_MARKER_QUERY,)],
-            [call(LOGIN_MARKER_QUERY)] * 7,
-        )
-        self.assertNotIn(call(LOGIN_DIAGNOSTIC_QUERY), node.succeed.call_args_list)
-
-    def test_firstboot_login_helper_missing_request_fails_after_one_submission(self):
-        namespace = self._firstboot_login_helpers()
-        node = Mock()
-        diagnostic = (
-            'sddm-greeter: Adding view for "Virtual-1" QRect(0,0 1280x800)\n'
-            "sddm-greeter: Message received from daemon: HostName\n"
-            "sddm-helper: pam_unix authentication failure\n"
-        )
-        node.succeed.side_effect = ["0\n", "00ab\n"] + ["0\n"] * 20 + [diagnostic]
-        with self.assertRaisesRegex(
-            AssertionError,
-            "(?s)never submitted.*Adding view.*HostName.*pam_unix",
-        ):
-            namespace["graphical_login"](node, "/run/test-only-password")
-        self.assertEqual(node.qmp_client.send.call_count, 2)
-        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
-        self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(
-            [c for c in node.succeed.call_args_list if c.args == (LOGIN_MARKER_QUERY,)],
-            [call(LOGIN_MARKER_QUERY)] * 21,
-        )
-        self.assertEqual(
-            [c for c in node.succeed.call_args_list if c.args == (LOGIN_DIAGNOSTIC_QUERY,)],
-            [call(LOGIN_DIAGNOSTIC_QUERY)],
-        )
-
-    def test_firstboot_login_helper_does_not_resubmit_after_backend_request(self):
-        namespace = self._firstboot_login_helpers()
-        node = Mock()
-        node.succeed.side_effect = ["0\n", "00ab\n", "1\n"]
-
-        def wait_until_succeeds(command, timeout=None):
-            if "loginctl list-sessions" in command:
-                raise TimeoutError("Wayland session did not appear")
-            return None
-
-        node.wait_until_succeeds.side_effect = wait_until_succeeds
-        with self.assertRaisesRegex(TimeoutError, "Wayland session did not appear"):
-            namespace["graphical_login"](node, "/run/test-only-password")
-        expected_keys = [call(char, log=False) for char in "00ab"] + [call("ret")]
-        self.assertEqual(node.send_key.call_args_list, expected_keys)
-        self.assertEqual(node.qmp_client.send.call_count, 2)
-        self.assertEqual(
-            [c for c in node.succeed.call_args_list if c.args == (LOGIN_MARKER_QUERY,)],
-            [call(LOGIN_MARKER_QUERY)] * 2,
-        )
-        self.assertNotIn(call(LOGIN_DIAGNOSTIC_QUERY), node.succeed.call_args_list)
 
     def test_desktop_disables_automatic_sleep_without_blocking_manual_suspend(self):
         desktop = (SOURCE / "modules/desktop.nix").read_text()
@@ -260,8 +139,8 @@ class T(unittest.TestCase):
         self.assertNotIn("systemd.sleep.settings.Sleep =", desktop)
         for key in ("AllowSuspend", "AllowHibernation", "AllowSuspendThenHibernate", "AllowHybridSleep"):
             self.assertNotIn(f'{key} = "no";', desktop)
+            self.assertIn(f'!(c.systemd.sleep.settings.Sleep ? {key})', flake)
         self.assertIn('c.services.logind.settings.Login.IdleAction == "ignore"', flake)
-        self.assertIn('!(c.systemd.sleep.settings.Sleep ? AllowSuspend)', flake)
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
@@ -344,6 +223,9 @@ class T(unittest.TestCase):
             'root_source="$(findmnt --nofsroot -rn -o SOURCE / 2>/dev/null || true)"',
             gate,
         )
+        self.assertIn('mapper="\'\'${root_source#/dev/mapper/}"', gate)
+        self.assertIn('cryptsetup status "$mapper"', gate)
+        self.assertNotIn('cryptsetup status "$root_source"', gate)
         with tempfile.NamedTemporaryFile(mode="w") as mountinfo:
             mountinfo.write(
                 "29 1 253:0 /@root / rw,relatime - btrfs "
