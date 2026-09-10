@@ -105,6 +105,10 @@ let
 
     virtualisation.memorySize = 3072;
     virtualisation.cores = 2;
+    virtualisation.resolution = {
+      x = 1280;
+      y = 800;
+    };
     # The physical desktop profile runs SDDM itself on Wayland. QEMU's default
     # std VGA produces a corrupt greeter framebuffer under that path, so use
     # the virtio GPU shape used by upstream NixOS Wayland VM tests.
@@ -174,9 +178,16 @@ pkgs.testers.runNixOSTest {
             timeout=180,
         )
 
-    def move_greeter_pointer(node, x, y):
+    def select_alex_user(node):
+        # Breeze 6.6 anchors UserList.bottom to the 1280x800 view's vertical
+        # center. Its StrictlyEnforceRange current delegate is horizontally
+        # centered and has a full-size MouseArea. Stay well inside the delegate;
+        # the click emits userSelected(), which Login.qml uses to clear and focus
+        # the password field.
         display_width = 1280
         display_height = 800
+        user_delegate_x = display_width // 2
+        user_delegate_y = display_height // 2 - 32
         maximum = 0x7FFF
         qmp = node.qmp_client
         assert qmp is not None
@@ -188,43 +199,21 @@ pkgs.testers.runNixOSTest {
                         "type": "abs",
                         "data": {
                             "axis": "x",
-                            "value": round(x * maximum / (display_width - 1)),
+                            "value": round(user_delegate_x * maximum / (display_width - 1)),
                         },
                     },
                     {
                         "type": "abs",
                         "data": {
                             "axis": "y",
-                            "value": round(y * maximum / (display_height - 1)),
+                            "value": round(user_delegate_y * maximum / (display_height - 1)),
                         },
                     },
-                ]
-            },
-        )
-
-    def click_greeter_pointer(node):
-        qmp = node.qmp_client
-        assert qmp is not None
-        qmp.send(
-            "input-send-event",
-            {
-                "events": [
                     {"type": "btn", "data": {"down": True, "button": "left"}},
                     {"type": "btn", "data": {"down": False, "button": "left"}},
                 ]
             },
         )
-
-    def focus_password_field(node):
-        # QEMU/Weston evidence shows that combining the first absolute tablet
-        # move and button press can leave the Breeze greeter without keyboard
-        # delivery. Settle the pointer on the already-current user first, then
-        # emit exactly one semantic delegate click. UserList.qml emits
-        # userSelected(), and Login.qml clears/focuses passwordBox.
-        move_greeter_pointer(node, 1280 // 2, 800 // 2 - 32)
-        node.sleep(0.2)
-        click_greeter_pointer(node)
-        node.sleep(0.5)
 
     def graphical_login(node, password_path):
         node.wait_for_unit("display-manager.service", timeout=180)
@@ -241,23 +230,28 @@ pkgs.testers.runNixOSTest {
         )
 
         # Bind submission to a fresh backend request, not merely to injected
-        # key events. Keep pointer positioning separate from the single semantic
-        # Breeze user click so the QEMU tablet move has settled before focus is
-        # requested; never retry the delegate or replay credentials.
-        latest_journal = ""
-
+        # key events. The complete daemon journal stays inside the guest; only
+        # the exact marker count crosses the test-driver transport. pipefail and
+        # the narrow grep-status normalization propagate journal and grep errors.
         def login_request_count():
-            nonlocal latest_journal
-            latest_journal = node.succeed("journalctl -b --no-pager -o cat")
-            return latest_journal.count("Message received from greeter: Login")
+            return int(node.succeed(
+                "set -o pipefail; "
+                "journalctl -b --quiet --no-pager -o cat _COMM=sddm | "
+                "{ grep -Fxc 'Message received from greeter: Login' || "
+                "test $? -eq 1; }"
+            ).strip())
 
         # succeed() logs the command but does not log successful stdout. Never
         # call send_chars(): it logs repr(chars). send_key(log=False) keeps the
         # runtime-only password out of the public VM-test log.
+        requests_before = login_request_count()
         password = node.succeed(f"cat {password_path}").strip()
         assert password
-        requests_before = login_request_count()
-        focus_password_field(node)
+        # Reuse the last-green PR #135 delegate-selection event twice before any
+        # password byte. Credentials and Enter remain strictly single-shot, and
+        # no pointer event is allowed after credential input begins.
+        select_alex_user(node)
+        select_alex_user(node)
         for char in password:
             node.send_key(char, log=False)
         node.send_key("ret")
@@ -267,11 +261,14 @@ pkgs.testers.runNixOSTest {
                 return
             node.sleep(0.25)
 
-        diagnostic_lines = [
-            line for line in latest_journal.splitlines()
-            if any(token in line.lower() for token in ("sddm", "greeter", "pam"))
-        ]
-        diagnostic = "\n".join(diagnostic_lines[-80:])
+        # Fetch diagnostics once, only after the bounded marker wait expires.
+        # Metadata disjunction covers the daemon, sddm-helper/PAM, and every
+        # sddm-user greeter message (including Adding view and HostName).
+        diagnostic = node.succeed(
+            'sddm_uid=$(id -u sddm) && '
+            'journalctl -b --quiet --no-pager -n 120 -o short-monotonic '
+            '_COMM=sddm + _COMM=sddm-helper + _UID="$sddm_uid"'
+        )
         raise AssertionError(
             "SDDM greeter never submitted the graphical login request; "
             "recent SDDM/greeter/PAM journal follows:\n" + diagnostic
