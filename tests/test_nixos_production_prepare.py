@@ -68,6 +68,7 @@ def test_nix_argv_binds_exact_source_and_dedicated_nix_volume():
         "-v", f"{NIX_VOLUME}:/nix",
         "--entrypoint", prep.NIX_BIN,
         prep.installer.PINNED_NIX_IMAGE,
+        "--extra-experimental-features", "nix-command flakes",
         "flake", "check", "/source/repo/nixos/system",
     ]
 

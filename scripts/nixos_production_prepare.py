@@ -130,7 +130,7 @@ def nix_argv(*, source_volume: str, nix_volume: str, args: list[str], network_no
         "--entrypoint", NIX_BIN,
         installer.PINNED_NIX_IMAGE,
     ]
-    return argv + args
+    return argv + ["--extra-experimental-features", "nix-command flakes"] + args
 
 
 def build_exact_closure(*, source_volume: str, nix_volume: str) -> str:
