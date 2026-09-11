@@ -17,6 +17,10 @@ WD = "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756"
 REVISION = "a" * 40
 SYSTEM_PATH = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-26.05-test"
 NIX_VOLUME = "heim-pc-nixos-production-" + REVISION[:12]
+CLOSURE_PATH_INFO = {
+    SYSTEM_PATH: {"narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "narSize": 123, "references": []},
+}
+CLOSURE = prod.closure_manifest_metadata(CLOSURE_PATH_INFO)
 ARTIFACT = {
     "schema_version": 1,
     "kind": "heim_pc.nixos_production_install_artifact",
@@ -26,6 +30,7 @@ ARTIFACT = {
     "nix_image": prod.PINNED_NIX_IMAGE,
     "profile": "heim-pc-storage-target",
     "source_bundle_sha256": "b" * 64,
+    **CLOSURE,
 }
 PARTUUIDS = [
     "fef423b1-cb0d-4594-a272-c203cb003779",
@@ -193,16 +198,18 @@ def test_plan_has_exact_partition_guids_and_never_mutates_wd():
     assert "efibootmgr" not in mutating_argv
 
 
-def test_filesystem_and_luks_commands_use_fixed_partuuids():
+def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     compiled = plan()
     by_effect = {item["effect"]: item for item in compiled["commands"]}
-    assert f"/dev/disk/by-partuuid/{PARTUUIDS[0]}" in by_effect["efi-filesystem"]["argv"]
-    assert f"/dev/disk/by-partuuid/{PARTUUIDS[1]}" in by_effect["recovery-filesystem"]["argv"]
-    crypt = f"/dev/disk/by-partuuid/{PARTUUIDS[2]}"
+    assert f"{SEAGATE}-part1" in by_effect["efi-filesystem"]["argv"]
+    assert f"{SEAGATE}-part2" in by_effect["recovery-filesystem"]["argv"]
+    crypt = f"{SEAGATE}-part3"
     assert crypt in by_effect["luks-format"]["argv"]
     assert crypt in by_effect["luks-open"]["argv"]
+    assert f"/dev/disk/by-partuuid/{PARTUUIDS[0]}" not in by_effect["efi-filesystem"]["argv"]
     assert by_effect["luks-format"]["secret_binding"] == "luks-passphrase-v1"
     assert by_effect["luks-open"]["secret_binding"] == "luks-passphrase-v1"
+    assert compiled["partition_binding_verification_required"] is True
 
 
 def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
@@ -259,11 +266,15 @@ def test_invalid_artifact_source_revision_is_rejected():
         plan(artifact=artifact)
 
 
-def test_install_artifact_rejects_unpinned_image_or_volume():
+def test_install_artifact_rejects_unpinned_image_volume_or_closure_metadata():
     with pytest.raises(prod.ProductionInstallError, match="pinned image"):
         prod.validate_install_artifact(dict(ARTIFACT, nix_image="sha256:" + "0" * 64))
     with pytest.raises(prod.ProductionInstallError, match="nix_volume"):
         prod.validate_install_artifact(dict(ARTIFACT, nix_volume="nix"))
+    with pytest.raises(prod.ProductionInstallError, match="closure manifest"):
+        prod.validate_install_artifact(dict(ARTIFACT, closure_manifest_sha256="wrong"))
+    with pytest.raises(prod.ProductionInstallError, match="closure path count"):
+        prod.validate_install_artifact(dict(ARTIFACT, closure_path_count=0))
 
 
 def test_btrfs_tools_also_run_from_exact_artifact():
@@ -372,3 +383,71 @@ def test_hidden_signature_check_rejects_any_signature(monkeypatch):
     monkeypatch.setattr(prod, "_run", lambda argv: Result())
     with pytest.raises(prod.ProductionInstallError, match="wipefs found signatures"):
         prod.verify_no_hidden_target_signatures(SEAGATE)
+
+
+def test_closure_manifest_metadata_is_canonical_and_reference_order_independent():
+    dependency = "/nix/store/" + "1" * 32 + "-dependency"
+    payload_a = {
+        SYSTEM_PATH: {"narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "narSize": 123, "references": [dependency]},
+        dependency: {"narHash": "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", "narSize": 45, "references": []},
+    }
+    payload_b = {dependency: payload_a[dependency], SYSTEM_PATH: payload_a[SYSTEM_PATH]}
+    assert prod.closure_manifest_metadata(payload_a) == prod.closure_manifest_metadata(payload_b)
+    assert prod.closure_manifest_metadata(payload_a)["closure_path_count"] == 2
+
+
+def test_partuuid_namespace_must_be_clear_before_partitioning(monkeypatch):
+    blocked = f"/dev/disk/by-partuuid/{PARTUUIDS[1]}"
+    monkeypatch.setattr(prod.os.path, "lexists", lambda path: path == blocked)
+    with pytest.raises(prod.ProductionInstallError, match="already exists before partitioning"):
+        prod.verify_partuuid_namespace_clear(prod.load_contract())
+
+
+def _post_partition_target():
+    target = observation()["target"]
+    target["partition_table"] = "gpt"
+    target["partitions"] = [
+        {"number": number, "path": f"/dev/nvme0n1p{number}", "partuuid": partuuid}
+        for number, partuuid in enumerate(PARTUUIDS, 1)
+    ]
+    return target
+
+
+def test_target_partition_bindings_reject_partuuid_alias_outside_seagate(monkeypatch):
+    target = _post_partition_target()
+    aliases = {}
+    for number, partuuid in enumerate(PARTUUIDS, 1):
+        resolved = f"/dev/nvme0n1p{number}"
+        aliases[f"{SEAGATE}-part{number}"] = resolved
+        aliases[f"/dev/disk/by-partuuid/{partuuid}"] = resolved
+    monkeypatch.setattr(prod, "_disk_observation", lambda authority: target)
+    monkeypatch.setattr(prod.os.path, "islink", lambda path: path in aliases)
+    monkeypatch.setattr(prod.os.path, "realpath", lambda path: aliases.get(path, path))
+    prod.verify_target_partition_bindings(prod.load_contract())
+    aliases[f"/dev/disk/by-partuuid/{PARTUUIDS[0]}"] = "/dev/nvme9n1p1"
+    with pytest.raises(prod.ProductionInstallError, match="PARTUUID alias points outside"):
+        prod.verify_target_partition_bindings(prod.load_contract())
+
+
+def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatch):
+    calls = []
+
+    class Result:
+        def __init__(self, stdout=b""):
+            self.stdout = stdout
+            self.returncode = 0
+            self.stderr = b""
+
+    def fake_run(argv, *, input_bytes=None, check=True):
+        calls.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "--format"]:
+            return Result((prod.PINNED_NIX_IMAGE + "\n").encode())
+        if "path-info" in argv:
+            return Result(json.dumps(CLOSURE_PATH_INFO).encode())
+        return Result()
+
+    monkeypatch.setattr(prod, "_run", fake_run)
+    prod.verify_install_artifact_environment(ARTIFACT)
+    assert any("store" in argv and "verify" in argv and "--no-trust" in argv for argv in calls)
+    with pytest.raises(prod.ProductionInstallError, match="closure metadata"):
+        prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))

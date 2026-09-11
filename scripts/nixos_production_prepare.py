@@ -52,7 +52,10 @@ def volume_names(revision: str) -> tuple[str, str]:
     return f"heim-pc-nixos-production-{short}", f"heim-pc-nixos-source-{short}"
 
 
-def make_artifact(*, revision: str, system_path: str, nix_volume: str, bundle_sha256: str) -> dict[str, object]:
+def make_artifact(
+    *, revision: str, system_path: str, nix_volume: str, bundle_sha256: str,
+    closure_manifest_sha256: str, closure_path_count: int,
+) -> dict[str, object]:
     value = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_production_install_artifact",
@@ -62,6 +65,8 @@ def make_artifact(*, revision: str, system_path: str, nix_volume: str, bundle_sh
         "nix_image": installer.PINNED_NIX_IMAGE,
         "profile": "heim-pc-storage-target",
         "source_bundle_sha256": bundle_sha256,
+        "closure_manifest_sha256": closure_manifest_sha256,
+        "closure_path_count": closure_path_count,
     }
     return installer.validate_install_artifact(value)
 
@@ -160,7 +165,31 @@ def build_exact_closure(*, source_volume: str, nix_volume: str) -> str:
     return system_path
 
 
+def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, object]:
+    result = run([
+        "docker", "run", "--rm", "--network", "none",
+        "-v", f"{nix_volume}:/nix",
+        "--entrypoint", NIX_BIN,
+        installer.PINNED_NIX_IMAGE,
+        "--extra-experimental-features", "nix-command flakes",
+        "path-info", "--json", "--recursive", system_path,
+    ])
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise PrepareError("invalid JSON from Nix closure path-info") from exc
+    return installer.closure_manifest_metadata(payload)
+
+
 def verify_closure(*, nix_volume: str, system_path: str) -> None:
+    run([
+        "docker", "run", "--rm", "--network", "none",
+        "-v", f"{nix_volume}:/nix",
+        "--entrypoint", NIX_BIN,
+        installer.PINNED_NIX_IMAGE,
+        "--extra-experimental-features", "nix-command flakes",
+        "store", "verify", "--no-trust", "--recursive", system_path,
+    ])
     checks = [
         ("-x", f"{system_path}/sw/bin/nixos-install"),
         ("-x", f"{system_path}/sw/bin/mkfs.btrfs"),
@@ -221,11 +250,14 @@ def prepare(*, repo: Path, output: Path) -> dict[str, object]:
             clone_bundle_to_volume(bundle=bundle, source_volume=source_volume, revision=revision)
             system_path = build_exact_closure(source_volume=source_volume, nix_volume=nix_volume)
             verify_closure(nix_volume=nix_volume, system_path=system_path)
+            closure = capture_closure_manifest(nix_volume=nix_volume, system_path=system_path)
             artifact = make_artifact(
                 revision=revision,
                 system_path=system_path,
                 nix_volume=nix_volume,
                 bundle_sha256=bundle_sha,
+                closure_manifest_sha256=str(closure["closure_manifest_sha256"]),
+                closure_path_count=int(closure["closure_path_count"]),
             )
             write_artifact(output, artifact)
             success = True

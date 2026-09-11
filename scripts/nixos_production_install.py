@@ -118,6 +118,12 @@ def validate_install_artifact(value: Any) -> dict[str, Any]:
     bundle_sha = value.get("source_bundle_sha256")
     if not isinstance(bundle_sha, str) or re.fullmatch(r"[0-9a-f]{64}", bundle_sha) is None:
         raise ProductionInstallError("install artifact source bundle digest is invalid")
+    closure_sha = value.get("closure_manifest_sha256")
+    if not isinstance(closure_sha, str) or re.fullmatch(r"[0-9a-f]{64}", closure_sha) is None:
+        raise ProductionInstallError("install artifact closure manifest digest is invalid")
+    closure_count = value.get("closure_path_count")
+    if isinstance(closure_count, bool) or not isinstance(closure_count, int) or closure_count < 1:
+        raise ProductionInstallError("install artifact closure path count is invalid")
     return dict(value)
 
 
@@ -155,6 +161,14 @@ def _partition_by_role(contract: dict[str, Any], role: str) -> dict[str, Any]:
 
 def _partuuid_path(partition: dict[str, Any]) -> str:
     return f"/dev/disk/by-partuuid/{str(partition['partuuid']).lower()}"
+
+
+def _target_partition_path(target_authority: str, partition: dict[str, Any]) -> str:
+    target = _require_by_id(target_authority, "target partition authority")
+    number = partition.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise ProductionInstallError("target partition number is invalid")
+    return f"{target}-part{number}"
 
 
 def _partition_new_arg(partition: dict[str, Any]) -> str:
@@ -275,6 +289,36 @@ def protected_fingerprint(value: dict[str, Any]) -> str:
     return sha256_json(value)
 
 
+def closure_manifest_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        raise ProductionInstallError("Nix closure path-info must be a non-empty object")
+    entries: list[dict[str, Any]] = []
+    for path in sorted(value):
+        details = value[path]
+        if not isinstance(path, str) or not path.startswith("/nix/store/") or not isinstance(details, dict):
+            raise ProductionInstallError("Nix closure path-info contains an invalid store entry")
+        nar_hash = details.get("narHash")
+        nar_size = details.get("narSize")
+        references = details.get("references")
+        if not isinstance(nar_hash, str) or re.fullmatch(r"sha256-[A-Za-z0-9+/]{43}=", nar_hash) is None:
+            raise ProductionInstallError("Nix closure path-info contains an invalid narHash")
+        if isinstance(nar_size, bool) or not isinstance(nar_size, int) or nar_size < 0:
+            raise ProductionInstallError("Nix closure path-info contains an invalid narSize")
+        if not isinstance(references, list) or any(not isinstance(item, str) or not item.startswith("/nix/store/") for item in references):
+            raise ProductionInstallError("Nix closure path-info contains invalid references")
+        entries.append({
+            "path": path,
+            "narHash": nar_hash,
+            "narSize": nar_size,
+            "references": sorted(references),
+        })
+    material = {"schema_version": 1, "entries": entries}
+    return {
+        "closure_manifest_sha256": sha256_json(material),
+        "closure_path_count": len(entries),
+    }
+
+
 def _subvolume_mounts(contract: dict[str, Any]) -> list[tuple[str, str]]:
     result = [(item["name"], item["mountpoint"]) for item in contract["topology"]["btrfs"]["subvolumes"]]
     if len({mount for _, mount in result}) != len(result):
@@ -320,10 +364,10 @@ def compile_plan(
         {"effect": "partition-table-reread", "argv": ["partprobe", target]},
         {"effect": "udev-settle", "argv": ["udevadm", "settle"]},
         {"effect": "mount-root-create", "argv": ["mkdir", "-p", MOUNT_ROOT, BTRFS_STAGE_ROOT]},
-        {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["label"], _partuuid_path(efi)]},
-        {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["label"], _partuuid_path(recovery)]},
-        {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-", _partuuid_path(encrypted)], "secret_binding": "luks-passphrase-v1"},
-        {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _partuuid_path(encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
+        {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["label"], _target_partition_path(target, efi)]},
+        {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["label"], _target_partition_path(target, recovery)]},
+        {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-", _target_partition_path(target, encrypted)], "secret_binding": "luks-passphrase-v1"},
+        {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _target_partition_path(target, encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
         {
             "effect": "btrfs-filesystem",
             "argv": _docker_tool_argv(artifact, "mkfs.btrfs", ["-f", "-L", btrfs["label"], mapper], mounts=["/dev:/dev"]),
@@ -348,7 +392,7 @@ def compile_plan(
     for partition in (efi, recovery):
         dest = _mount_path(partition["mountpoint"])
         commands.append({"effect": "mountpoint-create", "argv": ["mkdir", "-p", dest]})
-        commands.append({"effect": "surface-mount", "argv": ["mount", _partuuid_path(partition), dest]})
+        commands.append({"effect": "surface-mount", "argv": ["mount", _target_partition_path(target, partition), dest]})
     commands.append({
         "effect": "nixos-install",
         "argv": _docker_tool_argv(
@@ -376,6 +420,7 @@ def compile_plan(
         "protected_authority": contract["protected_disks"][0]["by_id"],
         "preflight": preflight,
         "protected_pre_fingerprint": protected_fingerprint(preflight["protected"]),
+        "partition_binding_verification_required": True,
         "commands": commands,
         "teardown_commands": teardown,
         "credential_staging_required": True,
@@ -574,6 +619,47 @@ def observe_live(contract: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+def verify_partuuid_namespace_clear(contract: dict[str, Any]) -> None:
+    for partition in contract["topology"]["partitions"]:
+        alias = _partuuid_path(partition)
+        if os.path.lexists(alias):
+            raise ProductionInstallError(f"planned PARTUUID already exists before partitioning: {alias}")
+
+
+def verify_target_partition_bindings(contract: dict[str, Any]) -> dict[str, Any]:
+    target_contract = contract["target_identity"]
+    target = target_contract["exact_by_id"]
+    observed = _disk_observation(target)
+    expected_identity = (
+        target_contract["exact_model"], target_contract["exact_serial"], target_contract["exact_wwn"],
+        target_contract["exact_size_bytes"], target_contract["transport"],
+    )
+    if _identity_tuple(observed) != expected_identity:
+        raise ProductionInstallError("Seagate target identity changed after partitioning")
+    expected = sorted(contract["topology"]["partitions"], key=lambda item: item["number"])
+    actual_parts = observed.get("partitions")
+    if not isinstance(actual_parts, list) or len(actual_parts) != len(expected):
+        raise ProductionInstallError("Seagate partition count mismatch after partitioning")
+    actual_by_number = {item.get("number"): item for item in actual_parts}
+    for partition in expected:
+        number = partition["number"]
+        actual = actual_by_number.get(number)
+        if not isinstance(actual, dict) or str(actual.get("partuuid", "")).lower() != str(partition["partuuid"]).lower():
+            raise ProductionInstallError(f"Seagate partition {number} PARTUUID mismatch after partitioning")
+        actual_path = actual.get("path")
+        if not isinstance(actual_path, str) or KERNEL_NVME_RE.fullmatch(actual_path) is None:
+            raise ProductionInstallError(f"Seagate partition {number} observed path is invalid")
+        for label, alias in (
+            ("target by-id", _target_partition_path(target, partition)),
+            ("PARTUUID", _partuuid_path(partition)),
+        ):
+            if not os.path.islink(alias):
+                raise ProductionInstallError(f"Seagate partition {number} {label} alias is missing")
+            if os.path.realpath(alias) != actual_path:
+                raise ProductionInstallError(f"Seagate partition {number} {label} alias points outside the selected target")
+    return observed
+
+
 def verify_persist_mount(mount_root: str, mapper: str) -> None:
     persist = str(PurePosixPath(mount_root, "persist"))
     result = _run([
@@ -617,12 +703,28 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     return head
 
 
+def _nix_volume_argv(artifact: dict[str, Any], args: list[str]) -> list[str]:
+    return [
+        "docker", "run", "--rm", "--network", "none",
+        "-v", f"{artifact['nix_volume']}:/nix",
+        "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
+        artifact["nix_image"],
+        "--extra-experimental-features", "nix-command flakes",
+        *args,
+    ]
+
+
 def verify_install_artifact_environment(artifact: dict[str, Any]) -> None:
     artifact = validate_install_artifact(artifact)
     image = _run(["docker", "image", "inspect", "--format", "{{.Id}}", artifact["nix_image"]]).stdout.decode().strip()
     if image != artifact["nix_image"]:
         raise ProductionInstallError("pinned Nix image identity mismatch")
     _run(["docker", "volume", "inspect", artifact["nix_volume"]])
+    path_info = _json_command(_nix_volume_argv(artifact, ["path-info", "--json", "--recursive", artifact["system_path"]]))
+    closure = closure_manifest_metadata(path_info)
+    if closure["closure_manifest_sha256"] != artifact["closure_manifest_sha256"] or closure["closure_path_count"] != artifact["closure_path_count"]:
+        raise ProductionInstallError("prepared Nix closure metadata no longer matches the install artifact")
+    _run(_nix_volume_argv(artifact, ["store", "verify", "--no-trust", "--recursive", artifact["system_path"]]))
     checks = [
         ("-x", f"{artifact['system_path']}/sw/bin/nixos-install"),
         ("-x", f"{artifact['system_path']}/sw/bin/mkfs.btrfs"),
@@ -695,6 +797,7 @@ def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_h
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     pre_now = validate_preflight(observer(contract), contract)
     verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
+    verify_partuuid_namespace_clear(contract)
     if protected_fingerprint(pre_now["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("live protected WD preimage differs from the reviewed plan")
     hash_bytes = read_credential_hash(credential_hash_file)
@@ -707,7 +810,9 @@ def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_h
     # Final race-closing gate immediately before the first destructive command.
     final_pre = validate_preflight(observer(contract), contract)
     verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
+    verify_partuuid_namespace_clear(contract)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
+    verify_install_artifact_environment(artifact)
     if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("protected WD changed after interactive authorization")
     nvram_before = efi_nvram_digest()
@@ -719,6 +824,8 @@ def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_h
         for command in plan["commands"]:
             _run(command["argv"], input_bytes=secret if command.get("secret_binding") else None)
             completed_effects.append(command["effect"])
+            if command["effect"] == "udev-settle":
+                verify_target_partition_bindings(contract)
         verify_installed_target(artifact)
         verify_persist_mount(MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}")
         credential_receipt = stage_firstboot_credentials(mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes)

@@ -21,6 +21,8 @@ REVISION = "a" * 40
 SYSTEM_PATH = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-26.05-test"
 NIX_VOLUME = "heim-pc-nixos-production-" + REVISION[:12]
 SOURCE_VOLUME = "heim-pc-nixos-source-" + REVISION[:12]
+CLOSURE_SHA = "c" * 64
+CLOSURE_COUNT = 42
 
 
 class Result:
@@ -42,6 +44,8 @@ def test_make_artifact_uses_pinned_image_and_exact_profile():
         system_path=SYSTEM_PATH,
         nix_volume=NIX_VOLUME,
         bundle_sha256="b" * 64,
+        closure_manifest_sha256=CLOSURE_SHA,
+        closure_path_count=CLOSURE_COUNT,
     )
     assert artifact == {
         "schema_version": 1,
@@ -52,6 +56,8 @@ def test_make_artifact_uses_pinned_image_and_exact_profile():
         "nix_image": prep.installer.PINNED_NIX_IMAGE,
         "profile": "heim-pc-storage-target",
         "source_bundle_sha256": "b" * 64,
+        "closure_manifest_sha256": CLOSURE_SHA,
+        "closure_path_count": CLOSURE_COUNT,
     }
 
 
@@ -96,6 +102,8 @@ def test_write_artifact_is_create_only_and_private(tmp_path):
         system_path=SYSTEM_PATH,
         nix_volume=NIX_VOLUME,
         bundle_sha256="b" * 64,
+        closure_manifest_sha256=CLOSURE_SHA,
+        closure_path_count=CLOSURE_COUNT,
     )
     target = tmp_path / "artifact.json"
     prep.write_artifact(target, artifact)
@@ -121,12 +129,25 @@ def test_build_exact_closure_runs_check_then_build(monkeypatch):
     assert "#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel" in " ".join(calls[1])
 
 
-def test_verify_closure_checks_only_exact_closure_in_offline_container(monkeypatch):
+def test_capture_closure_manifest_uses_canonical_path_info(monkeypatch):
+    path_info = {SYSTEM_PATH: {"narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "narSize": 123, "references": []}}
+    calls = []
+    monkeypatch.setattr(prep, "run", lambda argv, check=True: calls.append(argv) or Result(json.dumps(path_info).encode()))
+    result = prep.capture_closure_manifest(nix_volume=NIX_VOLUME, system_path=SYSTEM_PATH)
+    assert result == prep.installer.closure_manifest_metadata(path_info)
+    assert "path-info" in calls[0] and "--recursive" in calls[0]
+    assert "--network" in calls[0] and "none" in calls[0]
+
+
+def test_verify_closure_checks_store_and_exact_closure_in_offline_container(monkeypatch):
     calls = []
     monkeypatch.setattr(prep, "run", lambda argv, check=True: calls.append(argv) or Result())
     prep.verify_closure(nix_volume=NIX_VOLUME, system_path=SYSTEM_PATH)
-    assert len(calls) == 4
-    for argv in calls:
+    assert len(calls) == 5
+    verify = calls[0]
+    assert "store" in verify and "verify" in verify and "--no-trust" in verify and "--recursive" in verify
+    assert verify[verify.index("--entrypoint") + 1] == prep.NIX_BIN
+    for argv in calls[1:]:
         assert argv[:5] == ["docker", "run", "--rm", "--network", "none"]
         assert f"{NIX_VOLUME}:/nix:ro" in argv
         assert prep.installer.PINNED_NIX_IMAGE in argv
