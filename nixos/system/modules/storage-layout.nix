@@ -26,7 +26,9 @@ let
     };
   }) topology.btrfs.subvolumes);
 
-  partitionDevice = partition: "/dev/disk/by-partuuid/${partition.partuuid}";
+  # PARTLABELs describe public topology. Exact PARTUUIDs remain private and
+  # are enforced by the installer before this closure is ever booted.
+  partitionDevice = partition: "/dev/disk/by-partlabel/${partition.label}";
 
   surfaceFileSystems = {
     ${efi.mountpoint} = {
@@ -47,7 +49,8 @@ in
       message = "storage target requires production storage contract v1";
     }
     {
-      assertion = topology.partition_table == "gpt";
+      assertion = topology.partition_table == "gpt"
+        && topology.partition_identity_policy == "private-identity-contract-assigned-partuuid";
       message = "storage target requires the production GPT topology";
     }
     {

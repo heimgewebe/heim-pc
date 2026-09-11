@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d7496275d03f729cae9eabe53032e3cc0656a0eab6ba8de04f7a3bf32228dabf"
+SOURCE_SNAPSHOT_SHA256 = "995f25e36598c692e40e20a3a7c26b0b5357b0c49ec27812d4adafdfb7a3ceeb"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -188,7 +188,7 @@ class T(unittest.TestCase):
         self.assertIn("../../production/contract-v1.json", layout)
         self.assertNotIn("../../rehearsal/contract-v1.json", layout)
         self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
-        self.assertIn("/dev/disk/by-partuuid/${partition.partuuid}", layout)
+        self.assertIn("/dev/disk/by-partlabel/${partition.label}", layout)
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)
         self.assertIn("console.useXkbConfig = true;", host)
@@ -198,42 +198,27 @@ class T(unittest.TestCase):
         self.assertEqual(production["migration_mode"], "isolated-parallel-disk")
         self.assertTrue(production["target_identity"]["capture_required_before_mutation"])
         self.assertFalse(production["target_identity"]["kernel_name_authoritative"])
-        self.assertEqual(production["target_identity"]["exact_by_id"], "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7")
+        self.assertNotIn("exact_by_id", production["target_identity"])
         self.assertEqual(production["target_identity"]["exact_model"], "Seagate ZP4000GP304001")
-        self.assertEqual(production["target_identity"]["exact_serial"], "7VS01DX7")
-        self.assertEqual(production["target_identity"]["exact_wwn"], "eui.6479a7716f000a39")
+        self.assertNotIn("exact_serial", production["target_identity"])
+        self.assertNotIn("exact_wwn", production["target_identity"])
         self.assertEqual(production["target_identity"]["exact_size_bytes"], 4000787030016)
         self.assertTrue(production["mutation_policy"]["target_by_id_only"])
         self.assertTrue(production["mutation_policy"]["kernel_device_name_forbidden"])
         protected = production["protected_disks"]
         self.assertEqual(len(protected), 1)
         self.assertEqual(protected[0]["role"], "popos-fallback")
-        self.assertEqual(protected[0]["serial"], "25025T802519")
+        self.assertNotIn("serial", protected[0])
+        self.assertNotIn("wwn", protected[0])
+        self.assertNotIn("by_id", protected[0])
         self.assertEqual(len(protected[0]["partition_table_fingerprint"]), 4)
-        self.assertEqual(
-            [(item["fstype"], item["uuid"]) for item in protected[0]["partition_table_fingerprint"]],
-            [
-                ("vfat", "78FD-6130"),
-                ("vfat", "78FD-60C8"),
-                ("ext4", "d25d44aa-5334-4b9d-9cc2-2475e9123776"),
-                ("swap", "098646bf-5717-4810-8ebc-468f6f387bba"),
-            ],
-        )
-        self.assertEqual(
-            [item["partuuid"] for item in protected[0]["partition_table_fingerprint"]],
-            [
-                "f16edce1-0366-4188-9f67-bd21bd022010",
-                "bf96afc8-02a9-452d-beba-94979a014add",
-                "3124b879-382d-47b0-90c7-b84a9fd8ff9e",
-                "b9f8924f-5909-4b0d-ad92-cd339e4c5c43",
-            ],
-        )
-        self.assertEqual(
-            protected[0]["by_id"],
-            "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756",
-        )
+        self.assertTrue(all("partuuid" not in item and "uuid" not in item for item in protected[0]["partition_table_fingerprint"]))
+        self.assertEqual(production["identity_policy"]["source"], "local-private-contract")
+        self.assertTrue(production["identity_policy"]["unique_identifiers_forbidden_in_public_contract"])
         partitions = production["topology"]["partitions"]
-        self.assertEqual(len({item["partuuid"] for item in partitions}), 3)
+        self.assertTrue(all("partuuid" not in item for item in partitions))
+        self.assertEqual(len({item["label"] for item in partitions}), 3)
+        self.assertEqual(production["topology"]["partition_identity_policy"], "private-identity-contract-assigned-partuuid")
         self.assertTrue(all(item["label"].startswith("HEIMPC_NIXOS_") for item in partitions))
         self.assertTrue(production["boot"]["own_esp_required"])
         self.assertTrue(production["boot"]["shared_esp_forbidden"])

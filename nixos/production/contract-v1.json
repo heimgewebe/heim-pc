@@ -8,10 +8,7 @@
     "transport": "nvme",
     "minimum_size_bytes": 3900000000000,
     "selection_path_kind": "by-id",
-    "exact_by_id": "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7",
     "exact_model": "Seagate ZP4000GP304001",
-    "exact_serial": "7VS01DX7",
-    "exact_wwn": "eui.6479a7716f000a39",
     "capture_required_before_mutation": true,
     "kernel_name_authoritative": false,
     "requires_blank": true,
@@ -21,49 +18,35 @@
   "protected_disks": [
     {
       "role": "popos-fallback",
-      "by_id": "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756",
       "model": "WD_BLACK SN850X 2000GB",
-      "serial": "25025T802519",
-      "wwn": "eui.e8238fa6bf530001001b448b4d59e756",
       "size_bytes": 2000398934016,
       "partition_table_must_remain_unchanged": true,
       "esp_must_remain_unchanged": true,
       "filesystem_signatures_must_remain_unchanged": true,
-      "verified_by_id_aliases": [
-        "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519"
-      ],
       "partition_table_fingerprint": [
         {
           "number": 1,
           "size_bytes": 1071644160,
-          "partuuid": "f16edce1-0366-4188-9f67-bd21bd022010",
           "role": "popos-esp",
-          "fstype": "vfat",
-          "uuid": "78FD-6130"
+          "fstype": "vfat"
         },
         {
           "number": 2,
           "size_bytes": 4294966784,
-          "partuuid": "bf96afc8-02a9-452d-beba-94979a014add",
           "role": "popos-recovery",
-          "fstype": "vfat",
-          "uuid": "78FD-60C8"
+          "fstype": "vfat"
         },
         {
           "number": 3,
           "size_bytes": 1990733157888,
-          "partuuid": "3124b879-382d-47b0-90c7-b84a9fd8ff9e",
           "role": "popos-root",
-          "fstype": "ext4",
-          "uuid": "d25d44aa-5334-4b9d-9cc2-2475e9123776"
+          "fstype": "ext4"
         },
         {
           "number": 4,
           "size_bytes": 4294966784,
-          "partuuid": "b9f8924f-5909-4b0d-ad92-cd339e4c5c43",
           "role": "popos-swap-backing",
-          "fstype": "swap",
-          "uuid": "098646bf-5717-4810-8ebc-468f6f387bba"
+          "fstype": "swap"
         }
       ]
     }
@@ -75,7 +58,6 @@
         "number": 1,
         "role": "efi-system-partition",
         "label": "HEIMPC_NIXOS_EFI",
-        "partuuid": "fef423b1-cb0d-4594-a272-c203cb003779",
         "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
         "filesystem": "vfat",
         "mountpoint": "/boot",
@@ -88,7 +70,6 @@
         "number": 2,
         "role": "recovery-surface",
         "label": "HEIMPC_NIXOS_RECOVERY",
-        "partuuid": "6da3e5b4-6693-49d4-a7c5-1a4b13effcf1",
         "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
         "filesystem": "ext4",
         "mountpoint": "/recovery",
@@ -101,7 +82,6 @@
         "number": 3,
         "role": "encrypted-system",
         "label": "HEIMPC_NIXOS_CRYPT",
-        "partuuid": "b2fdb842-ba91-4482-880f-ef02065c6af1",
         "type_guid": "CA7D7CCB-63ED-4C53-861C-1742536059CC",
         "encryption": "luks2",
         "filesystem": "btrfs",
@@ -117,33 +97,15 @@
     "btrfs": {
       "label": "HEIMPC_NIXOS",
       "subvolumes": [
-        {
-          "name": "@root",
-          "mountpoint": "/"
-        },
-        {
-          "name": "@nix",
-          "mountpoint": "/nix"
-        },
-        {
-          "name": "@persist",
-          "mountpoint": "/persist"
-        },
-        {
-          "name": "@home",
-          "mountpoint": "/home"
-        },
-        {
-          "name": "@data",
-          "mountpoint": "/var/lib/heim-pc-data"
-        },
-        {
-          "name": "@containers",
-          "mountpoint": "/var/lib/containers"
-        }
+        {"name": "@root", "mountpoint": "/"},
+        {"name": "@nix", "mountpoint": "/nix"},
+        {"name": "@persist", "mountpoint": "/persist"},
+        {"name": "@home", "mountpoint": "/home"},
+        {"name": "@data", "mountpoint": "/var/lib/heim-pc-data"},
+        {"name": "@containers", "mountpoint": "/var/lib/containers"}
       ]
     },
-    "partition_identity_policy": "contract-assigned-partuuid"
+    "partition_identity_policy": "private-identity-contract-assigned-partuuid"
   },
   "boot": {
     "own_esp_required": true,
@@ -158,5 +120,12 @@
     "protected_disk_pre_post_identity_required": true,
     "protected_disk_partition_table_pre_post_required": true,
     "target_identity_must_be_fully_captured": true
+  },
+  "identity_policy": {
+    "source": "local-private-contract",
+    "schema_version": 1,
+    "source_revision_bound": true,
+    "public_contract_sha256_bound": true,
+    "unique_identifiers_forbidden_in_public_contract": true
   }
 }

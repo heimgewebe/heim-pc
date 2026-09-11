@@ -137,6 +137,8 @@ def test_capture_closure_manifest_uses_canonical_path_info(monkeypatch):
     assert result == prep.installer.closure_manifest_metadata(path_info)
     assert "path-info" in calls[0] and "--recursive" in calls[0]
     assert "--network" in calls[0] and "none" in calls[0]
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in calls[0]
+    assert calls[0][calls[0].index("--store") + 1] == prep.installer.READONLY_NIX_STORE
 
 
 def test_verify_closure_checks_store_and_exact_closure_in_offline_container(monkeypatch):
@@ -147,6 +149,8 @@ def test_verify_closure_checks_store_and_exact_closure_in_offline_container(monk
     verify = calls[0]
     assert "store" in verify and "verify" in verify and "--no-trust" in verify and "--recursive" in verify
     assert verify[verify.index("--entrypoint") + 1] == prep.NIX_BIN
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in verify
+    assert verify[verify.index("--store") + 1] == prep.installer.READONLY_NIX_STORE
     for argv in calls[1:]:
         assert argv[:5] == ["docker", "run", "--rm", "--network", "none"]
         assert f"{NIX_VOLUME}:/nix:ro" in argv
@@ -181,3 +185,28 @@ def test_prepare_failure_removes_created_volumes_and_does_not_publish_artifact(m
     assert created == [NIX_VOLUME, SOURCE_VOLUME]
     assert removed == [SOURCE_VOLUME, NIX_VOLUME]
     assert not output.exists()
+
+
+def test_run_uses_fixed_trusted_environment(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(prep.subprocess, "run", fake_run)
+    prep.run(["git", "--version"])
+    assert captured["env"]["PATH"] == prep.installer.TRUSTED_PATH
+    assert captured["env"]["HOME"] == "/"
+    assert set(captured["env"]) == {"PATH", "LC_ALL", "LANG", "HOME", "SYSTEMD_COLORS"}
+
+
+def test_prepare_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        prep, "prepare",
+        lambda **kwargs: (_ for _ in ()).throw(prep.PrepareError("super-secret-material")),
+    )
+    assert prep.main(["--repo", str(tmp_path), "--output", str(tmp_path / "artifact.json")]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "nixos production artifact preparation blocked by a safety check\n"
+    assert "super-secret-material" not in captured.err

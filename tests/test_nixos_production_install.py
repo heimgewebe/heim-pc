@@ -12,8 +12,8 @@ prod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(prod)
 
-SEAGATE = "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7"
-WD = "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756"
+SEAGATE = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_0001"
+WD = "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK_0002"
 REVISION = "a" * 40
 SYSTEM_PATH = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-26.05-test"
 NIX_VOLUME = "heim-pc-nixos-production-" + REVISION[:12]
@@ -33,10 +33,44 @@ ARTIFACT = {
     **CLOSURE,
 }
 PARTUUIDS = [
-    "fef423b1-cb0d-4594-a272-c203cb003779",
-    "6da3e5b4-6693-49d4-a7c5-1a4b13effcf1",
-    "b2fdb842-ba91-4482-880f-ef02065c6af1",
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
 ]
+PUBLIC_CONTRACT = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
+PRIVATE_IDENTITY = {
+    "schema_version": 1,
+    "kind": prod.storage_identity.PRIVATE_IDENTITY_KIND,
+    "source_revision": REVISION,
+    "public_contract_sha256": prod.storage_identity.sha256_json(PUBLIC_CONTRACT),
+    "target_identity": {
+        "exact_by_id": SEAGATE,
+        "exact_serial": "SYNTH-TARGET-SERIAL",
+        "exact_wwn": "eui.synthetic-target",
+    },
+    "protected_disks": [{
+        "role": "popos-fallback",
+        "by_id": WD,
+        "serial": "SYNTH-FALLBACK-SERIAL",
+        "wwn": "eui.synthetic-fallback",
+        "verified_by_id_aliases": ["/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK_ALIAS"],
+        "partition_table_fingerprint": [
+            {"number": 1, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "uuid": "SYN1-0001"},
+            {"number": 2, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "uuid": "SYN2-0002"},
+            {"number": 3, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "uuid": "SYNTH-ROOT-UUID"},
+            {"number": 4, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "uuid": "SYNTH-SWAP-UUID"},
+        ],
+    }],
+    "topology": {
+        "partitions": [
+            {"number": number, "partuuid": partuuid}
+            for number, partuuid in enumerate(PARTUUIDS, 1)
+        ],
+    },
+}
+CONTRACT = prod.storage_identity.bind_contract(
+    PUBLIC_CONTRACT, PRIVATE_IDENTITY, expected_revision=REVISION
+)
 
 
 def observation():
@@ -45,8 +79,8 @@ def observation():
             "requested_path": SEAGATE,
             "resolved_path": "/dev/nvme0n1",
             "model": "Seagate ZP4000GP304001",
-            "serial": "7VS01DX7",
-            "wwn": "eui.6479a7716f000a39",
+            "serial": "SYNTH-TARGET-SERIAL",
+            "wwn": "eui.synthetic-target",
             "size_bytes": 4000787030016,
             "transport": "nvme",
             "filesystem": None,
@@ -60,8 +94,8 @@ def observation():
             "requested_path": WD,
             "resolved_path": "/dev/nvme1n1",
             "model": "WD_BLACK SN850X 2000GB",
-            "serial": "25025T802519",
-            "wwn": "eui.e8238fa6bf530001001b448b4d59e756",
+            "serial": "SYNTH-FALLBACK-SERIAL",
+            "wwn": "eui.synthetic-fallback",
             "size_bytes": 2000398934016,
             "transport": "nvme",
             "filesystem": None,
@@ -70,10 +104,10 @@ def observation():
             "mounted": True,
             "signatures": [],
             "partitions": [
-                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "partuuid": "f16edce1-0366-4188-9f67-bd21bd022010", "fstype": "vfat", "uuid": "78FD-6130"},
-                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "partuuid": "bf96afc8-02a9-452d-beba-94979a014add", "fstype": "vfat", "uuid": "78FD-60C8"},
-                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "partuuid": "3124b879-382d-47b0-90c7-b84a9fd8ff9e", "fstype": "ext4", "uuid": "d25d44aa-5334-4b9d-9cc2-2475e9123776"},
-                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "partuuid": "b9f8924f-5909-4b0d-ad92-cd339e4c5c43", "fstype": "swap", "uuid": "098646bf-5717-4810-8ebc-468f6f387bba"},
+                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "fstype": "vfat", "uuid": "SYN1-0001"},
+                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "fstype": "vfat", "uuid": "SYN2-0002"},
+                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "fstype": "ext4", "uuid": "SYNTH-ROOT-UUID"},
+                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "fstype": "swap", "uuid": "SYNTH-SWAP-UUID"},
             ],
         },
         "root_source": "/dev/nvme1n1p3",
@@ -86,24 +120,65 @@ def plan(obs=None, artifact=None):
         obs or observation(),
         install_artifact=artifact or ARTIFACT,
         flake_source="/srv/exact-source",
+        contract=CONTRACT,
     )
 
 
 def test_contract_is_bound_to_physical_seagate_and_protected_wd():
-    contract = prod.load_contract()
+    contract = CONTRACT
     target = contract["target_identity"]
     assert target["exact_by_id"] == SEAGATE
     assert target["exact_model"] == "Seagate ZP4000GP304001"
-    assert target["exact_serial"] == "7VS01DX7"
-    assert target["exact_wwn"] == "eui.6479a7716f000a39"
+    assert target["exact_serial"] == "SYNTH-TARGET-SERIAL"
+    assert target["exact_wwn"] == "eui.synthetic-target"
     assert target["exact_size_bytes"] == 4000787030016
     assert target["kernel_name_authoritative"] is False
     assert contract["protected_disks"][0]["by_id"] == WD
     assert len(contract["protected_disks"][0]["partition_table_fingerprint"]) == 4
 
 
+def test_public_contract_contains_no_private_hardware_identifiers():
+    prod.storage_identity.validate_public_contract(PUBLIC_CONTRACT)
+    forbidden = prod.storage_identity.FORBIDDEN_PUBLIC_IDENTITY_KEYS
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                assert key not in forbidden
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(PUBLIC_CONTRACT)
+
+
+def test_private_identity_file_is_mode_revision_and_public_digest_bound(tmp_path):
+    path = tmp_path / "identity.json"
+    path.write_text(json.dumps(PRIVATE_IDENTITY))
+    path.chmod(0o600)
+    loaded = prod.load_contract(path, expected_revision=REVISION)
+    assert loaded["target_identity"]["exact_by_id"] == SEAGATE
+    assert loaded["identity_binding"]["source_revision"] == REVISION
+
+    wrong_revision = dict(PRIVATE_IDENTITY, source_revision="b" * 40)
+    path.write_text(json.dumps(wrong_revision))
+    with pytest.raises(prod.ProductionInstallError, match="identity contract rejected"):
+        prod.load_contract(path, expected_revision=REVISION)
+
+    wrong_digest = dict(PRIVATE_IDENTITY, public_contract_sha256="0" * 64)
+    path.write_text(json.dumps(wrong_digest))
+    with pytest.raises(prod.ProductionInstallError, match="identity contract rejected"):
+        prod.load_contract(path, expected_revision=REVISION)
+
+    path.write_text(json.dumps(PRIVATE_IDENTITY))
+    path.chmod(0o644)
+    with pytest.raises(prod.ProductionInstallError, match="identity contract rejected"):
+        prod.load_contract(path, expected_revision=REVISION)
+
+
 def test_valid_preflight_binds_root_and_efi_to_protected_wd():
-    result = prod.validate_preflight(observation())
+    result = prod.validate_preflight(observation(), CONTRACT)
     assert result["target"]["requested_path"] == SEAGATE
     assert result["protected"]["requested_path"] == WD
     assert result["protected"]["root_source"] == "/dev/nvme1n1p3"
@@ -124,14 +199,14 @@ def test_target_identity_mismatch_is_rejected(field, wrong):
     obs = observation()
     obs["target"][field] = wrong
     with pytest.raises(prod.ProductionInstallError, match="target identity mismatch"):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 def test_kernel_name_cannot_be_target_authority():
     obs = observation()
     obs["target"]["requested_path"] = "/dev/nvme0n1"
     with pytest.raises(prod.ProductionInstallError, match="exact contract by-id"):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 @pytest.mark.parametrize(
@@ -148,14 +223,14 @@ def test_nonblank_or_mounted_target_is_rejected(mutation):
     obs = observation()
     mutation(obs["target"])
     with pytest.raises(prod.ProductionInstallError):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 def test_target_protected_alias_collision_is_rejected():
     obs = observation()
     obs["target"]["resolved_path"] = "/dev/nvme1n1"
     with pytest.raises(prod.ProductionInstallError, match="alias collision"):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 @pytest.mark.parametrize(
@@ -166,14 +241,14 @@ def test_root_and_efi_must_be_on_protected_wd(key, wrong):
     obs = observation()
     obs[key] = wrong
     with pytest.raises(prod.ProductionInstallError):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 def test_protected_partition_fingerprint_mismatch_is_rejected():
     obs = observation()
     obs["protected"]["partitions"][2]["partuuid"] = "00000000-0000-0000-0000-000000000000"
     with pytest.raises(prod.ProductionInstallError, match="fingerprint mismatch"):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 
 
@@ -181,7 +256,7 @@ def test_protected_filesystem_signature_mismatch_is_rejected():
     obs = observation()
     obs["protected"]["partitions"][0]["uuid"] = "DEAD-BEEF"
     with pytest.raises(prod.ProductionInstallError, match="fingerprint mismatch"):
-        prod.validate_preflight(obs)
+        prod.validate_preflight(obs, CONTRACT)
 
 def test_plan_has_exact_partition_guids_and_never_mutates_wd():
     compiled = plan()
@@ -256,7 +331,7 @@ def test_execute_plan_rejects_wrong_confirmation_before_any_effect(monkeypatch, 
     touched = []
     monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: touched.append(args) or (_ for _ in ()).throw(AssertionError("effect reached")))
     with pytest.raises(prod.ProductionInstallError, match="exact plan digest"):
-        prod.execute_plan(compiled, confirmation="wrong", credential_hash_file=tmp_path / "unused")
+        prod.execute_plan(compiled, contract=CONTRACT, confirmation="wrong", credential_hash_file=tmp_path / "unused")
     assert touched == []
 
 
@@ -328,11 +403,39 @@ def test_plan_contains_no_secret_material():
 
 
 def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(prod, "load_contract", lambda: (_ for _ in ()).throw(prod.ProductionInstallError("super-secret-material")))
-    assert prod.main(["--install-artifact", str(tmp_path / "unused.json")]) == 2
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(
+        prod, "load_contract",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            prod.ProductionInstallError("super-secret-material")
+        ),
+    )
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+    ]) == 2
     captured = capsys.readouterr()
     assert captured.err == "nixos production install blocked by a safety check\n"
     assert "super-secret-material" not in captured.err
+
+
+def test_run_uses_fixed_trusted_environment(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(prod.subprocess, "run", fake_run)
+    prod._run(["cryptsetup", "--version"])
+    assert captured["env"]["PATH"] == prod.TRUSTED_PATH
+    assert captured["env"]["HOME"] == "/"
+    assert set(captured["env"]) == {"PATH", "LC_ALL", "LANG", "HOME", "SYSTEMD_COLORS"}
 
 
 def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):
@@ -408,14 +511,26 @@ def test_partuuid_namespace_must_be_clear_before_partitioning(monkeypatch):
     blocked = f"/dev/disk/by-partuuid/{PARTUUIDS[1]}"
     monkeypatch.setattr(prod.os.path, "lexists", lambda path: path == blocked)
     with pytest.raises(prod.ProductionInstallError, match="already exists before partitioning"):
-        prod.verify_partuuid_namespace_clear(prod.load_contract())
+        prod.verify_partuuid_namespace_clear(CONTRACT)
+
+
+def test_partlabel_namespace_must_be_clear_before_partitioning(monkeypatch):
+    blocked = f"/dev/disk/by-partlabel/{PUBLIC_CONTRACT['topology']['partitions'][1]['label']}"
+    monkeypatch.setattr(prod.os.path, "lexists", lambda path: path == blocked)
+    with pytest.raises(prod.ProductionInstallError, match="PARTLABEL already exists before partitioning"):
+        prod.verify_partlabel_namespace_clear(CONTRACT)
 
 
 def _post_partition_target():
     target = observation()["target"]
     target["partition_table"] = "gpt"
     target["partitions"] = [
-        {"number": number, "path": f"/dev/nvme0n1p{number}", "partuuid": partuuid}
+        {
+            "number": number,
+            "path": f"/dev/nvme0n1p{number}",
+            "partuuid": partuuid,
+            "partlabel": PUBLIC_CONTRACT["topology"]["partitions"][number - 1]["label"],
+        }
         for number, partuuid in enumerate(PARTUUIDS, 1)
     ]
     return target
@@ -428,13 +543,43 @@ def test_target_partition_bindings_reject_partuuid_alias_outside_seagate(monkeyp
         resolved = f"/dev/nvme0n1p{number}"
         aliases[f"{SEAGATE}-part{number}"] = resolved
         aliases[f"/dev/disk/by-partuuid/{partuuid}"] = resolved
+        aliases[f"/dev/disk/by-partlabel/{PUBLIC_CONTRACT['topology']['partitions'][number - 1]['label']}"] = resolved
     monkeypatch.setattr(prod, "_disk_observation", lambda authority: target)
     monkeypatch.setattr(prod.os.path, "islink", lambda path: path in aliases)
     monkeypatch.setattr(prod.os.path, "realpath", lambda path: aliases.get(path, path))
-    prod.verify_target_partition_bindings(prod.load_contract())
+    prod.verify_target_partition_bindings(CONTRACT)
     aliases[f"/dev/disk/by-partuuid/{PARTUUIDS[0]}"] = "/dev/nvme9n1p1"
     with pytest.raises(prod.ProductionInstallError, match="PARTUUID alias points outside"):
-        prod.verify_target_partition_bindings(prod.load_contract())
+        prod.verify_target_partition_bindings(CONTRACT)
+
+
+def test_target_partition_bindings_reject_partlabel_alias_outside_seagate(monkeypatch):
+    target = _post_partition_target()
+    aliases = {}
+    for number, partuuid in enumerate(PARTUUIDS, 1):
+        resolved = f"/dev/nvme0n1p{number}"
+        label = PUBLIC_CONTRACT["topology"]["partitions"][number - 1]["label"]
+        aliases[f"{SEAGATE}-part{number}"] = resolved
+        aliases[f"/dev/disk/by-partuuid/{partuuid}"] = resolved
+        aliases[f"/dev/disk/by-partlabel/{label}"] = resolved
+    monkeypatch.setattr(prod, "_disk_observation", lambda authority: target)
+    monkeypatch.setattr(prod.os.path, "islink", lambda path: path in aliases)
+    monkeypatch.setattr(prod.os.path, "realpath", lambda path: aliases.get(path, path))
+    prod.verify_target_partition_bindings(CONTRACT)
+    first_label = PUBLIC_CONTRACT["topology"]["partitions"][0]["label"]
+    aliases[f"/dev/disk/by-partlabel/{first_label}"] = "/dev/nvme9n1p1"
+    with pytest.raises(prod.ProductionInstallError, match="PARTLABEL alias points outside"):
+        prod.verify_target_partition_bindings(CONTRACT)
+
+
+def test_readonly_nix_verifier_uses_pinned_image_binary_and_separate_subject_store():
+    argv = prod._nix_volume_argv(ARTIFACT, ["store", "verify", "--no-trust", SYSTEM_PATH])
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
+    assert "-v" in argv
+    assert f"{NIX_VOLUME}:/nix" not in argv
+    assert argv[argv.index("--entrypoint") + 1] == "/nix/var/nix/profiles/default/bin/nix"
+    assert argv[argv.index("--store") + 1] == prod.READONLY_NIX_STORE
+    assert prod.READONLY_NIX_FEATURES in argv
 
 
 def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatch):
@@ -456,6 +601,8 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
 
     monkeypatch.setattr(prod, "_run", fake_run)
     prod.verify_install_artifact_environment(ARTIFACT)
-    assert any("store" in argv and "verify" in argv and "--no-trust" in argv for argv in calls)
+    verifier = next(argv for argv in calls if "store" in argv and "verify" in argv and "--no-trust" in argv)
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in verifier
+    assert verifier[verifier.index("--store") + 1] == prod.READONLY_NIX_STORE
     with pytest.raises(prod.ProductionInstallError, match="closure metadata"):
         prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))

@@ -29,7 +29,16 @@ class PrepareError(RuntimeError):
 
 
 def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    command_env = {
+        "PATH": installer.TRUSTED_PATH,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "HOME": "/",
+        "SYSTEMD_COLORS": "0",
+    }
+    result = subprocess.run(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=command_env
+    )
     if check and result.returncode != 0:
         stderr = result.stderr.decode("utf-8", "replace")[-8000:]
         raise PrepareError(f"command failed ({argv[0]}): {stderr}")
@@ -165,15 +174,23 @@ def build_exact_closure(*, source_volume: str, nix_volume: str) -> str:
     return system_path
 
 
-def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, object]:
-    result = run([
+def readonly_nix_argv(*, nix_volume: str, args: list[str]) -> list[str]:
+    return [
         "docker", "run", "--rm", "--network", "none",
-        "-v", f"{nix_volume}:/nix",
+        "-v", f"{nix_volume}:/subject/nix:ro",
         "--entrypoint", NIX_BIN,
         installer.PINNED_NIX_IMAGE,
-        "--extra-experimental-features", "nix-command flakes",
-        "path-info", "--json", "--recursive", system_path,
-    ])
+        "--extra-experimental-features", installer.READONLY_NIX_FEATURES,
+        "--store", installer.READONLY_NIX_STORE,
+        *args,
+    ]
+
+
+def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, object]:
+    result = run(readonly_nix_argv(
+        nix_volume=nix_volume,
+        args=["path-info", "--json", "--recursive", system_path],
+    ))
     try:
         payload = json.loads(result.stdout.decode("utf-8"))
     except json.JSONDecodeError as exc:
@@ -182,14 +199,10 @@ def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, 
 
 
 def verify_closure(*, nix_volume: str, system_path: str) -> None:
-    run([
-        "docker", "run", "--rm", "--network", "none",
-        "-v", f"{nix_volume}:/nix",
-        "--entrypoint", NIX_BIN,
-        installer.PINNED_NIX_IMAGE,
-        "--extra-experimental-features", "nix-command flakes",
-        "store", "verify", "--no-trust", "--recursive", system_path,
-    ])
+    run(readonly_nix_argv(
+        nix_volume=nix_volume,
+        args=["store", "verify", "--no-trust", "--recursive", system_path],
+    ))
     checks = [
         ("-x", f"{system_path}/sw/bin/nixos-install"),
         ("-x", f"{system_path}/sw/bin/mkfs.btrfs"),
@@ -278,8 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         artifact = prepare(repo=args.repo.resolve(), output=args.output.resolve())
         print(json.dumps(artifact, indent=2, sort_keys=True))
         return 0
-    except (PrepareError, installer.ProductionInstallError, OSError) as exc:
-        print(f"nixos production artifact preparation blocked: {exc}", file=sys.stderr)
+    except (PrepareError, installer.ProductionInstallError, OSError):
+        print("nixos production artifact preparation blocked by a safety check", file=sys.stderr)
         return 2
 
 

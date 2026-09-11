@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -27,14 +28,26 @@ MOUNT_ROOT = "/mnt/heim-pc-nixos-production"
 BTRFS_STAGE_ROOT = "/mnt/heim-pc-nixos-production-btrfs-stage"
 CONFIRM_PREFIX = "APPLY-NIXOS-PRODUCTION:"
 PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
+TRUSTED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+READONLY_NIX_STORE = "local?root=/subject&read-only=true"
+READONLY_NIX_FEATURES = "nix-command flakes read-only-local-store"
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 SYSTEM_PATH_RE = re.compile(r"^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$")
 NIX_VOLUME_RE = re.compile(r"^heim-pc-nixos-production-[0-9a-f]{12,40}$")
 KERNEL_NVME_RE = re.compile(r"^/dev/nvme\d+n\d+(?:p\d+)?$")
+PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
 YESCRYPT_CHECKSUM_LAST = frozenset(CRYPT64[:16])
+
+_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "nixos_production_identity", Path(__file__).with_name("nixos_production_identity.py")
+)
+if _IDENTITY_SPEC is None or _IDENTITY_SPEC.loader is None:
+    raise RuntimeError("cannot load production identity module")
+storage_identity = importlib.util.module_from_spec(_IDENTITY_SPEC)
+_IDENTITY_SPEC.loader.exec_module(storage_identity)
 
 
 class ProductionInstallError(RuntimeError):
@@ -49,13 +62,15 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
-def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
+def load_contract(
+    identity_path: Path, *, expected_revision: str, path: Path = CONTRACT_PATH
+) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ProductionInstallError(f"cannot read production storage contract: {exc}") from exc
-    if value.get("schema_version") != 1 or value.get("kind") != "heim_pc.nixos_production_storage_contract":
-        raise ProductionInstallError("production storage contract identity mismatch")
+        value = storage_identity.load_contract(
+            path, identity_path, expected_revision=expected_revision
+        )
+    except storage_identity.IdentityContractError as exc:
+        raise ProductionInstallError("production storage identity contract rejected") from exc
     target = value.get("target_identity")
     if not isinstance(target, dict):
         raise ProductionInstallError("target_identity is missing")
@@ -75,7 +90,11 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
     if not isinstance(fingerprint, list) or len(fingerprint) != 4:
         raise ProductionInstallError("protected disk partition fingerprint must contain four partitions")
     topology = value.get("topology", {})
-    if topology.get("partition_table") != "gpt" or topology.get("partition_identity_policy") != "contract-assigned-partuuid":
+    if (
+        topology.get("partition_table") != "gpt"
+        or topology.get("partition_identity_policy")
+        != "private-identity-contract-assigned-partuuid"
+    ):
         raise ProductionInstallError("production GPT/PARTUUID policy mismatch")
     partitions = topology.get("partitions")
     if not isinstance(partitions, list) or len(partitions) != 3:
@@ -83,8 +102,18 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
     partuuids = [str(item.get("partuuid", "")).lower() for item in partitions]
     if len(set(partuuids)) != 3 or any(not item for item in partuuids):
         raise ProductionInstallError("production PARTUUIDs must be unique and non-empty")
+    labels = [item.get("label") for item in partitions]
+    if (
+        len(set(labels)) != 3
+        or any(not isinstance(label, str) or PARTLABEL_RE.fullmatch(label) is None for label in labels)
+    ):
+        raise ProductionInstallError("production PARTLABELs must be canonical and unique")
     boot = value.get("boot", {})
-    if boot.get("own_esp_required") is not True or boot.get("shared_esp_forbidden") is not True or boot.get("touch_efi_variables") is not False:
+    if (
+        boot.get("own_esp_required") is not True
+        or boot.get("shared_esp_forbidden") is not True
+        or boot.get("touch_efi_variables") is not False
+    ):
         raise ProductionInstallError("isolated boot policy mismatch")
     mutation = value.get("mutation_policy", {})
     if not all(mutation.get(key) is True for key in (
@@ -94,6 +123,14 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
         "target_identity_must_be_fully_captured",
     )):
         raise ProductionInstallError("production mutation policy is incomplete")
+    binding = value.get("identity_binding")
+    if (
+        not isinstance(binding, dict)
+        or binding.get("source_revision") != expected_revision
+        or not isinstance(binding.get("public_contract_sha256"), str)
+        or not isinstance(binding.get("identity_contract_sha256"), str)
+    ):
+        raise ProductionInstallError("production identity binding is incomplete")
     return value
 
 
@@ -163,6 +200,13 @@ def _partuuid_path(partition: dict[str, Any]) -> str:
     return f"/dev/disk/by-partuuid/{str(partition['partuuid']).lower()}"
 
 
+def _partlabel_path(partition: dict[str, Any]) -> str:
+    label = partition.get("label")
+    if not isinstance(label, str) or PARTLABEL_RE.fullmatch(label) is None:
+        raise ProductionInstallError("target PARTLABEL is invalid")
+    return f"/dev/disk/by-partlabel/{label}"
+
+
 def _target_partition_path(target_authority: str, partition: dict[str, Any]) -> str:
     target = _require_by_id(target_authority, "target partition authority")
     number = partition.get("number")
@@ -198,8 +242,7 @@ def _identity_tuple(value: dict[str, Any]) -> tuple[Any, ...]:
     return (value.get("model"), value.get("serial"), value.get("wwn"), value.get("size_bytes"), value.get("transport"))
 
 
-def validate_protected_state(observation: dict[str, Any], contract: dict[str, Any] | None = None) -> dict[str, Any]:
-    contract = contract or load_contract()
+def validate_protected_state(observation: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     protected_contract = contract["protected_disks"][0]
     protected = observation.get("protected")
     if not isinstance(protected, dict):
@@ -251,8 +294,7 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
     }
 
 
-def validate_preflight(observation: dict[str, Any], contract: dict[str, Any] | None = None) -> dict[str, Any]:
-    contract = contract or load_contract()
+def validate_preflight(observation: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     target_contract = contract["target_identity"]
     target = observation.get("target")
     if not isinstance(target, dict):
@@ -334,9 +376,8 @@ def compile_plan(
     *,
     install_artifact: dict[str, Any],
     flake_source: str,
-    contract: dict[str, Any] | None = None,
+    contract: dict[str, Any],
 ) -> dict[str, Any]:
-    contract = contract or load_contract()
     artifact = validate_install_artifact(install_artifact)
     source_revision = artifact["source_revision"]
     flake = str(PurePosixPath(flake_source))
@@ -411,6 +452,7 @@ def compile_plan(
         "schema_version": 1,
         "kind": "heim_pc.nixos_production_install_plan",
         "contract_sha256": sha256_json(contract),
+        "identity_contract_sha256": contract["identity_binding"]["identity_contract_sha256"],
         "install_artifact_sha256": sha256_json(artifact),
         "install_artifact": artifact,
         "source_revision": source_revision,
@@ -535,7 +577,17 @@ def stage_firstboot_credentials(*, mount_root: str, source_revision: str, hash_b
 
 
 def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    command_env = {
+        "PATH": TRUSTED_PATH,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "HOME": "/",
+        "SYSTEMD_COLORS": "0",
+    }
+    result = subprocess.run(
+        argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, env=command_env,
+    )
     if check and result.returncode != 0:
         if input_bytes is not None:
             raise ProductionInstallError(f"command failed ({argv[0]}) with sensitive stdin; stderr withheld")
@@ -557,7 +609,7 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
     if not os.path.islink(authority_path):
         raise ProductionInstallError(f"by-id authority is missing: {authority_path}")
     resolved = os.path.realpath(authority_path)
-    data = _json_command(["lsblk", "--json", "--bytes", "--paths", "-o", "PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PARTUUID,MOUNTPOINTS", resolved])
+    data = _json_command(["lsblk", "--json", "--bytes", "--paths", "-o", "PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PARTUUID,PARTLABEL,MOUNTPOINTS", resolved])
     devices = data.get("blockdevices") or []
     disks = [item for item in devices if item.get("type") == "disk" and item.get("path") == resolved]
     if len(disks) != 1:
@@ -582,6 +634,7 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
                 "path": path,
                 "size_bytes": int(child.get("size") or 0),
                 "partuuid": str(child.get("partuuid") or "").lower(),
+                "partlabel": str(child.get("partlabel") or ""),
                 "fstype": str(child.get("fstype") or ""),
                 "uuid": str(child.get("uuid") or ""),
             })
@@ -609,8 +662,7 @@ def _findmnt(target: str) -> str:
     return result.stdout.decode("utf-8").strip()
 
 
-def observe_live(contract: dict[str, Any] | None = None) -> dict[str, Any]:
-    contract = contract or load_contract()
+def observe_live(contract: dict[str, Any]) -> dict[str, Any]:
     return {
         "target": _disk_observation(contract["target_identity"]["exact_by_id"]),
         "protected": _disk_observation(contract["protected_disks"][0]["by_id"]),
@@ -624,6 +676,13 @@ def verify_partuuid_namespace_clear(contract: dict[str, Any]) -> None:
         alias = _partuuid_path(partition)
         if os.path.lexists(alias):
             raise ProductionInstallError(f"planned PARTUUID already exists before partitioning: {alias}")
+
+
+def verify_partlabel_namespace_clear(contract: dict[str, Any]) -> None:
+    for partition in contract["topology"]["partitions"]:
+        alias = _partlabel_path(partition)
+        if os.path.lexists(alias):
+            raise ProductionInstallError(f"planned PARTLABEL already exists before partitioning: {alias}")
 
 
 def verify_target_partition_bindings(contract: dict[str, Any]) -> dict[str, Any]:
@@ -646,12 +705,15 @@ def verify_target_partition_bindings(contract: dict[str, Any]) -> dict[str, Any]
         actual = actual_by_number.get(number)
         if not isinstance(actual, dict) or str(actual.get("partuuid", "")).lower() != str(partition["partuuid"]).lower():
             raise ProductionInstallError(f"Seagate partition {number} PARTUUID mismatch after partitioning")
+        if actual.get("partlabel") != partition["label"]:
+            raise ProductionInstallError(f"Seagate partition {number} PARTLABEL mismatch after partitioning")
         actual_path = actual.get("path")
         if not isinstance(actual_path, str) or KERNEL_NVME_RE.fullmatch(actual_path) is None:
             raise ProductionInstallError(f"Seagate partition {number} observed path is invalid")
         for label, alias in (
             ("target by-id", _target_partition_path(target, partition)),
             ("PARTUUID", _partuuid_path(partition)),
+            ("PARTLABEL", _partlabel_path(partition)),
         ):
             if not os.path.islink(alias):
                 raise ProductionInstallError(f"Seagate partition {number} {label} alias is missing")
@@ -706,10 +768,11 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
 def _nix_volume_argv(artifact: dict[str, Any], args: list[str]) -> list[str]:
     return [
         "docker", "run", "--rm", "--network", "none",
-        "-v", f"{artifact['nix_volume']}:/nix",
+        "-v", f"{artifact['nix_volume']}:/subject/nix:ro",
         "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
         artifact["nix_image"],
-        "--extra-experimental-features", "nix-command flakes",
+        "--extra-experimental-features", READONLY_NIX_FEATURES,
+        "--store", READONLY_NIX_STORE,
         *args,
     ]
 
@@ -782,11 +845,17 @@ def verify_installed_target(artifact: dict[str, Any]) -> None:
         raise ProductionInstallError("systemd-boot files are missing from the Seagate ESP")
 
 
-def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_hash_file: Path, observer=observe_live) -> dict[str, Any]:
+def execute_plan(
+    plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
+    credential_hash_file: Path, observer=observe_live,
+) -> dict[str, Any]:
     validate_confirmation(plan, confirmation)
     if os.geteuid() != 0:
         raise ProductionInstallError("production apply requires root")
-    contract = load_contract()
+    if sha256_json(contract) != plan.get("contract_sha256"):
+        raise ProductionInstallError("storage contract no longer matches the reviewed plan")
+    if contract.get("identity_binding", {}).get("identity_contract_sha256") != plan.get("identity_contract_sha256"):
+        raise ProductionInstallError("private storage identity no longer matches the reviewed plan")
     artifact = validate_install_artifact(plan.get("install_artifact"))
     if sha256_json(artifact) != plan.get("install_artifact_sha256"):
         raise ProductionInstallError("install artifact digest no longer matches the reviewed plan")
@@ -798,6 +867,7 @@ def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_h
     pre_now = validate_preflight(observer(contract), contract)
     verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
     verify_partuuid_namespace_clear(contract)
+    verify_partlabel_namespace_clear(contract)
     if protected_fingerprint(pre_now["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("live protected WD preimage differs from the reviewed plan")
     hash_bytes = read_credential_hash(credential_hash_file)
@@ -811,6 +881,7 @@ def execute_plan(plan: dict[str, Any], *, confirmation: str | None, credential_h
     final_pre = validate_preflight(observer(contract), contract)
     verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
     verify_partuuid_namespace_clear(contract)
+    verify_partlabel_namespace_clear(contract)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     verify_install_artifact_environment(artifact)
     if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
@@ -870,13 +941,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--observation-json", type=Path)
     parser.add_argument("--flake-source", default=str(FLAKE_SOURCE))
     parser.add_argument("--install-artifact", type=Path, required=True)
+    parser.add_argument("--identity-contract", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--credential-hash-file", type=Path)
     args = parser.parse_args(argv)
     try:
-        contract = load_contract()
         artifact = load_install_artifact(args.install_artifact)
+        contract = load_contract(
+            args.identity_contract, expected_revision=artifact["source_revision"]
+        )
         observation = json.loads(args.observation_json.read_text()) if args.observation_json else observe_live(contract)
         verify_source(args.flake_source, artifact["source_revision"])
         if args.observation_json is None:
@@ -893,7 +967,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.credential_hash_file is None:
             raise ProductionInstallError("--apply requires --credential-hash-file")
-        receipt = execute_plan(plan, confirmation=args.confirm, credential_hash_file=args.credential_hash_file)
+        receipt = execute_plan(
+            plan, contract=contract, confirmation=args.confirm,
+            credential_hash_file=args.credential_hash_file,
+        )
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0
     except (ProductionInstallError, OSError, json.JSONDecodeError):

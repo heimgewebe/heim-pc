@@ -337,12 +337,12 @@
             ) topology.btrfs.subvolumes;
             surfaceMatches = builtins.all (role:
               let p = byRole role; fs = target.fileSystems.${p.mountpoint};
-              in fs.device == "/dev/disk/by-partuuid/${p.partuuid}" && fs.fsType == p.filesystem
+              in fs.device == "/dev/disk/by-partlabel/${p.label}" && fs.fsType == p.filesystem
             ) [ "efi-system-partition" "recovery-surface" ];
           in
           assert fsMatches && surfaceMatches;
           assert target.boot.initrd.luks.devices.${mapperName}.device
-            == "/dev/disk/by-partuuid/${(byRole "encrypted-system").partuuid}";
+            == "/dev/disk/by-partlabel/${(byRole "encrypted-system").label}";
           assert target.boot.loader.systemd-boot.enable;
           assert !target.boot.loader.efi.canTouchEfiVariables;
           assert target.services.xserver.xkb.layout == "de";

@@ -463,7 +463,7 @@ Ein Wechsel wird neu bewertet, wenn ein anderer Host nachweislich bessere Gesamt
 
 ## Produktions-Installer: physisch gebundene Seagate
 
-Der nach dem Umbau gelesene Ist-Zustand ist Vertragsbestandteil: M.2_1/PCIe-4.0-x4 enthält die 4-TB-Seagate `ZP4000GP304001` (Serial `7VS01DX7`, EUI `eui.6479a7716f000a39`), M.2_2/PCIe-3.0-x4 die unveränderte WD SN850X mit Pop!_OS. `nvme0n1` beziehungsweise `nvme1n1` sind ausdrücklich keine Identitäten; der Umbau hat ihre Nummerierung gegenüber dem Ausgangszustand bereits vertauscht.
+Der nach dem Umbau gelesene Ist-Zustand ist Vertragsbestandteil: M.2_1/PCIe-4.0-x4 enthält die 4-TB-Seagate `ZP4000GP304001`, M.2_2/PCIe-3.0-x4 die WD SN850X mit Pop!_OS. Exakte Seriennummern, WWNs und by-id-Pfade stehen ausschließlich im lokalen privaten Identity-Contract; `nvme0n1` beziehungsweise `nvme1n1` bleiben reine Beobachtungsnamen und sind keine Mutationsautorität.
 
 Der produktive Pfad hat drei getrennte Stufen. Erstens baut `scripts/nixos_production_prepare.py` aus einem **cleanen exakten Git-Commit** im gepinnten Nix-Docker-Image den exakten `heim-pc-storage-target`-Closure in einem revisionsgebundenen `/nix`-Volume und publiziert nur dessen kleines Install-Artefakt. Diese Stufe kennt keine Blockgeräte. Ein Artefakt eines PR-/Branch-Heads ist ausschließlich Proof; nach einem Merge muss für den tatsächlichen Installationslauf aus dem finalen Main-Commit neu gebaut werden. Zweitens liest `scripts/nixos_production_install.py` Hardware und Artefakt effect-frei ein und kompiliert einen plan-hash-gebundenen Plan. Drittens darf Apply erst nach exakter Bestätigung, erneutem Live-Gate und interaktiver Secret-Zufuhr mutieren.
 
