@@ -327,6 +327,14 @@ def test_plan_contains_no_secret_material():
     assert "$y$j9T$" not in serialized
 
 
+def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_contract", lambda: (_ for _ in ()).throw(prod.ProductionInstallError("super-secret-material")))
+    assert prod.main(["--install-artifact", str(tmp_path / "unused.json")]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "nixos production install blocked by a safety check\n"
+    assert "super-secret-material" not in captured.err
+
+
 def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):
     class Result:
         returncode = 1

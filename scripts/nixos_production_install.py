@@ -896,8 +896,8 @@ def main(argv: list[str] | None = None) -> int:
         receipt = execute_plan(plan, confirmation=args.confirm, credential_hash_file=args.credential_hash_file)
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0
-    except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
-        print(f"nixos production install blocked: {exc}", file=sys.stderr)
+    except (ProductionInstallError, OSError, json.JSONDecodeError):
+        print("nixos production install blocked by a safety check", file=sys.stderr)
         return 2
 
 
