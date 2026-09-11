@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "48372a61d5a9a6d89671a8a37609d746757112725fe347f6243e244a597e22f1"
+SOURCE_SNAPSHOT_SHA256 = "988ff54480d89c4d201aedf3c92b15685a6e5e7512f5632d19a35ab6bd299f0e"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -185,7 +185,12 @@ class T(unittest.TestCase):
         self.assertIn("./modules/storage-layout.nix", flake)
         self.assertIn("../../rehearsal/contract-v1.json", layout)
         self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
+        self.assertIn('boot.initrd.availableKernelModules = [ "usb_storage" ];', layout)
         self.assertIn("fileSystems = lib.mkForce", layout)
+        self.assertIn('services.xserver.xkb.layout = "de";', host)
+        self.assertIn("console.useXkbConfig = true;", host)
+        self.assertIn('i18n.defaultLocale = "de_DE.UTF-8";', host)
+        self.assertIn('time.timeZone = "Europe/Berlin";', host)
         self.assertIn(
             ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
             deployment,

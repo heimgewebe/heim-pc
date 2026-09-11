@@ -345,6 +345,11 @@
             == "/dev/disk/by-partlabel/${(byRole "encrypted-system").label}";
           assert target.boot.loader.systemd-boot.enable;
           assert !target.boot.loader.efi.canTouchEfiVariables;
+          assert builtins.elem "usb_storage" target.boot.initrd.availableKernelModules;
+          assert target.services.xserver.xkb.layout == "de";
+          assert target.console.useXkbConfig;
+          assert target.i18n.defaultLocale == "de_DE.UTF-8";
+          assert target.time.timeZone == "Europe/Berlin";
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;

@@ -60,6 +60,11 @@ in
     }
   ];
 
+  # The installed system lives behind a USB mass-storage bridge.  This driver
+  # must be available before LUKS discovery; otherwise the root device cannot
+  # appear in the initrd at all.
+  boot.initrd.availableKernelModules = [ "usb_storage" ];
+
   boot.initrd.luks.devices.${mapperName}.device =
     "/dev/disk/by-partlabel/${encrypted.label}";
 
