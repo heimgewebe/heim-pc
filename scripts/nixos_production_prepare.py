@@ -21,7 +21,7 @@ import nixos_production_install as installer
 ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos" / "system"
 NIX_BIN = "/nix/var/nix/profiles/default/bin/nix"
-GIT_BIN = "/usr/bin/git"
+GIT_BIN = "/root/.nix-profile/bin/git"
 
 
 class PrepareError(RuntimeError):
