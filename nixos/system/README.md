@@ -26,7 +26,8 @@ The hard security assumption is that an arbitrary coding agent may become root i
 
 - `flake.nix`: host, VM, MicroVM, lifecycle and check graph.
 - `hosts/heim-pc/default.nix`: shared Heim-PC host assembly; the default root remains a non-installing placeholder unless `storage-layout.nix` is explicitly layered in.
-- `modules/storage-layout.nix`: contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles.
+- `modules/storage-layout.nix`: production-contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles; it is intentionally separate from the disposable Freecom rehearsal contract.
+- `../production/contract-v1.json`: isolated parallel-disk production topology. It binds final mounts to fixed PARTUUIDs, protects the current WD/Pop!_OS fallback by stable identity, and leaves the Seagate by-id/serial unset until fresh post-install hardware inventory captures them.
 - `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
 - `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
 - `tests/integration.nix`: scoped Grabowski/Bureau VM integration proof.

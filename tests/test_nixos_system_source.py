@@ -1,6 +1,7 @@
 from pathlib import Path
 import fcntl
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "988ff54480d89c4d201aedf3c92b15685a6e5e7512f5632d19a35ab6bd299f0e"
+SOURCE_SNAPSHOT_SHA256 = "7eeeea5b1ce224228c8ffa2892ac2e29d6d550fe346018278024ecd6bbe1d2fd"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -176,21 +177,43 @@ class T(unittest.TestCase):
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)
         self.assertIn("boot.loader.efi.canTouchEfiVariables = false", host)
 
-    def test_storage_target_build_is_contract_derived_and_separate_from_prototype(self):
+    def test_storage_target_build_is_production_contract_derived_and_separate_from_rehearsal(self):
         flake = (SOURCE / "flake.nix").read_text()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         layout = (SOURCE / "modules/storage-layout.nix").read_text()
         deployment = (ROOT / "nixos" / "deployment" / "contract-v1.json").read_text()
+        production = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
         self.assertIn("nixosConfigurations.heim-pc-storage-target", flake)
         self.assertIn("./modules/storage-layout.nix", flake)
-        self.assertIn("../../rehearsal/contract-v1.json", layout)
+        self.assertIn("../../production/contract-v1.json", layout)
+        self.assertNotIn("../../rehearsal/contract-v1.json", layout)
         self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
-        self.assertIn('boot.initrd.availableKernelModules = [ "usb_storage" ];', layout)
+        self.assertIn("/dev/disk/by-partuuid/${partition.partuuid}", layout)
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)
         self.assertIn("console.useXkbConfig = true;", host)
         self.assertIn('i18n.defaultLocale = "de_DE.UTF-8";', host)
         self.assertIn('time.timeZone = "Europe/Berlin";', host)
+        self.assertEqual(production["kind"], "heim_pc.nixos_production_storage_contract")
+        self.assertEqual(production["migration_mode"], "isolated-parallel-disk")
+        self.assertTrue(production["target_identity"]["capture_required_before_mutation"])
+        self.assertFalse(production["target_identity"]["kernel_name_authoritative"])
+        self.assertIsNone(production["target_identity"]["exact_by_id"])
+        self.assertTrue(production["mutation_policy"]["target_by_id_only"])
+        self.assertTrue(production["mutation_policy"]["kernel_device_name_forbidden"])
+        protected = production["protected_disks"]
+        self.assertEqual(len(protected), 1)
+        self.assertEqual(protected[0]["role"], "popos-fallback")
+        self.assertEqual(protected[0]["serial"], "25025T802519")
+        self.assertEqual(
+            protected[0]["by_id"],
+            "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519",
+        )
+        partitions = production["topology"]["partitions"]
+        self.assertEqual(len({item["partuuid"] for item in partitions}), 3)
+        self.assertTrue(all(item["label"].startswith("HEIMPC_NIXOS_") for item in partitions))
+        self.assertTrue(production["boot"]["own_esp_required"])
+        self.assertTrue(production["boot"]["shared_esp_forbidden"])
         self.assertIn(
             ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
             deployment,

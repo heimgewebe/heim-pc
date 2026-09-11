@@ -152,6 +152,12 @@ GPT
 
 Disko beschreibt die produktive Zieltopologie deklarativ.
 
+Für die Heim-PC-Migration gilt ab dem Zwei-NVMe-Cutover eine **isolierte Parallel-Migration**: Die neue 4-TB-Seagate ist ausschließliches NixOS-Ziel mit eigener ESP und eigenem Bootloader; die bestehende WD SN850X mit Pop!_OS bleibt als unabhängig bootfähiger Rückfallpfad unangetastet. Die Firmware wählt zwischen beiden Platten. Ein gemeinsamer Bootloader oder eine gemeinsam genutzte ESP ist während der Migration ausdrücklich nicht Teil des Zielbilds.
+
+Produktive Mounts werden nicht über generische Partlabels wie `EFI`, `RECOVERY` oder `NIXOS_CRYPT` adressiert. Der Produktionsvertrag verwendet eindeutige `HEIMPC_NIXOS_*`-Labels und feste GPT-PARTUUIDs. Destruktive Operationen dürfen das Ziel ausschließlich über eine nach dem physischen Einbau frisch gelesene exakte `/dev/disk/by-id/...`-Identität plus Modell, Seriennummer, Größe und WWN auswählen. Kernel-Namen wie `/dev/nvme0n1` oder `/dev/nvme1n1` sind niemals Autorität.
+
+Die WD-Rückfallplatte wird separat über ihre stabile NVMe-by-id-, Seriennummer- und WWN-Identität geschützt. Vor und nach jeder produktiven Storage-Mutation müssen mindestens Identität und Partitionstabelle der WD übereinstimmen; ihre ESP und Dateisystemsignaturen sind Nicht-Ziele.
+
 Die genaue Größe und Position der Partitionen ist keine Verfassungsinvariante und wird erst aus einem frischen Datenträgerinventar und einem gesonderten Migrationsplan festgelegt.
 
 ### Root

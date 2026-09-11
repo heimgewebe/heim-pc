@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_production_storage_contract",
+  "profile": "nixos-executor-2026",
+  "migration_mode": "isolated-parallel-disk",
+  "target_identity": {
+    "role": "nixos-primary",
+    "transport": "nvme",
+    "minimum_size_bytes": 3900000000000,
+    "expected_vendor": "Seagate",
+    "selection_path_kind": "by-id",
+    "exact_by_id": null,
+    "exact_model": null,
+    "exact_serial": null,
+    "exact_wwn": null,
+    "capture_required_before_mutation": true,
+    "kernel_name_authoritative": false,
+    "requires_blank": true,
+    "requires_unmounted": true
+  },
+  "protected_disks": [
+    {
+      "role": "popos-fallback",
+      "by_id": "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519",
+      "model": "WD_BLACK SN850X 2000GB",
+      "serial": "25025T802519",
+      "wwn": "eui.e8238fa6bf530001001b448b4d59e756",
+      "size_bytes": 2000398934016,
+      "partition_table_must_remain_unchanged": true,
+      "esp_must_remain_unchanged": true,
+      "filesystem_signatures_must_remain_unchanged": true
+    }
+  ],
+  "topology": {
+    "partition_table": "gpt",
+    "partitions": [
+      {
+        "number": 1,
+        "role": "efi-system-partition",
+        "label": "HEIMPC_NIXOS_EFI",
+        "partuuid": "fef423b1-cb0d-4594-a272-c203cb003779",
+        "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+        "filesystem": "vfat",
+        "mountpoint": "/boot",
+        "size": {
+          "kind": "fixed_mib",
+          "value": 1024
+        }
+      },
+      {
+        "number": 2,
+        "role": "recovery-surface",
+        "label": "HEIMPC_NIXOS_RECOVERY",
+        "partuuid": "6da3e5b4-6693-49d4-a7c5-1a4b13effcf1",
+        "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+        "filesystem": "ext4",
+        "mountpoint": "/recovery",
+        "size": {
+          "kind": "fixed_mib",
+          "value": 4096
+        }
+      },
+      {
+        "number": 3,
+        "role": "encrypted-system",
+        "label": "HEIMPC_NIXOS_CRYPT",
+        "partuuid": "b2fdb842-ba91-4482-880f-ef02065c6af1",
+        "type_guid": "CA7D7CCB-63ED-4C53-861C-1742536059CC",
+        "encryption": "luks2",
+        "filesystem": "btrfs",
+        "size": {
+          "kind": "remainder"
+        }
+      }
+    ],
+    "luks": {
+      "version": 2,
+      "mapper_name": "heimpc-nixos-crypt"
+    },
+    "btrfs": {
+      "label": "HEIMPC_NIXOS",
+      "subvolumes": [
+        {
+          "name": "@root",
+          "mountpoint": "/"
+        },
+        {
+          "name": "@nix",
+          "mountpoint": "/nix"
+        },
+        {
+          "name": "@persist",
+          "mountpoint": "/persist"
+        },
+        {
+          "name": "@home",
+          "mountpoint": "/home"
+        },
+        {
+          "name": "@data",
+          "mountpoint": "/var/lib/heim-pc-data"
+        },
+        {
+          "name": "@containers",
+          "mountpoint": "/var/lib/containers"
+        }
+      ]
+    }
+  },
+  "boot": {
+    "own_esp_required": true,
+    "shared_esp_forbidden": true,
+    "firmware_boot_selection": "motherboard-uefi",
+    "touch_efi_variables": false,
+    "fallback_os_role": "popos-fallback"
+  },
+  "mutation_policy": {
+    "target_by_id_only": true,
+    "kernel_device_name_forbidden": true,
+    "protected_disk_pre_post_identity_required": true,
+    "protected_disk_partition_table_pre_post_required": true,
+    "target_identity_must_be_fully_captured": true
+  }
+}
