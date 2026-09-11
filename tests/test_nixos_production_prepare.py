@@ -59,7 +59,7 @@ def test_nix_argv_binds_exact_source_and_dedicated_nix_volume():
     argv = prep.nix_argv(
         source_volume=SOURCE_VOLUME,
         nix_volume=NIX_VOLUME,
-        args=["flake", "check", "/source/repo/nixos/system"],
+        args=["flake", "check", "/source/repo"],
         network_none=True,
     )
     assert argv == [
@@ -69,7 +69,7 @@ def test_nix_argv_binds_exact_source_and_dedicated_nix_volume():
         "--entrypoint", prep.NIX_BIN,
         prep.installer.PINNED_NIX_IMAGE,
         "--extra-experimental-features", "nix-command flakes",
-        "flake", "check", "/source/repo/nixos/system",
+        "flake", "check", "/source/repo",
     ]
 
 

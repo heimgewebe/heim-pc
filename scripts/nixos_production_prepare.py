@@ -19,7 +19,7 @@ from pathlib import Path
 import nixos_production_install as installer
 
 ROOT = Path(__file__).resolve().parents[1]
-FLAKE = ROOT / "nixos" / "system"
+FLAKE = ROOT
 NIX_BIN = "/nix/var/nix/profiles/default/bin/nix"
 GIT_BIN = "/root/.nix-profile/bin/git"
 
@@ -134,7 +134,7 @@ def nix_argv(*, source_volume: str, nix_volume: str, args: list[str], network_no
 
 
 def build_exact_closure(*, source_volume: str, nix_volume: str) -> str:
-    flake = "/source/repo/nixos/system"
+    flake = "/source/repo"
     run(nix_argv(
         source_volume=source_volume,
         nix_volume=nix_volume,
