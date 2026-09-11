@@ -7,28 +7,65 @@
     "role": "nixos-primary",
     "transport": "nvme",
     "minimum_size_bytes": 3900000000000,
-    "expected_vendor": "Seagate",
     "selection_path_kind": "by-id",
-    "exact_by_id": null,
-    "exact_model": null,
-    "exact_serial": null,
-    "exact_wwn": null,
+    "exact_by_id": "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7",
+    "exact_model": "Seagate ZP4000GP304001",
+    "exact_serial": "7VS01DX7",
+    "exact_wwn": "eui.6479a7716f000a39",
     "capture_required_before_mutation": true,
     "kernel_name_authoritative": false,
     "requires_blank": true,
-    "requires_unmounted": true
+    "requires_unmounted": true,
+    "exact_size_bytes": 4000787030016
   },
   "protected_disks": [
     {
       "role": "popos-fallback",
-      "by_id": "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519",
+      "by_id": "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756",
       "model": "WD_BLACK SN850X 2000GB",
       "serial": "25025T802519",
       "wwn": "eui.e8238fa6bf530001001b448b4d59e756",
       "size_bytes": 2000398934016,
       "partition_table_must_remain_unchanged": true,
       "esp_must_remain_unchanged": true,
-      "filesystem_signatures_must_remain_unchanged": true
+      "filesystem_signatures_must_remain_unchanged": true,
+      "verified_by_id_aliases": [
+        "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519"
+      ],
+      "partition_table_fingerprint": [
+        {
+          "number": 1,
+          "size_bytes": 1071644160,
+          "partuuid": "f16edce1-0366-4188-9f67-bd21bd022010",
+          "role": "popos-esp",
+          "fstype": "vfat",
+          "uuid": "78FD-6130"
+        },
+        {
+          "number": 2,
+          "size_bytes": 4294966784,
+          "partuuid": "bf96afc8-02a9-452d-beba-94979a014add",
+          "role": "popos-recovery",
+          "fstype": "vfat",
+          "uuid": "78FD-60C8"
+        },
+        {
+          "number": 3,
+          "size_bytes": 1990733157888,
+          "partuuid": "3124b879-382d-47b0-90c7-b84a9fd8ff9e",
+          "role": "popos-root",
+          "fstype": "ext4",
+          "uuid": "d25d44aa-5334-4b9d-9cc2-2475e9123776"
+        },
+        {
+          "number": 4,
+          "size_bytes": 4294966784,
+          "partuuid": "b9f8924f-5909-4b0d-ad92-cd339e4c5c43",
+          "role": "popos-swap-backing",
+          "fstype": "swap",
+          "uuid": "098646bf-5717-4810-8ebc-468f6f387bba"
+        }
+      ]
     }
   ],
   "topology": {
@@ -105,7 +142,8 @@
           "mountpoint": "/var/lib/containers"
         }
       ]
-    }
+    },
+    "partition_identity_policy": "contract-assigned-partuuid"
   },
   "boot": {
     "own_esp_required": true,

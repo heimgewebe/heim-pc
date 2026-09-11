@@ -793,8 +793,8 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--property=ProtectKernelTunables=yes",
         "--property=ProtectControlGroups=yes",
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=/dev/nvme0n1p3 r",
-        "--property=DeviceAllow=/dev/nvme0n1p1 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part3 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part1 r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
@@ -825,15 +825,15 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert "--property=PrivateDevices=yes" not in apt_apply
     assert "--property=DevicePolicy=closed" in apt_apply
     assert "--property=DeviceAllow=block-* r" not in apt_apply
-    assert "--property=DeviceAllow=/dev/nvme0n1p3 r" in apt_apply
-    assert "--property=DeviceAllow=/dev/nvme0n1p1 r" in apt_apply
+    assert "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part3 r" in apt_apply
+    assert "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part1 r" in apt_apply
     assert "--property=ProtectKernelModules=yes" not in apt_apply
     assert "--property=BindPaths=/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503:/run" in apt_apply
     assert "--property=TemporaryFileSystem=/run" not in apt_apply
     assert "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket" in apt_apply
     for prop in (
         "ProtectKernelTunables=yes", "ProtectControlGroups=yes",
-        "DevicePolicy=closed", "DeviceAllow=/dev/nvme0n1p3 r", "DeviceAllow=/dev/nvme0n1p1 r",
+        "DevicePolicy=closed", "DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part3 r", "DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part1 r",
         "RestrictNamespaces=yes", "ProtectKernelLogs=yes",
         "ProtectClock=yes", "LockPersonality=yes",
     ):

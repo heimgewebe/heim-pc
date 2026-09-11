@@ -1304,8 +1304,8 @@ def _apt_apply_systemd_argv(
         # keep devices closed and permit read-only access only to the audited
         # root and ESP devices.
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=/dev/nvme0n1p3 r",
-        "--property=DeviceAllow=/dev/nvme0n1p1 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part3 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756-part1 r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",

@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "da8e75f57dd9ba1b0088c326f5e47840cd4c281f152773ea375f1b6c8581977a"
+SOURCE_SNAPSHOT_SHA256 = "4e99b6fdb435ced9c295b276a9093503d698ab9ac9d2d6c0cef5458fe0283349"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -198,16 +198,39 @@ class T(unittest.TestCase):
         self.assertEqual(production["migration_mode"], "isolated-parallel-disk")
         self.assertTrue(production["target_identity"]["capture_required_before_mutation"])
         self.assertFalse(production["target_identity"]["kernel_name_authoritative"])
-        self.assertIsNone(production["target_identity"]["exact_by_id"])
+        self.assertEqual(production["target_identity"]["exact_by_id"], "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7")
+        self.assertEqual(production["target_identity"]["exact_model"], "Seagate ZP4000GP304001")
+        self.assertEqual(production["target_identity"]["exact_serial"], "7VS01DX7")
+        self.assertEqual(production["target_identity"]["exact_wwn"], "eui.6479a7716f000a39")
+        self.assertEqual(production["target_identity"]["exact_size_bytes"], 4000787030016)
         self.assertTrue(production["mutation_policy"]["target_by_id_only"])
         self.assertTrue(production["mutation_policy"]["kernel_device_name_forbidden"])
         protected = production["protected_disks"]
         self.assertEqual(len(protected), 1)
         self.assertEqual(protected[0]["role"], "popos-fallback")
         self.assertEqual(protected[0]["serial"], "25025T802519")
+        self.assertEqual(len(protected[0]["partition_table_fingerprint"]), 4)
+        self.assertEqual(
+            [(item["fstype"], item["uuid"]) for item in protected[0]["partition_table_fingerprint"]],
+            [
+                ("vfat", "78FD-6130"),
+                ("vfat", "78FD-60C8"),
+                ("ext4", "d25d44aa-5334-4b9d-9cc2-2475e9123776"),
+                ("swap", "098646bf-5717-4810-8ebc-468f6f387bba"),
+            ],
+        )
+        self.assertEqual(
+            [item["partuuid"] for item in protected[0]["partition_table_fingerprint"]],
+            [
+                "f16edce1-0366-4188-9f67-bd21bd022010",
+                "bf96afc8-02a9-452d-beba-94979a014add",
+                "3124b879-382d-47b0-90c7-b84a9fd8ff9e",
+                "b9f8924f-5909-4b0d-ad92-cd339e4c5c43",
+            ],
+        )
         self.assertEqual(
             protected[0]["by_id"],
-            "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519",
+            "/dev/disk/by-id/nvme-eui.e8238fa6bf530001001b448b4d59e756",
         )
         partitions = production["topology"]["partitions"]
         self.assertEqual(len({item["partuuid"] for item in partitions}), 3)
