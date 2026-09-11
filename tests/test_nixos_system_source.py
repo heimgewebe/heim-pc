@@ -163,7 +163,7 @@ class T(unittest.TestCase):
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nvidia.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
-            "tests/firstboot-credentials.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
+            "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
