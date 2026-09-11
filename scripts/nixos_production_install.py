@@ -492,6 +492,8 @@ def stage_firstboot_credentials(*, mount_root: str, source_revision: str, hash_b
 def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if check and result.returncode != 0:
+        if input_bytes is not None:
+            raise ProductionInstallError(f"command failed ({argv[0]}) with sensitive stdin; stderr withheld")
         stderr = result.stderr.decode("utf-8", "replace")[-4000:]
         raise ProductionInstallError(f"command failed ({argv[0]}): {stderr}")
     return result

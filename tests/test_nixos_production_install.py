@@ -316,6 +316,18 @@ def test_plan_contains_no_secret_material():
     assert "$y$j9T$" not in serialized
 
 
+def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):
+    class Result:
+        returncode = 1
+        stdout = b""
+        stderr = b"the-secret-must-never-be-logged"
+
+    monkeypatch.setattr(prod.subprocess, "run", lambda *args, **kwargs: Result())
+    with pytest.raises(prod.ProductionInstallError, match="sensitive stdin; stderr withheld") as exc:
+        prod._run(["cryptsetup", "luksFormat"], input_bytes=b"the-secret-must-never-be-logged")
+    assert "the-secret-must-never-be-logged" not in str(exc.value)
+
+
 def test_plan_teardown_always_attempts_stage_mount_cleanup():
     compiled = plan()
     assert compiled["teardown_commands"][0] == {
