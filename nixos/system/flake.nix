@@ -244,6 +244,12 @@
         vm = self.nixosConfigurations.heim-pc-vm.config.system.build.vm;
         provenance-guard = provenanceGuard;
         provenance-bundle = provenanceBundle;
+        # Optional real SDDM/Plasma Wayland credential proof. Keep this out of
+        # checks: mandatory CI retains the smaller headless state-machine test,
+        # while this target is run explicitly on a KVM-capable proof host.
+        firstboot-gui-proof = import ./tests/firstboot-gui-proof.nix {
+          inherit pkgs sourceRevision;
+        };
         agent-microvm = self.nixosConfigurations.agent-zone.config.microvm.declaredRunner;
         agent-vsock-proof-microvm = self.nixosConfigurations.agent-zone-vsock-proof.config.microvm.declaredRunner;
         trust-zone-host-system = self.nixosConfigurations.trust-zone-host.config.system.build.toplevel;

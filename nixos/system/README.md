@@ -217,7 +217,7 @@ It does not yet establish:
 - Secure Boot + LUKS + recovery on the real UEFI machine; blank-disk reconstruction and manual passphrase unlock already pass in KVM, but physical enrollment, current firmware boot selection, independent recovery/rollback and production secret handling do not;
 - Bureau approval/promotion -> physical host activation -> exact runtime identity readback;
 - production Rootbroker capability protocol;
-- runtime credential readiness for a fresh bare-metal installation: the fail-closed source contract now exists, but disposable graphical-login/admin-recovery proof, target-bound secret staging and later physical acceptance remain unproven.
+- runtime credential readiness for a fresh bare-metal installation: the fail-closed source contract and separately authorized disposable graphical-login/admin-recovery proof now exist; target-bound secret staging and later physical acceptance remain unproven, so bare-metal login readiness remains blocked.
 
 Those are migration gates, not details to hand-wave away.
 

@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "f7b26e546329c6e90600f25dd676d1a3bc32d08653aebc1ddd7092220f02e4a3"
+SOURCE_SNAPSHOT_SHA256 = "48372a61d5a9a6d89671a8a37609d746757112725fe347f6243e244a597e22f1"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -151,7 +151,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 23)
+        self.assertEqual(len(files), 24)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -163,7 +163,7 @@ class T(unittest.TestCase):
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nvidia.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
-            "tests/firstboot-credentials.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
+            "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
