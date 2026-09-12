@@ -43,7 +43,7 @@ It provides a complete overview of the canonical documentation zones and their c
 
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
-| runtime.readme | [runtime/README.md](runtime/README.md) | canonical | 2026-02-28 | - |
+| runtime.readme | [runtime/README.md](runtime/README.md) | canonical | 2026-09-12 | - |
 | home-entry | [runtime/home-entry.md](runtime/home-entry.md) | canonical | 2026-07-13 | operatorium-entry, security |
 | software-inventory | [runtime/software-inventory.md](runtime/software-inventory.md) | canonical | 2026-07-09 | home-entry, security |
 | program-inventory-summary | [runtime/program-inventory-summary.md](runtime/program-inventory-summary.md) | canonical | 2026-07-09 | software-inventory |

@@ -2,7 +2,7 @@
 id: runtime.readme
 role: reality
 status: canonical
-last_reviewed: 2026-02-28
+last_reviewed: 2026-09-12
 depends_on: []
 verifies_with: []
 ---
@@ -15,4 +15,4 @@ Documents in this zone should follow the canonical schema with the `role: realit
 
 ## Program inventory boundary
 
-`program-inventory-summary.md` and `program-inventory.v1.json` are the reviewable repo artifacts for the current program surface. Large raw CSV/TXT inventories stay local under `~/.local/share/heim-utilities/program-inventory/` and are not committed.
+`program-inventory-summary.md` and `program-inventory.v1.json` are reviewable point-in-time observations of the program surface. Their embedded `observed_at` timestamp defines their authority; they do not establish present runtime after that timestamp. Large raw CSV/TXT inventories stay local under `~/.local/share/heim-utilities/program-inventory/` and are not committed.
