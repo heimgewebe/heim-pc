@@ -282,6 +282,7 @@ def test_managed_prepare_routes_plan_then_run_without_recursive_reexec(monkeypat
         assert str(prep.MANAGED_BUILD) in argv
         assert "--managed-worker" in argv
         assert argv[argv.index("--tool") + 1] == "nix"
+        assert argv[argv.index("--") + 1] == sys.executable
         assert kwargs["env"][prep.MANAGED_WORKER_ENV] == "1"
 
 

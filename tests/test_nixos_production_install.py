@@ -762,6 +762,195 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
         prod.write_private_receipt(receipt_path, {"second": True})
 
 
+def test_private_receipt_reservation_is_create_only_and_finalizes_same_inode(tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    before = target.stat()
+    assert before.st_mode & 0o777 == 0o600
+    assert json.loads(target.read_text()) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+    prod.finalize_private_receipt(reservation, {"secret": "reserved"})
+    after = target.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert json.loads(target.read_text()) == {"secret": "reserved"}
+    with pytest.raises(prod.ProductionInstallError, match="overwrite"):
+        prod.reserve_private_receipt(target)
+
+
+def test_private_receipt_discard_never_unlinks_replaced_target(tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    held = tmp_path / "held-reservation.json"
+    reservation = prod.reserve_private_receipt(target)
+    target.rename(held)
+    target.write_text("foreign", encoding="utf-8")
+    target.chmod(0o600)
+    with pytest.raises(prod.ProductionInstallError, match="identity changed"):
+        prod.discard_private_receipt_reservation(reservation)
+    assert target.read_text(encoding="utf-8") == "foreign"
+    assert json.loads(held.read_text(encoding="utf-8"))["kind"] == (
+        "heim_pc.nixos_production_install_receipt_reservation"
+    )
+
+
+def test_private_receipt_discard_rejects_symlink_replacement(tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    held = tmp_path / "held-reservation.json"
+    reservation = prod.reserve_private_receipt(target)
+    target.rename(held)
+    target.symlink_to(held.name)
+    with pytest.raises(prod.ProductionInstallError, match="identity changed"):
+        prod.discard_private_receipt_reservation(reservation)
+    assert target.is_symlink()
+    assert json.loads(held.read_text(encoding="utf-8"))["status"] == "reserved"
+
+
+def test_private_receipt_discard_rejects_parent_replacement(tmp_path):
+    parent = tmp_path / "receipts"
+    parent.mkdir()
+    target = parent / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    held_parent = tmp_path / "held-receipts"
+    parent.rename(held_parent)
+    parent.mkdir()
+    replacement = parent / target.name
+    replacement.write_text("foreign", encoding="utf-8")
+    replacement.chmod(0o600)
+    with pytest.raises(prod.ProductionInstallError, match="identity changed"):
+        prod.discard_private_receipt_reservation(reservation)
+    assert replacement.read_text(encoding="utf-8") == "foreign"
+    assert json.loads((held_parent / target.name).read_text(encoding="utf-8"))["status"] == "reserved"
+
+
+def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "execute_plan", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("execute_plan must not run")))
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("occupied", encoding="utf-8")
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "nixos production install blocked by a safety check\n"
+    assert receipt_path.read_text(encoding="utf-8") == "occupied"
+
+
+def test_main_pre_mutation_failure_discards_receipt_reservation(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(
+        prod,
+        "execute_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            prod.ProductionInstallError("secret-before-mutation")
+        ),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "nixos production install blocked by a safety check\n"
+    assert "secret-before-mutation" not in captured.err
+    assert not receipt_path.exists()
+
+
+def test_main_post_mutation_failure_preserves_receipt_reservation(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(
+        prod,
+        "execute_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            prod.PostMutationInstallError("protected-fallback-changed")
+        ),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == prod.POST_MUTATION_PUBLIC_MESSAGES["protected-fallback-changed"] + "\n"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+
+
+def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "execute_plan", lambda *args, **kwargs: {"secret": "super-secret-material"})
+    monkeypatch.setattr(prod, "finalize_private_receipt", lambda *_args, **_kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("secret-finalize-detail")))
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == prod.POST_MUTATION_PUBLIC_MESSAGES["private-receipt-finalization-incomplete"] + "\n"
+    assert "secret-finalize-detail" not in captured.err
+    assert "super-secret-material" not in captured.err
+    assert receipt_path.exists()
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+
+
 def test_managed_build_receipt_rejects_noncanonical_store_root():
     receipt = managed_receipt(ARTIFACT)
     receipt["store_root"] = "/tmp/user-controlled-nix-store"

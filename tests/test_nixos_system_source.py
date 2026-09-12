@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "fbee4f2ed451f13f71b0d7cd1bebe66447b1473e8412bb81205fefa1c5d9989e"
+SOURCE_SNAPSHOT_SHA256 = "9cf3e5be191022aa7678b5019a9ce3c39f359d08f6c06e96208953967732b3cb"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -194,6 +194,11 @@ class T(unittest.TestCase):
         self.assertIn("/dev/disk/by-partuuid/", layout)
         self.assertIn("patch-loader-entries", layout)
         self.assertIn("heim-pc-private-storage-mounts", layout)
+        self.assertIn('--mountpoint "$target"', layout)
+        self.assertIn("--mountpoint /boot", layout)
+        self.assertIn("        else\n          rc=$?\n        fi\n        (( rc == 1 ))", layout)
+        self.assertNotIn('-T "$target"', layout)
+        self.assertNotIn("-T /boot", layout)
         self.assertIsNone(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", layout))
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)

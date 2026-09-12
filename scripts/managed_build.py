@@ -31,6 +31,8 @@ DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 NIX_STORE_MONITOR_INTERVAL_SECONDS = 0.5
+NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 30.0
+INTERNAL_NIX_STORE_SCAN_OPERATION = "--internal-nix-store-scan"
 NIX_CANCEL_GRACE_SECONDS = 5
 NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
@@ -43,6 +45,10 @@ class PolicyError(ValueError):
 
 class ManagedBuildError(RuntimeError):
     """Raised when a managed build cannot be planned or executed safely."""
+
+
+class StoreScanTimeout(ManagedBuildError):
+    """Raised when a managed Nix store scan exceeds its bounded observation window."""
 
 
 def _utc_now() -> str:
@@ -323,8 +329,15 @@ def _command_basename(command: Sequence[str]) -> str:
     return Path(command[0]).name
 
 
+def _trusted_nix_worker_python() -> str:
+    executable = str(sys.executable)
+    if not Path(executable).is_absolute() or os.path.normpath(executable) != executable:
+        raise ManagedBuildError("current Python interpreter path is not canonical and absolute")
+    return executable
+
+
 def _is_nix_prepare_worker(command: Sequence[str]) -> bool:
-    if not command or Path(str(command[0])).name not in {"python", "python3"}:
+    if not command or str(command[0]) != _trusted_nix_worker_python():
         return False
     args = [str(item) for item in command[1:]]
     return (
@@ -487,6 +500,52 @@ def scan_worktree_payloads(
     return {"allocated_bytes": total, "error_count": error_count, "entries": entries}
 
 
+def _validate_store_scan_observation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ManagedBuildError("managed Nix store scan returned an invalid observation")
+    allocated = value.get("allocated_bytes")
+    errors = value.get("error_count")
+    if type(allocated) is not int or allocated < 0 or type(errors) is not int or errors < 0 or not isinstance(value.get("entries"), list):
+        raise ManagedBuildError("managed Nix store scan returned an invalid observation")
+    return value
+
+
+def _bounded_store_scan(store_root: Path, *, timeout_seconds: float) -> dict[str, Any]:
+    if timeout_seconds <= 0:
+        raise StoreScanTimeout("managed Nix store scan deadline elapsed")
+    root_text = str(store_root)
+    if not store_root.is_absolute() or os.path.normpath(root_text) != root_text:
+        raise ManagedBuildError("managed Nix store scan root must be canonical and absolute")
+    try:
+        result = subprocess.run(
+            [_trusted_nix_worker_python(), str(Path(__file__).resolve()), INTERNAL_NIX_STORE_SCAN_OPERATION, root_text],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout_seconds, start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise StoreScanTimeout("managed Nix store scan exceeded its bounded observation window") from exc
+    if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
+        raise ManagedBuildError("managed Nix store scan helper failed")
+    try:
+        observation = json.loads(result.stdout.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ManagedBuildError("managed Nix store scan helper returned invalid JSON") from exc
+    return _validate_store_scan_observation(observation)
+
+
+def _internal_nix_store_scan_main(argv: Sequence[str]) -> int:
+    if len(argv) != 2 or argv[0] != INTERNAL_NIX_STORE_SCAN_OPERATION:
+        return 2
+    root = Path(argv[1]); root_text = str(root)
+    if not root.is_absolute() or os.path.normpath(root_text) != root_text:
+        return 2
+    try:
+        observation = _validate_store_scan_observation(scan_worktree_payloads(root, ["."]))
+    except (ManagedBuildError, OSError):
+        return 2
+    print(json.dumps({"allocated_bytes": observation["allocated_bytes"], "error_count": observation["error_count"], "entries": []}, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def _pin_path(state_root: Path, repository_id: str, tool: str) -> Path:
     return state_root / "pins" / f"{repository_id}-{tool}.json"
 
@@ -554,6 +613,8 @@ def _require_nix_prepare_worker_binding(
 ) -> None:
     if profile != "nixos-production-prepare":
         raise ManagedBuildError("managed Nix is restricted to the nixos-production-prepare profile")
+    if not command or str(command[0]) != _trusted_nix_worker_python():
+        raise ManagedBuildError("managed Nix worker must use the exact current Python interpreter")
     args = [str(item) for item in command[1:]]
     expected_script = root / "scripts" / "nixos_production_prepare.py"
     if (
@@ -1160,9 +1221,24 @@ def _run_nix_worker_guarded(
     trigger: str | None = None
     max_observed = 0
     store_scan_error_detected = False
+    store_scan_timeout_detected = False
+    final_store_scan: dict[str, Any] | None = None
     try:
         while True:
-            scan = scan_worktree_payloads(store_root, ["."])
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                trigger = "runtime-timeout"
+                break
+            try:
+                scan = _bounded_store_scan(store_root, timeout_seconds=min(NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, remaining))
+            except StoreScanTimeout:
+                if time.monotonic() >= deadline:
+                    trigger = "runtime-timeout"
+                else:
+                    store_scan_error_detected = True
+                    store_scan_timeout_detected = True
+                    trigger = "store-scan-timeout"
+                break
             if scan["error_count"] != 0:
                 store_scan_error_detected = True
                 trigger = "store-scan-error"
@@ -1187,13 +1263,22 @@ def _run_nix_worker_guarded(
         orphan_ids = _nix_container_ids(label)
         orphan_detected = bool(orphan_ids)
         removed, cleanup_verified = _remove_exact_nix_containers(label)
-        final_scan = scan_worktree_payloads(store_root, ["."])
-        if final_scan["error_count"] != 0:
+        try:
+            final_scan = _bounded_store_scan(store_root, timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS)
+        except StoreScanTimeout:
             store_scan_error_detected = True
+            store_scan_timeout_detected = True
             if trigger is None:
-                trigger = "store-scan-error"
-        final_bytes = final_scan["allocated_bytes"]
-        max_observed = max(max_observed, final_bytes)
+                trigger = "store-scan-timeout"
+            final_bytes = max_observed
+        else:
+            final_store_scan = final_scan
+            if final_scan["error_count"] != 0:
+                store_scan_error_detected = True
+                if trigger is None:
+                    trigger = "store-scan-error"
+            final_bytes = final_scan["allocated_bytes"]
+            max_observed = max(max_observed, final_bytes)
         if not cleanup_verified:
             raise ManagedBuildError("managed Nix container cleanup could not be verified")
     except BaseException as exc:
@@ -1213,12 +1298,12 @@ def _run_nix_worker_guarded(
                 "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
             ) from exc
         raise
-    if store_scan_error_detected:
+    if trigger == "runtime-timeout":
+        effective = 124
+    elif store_scan_error_detected:
         effective = 77
     elif trigger == "store-budget" or final_bytes >= stop_threshold:
         effective = 75
-    elif trigger == "runtime-timeout":
-        effective = 124
     elif orphan_detected:
         effective = 76
     else:
@@ -1233,6 +1318,8 @@ def _run_nix_worker_guarded(
         "store_max_observed_bytes": max_observed,
         "store_budget_stop_triggered": trigger == "store-budget" or final_bytes >= stop_threshold,
         "store_scan_error_detected": store_scan_error_detected,
+        "store_scan_timeout_detected": store_scan_timeout_detected,
+        "store_final_scan": final_store_scan,
         "runtime_timeout_triggered": trigger == "runtime-timeout",
     }
 
@@ -1300,6 +1387,7 @@ def execute_plan(
     cleanup_verified = plan["tool"] != "nix"
     before_store = {"allocated_bytes": 0}
     telemetry: dict[str, Any] | None = None
+    final_store_scan: dict[str, Any] | None = None
     if plan["tool"] == "nix":
         if not isinstance(nix_guard, dict):
             raise ManagedBuildError("managed Nix plan lacks its Nix guard")
@@ -1359,12 +1447,22 @@ def execute_plan(
                 result, telemetry = _run_nix_worker_guarded(
                     command, root=root, environment=environment, guard=nix_guard
                 )
+                observed_final_store_scan = telemetry.get("store_final_scan")
+                if observed_final_store_scan is not None:
+                    final_store_scan = _validate_store_scan_observation(
+                        observed_final_store_scan
+                    )
+                elif not telemetry.get("store_scan_timeout_detected"):
+                    raise ManagedBuildError(
+                        "managed Nix final store scan evidence is missing"
+                    )
             else:
                 # Unit-test injection stays explicit; production always uses the guarded Popen path.
                 result = runner(list(command), cwd=root, env=environment, check=False)
                 after_injected_scan = scan_worktree_payloads(
                     Path(str(nix_guard["store_root"])), ["."]
                 )
+                final_store_scan = after_injected_scan
                 after_injected = after_injected_scan["allocated_bytes"]
                 telemetry = {
                     "container_label_sha256": "0" * 64,
@@ -1376,6 +1474,8 @@ def execute_plan(
                     "store_max_observed_bytes": after_injected,
                     "store_budget_stop_triggered": after_injected >= int(nix_guard["store_stop_threshold_bytes"]),
                     "store_scan_error_detected": after_injected_scan["error_count"] != 0,
+                    "store_scan_timeout_detected": False,
+                    "store_final_scan": after_injected_scan,
                     "runtime_timeout_triggered": False,
                 }
                 if telemetry["store_scan_error_detected"]:
@@ -1390,15 +1490,22 @@ def execute_plan(
         effective_returncode = int(result.returncode)
         nix_receipt: dict[str, Any] | None = None
         if plan["tool"] == "nix":
-            store_root = Path(str(nix_guard["store_root"]))
-            after_store = scan_worktree_payloads(store_root, ["."])
-            store_scan_error_detected = (
-                bool((telemetry or {}).get("store_scan_error_detected"))
-                or after_store["error_count"] != 0
+            store_scan_error_detected = bool(
+                (telemetry or {}).get("store_scan_error_detected")
+            ) or (
+                final_store_scan is not None
+                and final_store_scan["error_count"] != 0
             )
-            if store_scan_error_detected:
+            if bool((telemetry or {}).get("runtime_timeout_triggered")):
+                effective_returncode = 124
+            elif store_scan_error_detected:
                 effective_returncode = 77
-            elif after_store["allocated_bytes"] >= int(nix_guard["store_stop_threshold_bytes"]) and effective_returncode == 0:
+            elif (
+                final_store_scan is not None
+                and final_store_scan["allocated_bytes"]
+                >= int(nix_guard["store_stop_threshold_bytes"])
+                and effective_returncode == 0
+            ):
                 effective_returncode = 75
             nix_receipt = {
                 "source_revision": nix_guard["source_revision"],
@@ -1406,8 +1513,16 @@ def execute_plan(
                 "source_volume": nix_guard["source_volume"],
                 "store_root": nix_guard["store_root"],
                 "store_allocated_bytes_before": before_store["allocated_bytes"],
-                "store_allocated_bytes_after": after_store["allocated_bytes"],
-                "store_scan_error_count_after": after_store["error_count"],
+                "store_allocated_bytes_after": (
+                    final_store_scan["allocated_bytes"]
+                    if final_store_scan is not None
+                    else None
+                ),
+                "store_scan_error_count_after": (
+                    final_store_scan["error_count"]
+                    if final_store_scan is not None
+                    else None
+                ),
                 "store_scan_error_detected": store_scan_error_detected,
                 "store_budget_bytes": nix_guard["store_budget_bytes"],
                 "runtime_budget_seconds": nix_guard["runtime_budget_seconds"],
@@ -1548,6 +1663,7 @@ def _normalized_command(
     *,
     policy: dict[str, Any],
     home: Path,
+    explicit_tool: str | None = None,
 ) -> list[str]:
     result = list(command)
     if result and result[0] == "--":
@@ -1556,6 +1672,10 @@ def _normalized_command(
         raise ManagedBuildError("command is required after '--'")
     if any(not isinstance(item, str) or "\x00" in item for item in result):
         raise ManagedBuildError("command contains an invalid argument")
+    if explicit_tool == "nix":
+        if result[0] != _trusted_nix_worker_python():
+            raise ManagedBuildError("managed Nix worker must request the exact current Python interpreter")
+        return result
     if "/" in result[0]:
         raise ManagedBuildError("managed executable must be named without a path")
     search_paths = [
@@ -1573,7 +1693,10 @@ def _normalized_command(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == INTERNAL_NIX_STORE_SCAN_OPERATION:
+        return _internal_nix_store_scan_main(raw_argv)
+    args = _parser().parse_args(raw_argv)
     try:
         policy = load_policy(args.policy)
         home = Path(os.environ.get("HOME", "~")).expanduser().resolve()
@@ -1638,7 +1761,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
-        command = _normalized_command(args.command, policy=policy, home=home)
+        command = _normalized_command(
+            args.command, policy=policy, home=home, explicit_tool=args.tool
+        )
         plan = build_plan(
             policy,
             repo=args.repo,

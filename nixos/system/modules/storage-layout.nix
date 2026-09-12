@@ -74,13 +74,17 @@ let
         local target="$1" uuid="$2" fs="$3" expected current
         expected="$(resolve_partuuid "$uuid")"
         install -d -m 0755 -- "$target"
-        current="$(findmnt -rn -o SOURCE -T "$target" 2>/dev/null || true)"
-        if [[ -n "$current" ]]; then
+        if current="$(findmnt --first-only --nofsroot -rn -o SOURCE --mountpoint "$target" 2>/dev/null)"; then
+          [[ -n "$current" && "$current" != *$'\n'* ]] || fail "$target mount source is invalid"
           [[ "$(readlink -f -- "$current")" == "$expected" ]] || fail "$target is mounted from the wrong device"
           return 0
+        else
+          rc=$?
         fi
+        (( rc == 1 )) || fail "$target mount state could not be inspected"
         mount -t "$fs" "/dev/disk/by-partuuid/$uuid" "$target"
-        current="$(findmnt -rn -o SOURCE -T "$target")"
+        current="$(findmnt --first-only --nofsroot -rn -o SOURCE --mountpoint "$target" 2>/dev/null)" || fail "$target mount identity could not be read"
+        [[ -n "$current" && "$current" != *$'\n'* ]] || fail "$target mount source is invalid"
         [[ "$(readlink -f -- "$current")" == "$expected" ]] || fail "$target mount identity could not be verified"
       }
 
@@ -88,8 +92,8 @@ let
         load_identity
         local boot_source expected_boot entry options_count options expected_token token seen tmp persist_target
         expected_boot="$(resolve_partuuid "$efi_partuuid")"
-        boot_source="$(findmnt -rn -o SOURCE -T /boot 2>/dev/null || true)"
-        [[ -n "$boot_source" && "$(readlink -f -- "$boot_source")" == "$expected_boot" ]] || fail "/boot is not the private EFI partition"
+        boot_source="$(findmnt --first-only --nofsroot -rn -o SOURCE --mountpoint /boot 2>/dev/null)" || fail "/boot is not mounted as an exact private EFI mountpoint"
+        [[ -n "$boot_source" && "$boot_source" != *$'\n'* && "$(readlink -f -- "$boot_source")" == "$expected_boot" ]] || fail "/boot is not the private EFI partition"
         expected_token="rd.luks.name=$encrypted_partuuid=$mapper_name"
         shopt -s nullglob
         entries=(/boot/loader/entries/*.conf)

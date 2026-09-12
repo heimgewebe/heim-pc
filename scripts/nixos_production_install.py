@@ -97,6 +97,7 @@ POST_MUTATION_PUBLIC_MESSAGES = {
     "protected-fallback-unverifiable": "nixos production install POST-MUTATION ALARM: protected fallback state could not be verified; stop and inspect the fallback disk before any retry",
     "trusted-build-seal-teardown-incomplete": "nixos production install POST-MUTATION ALARM: the root-protected build seal could not be fully torn down; inspect /nix and the seal before any retry",
     "docker-quiesce-restore-incomplete": "nixos production install POST-MUTATION ALARM: the pre-apply Docker service state could not be restored safely; inspect Docker before any retry",
+    "private-receipt-finalization-incomplete": "nixos production install POST-MUTATION ALARM: the reserved private success receipt could not be finalized safely; inspect target and receipt path before any retry",
 }
 
 
@@ -1060,34 +1061,236 @@ def write_private_plan(path: Path, plan: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def write_private_receipt(path: Path, receipt: dict[str, Any]) -> None:
-    if path.exists() or path.is_symlink():
-        raise ProductionInstallError("refusing to overwrite private production receipt")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd, temporary_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+def _private_receipt_reservation_marker() -> bytes:
+    return (json.dumps({
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _private_receipt_reservation_valid(reservation: dict[str, Any]) -> None:
+    path = reservation.get("path")
+    fd = reservation.get("fd")
+    parent_fd = reservation.get("parent_fd")
+    if not isinstance(path, Path) or type(fd) is not int or type(parent_fd) is not int:
+        raise ProductionInstallError("private production receipt reservation is invalid")
+    try:
+        opened = os.fstat(fd)
+        linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        opened_parent = os.fstat(parent_fd)
+        linked_parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise ProductionInstallError("private production receipt reservation identity is unavailable") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_uid != os.geteuid()
+        or opened.st_gid != os.getegid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_dev != reservation.get("device")
+        or opened.st_ino != reservation.get("inode")
+        or opened.st_mode != reservation.get("mode")
+        or opened.st_uid != reservation.get("uid")
+        or opened.st_gid != reservation.get("gid")
+        or opened.st_nlink != reservation.get("nlink")
+        or linked.st_dev != opened.st_dev
+        or linked.st_ino != opened.st_ino
+        or linked.st_mode != opened.st_mode
+        or linked.st_uid != opened.st_uid
+        or linked.st_gid != opened.st_gid
+        or linked.st_nlink != opened.st_nlink
+        or not stat.S_ISREG(linked.st_mode)
+        or not stat.S_ISDIR(opened_parent.st_mode)
+        or opened_parent.st_nlink < 1
+        or opened_parent.st_uid != os.geteuid()
+        or opened_parent.st_gid != os.getegid()
+        or (stat.S_IMODE(opened_parent.st_mode) & 0o022) != 0
+        or opened_parent.st_dev != reservation.get("parent_device")
+        or opened_parent.st_ino != reservation.get("parent_inode")
+        or opened_parent.st_mode != reservation.get("parent_mode")
+        or opened_parent.st_uid != reservation.get("parent_uid")
+        or opened_parent.st_gid != reservation.get("parent_gid")
+        or opened_parent.st_nlink != reservation.get("parent_nlink")
+        or linked_parent.st_dev != opened_parent.st_dev
+        or linked_parent.st_ino != opened_parent.st_ino
+        or linked_parent.st_mode != opened_parent.st_mode
+        or linked_parent.st_uid != opened_parent.st_uid
+        or linked_parent.st_gid != opened_parent.st_gid
+        or linked_parent.st_nlink != opened_parent.st_nlink
+        or not stat.S_ISDIR(linked_parent.st_mode)
+    ):
+        raise ProductionInstallError("private production receipt reservation identity changed")
+
+
+def _private_receipt_target_matches_reservation(reservation: dict[str, Any]) -> bool:
+    path = reservation.get("path")
+    fd = reservation.get("fd")
+    parent_fd = reservation.get("parent_fd")
+    if not isinstance(path, Path) or type(fd) is not int or type(parent_fd) is not int:
+        return False
+    try:
+        opened = os.fstat(fd)
+        linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        opened_parent = os.fstat(parent_fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(opened.st_mode)
+        and stat.S_ISREG(linked.st_mode)
+        and stat.S_ISDIR(opened_parent.st_mode)
+        and opened.st_dev == reservation.get("device")
+        and opened.st_ino == reservation.get("inode")
+        and linked.st_dev == opened.st_dev
+        and linked.st_ino == opened.st_ino
+        and opened_parent.st_dev == reservation.get("parent_device")
+        and opened_parent.st_ino == reservation.get("parent_inode")
     )
-    temporary = Path(temporary_name)
+
+
+def _private_receipt_reservation_marker_valid(reservation: dict[str, Any]) -> None:
+    marker = _private_receipt_reservation_marker()
+    fd = reservation["fd"]
+    try:
+        opened = os.fstat(fd)
+        content = os.pread(fd, len(marker) + 1, 0)
+    except OSError as exc:
+        raise ProductionInstallError("private production receipt reservation marker is unavailable") from exc
+    if opened.st_size != len(marker) or content != marker:
+        raise ProductionInstallError("private production receipt reservation marker changed")
+
+
+def reserve_private_receipt(path: Path) -> dict[str, Any]:
+    path = Path(os.path.abspath(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+    try:
+        parent_fd = os.open(path.parent, parent_flags)
+    except OSError as exc:
+        raise ProductionInstallError("private production receipt directory is unavailable") from exc
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+    except FileExistsError as exc:
+        os.close(parent_fd)
+        raise ProductionInstallError("refusing to overwrite private production receipt") from exc
+    except OSError as exc:
+        os.close(parent_fd)
+        raise ProductionInstallError("cannot reserve private production receipt") from exc
+    reservation: dict[str, Any] | None = None
     try:
         os.fchmod(fd, 0o600)
+        opened = os.fstat(fd)
+        opened_parent = os.fstat(parent_fd)
+        reservation = {
+            "path": path,
+            "fd": fd,
+            "parent_fd": parent_fd,
+            "device": opened.st_dev,
+            "inode": opened.st_ino,
+            "mode": opened.st_mode,
+            "uid": opened.st_uid,
+            "gid": opened.st_gid,
+            "nlink": opened.st_nlink,
+            "parent_device": opened_parent.st_dev,
+            "parent_inode": opened_parent.st_ino,
+            "parent_mode": opened_parent.st_mode,
+            "parent_uid": opened_parent.st_uid,
+            "parent_gid": opened_parent.st_gid,
+            "parent_nlink": opened_parent.st_nlink,
+        }
+        _private_receipt_reservation_valid(reservation)
+        marker = _private_receipt_reservation_marker()
+        _write_all_fd(fd, marker)
+        os.fsync(fd)
+        _private_receipt_reservation_valid(reservation)
+        _private_receipt_reservation_marker_valid(reservation)
+        os.fsync(parent_fd)
+        return reservation
+    except BaseException:
+        try:
+            if reservation is not None and _private_receipt_target_matches_reservation(reservation):
+                os.unlink(path.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+        except OSError:
+            pass
+        os.close(fd)
+        os.close(parent_fd)
+        raise
+
+
+def _close_private_receipt_reservation(reservation: dict[str, Any]) -> None:
+    fd = reservation.pop("fd", None)
+    parent_fd = reservation.pop("parent_fd", None)
+    if type(fd) is int:
+        os.close(fd)
+    if type(parent_fd) is int:
+        os.close(parent_fd)
+
+
+def discard_private_receipt_reservation(reservation: dict[str, Any]) -> None:
+    try:
+        _private_receipt_reservation_valid(reservation)
+        if not _private_receipt_target_matches_reservation(reservation):
+            raise ProductionInstallError("private production receipt reservation identity changed")
+        os.unlink(reservation["path"].name, dir_fd=reservation["parent_fd"])
+        if os.fstat(reservation["fd"]).st_nlink != 0:
+            raise ProductionInstallError("private production receipt reservation cleanup was not verified")
+        os.fsync(reservation["parent_fd"])
+    except OSError as exc:
+        raise ProductionInstallError("cannot discard private production receipt reservation") from exc
+    finally:
+        _close_private_receipt_reservation(reservation)
+
+
+def preserve_private_receipt_reservation(reservation: dict[str, Any]) -> None:
+    try:
+        _private_receipt_reservation_valid(reservation)
+        _private_receipt_reservation_marker_valid(reservation)
+        os.fsync(reservation["fd"])
+        os.fsync(reservation["parent_fd"])
+        _private_receipt_reservation_valid(reservation)
+        _private_receipt_reservation_marker_valid(reservation)
+    except OSError as exc:
+        raise ProductionInstallError("cannot preserve private production receipt reservation") from exc
+    finally:
+        _close_private_receipt_reservation(reservation)
+
+
+def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any]) -> None:
+    _private_receipt_reservation_valid(reservation)
+    _private_receipt_reservation_marker_valid(reservation)
+    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd = reservation["fd"]
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
         _write_all_fd(fd, payload)
         os.fsync(fd)
-        os.close(fd)
-        fd = -1
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError as exc:
-            raise ProductionInstallError("refusing to overwrite private production receipt") from exc
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        temporary.unlink(missing_ok=True)
+        _private_receipt_reservation_valid(reservation)
+        if os.fstat(fd).st_size != len(payload):
+            raise ProductionInstallError("private production receipt final size is invalid")
+        os.fsync(reservation["parent_fd"])
+    except OSError as exc:
+        raise ProductionInstallError("cannot finalize private production receipt") from exc
+    else:
+        _close_private_receipt_reservation(reservation)
+
+def write_private_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    reservation = reserve_private_receipt(path)
+    try:
+        finalize_private_receipt(reservation, receipt)
+    except BaseException:
+        if "fd" in reservation:
+            try:
+                discard_private_receipt_reservation(reservation)
+            except BaseException:
+                pass
+        raise
 
 
 def confirmation_for(plan: dict[str, Any]) -> str:
@@ -2985,11 +3188,29 @@ def main(argv: list[str] | None = None) -> int:
             raise ProductionInstallError("--apply requires --credential-hash-file")
         if args.write_receipt is None:
             raise ProductionInstallError("--apply requires --write-receipt")
-        receipt = execute_plan(
-            plan, contract=contract, confirmation=args.confirm,
-            credential_hash_file=args.credential_hash_file,
-        )
-        write_private_receipt(args.write_receipt.resolve(), receipt)
+        receipt_reservation = reserve_private_receipt(args.write_receipt)
+        try:
+            receipt = execute_plan(
+                plan, contract=contract, confirmation=args.confirm,
+                credential_hash_file=args.credential_hash_file,
+            )
+        except PostMutationInstallError:
+            try:
+                preserve_private_receipt_reservation(receipt_reservation)
+            except BaseException as evidence_exc:
+                raise PostMutationInstallError(
+                    "private-receipt-finalization-incomplete"
+                ) from evidence_exc
+            raise
+        except BaseException:
+            discard_private_receipt_reservation(receipt_reservation)
+            raise
+        try:
+            finalize_private_receipt(receipt_reservation, receipt)
+        except BaseException as exc:
+            if "fd" in receipt_reservation:
+                _close_private_receipt_reservation(receipt_reservation)
+            raise PostMutationInstallError("private-receipt-finalization-incomplete") from exc
         print(json.dumps({
             "schema_version": 1,
             "kind": "heim_pc.nixos_production_install_completed",

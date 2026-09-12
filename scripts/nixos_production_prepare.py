@@ -367,7 +367,7 @@ def managed_prepare_argv(
         "--tool", "nix",
         "--profile", MANAGED_PROFILE,
         "--",
-        "python3",
+        sys.executable,
         str(Path(__file__).resolve()),
         "--managed-worker",
         "--repo", str(repo),
