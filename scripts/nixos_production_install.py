@@ -2605,11 +2605,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.credential_hash_file is None:
             raise ProductionInstallError("--apply requires --credential-hash-file")
-        receipt = execute_plan(
+        execute_plan(
             plan, contract=contract, confirmation=args.confirm,
             credential_hash_file=args.credential_hash_file,
         )
-        print(json.dumps(receipt, indent=2, sort_keys=True))
+        print(json.dumps({
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_production_install_completed",
+            "private_receipt_redacted": True,
+        }, indent=2, sort_keys=True))
         return 0
     except PostMutationInstallError as exc:
         print(POST_MUTATION_PUBLIC_MESSAGES[exc.code], file=sys.stderr)

@@ -621,6 +621,41 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     assert "super-secret-material" not in captured.err
 
 
+def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(
+        prod, "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(
+        prod,
+        "execute_plan",
+        lambda *args, **kwargs: {"secret": "super-secret-material"},
+    )
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+    ]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_completed",
+        "private_receipt_redacted": True,
+    }
+    assert "super-secret-material" not in captured.out
+    assert "super-secret-material" not in captured.err
+
+
 def test_managed_build_receipt_rejects_noncanonical_store_root():
     receipt = managed_receipt(ARTIFACT)
     receipt["store_root"] = "/tmp/user-controlled-nix-store"
