@@ -370,8 +370,8 @@ def test_firstboot_staging_is_source_and_hash_bound_and_private(tmp_path):
     (tmp_path / "persist").mkdir(mode=0o755)
     password_hash = ("$y$j9T$" + "A" * 21 + "." + "$" + "B" * 43 + "\n").encode("ascii")
     receipt = prod.stage_firstboot_credentials(mount_root=str(tmp_path), source_revision=REVISION, hash_bytes=password_hash)
-    secret = Path(receipt["secret_path"])
-    authority = Path(receipt["authority_path"])
+    secret = tmp_path / "persist" / "secrets" / "heim-pc" / "first-boot" / "alex-password-hash"
+    authority = tmp_path / "persist" / "secrets" / "heim-pc" / "first-boot" / "alex-password-bootstrap-authority"
     assert secret.read_bytes() == password_hash
     assert secret.stat().st_mode & 0o777 == 0o600
     assert authority.stat().st_mode & 0o777 == 0o600
@@ -383,7 +383,8 @@ def test_firstboot_staging_is_source_and_hash_bound_and_private(tmp_path):
         f"source_revision={REVISION}\n"
         f"password_hash_sha256={digest}\n"
     )
-    assert receipt["password_hash_sha256"] == digest
+    assert receipt == {"schema_version": 1, "source_revision": REVISION, "password_hash_sha256": digest, "staged": True}
+    assert all(marker not in json.dumps(receipt) for marker in ("secret_path", "authority_path", "alex-password-hash", "first-boot"))
 
 
 def test_firstboot_staging_refuses_existing_secret(tmp_path):

@@ -573,7 +573,7 @@ def stage_firstboot_credentials(*, mount_root: str, source_revision: str, hash_b
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
-    return {"source_revision": source_revision, "password_hash_sha256": digest, "secret_path": str(secret), "authority_path": str(authority)}
+    return {"schema_version": 1, "source_revision": source_revision, "password_hash_sha256": digest, "staged": True}
 
 
 def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -889,7 +889,7 @@ def execute_plan(
     nvram_before = efi_nvram_digest()
 
     completed_effects: list[str] = []
-    credential_receipt: dict[str, Any] | None = None
+    credential_staged = False
     failure: BaseException | None = None
     try:
         for command in plan["commands"]:
@@ -899,7 +899,8 @@ def execute_plan(
                 verify_target_partition_bindings(contract)
         verify_installed_target(artifact)
         verify_persist_mount(MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}")
-        credential_receipt = stage_firstboot_credentials(mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes)
+        stage_firstboot_credentials(mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes)
+        credential_staged = True
     except BaseException as exc:
         failure = exc
     finally:
@@ -917,7 +918,7 @@ def execute_plan(
         raise ProductionInstallError("LUKS mapper remains open after teardown")
     if failure is not None:
         raise failure
-    if credential_receipt is None:
+    if not credential_staged:
         raise ProductionInstallError("credential staging did not complete")
     return {
         "schema_version": 1,
@@ -929,7 +930,7 @@ def execute_plan(
         "target_authority": plan["target_authority"],
         "protected_post_fingerprint": protected_fingerprint(post),
         "completed_effects": completed_effects,
-        "credential": credential_receipt,
+        "credential_staged": True,
         "efi_nvram_sha256_before": nvram_before,
         "efi_nvram_sha256_after": nvram_after,
         "efi_variables_touched": False,
