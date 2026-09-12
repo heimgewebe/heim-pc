@@ -177,7 +177,7 @@ in
 
   systemd.services.heim-pc-private-storage-mounts = {
     description = "Mount Heim-PC private EFI and recovery surfaces";
-    requiresMountsFor = [ "/persist" ];
+    unitConfig.RequiresMountsFor = [ "/persist" ];
     after = [ "local-fs.target" ];
     before = [ "multi-user.target" ];
     wantedBy = [ "multi-user.target" ];
