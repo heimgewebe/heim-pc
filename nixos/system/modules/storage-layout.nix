@@ -17,6 +17,12 @@ let
   mapperName = topology.luks.mapper_name;
   mapperDevice = "/dev/mapper/${mapperName}";
 
+  # The private LUKS token is the only unlock authority for this profile, so the
+  # loader-entry selector must not drift.  Pin the sort key here and reuse the
+  # same value in the entry matcher instead of assuming the nixpkgs default.
+  loaderSortKey = "nixos";
+  loaderSortKeyLine = "sort-key ${loaderSortKey}";
+
   btrfsFileSystems = builtins.listToAttrs (map (subvolume: {
     name = subvolume.mountpoint;
     value = {
@@ -103,7 +109,7 @@ let
         trap cleanup_tmp EXIT
         for entry in "''${entries[@]}"; do
           [[ -f "$entry" && ! -L "$entry" ]] || fail "loader entry is unsafe"
-          grep -qx 'sort-key nixos' "$entry" || continue
+          grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "$entry" || continue
           found=$((found + 1))
           options_count="$(grep -c '^options ' "$entry" || true)"
           [[ "$options_count" == 1 ]] || fail "NixOS loader entry must contain exactly one options line"
@@ -196,6 +202,7 @@ in
     };
   };
 
+  boot.loader.systemd-boot.sortKey = loaderSortKey;
   boot.loader.systemd-boot.extraInstallCommands =
     "${privateStorageTool}/bin/heim-pc-private-storage patch-loader-entries";
   boot.loader.efi.canTouchEfiVariables = false;

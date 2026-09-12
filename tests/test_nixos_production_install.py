@@ -246,6 +246,7 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
         "closure_manifest_sha256": compiled["install_artifact"]["closure_manifest_sha256"],
         "closure_path_count": compiled["install_artifact"]["closure_path_count"],
     }
+    monkeypatch.setattr(prod, "verify_host_tools_available", lambda _plan: [])
     monkeypatch.setattr(prod, "verify_host_nix_root_absent", lambda: log.append("nix-root-absent"))
     monkeypatch.setattr(prod, "prepare_verifier_image_archive", lambda _plan, _artifact: log.append("archive-create") or archive)
     monkeypatch.setattr(prod, "validate_verifier_image_archive", lambda *args, **kwargs: log.append("archive-verify") or archive)
@@ -2287,3 +2288,115 @@ def test_private_plan_is_explicit_create_only_and_stdout_summary_is_redacted(tmp
     assert SEAGATE not in summary
     assert WD not in summary
     assert prod.plan_summary(compiled)["private_hardware_identity_redacted"] is True
+
+
+def test_managed_store_root_accepts_any_canonical_home_but_not_arbitrary_paths():
+    cache_key = "1" * 64
+    suffix = f"/.cache/heim-pc/managed-builds/nix/{cache_key}/nix-store"
+    for home in ("/home/alex", "/home/runner", "/root"):
+        assert prod.MANAGED_NIX_STORE_ROOT_RE.fullmatch(home + suffix)
+    for rejected in (
+        "/srv/evil" + suffix,
+        "/home/alex/.cache/heim-pc/managed-builds/nix/" + cache_key + "/store",
+        "/home/a/b" + suffix,
+        "./home/alex" + suffix,
+    ):
+        assert prod.MANAGED_NIX_STORE_ROOT_RE.fullmatch(rejected) is None
+
+
+def test_independent_rebuild_receipt_from_a_foreign_home_still_authorizes():
+    """The GitHub-hosted attestation rebuild runs under its own HOME."""
+    receipt = managed_receipt(MERGED_ARTIFACT)
+    receipt["store_root"] = (
+        "/home/runner/.cache/heim-pc/managed-builds/nix/" + "1" * 64 + "/nix-store"
+    )
+    validated = prod.validate_managed_build_receipt(
+        receipt, MERGED_ARTIFACT, expected_policy_sha256=MANAGED_POLICY_SHA256
+    )
+    assert validated["store_root"] == receipt["store_root"]
+    receipt["store_root"] = "/tmp/nix-store"
+    with pytest.raises(prod.ProductionInstallError, match="does not authorize"):
+        prod.validate_managed_build_receipt(
+            receipt, MERGED_ARTIFACT, expected_policy_sha256=MANAGED_POLICY_SHA256
+        )
+
+
+def test_missing_host_tool_blocks_before_any_effect(monkeypatch):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    resolved: list[str] = []
+
+    def fake_resolve(name):
+        if name == "cryptsetup":
+            raise prod.ProductionInstallError(f"required host tool is unavailable: {name}")
+        resolved.append(name)
+        return name if name.startswith("/") else "/usr/sbin/" + name
+
+    monkeypatch.setattr(prod, "_resolve_trusted_executable", fake_resolve)
+    with pytest.raises(prod.ProductionInstallError, match="required host tool is unavailable"):
+        prod.verify_host_tools_available(compiled)
+
+    monkeypatch.setattr(prod, "_resolve_trusted_executable", lambda name: name)
+    checked = prod.verify_host_tools_available(compiled)
+    # Sealed-closure tools are addressed through the not-yet-mounted seal.
+    assert prod.SEALED_TOOL_LAUNCHER in checked
+    assert not any(item.startswith(SYSTEM_PATH) for item in checked)
+    for expected in ("sgdisk", "cryptsetup", "mkfs.fat", "mkfs.ext4", "/usr/bin/mksquashfs", prod.CTR_BIN):
+        assert expected in checked
+
+
+def test_guard_failure_before_first_effect_is_not_a_post_mutation_alarm(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *args, **kwargs: compiled["managed_build_receipt"])
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_host_tools_available", lambda _plan: [])
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
+    mock_trusted_build_gate(monkeypatch, compiled)
+
+    # The protected fallback becomes unverifiable while the target is still blank.
+    monkeypatch.setattr(
+        prod, "validate_protected_state",
+        lambda *_args: (_ for _ in ()).throw(prod.ProductionInstallError("observation failed")),
+    )
+    nvram = iter(["a" * 64, "b" * 64])
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: next(nvram))
+
+    quiesce_calls = {"count": 0}
+
+    def failing_quiesce():
+        quiesce_calls["count"] += 1
+        # Call 4 is the first in-loop guard, which runs before the first effect.
+        if quiesce_calls["count"] >= 4:
+            raise prod.ProductionInstallError("docker reactivated")
+
+    monkeypatch.setattr(prod, "verify_docker_quiesced", failing_quiesce)
+
+    effects: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: effects.append(argv) or Result())
+
+    with pytest.raises(prod.ProductionInstallError) as exc:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert not isinstance(exc.value, prod.PostMutationInstallError)
+    assert "blocked before mutation" in str(exc.value)
+    assert compiled["commands"][0]["argv"] not in effects

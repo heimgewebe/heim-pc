@@ -348,6 +348,8 @@
           assert nixpkgs.lib.hasInfix "heim-pc-private-storage patch-loader-entries"
             target.boot.loader.systemd-boot.extraInstallCommands;
           assert target.boot.loader.systemd-boot.enable;
+          # The private-storage hook selects NixOS entries by this exact sort key.
+          assert target.boot.loader.systemd-boot.sortKey == "nixos";
           assert !target.boot.loader.efi.canTouchEfiVariables;
           assert target.services.xserver.xkb.layout == "de";
           assert target.console.useXkbConfig;

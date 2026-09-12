@@ -63,6 +63,29 @@ INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "closure_path_count",
 )
 GH_BIN = "/usr/bin/gh"
+SEALED_TOOL_LAUNCHER = "/usr/bin/env"
+CTR_BIN = "/usr/bin/ctr"
+# Host-provided executables the apply path needs outside the reviewed plan argv.
+APPLY_HOST_TOOLS = (
+    GH_BIN,
+    SEALED_TOOL_LAUNCHER,
+    CTR_BIN,
+    "/usr/bin/mksquashfs",
+    "/usr/bin/chattr",
+    "/usr/bin/lsattr",
+    "/usr/bin/mount",
+    "/usr/bin/umount",
+    "/usr/bin/rm",
+    "/usr/sbin/losetup",
+    "docker",
+    "efibootmgr",
+    "findmnt",
+    "git",
+    "lsblk",
+    "mountpoint",
+    "systemctl",
+    "wipefs",
+)
 SEALED_NIX_BASE = Path("/var/lib/heim-pc/nixos-production-seals")
 VERIFIER_ARCHIVE_BASE = Path("/var/lib/heim-pc/nixos-production-verifiers")
 CONTAINERD_SOCKET = Path("/run/containerd/containerd.sock")
@@ -71,7 +94,13 @@ HOST_NIX_ROOT = Path("/nix")
 PRODUCTION_APPLY_LOCK_DIR = Path("/run/heim-pc-nixos-production-locks")
 PRODUCTION_APPLY_LOCK_OWNER_UID = 0
 PRODUCTION_APPLY_LOCK_OWNER_GID = 0
-MANAGED_NIX_STORE_ROOT_RE = re.compile(r"^/home/alex/\.cache/heim-pc/managed-builds/nix/[0-9a-f]{64}/nix-store$")
+# The canonical managed cache suffix stays bound exactly; only the HOME prefix is
+# host-relative, because the independent GitHub-hosted rebuild that authenticates a
+# merged-main candidate emits the same receipt shape under the runner account.
+MANAGED_NIX_STORE_ROOT_RE = re.compile(
+    r"^/(?:home/[a-z_][a-z0-9_-]{0,31}|root)"
+    r"/\.cache/heim-pc/managed-builds/nix/[0-9a-f]{64}/nix-store$"
+)
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
@@ -644,7 +673,7 @@ def _sealed_tool_argv(artifact: dict[str, Any], tool: str, args: list[str]) -> l
         raise ProductionInstallError("sealed Nix tool is not allowlisted")
     executable = f"{artifact['system_path']}/sw/bin/{tool}"
     path_value = f"{artifact['system_path']}/sw/bin:{TRUSTED_PATH}"
-    return ["/usr/bin/env", f"PATH={path_value}", executable, *args]
+    return [SEALED_TOOL_LAUNCHER, f"PATH={path_value}", executable, *args]
 
 
 def _require_by_id(value: Any, label: str) -> str:
@@ -2293,6 +2322,45 @@ def verify_host_nix_root_absent() -> None:
         raise ProductionInstallError("canonical /nix is already mounted")
 
 
+def _resolve_trusted_executable(name: str) -> str:
+    if name.startswith("/"):
+        if os.path.normpath(name) != name:
+            raise ProductionInstallError("required host tool path is not canonical")
+        candidates = [name]
+    elif "/" in name or not name:
+        raise ProductionInstallError("required host tool name is not canonical")
+    else:
+        candidates = [f"{directory}/{name}" for directory in TRUSTED_PATH.split(":")]
+    for candidate in candidates:
+        try:
+            info = os.stat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_mode & 0o111:
+            return candidate
+    raise ProductionInstallError(f"required host tool is unavailable: {name}")
+
+
+def verify_host_tools_available(plan: dict[str, Any]) -> list[str]:
+    """Prove every host-provided executable exists before the first effect.
+
+    A tool missing from Pop!_OS (for example cryptsetup or mksquashfs) must block
+    the run while the Seagate is still blank, not abort it halfway through a
+    partition/format sequence.
+    """
+    names: list[str] = []
+    for command in list(plan.get("commands", [])) + list(plan.get("teardown_commands", [])):
+        argv = command.get("argv") if isinstance(command, dict) else None
+        if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
+            raise ProductionInstallError("reviewed plan contains an invalid command")
+        # Sealed-closure tools are addressed through the seal that is not mounted yet.
+        if argv[0] == SEALED_TOOL_LAUNCHER:
+            continue
+        names.append(argv[0])
+    names.extend(APPLY_HOST_TOOLS)
+    return sorted({_resolve_trusted_executable(name) for name in dict.fromkeys(names)})
+
+
 def _systemd_active(unit: str) -> bool:
     result = _run(["systemctl", "is-active", "--quiet", unit], check=False)
     if result.returncode == 0:
@@ -2801,7 +2869,7 @@ def _verify_containerd_socket() -> None:
 
 
 def _ctr_argv(namespace: str | None, args: list[str]) -> list[str]:
-    argv = ["/usr/bin/ctr", "--address", str(CONTAINERD_SOCKET)]
+    argv = [CTR_BIN, "--address", str(CONTAINERD_SOCKET)]
     if namespace is not None:
         if re.fullmatch(r"heim-pc-nixos-verify-[0-9a-f]{16}", namespace) is None:
             raise ProductionInstallError("containerd verifier namespace is invalid")
@@ -3265,6 +3333,7 @@ def execute_plan(
         raise ProductionInstallError("install artifact revision no longer matches the reviewed plan")
     source_revision = verify_source(plan["flake_source"], artifact["source_revision"])
     verify_install_artifact_environment(artifact)
+    verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     pre_now = validate_preflight(observer(contract), contract)
     verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
@@ -3296,7 +3365,14 @@ def execute_plan(
     nvram_before: str | None = None
     nvram_after: str | None = None
 
-    def post_mutation_alarm(code: str) -> PostMutationInstallError:
+    def post_mutation_alarm(code: str) -> ProductionInstallError:
+        # An in-loop guard can fail before the first destructive command runs. The
+        # target is untouched then, so that is an ordinary block, not an alarm that
+        # tells the operator destructive execution was attempted.
+        if not mutation_attempted:
+            return ProductionInstallError(
+                f"production apply blocked before mutation: {code}"
+            )
         return PostMutationInstallError(
             code,
             private_evidence={
