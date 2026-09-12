@@ -152,6 +152,12 @@ GPT
 
 Disko beschreibt die produktive Zieltopologie deklarativ.
 
+Für die Heim-PC-Migration gilt ab dem Zwei-NVMe-Cutover eine **isolierte Parallel-Migration**: Die neue 4-TB-Seagate ist ausschließliches NixOS-Ziel mit eigener ESP und eigenem Bootloader; die bestehende WD SN850X mit Pop!_OS bleibt als unabhängig bootfähiger Rückfallpfad unangetastet. Die Firmware wählt zwischen beiden Platten. Ein gemeinsamer Bootloader oder eine gemeinsam genutzte ESP ist während der Migration ausdrücklich nicht Teil des Zielbilds.
+
+Produktive Mounts verwenden öffentliche, eindeutige `HEIMPC_NIXOS_*`-PARTLABELs. Exakte GPT-PARTUUIDs sowie die Ziel-/Fallback-Identitäten liegen ausschließlich im lokalen, revisions- und Public-Contract-Digest-gebundenen Private-Identity-Contract. Destruktive Operationen dürfen das Ziel ausschließlich über die dort gebundene exakte `/dev/disk/by-id/...`-Identität plus Modell, Seriennummer, Größe und WWN auswählen; PARTUUID- und PARTLABEL-Aliase werden nach der Partitionierung nur als zusätzliche Bindungsbeweise geprüft. Kernel-Namen wie `/dev/nvme0n1` oder `/dev/nvme1n1` sind niemals Autorität.
+
+Die WD-Rückfallplatte wird separat über ihre stabile NVMe-by-id-, Seriennummer- und WWN-Identität geschützt. Vor und nach jeder produktiven Storage-Mutation müssen mindestens Identität und Partitionstabelle der WD übereinstimmen; ihre ESP und Dateisystemsignaturen sind Nicht-Ziele.
+
 Die genaue Größe und Position der Partitionen ist keine Verfassungsinvariante und wird erst aus einem frischen Datenträgerinventar und einem gesonderten Migrationsplan festgelegt.
 
 ### Root
@@ -453,3 +459,12 @@ Die Architektur wird nicht rückwirkend an eine bequemere Migration angepasst. U
 NixOS bleibt Executor, solange es die `system-constitution` insgesamt am besten erfüllt.
 
 Ein Wechsel wird neu bewertet, wenn ein anderer Host nachweislich bessere Gesamtwerte bei Reproduzierbarkeit, Recovery, Hardwarezuverlässigkeit, Trust, Wartbarkeit und Fehlerdomänentrennung bietet. Die Bewertung erfolgt gegen beobachtbare Verträge und Acceptance Gates, nicht gegen NixOS-spezifische Syntaxtreue.
+
+
+## Produktions-Installer: physisch gebundene Seagate
+
+Der nach dem Umbau gelesene Ist-Zustand ist Vertragsbestandteil: M.2_1/PCIe-4.0-x4 enthält die 4-TB-Seagate `ZP4000GP304001`, M.2_2/PCIe-3.0-x4 die WD SN850X mit Pop!_OS. Exakte Seriennummern, WWNs und by-id-Pfade stehen ausschließlich im lokalen privaten Identity-Contract; `nvme0n1` beziehungsweise `nvme1n1` bleiben reine Beobachtungsnamen und sind keine Mutationsautorität.
+
+Der produktive Pfad hat drei getrennte Stufen. Erstens baut `scripts/nixos_production_prepare.py` aus einem **cleanen exakten Git-Commit** im gepinnten Nix-Docker-Image den exakten `heim-pc-storage-target`-Closure in einem revisionsgebundenen `/nix`-Volume und publiziert nur dessen kleines Install-Artefakt. Diese Stufe kennt keine Blockgeräte. Ein Artefakt eines PR-/Branch-Heads ist ausschließlich Proof; nach einem Merge muss für den tatsächlichen Installationslauf aus dem finalen Main-Commit neu gebaut werden. Zweitens liest `scripts/nixos_production_install.py` Hardware und Artefakt effect-frei ein und kompiliert einen plan-hash-gebundenen Plan. Drittens darf Apply erst nach exakter Bestätigung, erneutem Live-Gate und interaktiver Secret-Zufuhr mutieren.
+
+Pop!_OS benötigt dafür kein hostseitiges Nix. Der vorbereitete Store wird vor Apply mit dem Nix-Binary aus dem gepinnten Image als separater read-only Local Store verifiziert; danach laufen `nixos-install`, `mkfs.btrfs` und `btrfs` offline aus dem exakten Closure. Schreibende Storage-Befehle adressieren ausschließlich die exakte private Seagate-by-id beziehungsweise daraus abgeleitete stabile by-id-Partitionaliases; private PARTUUID- und öffentliche PARTLABEL-Aliase dienen nur als zusätzliche Bindungsbeweise nach der Partitionierung. Vor der ersten Mutation und nach dem Lauf muss der WD-Fingerprint inklusive Root/ESP-Zuordnung, PARTUUIDs sowie Filesystem-Typen/-UUIDs identisch sein. Die Seagate erhält ihre eigene GPT, ESP, Recovery-Fläche, LUKS2- und Btrfs-Struktur sowie systemd-boot; der EFI/NVRAM-Digest muss unverändert bleiben. Vor dem ersten Boot werden die source- und Hash-gebundenen Firstboot-Credentials ausschließlich in das verifizierte verschlüsselte `@persist` gestaged; nach Teardown muss der Mapper geschlossen sein.

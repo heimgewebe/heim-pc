@@ -1,6 +1,6 @@
 { lib, ... }:
 let
-  contract = builtins.fromJSON (builtins.readFile ../../rehearsal/contract-v1.json);
+  contract = builtins.fromJSON (builtins.readFile ../../production/contract-v1.json);
   topology = contract.topology;
   partitionByRole = role:
     let
@@ -26,13 +26,17 @@ let
     };
   }) topology.btrfs.subvolumes);
 
+  # PARTLABELs describe public topology. Exact PARTUUIDs remain private and
+  # are enforced by the installer before this closure is ever booted.
+  partitionDevice = partition: "/dev/disk/by-partlabel/${partition.label}";
+
   surfaceFileSystems = {
     ${efi.mountpoint} = {
-      device = "/dev/disk/by-partlabel/${efi.label}";
+      device = partitionDevice efi;
       fsType = efi.filesystem;
     };
     ${recovery.mountpoint} = {
-      device = "/dev/disk/by-partlabel/${recovery.label}";
+      device = partitionDevice recovery;
       fsType = recovery.filesystem;
     };
   };
@@ -41,12 +45,13 @@ in
   assertions = [
     {
       assertion = contract.schema_version == 1
-        && contract.kind == "heim_pc.nixos_storage_rehearsal_contract";
-      message = "storage target requires rehearsal contract v1";
+        && contract.kind == "heim_pc.nixos_production_storage_contract";
+      message = "storage target requires production storage contract v1";
     }
     {
-      assertion = topology.partition_table == "gpt";
-      message = "storage target requires the rehearsed GPT topology";
+      assertion = topology.partition_table == "gpt"
+        && topology.partition_identity_policy == "private-identity-contract-assigned-partuuid";
+      message = "storage target requires the production GPT topology";
     }
     {
       assertion = efi.filesystem == "vfat"
@@ -56,16 +61,16 @@ in
         && encrypted.encryption == "luks2"
         && encrypted.filesystem == "btrfs"
         && topology.luks.version == 2;
-      message = "storage target must stay bound to EFI/recovery/LUKS2/Btrfs rehearsal semantics";
+      message = "storage target must stay bound to isolated EFI/recovery/LUKS2/Btrfs production semantics";
     }
   ];
 
-  boot.initrd.luks.devices.${mapperName}.device =
-    "/dev/disk/by-partlabel/${encrypted.label}";
+  boot.initrd.luks.devices.${mapperName}.device = partitionDevice encrypted;
 
   fileSystems = lib.mkForce (btrfsFileSystems // surfaceFileSystems);
 
-  # This closure describes the rehearsed install/boot target only. It still
-  # cannot mutate EFI variables by itself and does not partition or format disks.
+  # This closure describes only the isolated production boot/storage topology.
+  # Runtime target selection remains a separate exact by-id gate; this module
+  # cannot partition/format disks or mutate EFI variables by itself.
   boot.loader.efi.canTouchEfiVariables = false;
 }

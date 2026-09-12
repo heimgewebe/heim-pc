@@ -26,6 +26,8 @@ PLAN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?: .*)?$")
 APT_SUMMARY_RE = re.compile(r"^(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded\.$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
+NVME_PARTITION_RE = re.compile(r"^/dev/nvme\d+n\d+p\d+\Z")
+BY_ID_ROOT = Path("/dev/disk/by-id")
 BROKER_OUTPUT_EVIDENCE_ROOT = Path("/run/grabowski/privileged-broker-evidence")
 BROKER_OUTPUT_EVIDENCE_KIND = "grabowski_privileged_output_evidence"
 BROKER_POWER_ACTION = "operator_power_argv"
@@ -127,6 +129,56 @@ def _host_readback_env(*, user: bool = False) -> dict[str, str]:
 
 def _host_dpkg_env() -> dict[str, str]:
     return _host_readback_env()
+
+
+def _mounted_nvme_partition(mountpoint: str) -> str:
+    result = _run(
+        ["/usr/bin/findmnt", "--nofsroot", "-rn", "-o", "SOURCE", mountpoint],
+        env=_host_readback_env(),
+    )
+    source = result["stdout"].strip()
+    if NVME_PARTITION_RE.fullmatch(source) is None:
+        raise PlanError(f"{mountpoint} is not backed by one direct NVMe partition")
+    return source
+
+
+def _stable_by_id_partition_alias(source: str) -> str:
+    if NVME_PARTITION_RE.fullmatch(source) is None:
+        raise PlanError("stable by-id resolution requires one direct NVMe partition")
+    resolved = os.path.realpath(source)
+    try:
+        entries = list(BY_ID_ROOT.iterdir())
+    except OSError as exc:
+        raise PlanError("stable block-device identity directory is unavailable") from exc
+    candidates: list[Path] = []
+    for entry in entries:
+        if not entry.is_symlink() or "-part" not in entry.name:
+            continue
+        try:
+            if os.path.realpath(entry) == resolved:
+                candidates.append(entry)
+        except OSError:
+            continue
+    if not candidates:
+        raise PlanError("mounted NVMe partition has no stable by-id alias")
+    candidates.sort(key=lambda entry: (
+        0 if entry.name.startswith("nvme-eui.") else 1,
+        1 if "_1-part" in entry.name else 0,
+        len(entry.name),
+        entry.name,
+    ))
+    return str(candidates[0])
+
+
+def _validate_device_allow_paths(root_device: str, efi_device: str) -> tuple[str, str]:
+    for value in (root_device, efi_device):
+        if not isinstance(value, str) or not value.startswith("/dev/disk/by-id/nvme-") or "-part" not in value:
+            raise PlanError("APT apply device bindings must use stable NVMe by-id partition aliases")
+    root_stem = re.sub(r"-part[0-9]+$", "", Path(root_device).name)
+    efi_stem = re.sub(r"-part[0-9]+$", "", Path(efi_device).name)
+    if root_device == efi_device or not root_stem or root_stem != efi_stem:
+        raise PlanError("APT apply root and EFI bindings must be distinct partitions on one NVMe identity")
+    return root_device, efi_device
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1273,10 +1325,12 @@ def _root_apt_deb_paths(plan: dict[str, Any]) -> list[Path]:
 
 
 def _apt_apply_systemd_argv(
-    plan_id: str, root_deb_paths: list[Path], runtime_capture: Path
+    plan_id: str, root_deb_paths: list[Path], runtime_capture: Path,
+    root_device: str, efi_device: str,
 ) -> list[str]:
     if not root_deb_paths:
         raise PlanError("APT apply requires at least one explicit root-owned DEB path")
+    root_device, efi_device = _validate_device_allow_paths(root_device, efi_device)
     unit_name = f"heim-pc-package-update-{SAFE_NAME_RE.sub('_', plan_id)}.service"
     argv = [
         "/usr/bin/systemd-run",
@@ -1304,8 +1358,8 @@ def _apt_apply_systemd_argv(
         # keep devices closed and permit read-only access only to the audited
         # root and ESP devices.
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=/dev/nvme0n1p3 r",
-        "--property=DeviceAllow=/dev/nvme0n1p1 r",
+        f"--property=DeviceAllow={root_device} r",
+        f"--property=DeviceAllow={efi_device} r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
@@ -1395,7 +1449,8 @@ def _apply_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, A
     apt_apply = None
     if root_deb_paths:
         apt_apply = _apt_apply_systemd_argv(
-            plan["plan_id"], root_deb_paths, Path(commands["runtime_capture_path"])
+            plan["plan_id"], root_deb_paths, Path(commands["runtime_capture_path"]),
+            str(plan["baseline"]["root_device"]), str(plan["baseline"]["efi_device"]),
         )
     snap_apply: list[list[str]] = []
     for item in plan["snap"].get("packages", []):
@@ -1446,6 +1501,8 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
         "dpkg_status_sha256": _dpkg_status_sha256(),
         "apt_source_config": _source_config_records(),
         "created_at_unix": int(time.time()),
+        "root_device": _stable_by_id_partition_alias(_mounted_nvme_partition("/")),
+        "efi_device": _stable_by_id_partition_alias(_mounted_nvme_partition("/boot/efi")),
     }
     apt = _stage_apt(stage, policy, uid)
     snap = _stage_snap(stage, policy, uid)
