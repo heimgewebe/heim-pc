@@ -104,10 +104,11 @@ POST_MUTATION_PUBLIC_MESSAGES = {
 class PostMutationInstallError(ProductionInstallError):
     """Stable non-secret alarm after destructive execution has been attempted."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, private_evidence: dict[str, Any] | None = None):
         if code not in POST_MUTATION_PUBLIC_MESSAGES:
             raise ValueError("unknown post-mutation alarm code")
         self.code = code
+        self.private_evidence = dict(private_evidence or {})
         super().__init__(code)
 
 
@@ -1279,6 +1280,29 @@ def _restore_private_receipt_reservation_marker(reservation: dict[str, Any]) -> 
         ) from exc
 
 
+def _invalidate_private_receipt_reservation(reservation: dict[str, Any]) -> None:
+    fd = reservation.get("fd")
+    parent_fd = reservation.get("parent_fd")
+    path = reservation.get("path")
+    if type(fd) is not int or type(parent_fd) is not int or not isinstance(path, Path):
+        raise ProductionInstallError("private production receipt reservation is invalid")
+    try:
+        # Destroy any syntactically valid success payload through the already-held
+        # descriptor even if the pathname or its parent was raced after reservation.
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.fsync(fd)
+        if _private_receipt_target_matches_reservation(reservation):
+            os.unlink(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+    except OSError as exc:
+        raise ProductionInstallError(
+            "cannot invalidate private production receipt after finalization failure"
+        ) from exc
+    finally:
+        _close_private_receipt_reservation(reservation)
+
+
 def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any]) -> None:
     _private_receipt_reservation_valid(reservation)
     _private_receipt_reservation_marker_valid(reservation)
@@ -1290,15 +1314,21 @@ def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any
         _write_all_fd(fd, payload)
         os.fsync(fd)
         _private_receipt_reservation_valid(reservation)
-        if os.fstat(fd).st_size != len(payload):
-            raise ProductionInstallError("private production receipt final size is invalid")
+        if os.fstat(fd).st_size != len(payload) or os.pread(fd, len(payload) + 1, 0) != payload:
+            raise ProductionInstallError("private production receipt final payload is invalid")
         os.fsync(reservation["parent_fd"])
     except (OSError, ProductionInstallError) as exc:
         try:
             _restore_private_receipt_reservation_marker(reservation)
         except (OSError, ProductionInstallError) as restore_exc:
+            try:
+                _invalidate_private_receipt_reservation(reservation)
+            except (OSError, ProductionInstallError) as invalidate_exc:
+                raise ProductionInstallError(
+                    "private production receipt finalization failed and reservation recovery is incomplete"
+                ) from invalidate_exc
             raise ProductionInstallError(
-                "private production receipt finalization failed and reservation recovery is incomplete"
+                "private production receipt finalization failed; reservation was invalidated"
             ) from restore_exc
         raise ProductionInstallError("cannot finalize private production receipt") from exc
     else:
@@ -1672,7 +1702,7 @@ def _wipefs_signatures(authority_path: str) -> list[dict[str, Any]]:
     return _normalize_signature_records(payload.get("signatures"), authority_path)
 
 
-def _directory_content_sha256(root: Path) -> str:
+def _directory_content_snapshot(root: Path) -> tuple[str, str]:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -1681,17 +1711,38 @@ def _directory_content_sha256(root: Path) -> str:
     except OSError as exc:
         raise ProductionInstallError("protected EFI content root cannot be opened safely") from exc
     digest = hashlib.sha256()
+    metadata = hashlib.sha256()
+
+    def stable_identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_uid, info.st_gid, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns,
+        )
+
+    def bind_metadata(kind: bytes, relative: str, info: os.stat_result) -> None:
+        metadata.update(kind + b"\0" + relative.encode("utf-8") + b"\0")
+        metadata.update(
+            (":".join(str(item) for item in stable_identity(info)) + "\0").encode("ascii")
+        )
+
     try:
         root_before = os.fstat(root_fd)
         if not stat.S_ISDIR(root_before.st_mode):
             raise ProductionInstallError("protected EFI content root is not a directory")
         root_device = root_before.st_dev
+        bind_metadata(b"D", "", root_before)
         for dirpath, dirnames, filenames, dir_fd in os.fwalk(
             ".", topdown=True, follow_symlinks=False, dir_fd=root_fd
         ):
             dirnames.sort()
             filenames.sort()
             prefix = "" if dirpath == "." else dirpath.removeprefix("./")
+            opened_dir = os.fstat(dir_fd)
+            if not stat.S_ISDIR(opened_dir.st_mode) or opened_dir.st_dev != root_device:
+                raise ProductionInstallError("protected EFI directory identity changed while hashing")
+            if prefix:
+                bind_metadata(b"D", prefix, opened_dir)
             for name in dirnames:
                 linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 if stat.S_ISLNK(linked.st_mode) or not stat.S_ISDIR(linked.st_mode) or linked.st_dev != root_device:
@@ -1711,17 +1762,12 @@ def _directory_content_sha256(root: Path) -> str:
                     raise ProductionInstallError("protected EFI file cannot be opened safely") from exc
                 try:
                     opened = os.fstat(fd)
-                    before_identity = (
-                        linked_before.st_dev, linked_before.st_ino,
-                        stat.S_IFMT(linked_before.st_mode), linked_before.st_size,
-                    )
-                    opened_identity = (
-                        opened.st_dev, opened.st_ino,
-                        stat.S_IFMT(opened.st_mode), opened.st_size,
-                    )
+                    before_identity = stable_identity(linked_before)
+                    opened_identity = stable_identity(opened)
                     if opened_identity != before_identity or opened.st_dev != root_device or not stat.S_ISREG(opened.st_mode):
                         raise ProductionInstallError("protected EFI file identity changed before hashing")
                     relative = str(PurePosixPath(prefix, name))
+                    bind_metadata(b"F", relative, opened)
                     digest.update(b"F\0" + relative.encode("utf-8") + b"\0")
                     digest.update(str(opened.st_size).encode("ascii") + b"\0")
                     remaining = opened.st_size
@@ -1735,28 +1781,29 @@ def _directory_content_sha256(root: Path) -> str:
                         raise ProductionInstallError("protected EFI file exceeds observed size")
                     opened_after = os.fstat(fd)
                     linked_after = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                    after_identity = (
-                        opened_after.st_dev, opened_after.st_ino,
-                        stat.S_IFMT(opened_after.st_mode), opened_after.st_size,
-                    )
-                    linked_after_identity = (
-                        linked_after.st_dev, linked_after.st_ino,
-                        stat.S_IFMT(linked_after.st_mode), linked_after.st_size,
-                    )
-                    if after_identity != opened_identity or linked_after_identity != opened_identity:
+                    if (
+                        stable_identity(opened_after) != opened_identity
+                        or stable_identity(linked_after) != opened_identity
+                    ):
                         raise ProductionInstallError("protected EFI file identity changed while hashing")
                 finally:
                     os.close(fd)
         root_after = os.fstat(root_fd)
-        if (
-            root_after.st_dev != root_before.st_dev
-            or root_after.st_ino != root_before.st_ino
-            or stat.S_IFMT(root_after.st_mode) != stat.S_IFMT(root_before.st_mode)
-        ):
+        if stable_identity(root_after) != stable_identity(root_before):
             raise ProductionInstallError("protected EFI content root changed while hashing")
-        return digest.hexdigest()
+        return digest.hexdigest(), metadata.hexdigest()
     finally:
         os.close(root_fd)
+
+
+def _directory_content_sha256(root: Path) -> str:
+    previous = _directory_content_snapshot(root)
+    for _attempt in range(3):
+        current = _directory_content_snapshot(root)
+        if current == previous:
+            return current[0]
+        previous = current
+    raise ProductionInstallError("protected EFI content did not stabilize while hashing")
 
 
 def _disk_observation(authority_path: str) -> dict[str, Any]:
@@ -2941,6 +2988,60 @@ def _success_receipt(
     }
 
 
+def _post_mutation_failure_receipt(
+    *, plan: dict[str, Any], artifact: dict[str, Any], error: PostMutationInstallError,
+) -> dict[str, Any]:
+    evidence = error.private_evidence if isinstance(error.private_evidence, dict) else {}
+    allowed_effects = {
+        str(command.get("effect"))
+        for command in plan.get("commands", [])
+        if isinstance(command, dict) and isinstance(command.get("effect"), str)
+    } | {"private-storage-identity-staged", "private-boot-entries-bound"}
+    completed = evidence.get("completed_effects")
+    completed_effects = (
+        [item for item in completed if isinstance(item, str) and item in allowed_effects]
+        if isinstance(completed, list) else []
+    )
+    allowed_teardown = {
+        str(command.get("effect"))
+        for command in plan.get("teardown_commands", [])
+        if isinstance(command, dict) and isinstance(command.get("effect"), str)
+    }
+    teardown = evidence.get("teardown_failures")
+    teardown_failures = (
+        sorted({item for item in teardown if isinstance(item, str) and item in allowed_teardown})
+        if isinstance(teardown, list) else []
+    )
+
+    def safe_digest(value: Any) -> str | None:
+        return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+    target_authority = str(plan["target_authority"])
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_failure_receipt",
+        "status": "failure",
+        "alarm_code": error.code,
+        "plan_sha256": plan["plan_sha256"],
+        "install_artifact_sha256": plan["install_artifact_sha256"],
+        "source_revision": artifact["source_revision"],
+        "system_path": artifact["system_path"],
+        "target_authority_sha256": hashlib.sha256(target_authority.encode("utf-8")).hexdigest(),
+        "private_target_authority_redacted": True,
+        "protected_pre_fingerprint": plan["protected_pre_fingerprint"],
+        "protected_post_fingerprint": safe_digest(evidence.get("protected_post_fingerprint")),
+        "completed_effects": completed_effects,
+        "mutation_attempted": evidence.get("mutation_attempted", True) is True,
+        "credential_staging_attempted": evidence.get("credential_staging_attempted") is True,
+        "credential_staged": evidence.get("credential_staged") is True,
+        "private_storage_identity_staged": evidence.get("private_storage_identity_staged") is True,
+        "teardown_failures": teardown_failures,
+        "efi_nvram_sha256_before": safe_digest(evidence.get("efi_nvram_sha256_before")),
+        "efi_nvram_sha256_after": safe_digest(evidence.get("efi_nvram_sha256_after")),
+        "efi_variables_touched": False,
+    }
+
+
 def execute_plan(
     plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
     credential_hash_file: Path, observer=observe_live,
@@ -2992,6 +3093,28 @@ def execute_plan(
     teardown_failures: list[str] = []
     teardown_exception: BaseException | None = None
     failure: BaseException | None = None
+    post: dict[str, Any] | None = None
+    nvram_before: str | None = None
+    nvram_after: str | None = None
+
+    def post_mutation_alarm(code: str) -> PostMutationInstallError:
+        return PostMutationInstallError(
+            code,
+            private_evidence={
+                "completed_effects": list(completed_effects),
+                "mutation_attempted": mutation_attempted,
+                "credential_staging_attempted": credential_staging_attempted,
+                "credential_staged": credential_staged,
+                "private_storage_identity_staged": private_storage_identity_staged,
+                "teardown_failures": list(teardown_failures),
+                "protected_post_fingerprint": (
+                    protected_fingerprint(post) if post is not None else None
+                ),
+                "efi_nvram_sha256_before": nvram_before,
+                "efi_nvram_sha256_after": nvram_after,
+            },
+        )
+
     try:
         verify_host_nix_root_absent()
         verifier_archive = prepare_verifier_image_archive(plan, artifact)
@@ -3074,18 +3197,18 @@ def execute_plan(
         try:
             post = validate_protected_state(observer(contract), contract)
         except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
-            raise PostMutationInstallError("protected-fallback-unverifiable") from exc
+            raise post_mutation_alarm("protected-fallback-unverifiable") from exc
         if protected_fingerprint(post) != plan["protected_pre_fingerprint"]:
-            raise PostMutationInstallError("protected-fallback-changed")
+            raise post_mutation_alarm("protected-fallback-changed")
         try:
             nvram_after = efi_nvram_digest()
         except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
-            raise PostMutationInstallError("efi-nvram-unverifiable") from exc
+            raise post_mutation_alarm("efi-nvram-unverifiable") from exc
         if nvram_after != nvram_before:
-            raise PostMutationInstallError("efi-nvram-changed")
+            raise post_mutation_alarm("efi-nvram-changed")
         mapper = Path("/dev/mapper") / contract["topology"]["luks"]["mapper_name"]
         if mapper.exists() or mapper.is_symlink():
-            raise PostMutationInstallError("mapper-open-after-teardown")
+            raise post_mutation_alarm("mapper-open-after-teardown")
         for command in plan["teardown_commands"]:
             if command["effect"] in {"unmount-stage", "unmount"}:
                 try:
@@ -3096,17 +3219,17 @@ def execute_plan(
                     if teardown_exception is None:
                         teardown_exception = exc
         if teardown_failures:
-            raise PostMutationInstallError("teardown-incomplete") from (
+            raise post_mutation_alarm("teardown-incomplete") from (
                 failure if failure is not None else teardown_exception
             )
         if credential_staging_attempted and not credential_staged:
-            raise PostMutationInstallError("credential-staging-incomplete") from failure
+            raise post_mutation_alarm("credential-staging-incomplete") from failure
         if failure is not None:
             if mutation_attempted:
-                raise PostMutationInstallError("apply-failed-after-mutation-attempt") from failure
+                raise post_mutation_alarm("apply-failed-after-mutation-attempt") from failure
             raise failure
         if not credential_staged:
-            raise PostMutationInstallError("credential-staging-incomplete")
+            raise post_mutation_alarm("credential-staging-incomplete")
         return _success_receipt(
             plan=plan,
             artifact=artifact,
@@ -3137,19 +3260,19 @@ def execute_plan(
                 docker_failure = exc
         if archive_failure is not None:
             if mutation_attempted:
-                raise PostMutationInstallError("trusted-build-seal-teardown-incomplete") from archive_failure
+                raise post_mutation_alarm("trusted-build-seal-teardown-incomplete") from archive_failure
             raise ProductionInstallError(
                 "pinned verifier archive cleanup failed before storage mutation"
             ) from archive_failure
         if docker_failure is not None:
             if mutation_attempted:
-                raise PostMutationInstallError("docker-quiesce-restore-incomplete") from docker_failure
+                raise post_mutation_alarm("docker-quiesce-restore-incomplete") from docker_failure
             raise ProductionInstallError(
                 "Docker state restore failed before storage mutation"
             ) from docker_failure
         if seal_failure is not None:
             if mutation_attempted:
-                raise PostMutationInstallError("trusted-build-seal-teardown-incomplete") from seal_failure
+                raise post_mutation_alarm("trusted-build-seal-teardown-incomplete") from seal_failure
             raise ProductionInstallError(
                 "trusted build seal teardown failed before storage mutation"
             ) from seal_failure
@@ -3218,10 +3341,19 @@ def main(argv: list[str] | None = None) -> int:
                 plan, contract=contract, confirmation=args.confirm,
                 credential_hash_file=args.credential_hash_file,
             )
-        except PostMutationInstallError:
+        except PostMutationInstallError as exc:
             try:
-                preserve_private_receipt_reservation(receipt_reservation)
+                failure_receipt = _post_mutation_failure_receipt(
+                    plan=plan, artifact=artifact, error=exc
+                )
+                finalize_private_receipt(receipt_reservation, failure_receipt)
             except BaseException as evidence_exc:
+                if "fd" in receipt_reservation:
+                    try:
+                        preserve_private_receipt_reservation(receipt_reservation)
+                    except BaseException:
+                        if "fd" in receipt_reservation:
+                            _close_private_receipt_reservation(receipt_reservation)
                 raise PostMutationInstallError(
                     "private-receipt-finalization-incomplete"
                 ) from evidence_exc

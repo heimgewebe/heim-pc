@@ -419,6 +419,67 @@ def test_protected_efi_content_digest_changes_with_bytes_and_rejects_symlinks(tm
         prod._directory_content_sha256(root)
 
 
+def test_protected_efi_digest_retries_same_size_rewrite_without_returning_stale_bytes(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    root.mkdir()
+    image = root / "BOOTX64.EFI"
+    image.write_bytes(b"first")
+    real_snapshot = prod._directory_content_snapshot
+    calls = 0
+
+    def racing_snapshot(path):
+        nonlocal calls
+        result = real_snapshot(path)
+        calls += 1
+        if calls == 1:
+            image.write_bytes(b"other")
+        return result
+
+    monkeypatch.setattr(prod, "_directory_content_snapshot", racing_snapshot)
+    observed = prod._directory_content_sha256(root)
+    monkeypatch.setattr(prod, "_directory_content_snapshot", real_snapshot)
+    assert calls >= 3
+    assert observed == prod._directory_content_sha256(root)
+
+
+def test_protected_efi_digest_retries_directory_mutation_without_returning_stale_tree(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    root.mkdir()
+    (root / "first.efi").write_bytes(b"one")
+    real_snapshot = prod._directory_content_snapshot
+    calls = 0
+
+    def racing_snapshot(path):
+        nonlocal calls
+        result = real_snapshot(path)
+        calls += 1
+        if calls == 1:
+            (root / "second.efi").write_bytes(b"two")
+        return result
+
+    monkeypatch.setattr(prod, "_directory_content_snapshot", racing_snapshot)
+    observed = prod._directory_content_sha256(root)
+    monkeypatch.setattr(prod, "_directory_content_snapshot", real_snapshot)
+    assert calls >= 3
+    assert observed == prod._directory_content_sha256(root)
+
+
+def test_protected_efi_digest_fails_closed_when_snapshot_never_stabilizes(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    root.mkdir()
+    calls = 0
+
+    def unstable_snapshot(_path):
+        nonlocal calls
+        calls += 1
+        return (f"{calls:064x}", f"{calls:064x}")
+
+    monkeypatch.setattr(prod, "_directory_content_snapshot", unstable_snapshot)
+    with pytest.raises(prod.ProductionInstallError, match="did not stabilize"):
+        prod._directory_content_sha256(root)
+    assert calls == 4
+
+
 def test_signature_inventory_rejects_nested_or_ambiguous_values():
     with pytest.raises(prod.ProductionInstallError, match="signature inventory is invalid"):
         prod._normalize_signature_records([{"type": "ext4", "nested": {"bad": True}}], "test")
@@ -807,6 +868,72 @@ def test_private_receipt_finalization_failure_restores_reservation_marker(monkey
     prod.preserve_private_receipt_reservation(reservation)
 
 
+def test_private_receipt_parent_fsync_failure_cannot_leave_success_json(monkeypatch, tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    real_fsync = prod.os.fsync
+    calls = 0
+
+    def fail_success_parent_fsync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("synthetic parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fsync", fail_success_parent_fsync)
+    with pytest.raises(prod.ProductionInstallError, match="cannot finalize"):
+        prod.finalize_private_receipt(
+            reservation,
+            {
+                "schema_version": 1,
+                "kind": "heim_pc.nixos_production_install_receipt",
+                "status": "success",
+            },
+        )
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+    prod.preserve_private_receipt_reservation(reservation)
+
+
+def test_private_receipt_failed_marker_restore_invalidates_success_payload(monkeypatch, tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    real_fsync = prod.os.fsync
+    calls = 0
+
+    def fail_success_parent_fsync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("synthetic parent fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fsync", fail_success_parent_fsync)
+    monkeypatch.setattr(
+        prod,
+        "_restore_private_receipt_reservation_marker",
+        lambda _reservation: (_ for _ in ()).throw(
+            prod.ProductionInstallError("synthetic marker restore failure")
+        ),
+    )
+    with pytest.raises(prod.ProductionInstallError, match="reservation was invalidated"):
+        prod.finalize_private_receipt(
+            reservation,
+            {
+                "schema_version": 1,
+                "kind": "heim_pc.nixos_production_install_receipt",
+                "status": "success",
+            },
+        )
+    assert not target.exists()
+    assert "fd" not in reservation
+    assert "parent_fd" not in reservation
+
+
 def test_private_receipt_discard_never_unlinks_replaced_target(tmp_path):
     target = tmp_path / "reserved-receipt.json"
     held = tmp_path / "held-reservation.json"
@@ -909,7 +1036,7 @@ def test_main_pre_mutation_failure_discards_receipt_reservation(monkeypatch, tmp
     assert not receipt_path.exists()
 
 
-def test_main_post_mutation_failure_preserves_receipt_reservation(monkeypatch, tmp_path, capsys):
+def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
     monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
@@ -924,7 +1051,14 @@ def test_main_post_mutation_failure_preserves_receipt_reservation(monkeypatch, t
         prod,
         "execute_plan",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            prod.PostMutationInstallError("protected-fallback-changed")
+            prod.PostMutationInstallError(
+                "protected-fallback-changed",
+                private_evidence={
+                    "mutation_attempted": True,
+                    "completed_effects": ["partition-table-reset"],
+                    "protected_post_fingerprint": "a" * 64,
+                },
+            )
         ),
     )
     receipt_path = tmp_path / "receipt.json"
@@ -937,11 +1071,20 @@ def test_main_post_mutation_failure_preserves_receipt_reservation(monkeypatch, t
     ]) == 3
     captured = capsys.readouterr()
     assert captured.err == prod.POST_MUTATION_PUBLIC_MESSAGES["protected-fallback-changed"] + "\n"
-    assert json.loads(receipt_path.read_text(encoding="utf-8")) == {
-        "schema_version": 1,
-        "kind": "heim_pc.nixos_production_install_receipt_reservation",
-        "status": "reserved",
-    }
+    failure_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert failure_receipt["schema_version"] == 1
+    assert failure_receipt["kind"] == "heim_pc.nixos_production_install_failure_receipt"
+    assert failure_receipt["status"] == "failure"
+    assert failure_receipt["alarm_code"] == "protected-fallback-changed"
+    assert failure_receipt["plan_sha256"] == compiled["plan_sha256"]
+    assert failure_receipt["install_artifact_sha256"] == compiled["install_artifact_sha256"]
+    assert failure_receipt["source_revision"] == ARTIFACT["source_revision"]
+    assert failure_receipt["system_path"] == ARTIFACT["system_path"]
+    assert failure_receipt["mutation_attempted"] is True
+    assert failure_receipt["completed_effects"] == ["partition-table-reset"]
+    assert failure_receipt["protected_post_fingerprint"] == "a" * 64
+    assert failure_receipt["private_target_authority_redacted"] is True
+    assert SEAGATE not in receipt_path.read_text(encoding="utf-8")
 
 
 def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, tmp_path, capsys):
