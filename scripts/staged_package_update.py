@@ -27,6 +27,9 @@ APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?:
 APT_SUMMARY_RE = re.compile(r"^(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded\.$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
 NVME_PARTITION_RE = re.compile(r"^/dev/nvme\d+n\d+p\d+\Z")
+STABLE_NVME_PARTITION_ALIAS_RE = re.compile(
+    r"^/dev/disk/by-id/nvme-[^/\x00]+-part[1-9][0-9]*\Z"
+)
 BY_ID_ROOT = Path("/dev/disk/by-id")
 BROKER_OUTPUT_EVIDENCE_ROOT = Path("/run/grabowski/privileged-broker-evidence")
 BROKER_OUTPUT_EVIDENCE_KIND = "grabowski_privileged_output_evidence"
@@ -133,13 +136,19 @@ def _host_dpkg_env() -> dict[str, str]:
 
 def _mounted_nvme_partition(mountpoint: str) -> str:
     result = _run(
-        ["/usr/bin/findmnt", "--nofsroot", "-rn", "-o", "SOURCE", mountpoint],
+        [
+            "/usr/bin/findmnt", "--first-only", "--nofsroot", "-rn",
+            "-o", "SOURCE", mountpoint,
+        ],
         env=_host_readback_env(),
     )
     source = result["stdout"].strip()
-    if NVME_PARTITION_RE.fullmatch(source) is None:
+    if not source or "\n" in source:
+        raise PlanError(f"{mountpoint} did not resolve to one mount source")
+    resolved = os.path.realpath(source)
+    if NVME_PARTITION_RE.fullmatch(resolved) is None:
         raise PlanError(f"{mountpoint} is not backed by one direct NVMe partition")
-    return source
+    return resolved
 
 
 def _stable_by_id_partition_alias(source: str) -> str:
@@ -172,13 +181,40 @@ def _stable_by_id_partition_alias(source: str) -> str:
 
 def _validate_device_allow_paths(root_device: str, efi_device: str) -> tuple[str, str]:
     for value in (root_device, efi_device):
-        if not isinstance(value, str) or not value.startswith("/dev/disk/by-id/nvme-") or "-part" not in value:
-            raise PlanError("APT apply device bindings must use stable NVMe by-id partition aliases")
+        if (
+            not isinstance(value, str)
+            or not os.path.isabs(value)
+            or os.path.normpath(value) != value
+            or ".." in Path(value).parts
+            or STABLE_NVME_PARTITION_ALIAS_RE.fullmatch(value) is None
+        ):
+            raise PlanError(
+                "APT apply device bindings must use canonical stable NVMe by-id partition aliases"
+            )
     root_stem = re.sub(r"-part[0-9]+$", "", Path(root_device).name)
     efi_stem = re.sub(r"-part[0-9]+$", "", Path(efi_device).name)
     if root_device == efi_device or not root_stem or root_stem != efi_stem:
         raise PlanError("APT apply root and EFI bindings must be distinct partitions on one NVMe identity")
     return root_device, efi_device
+
+
+def _live_device_allow_paths() -> tuple[str, str]:
+    return _validate_device_allow_paths(
+        _stable_by_id_partition_alias(_mounted_nvme_partition("/")),
+        _stable_by_id_partition_alias(_mounted_nvme_partition("/boot/efi")),
+    )
+
+
+def _verify_live_device_allow_binding(plan: dict[str, Any]) -> None:
+    baseline = plan.get("baseline")
+    if not isinstance(baseline, dict):
+        raise PlanError("plan baseline is missing")
+    planned = _validate_device_allow_paths(
+        str(baseline.get("root_device", "")), str(baseline.get("efi_device", ""))
+    )
+    live = _live_device_allow_paths()
+    if live != planned:
+        raise PlanError("live root/EFI device bindings differ from the package plan")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1672,6 +1708,7 @@ def _verify_plan_loaded(
     _validate_source_config(plan["baseline"]["apt_source_config"])
     if uid != plan["baseline"]["uid"]:
         raise PlanError("verification uid differs from plan uid")
+    _verify_live_device_allow_binding(plan)
     _require_broker_handoff_binding(policy)
     _validate_stage_artifacts(plan, uid, policy)
     _revalidate_apt_provenance(stage, plan, policy, uid)

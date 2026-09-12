@@ -13,6 +13,9 @@ from typing import Any
 PRIVATE_IDENTITY_KIND = "heim_pc.nixos_production_storage_identity"
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
+FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
+EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
+GPT_GUID_RE = re.compile(r"^[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$")
 FORBIDDEN_PUBLIC_IDENTITY_KEYS = frozenset({
     "exact_by_id", "exact_serial", "exact_wwn", "by_id", "serial", "wwn",
     "verified_by_id_aliases", "partuuid", "uuid",
@@ -143,6 +146,23 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or len(set(labels)) != 3
     ):
         raise IdentityContractError("public production partition labels must be canonical, unique and complete")
+    for partition in topology["partitions"]:
+        filesystem = partition.get("filesystem")
+        filesystem_label = partition.get("filesystem_label")
+        if filesystem == "vfat" and (
+            not isinstance(filesystem_label, str)
+            or FAT_LABEL_RE.fullmatch(filesystem_label) is None
+        ):
+            raise IdentityContractError(
+                "public vfat filesystem label must fit the FAT 11-character limit"
+            )
+        if filesystem == "ext4" and (
+            not isinstance(filesystem_label, str)
+            or EXT4_LABEL_RE.fullmatch(filesystem_label) is None
+        ):
+            raise IdentityContractError(
+                "public ext4 filesystem label must fit the ext4 16-character limit"
+            )
     return json.loads(json.dumps(value))
 
 
@@ -150,6 +170,12 @@ def _require_private_by_id(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.startswith("/dev/disk/by-id/") or os.path.normpath(value) != value:
         raise IdentityContractError(f"{label} must be a canonical /dev/disk/by-id path")
     return value
+
+
+def _canonical_gpt_guid(value: Any, label: str) -> str:
+    if not isinstance(value, str) or GPT_GUID_RE.fullmatch(value) is None:
+        raise IdentityContractError(f"{label} must be a canonical GPT GUID")
+    return value.lower()
 
 
 def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_revision: str) -> dict[str, Any]:
@@ -221,13 +247,17 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
             or private_item.get("uuid") in (None, "")
         ):
             raise IdentityContractError("private protected partition identity is incomplete")
-        item["partuuid"] = str(private_item["partuuid"]).lower()
+        item["partuuid"] = _canonical_gpt_guid(
+            private_item["partuuid"], "private protected PARTUUID"
+        )
         item["uuid"] = str(private_item["uuid"])
     for item in merged["topology"]["partitions"]:
         private_item = target_by_number.get(item.get("number"))
         if not isinstance(private_item, dict) or private_item.get("partuuid") in (None, ""):
             raise IdentityContractError("private target PARTUUID identity is incomplete")
-        item["partuuid"] = str(private_item["partuuid"]).lower()
+        item["partuuid"] = _canonical_gpt_guid(
+            private_item["partuuid"], "private target PARTUUID"
+        )
     partuuids = [item["partuuid"] for item in merged["topology"]["partitions"]]
     if len(set(partuuids)) != len(partuuids):
         raise IdentityContractError("private target PARTUUIDs must be unique")

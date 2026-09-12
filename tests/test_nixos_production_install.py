@@ -29,9 +29,11 @@ ARTIFACT = {
     "nix_volume": NIX_VOLUME,
     "nix_image": prod.PINNED_NIX_IMAGE,
     "profile": "heim-pc-storage-target",
+    "source_authority": "proof-only",
     "source_bundle_sha256": "b" * 64,
     **CLOSURE,
 }
+MERGED_ARTIFACT = dict(ARTIFACT, source_authority="merged-main")
 PARTUUIDS = [
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
@@ -85,6 +87,8 @@ def observation():
             "transport": "nvme",
             "filesystem": None,
             "partition_table": None,
+            "gpt_disk_guid": "",
+            "logical_sector_size": 512,
             "mountpoints": [],
             "mounted": False,
             "signatures": [],
@@ -100,14 +104,16 @@ def observation():
             "transport": "nvme",
             "filesystem": None,
             "partition_table": "gpt",
+            "gpt_disk_guid": "99999999-9999-4999-8999-999999999999",
+            "logical_sector_size": 512,
             "mountpoints": ["/boot/efi", "/recovery", "/"],
             "mounted": True,
             "signatures": [],
             "partitions": [
-                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "fstype": "vfat", "uuid": "SYN1-0001"},
-                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "fstype": "vfat", "uuid": "SYN2-0002"},
-                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "fstype": "ext4", "uuid": "SYNTH-ROOT-UUID"},
-                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "fstype": "swap", "uuid": "SYNTH-SWAP-UUID"},
+                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "start_sector": 2048, "end_sector": 2095102, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "ESP", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN1-0001"},
+                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "start_sector": 2095103, "end_sector": 10483709, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "RECOVERY", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN2-0002"},
+                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "start_sector": 10483710, "end_sector": 3898634408, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "POP_ROOT", "partflags": "0x0", "fstype": "ext4", "uuid": "SYNTH-ROOT-UUID"},
+                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "start_sector": 3898634409, "end_sector": 3907023015, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "type_guid": "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "partlabel": "SWAP", "partflags": "0x0", "fstype": "swap", "uuid": "SYNTH-SWAP-UUID"},
             ],
         },
         "root_source": "/dev/nvme1n1p3",
@@ -294,9 +300,10 @@ def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
         "docker",
         "run",
         "--rm",
-        "--privileged",
         "--network",
         "none",
+        "--cap-add",
+        "SYS_ADMIN",
         "-v",
         f"{NIX_VOLUME}:/nix",
         "-v",
@@ -313,6 +320,9 @@ def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
     ]
     assert compiled["install_artifact"] == ARTIFACT
     assert compiled["source_revision"] == REVISION
+    assert compiled["source_authority"] == "proof-only"
+    assert "--privileged" not in install["argv"]
+    assert "/dev:/dev" not in install["argv"]
     assert compiled["efi_variables_must_remain_untouched"] is True
     assert compiled["execution_authorized"] is False
 
@@ -352,16 +362,23 @@ def test_install_artifact_rejects_unpinned_image_volume_or_closure_metadata():
         prod.validate_install_artifact(dict(ARTIFACT, closure_path_count=0))
 
 
-def test_btrfs_tools_also_run_from_exact_artifact():
+def test_btrfs_tools_also_run_from_exact_artifact_without_global_device_access():
     compiled = plan()
     by_effect = {}
     for item in compiled["commands"]:
         by_effect.setdefault(item["effect"], item)
     mkfs = by_effect["btrfs-filesystem"]["argv"]
-    assert mkfs[:7] == ["docker", "run", "--rm", "--privileged", "--network", "none", "-v"]
+    assert mkfs[:5] == ["docker", "run", "--rm", "--network", "none"]
+    assert "--privileged" not in mkfs
+    assert "/dev:/dev" not in mkfs
+    assert "--device" in mkfs
+    assert "/dev/mapper/heimpc-nixos-crypt:/dev/heimpc-nixos-crypt:rw" in mkfs
     assert f"{NIX_VOLUME}:/nix:ro" in mkfs
     assert f"{SYSTEM_PATH}/sw/bin/mkfs.btrfs" in mkfs
     subvol = by_effect["btrfs-subvolume-create"]["argv"]
+    assert "--privileged" not in subvol
+    assert "/dev:/dev" not in subvol
+    assert ["--cap-add", "SYS_ADMIN"] == subvol[subvol.index("--cap-add"):subvol.index("--cap-add") + 2]
     assert f"{SYSTEM_PATH}/sw/bin/btrfs" in subvol
     assert f"{prod.BTRFS_STAGE_ROOT}:{prod.BTRFS_STAGE_ROOT}" in subvol
 
@@ -453,7 +470,7 @@ def test_post_mutation_alarm_codes_are_closed_and_non_secret():
 
 
 def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatch, tmp_path):
-    compiled = plan()
+    compiled = plan(artifact=MERGED_ARTIFACT)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
     monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
@@ -466,6 +483,7 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
 
     first_argv = compiled["commands"][0]["argv"]
 
@@ -679,3 +697,194 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
     assert verifier[verifier.index("--store") + 1] == prod.READONLY_NIX_STORE
     with pytest.raises(prod.ProductionInstallError, match="closure metadata"):
         prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
+
+
+def test_filesystem_labels_are_separate_bounded_and_gpt_labels_stay_unchanged():
+    compiled = plan()
+    by_effect = {item["effect"]: item for item in compiled["commands"]}
+    efi_label = by_effect["efi-filesystem"]["argv"][4]
+    recovery_label = by_effect["recovery-filesystem"]["argv"][3]
+    assert efi_label == PUBLIC_CONTRACT["topology"]["partitions"][0]["filesystem_label"]
+    assert recovery_label == PUBLIC_CONTRACT["topology"]["partitions"][1]["filesystem_label"]
+    assert len(efi_label) <= 11
+    assert len(recovery_label) <= 16
+    partition_argv = [
+        item["argv"] for item in compiled["commands"] if item["effect"].startswith("partition-")
+    ]
+    assert any("--change-name=1:HEIMPC_NIXOS_EFI" in argv for argv in partition_argv)
+    assert any("--change-name=2:HEIMPC_NIXOS_RECOVERY" in argv for argv in partition_argv)
+
+
+def test_public_contract_rejects_oversized_filesystem_labels():
+    value = json.loads(json.dumps(PUBLIC_CONTRACT))
+    value["topology"]["partitions"][0]["filesystem_label"] = "ABCDEFGHIJKL"
+    with pytest.raises(prod.storage_identity.IdentityContractError, match="FAT 11-character"):
+        prod.storage_identity.validate_public_contract(value)
+    value = json.loads(json.dumps(PUBLIC_CONTRACT))
+    value["topology"]["partitions"][1]["filesystem_label"] = "A" * 17
+    with pytest.raises(prod.storage_identity.IdentityContractError, match="ext4 16-character"):
+        prod.storage_identity.validate_public_contract(value)
+
+
+def test_private_target_partuuid_must_be_a_canonical_gpt_guid():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = "not-a-guid"
+    with pytest.raises(prod.storage_identity.IdentityContractError, match="private target PARTUUID"):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_proof_only_artifact_can_plan_but_cannot_apply(monkeypatch, tmp_path):
+    compiled = plan()
+    touched = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: touched.append(args) or None)
+    with pytest.raises(prod.ProductionInstallError, match="merged-main"):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+        )
+    assert touched == []
+
+
+def test_artifact_authority_changes_plan_hash():
+    proof = plan(artifact=ARTIFACT)
+    merged = plan(artifact=MERGED_ARTIFACT)
+    assert proof["source_authority"] == "proof-only"
+    assert merged["source_authority"] == "merged-main"
+    assert proof["install_artifact_sha256"] != merged["install_artifact_sha256"]
+    assert proof["plan_sha256"] != merged["plan_sha256"]
+
+
+def test_complete_live_wd_gpt_is_part_of_pre_post_fingerprint():
+    before = prod.validate_preflight(observation(), CONTRACT)["protected"]
+    assert before["gpt_disk_guid"] == "99999999-9999-4999-8999-999999999999"
+    assert before["partition_table_fingerprint"][0]["start_sector"] == 2048
+    assert before["partition_table_fingerprint"][0]["type_guid"] == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    assert before["partition_table_fingerprint"][0]["partlabel"] == "ESP"
+    assert before["partition_table_fingerprint"][0]["partflags"] == "0x0"
+    changed = observation()
+    changed["protected"]["partitions"][0]["start_sector"] += 1
+    after = prod.validate_preflight(changed, CONTRACT)["protected"]
+    assert prod.protected_fingerprint(before) != prod.protected_fingerprint(after)
+
+
+def test_findmnt_uses_first_only_and_canonicalizes_by_uuid(monkeypatch):
+    calls = []
+
+    class Result:
+        stdout = b"/dev/disk/by-uuid/SYNTH\n"
+
+    monkeypatch.setattr(prod, "_run", lambda argv: calls.append(argv) or Result())
+    monkeypatch.setattr(prod.os.path, "realpath", lambda path: "/dev/nvme1n1p3")
+    assert prod._findmnt("/") == "/dev/nvme1n1p3"
+    assert "--first-only" in calls[0]
+
+
+def test_verified_protected_aliases_are_rebound_live(monkeypatch):
+    aliases = {
+        WD: "/dev/nvme1n1",
+        "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK_ALIAS": "/dev/nvme1n1",
+    }
+    monkeypatch.setattr(prod.os.path, "realpath", lambda path: aliases.get(path, path))
+    monkeypatch.setattr(prod.os.path, "islink", lambda path: path in aliases)
+    prod._verify_protected_by_id_aliases(CONTRACT)
+    aliases["/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK_ALIAS"] = "/dev/nvme9n1"
+    with pytest.raises(prod.ProductionInstallError, match="alias no longer resolves"):
+        prod._verify_protected_by_id_aliases(CONTRACT)
+
+
+def test_teardown_nonzero_is_recorded_but_later_cleanup_still_runs(monkeypatch):
+    commands = [
+        {"effect": "unmount", "argv": ["umount", "/mnt/a"]},
+        {"effect": "unmount", "argv": ["umount", "/mnt/b"]},
+    ]
+    calls = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = b""
+            self.stderr = b""
+
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: True)
+    monkeypatch.setattr(
+        prod,
+        "_run",
+        lambda argv, check=False: calls.append(argv) or Result(32 if argv[-1] == "/mnt/a" else 0),
+    )
+    failures, error = prod._attempt_teardown(commands, "heimpc-nixos-crypt")
+    assert calls == [["umount", "/mnt/a"], ["umount", "/mnt/b"]]
+    assert failures == ["unmount"]
+    assert error is None
+
+
+def test_already_unmounted_stage_is_proven_clean_without_spurious_umount(monkeypatch):
+    calls = []
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
+    monkeypatch.setattr(prod, "_run", lambda argv, check=False: calls.append(argv))
+    failures, error = prod._attempt_teardown(
+        [{"effect": "unmount-stage", "argv": ["umount", prod.BTRFS_STAGE_ROOT]}],
+        "heimpc-nixos-crypt",
+    )
+    assert calls == []
+    assert failures == []
+    assert error is None
+
+
+def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+    monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_persist_mount", lambda *_args: None)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
+    monkeypatch.setattr(
+        prod,
+        "stage_firstboot_credentials",
+        lambda **kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("private staging detail")),
+    )
+    monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: Result())
+    with pytest.raises(prod.PostMutationInstallError) as exc:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert exc.value.code == "credential-staging-incomplete"
+
+
+def test_private_plan_is_explicit_create_only_and_stdout_summary_is_redacted(tmp_path):
+    compiled = plan()
+    target = tmp_path / "plan.json"
+    prod.write_private_plan(target, compiled)
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert json.loads(target.read_text()) == compiled
+    with pytest.raises(prod.ProductionInstallError, match="overwrite"):
+        prod.write_private_plan(target, compiled)
+    summary = json.dumps(prod.plan_summary(compiled), sort_keys=True)
+    assert "SYNTH-TARGET-SERIAL" not in summary
+    assert SEAGATE not in summary
+    assert WD not in summary
+    assert prod.plan_summary(compiled)["private_hardware_identity_redacted"] is True

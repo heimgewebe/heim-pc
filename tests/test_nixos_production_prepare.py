@@ -55,6 +55,7 @@ def test_make_artifact_uses_pinned_image_and_exact_profile():
         "nix_volume": NIX_VOLUME,
         "nix_image": prep.installer.PINNED_NIX_IMAGE,
         "profile": "heim-pc-storage-target",
+        "source_authority": "proof-only",
         "source_bundle_sha256": "b" * 64,
         "closure_manifest_sha256": CLOSURE_SHA,
         "closure_path_count": CLOSURE_COUNT,
@@ -206,7 +207,104 @@ def test_prepare_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsy
         prep, "prepare",
         lambda **kwargs: (_ for _ in ()).throw(prep.PrepareError("super-secret-material")),
     )
-    assert prep.main(["--repo", str(tmp_path), "--output", str(tmp_path / "artifact.json")]) == 2
+    monkeypatch.setenv(prep.MANAGED_WORKER_ENV, "1")
+    monkeypatch.setattr(prep, "_managed_worker_context_valid", lambda: True)
+    assert prep.main([
+        "--managed-worker", "--repo", str(tmp_path),
+        "--output", str(tmp_path / "artifact.json"),
+    ]) == 2
     captured = capsys.readouterr()
     assert captured.err == "nixos production artifact preparation blocked by a safety check\n"
     assert "super-secret-material" not in captured.err
+
+
+def test_merged_main_authority_fetches_and_binds_exact_origin_main(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, check=True):
+        calls.append(argv)
+        if "rev-parse" in argv:
+            return Result((REVISION + "\n").encode())
+        return Result()
+
+    monkeypatch.setattr(prep, "run", fake_run)
+    prep.verify_promoted_main(tmp_path, REVISION)
+    assert calls[0] == [
+        "git", "-C", str(tmp_path), "fetch", "--quiet", "--no-tags", "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+    assert calls[1][-1] == "refs/remotes/origin/main"
+
+
+def test_merged_main_authority_rejects_non_main_head(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        prep,
+        "run",
+        lambda argv, check=True: Result((("b" * 40) + "\n").encode()) if "rev-parse" in argv else Result(),
+    )
+    with pytest.raises(prep.PrepareError, match="freshly fetched origin/main"):
+        prep.verify_promoted_main(tmp_path, REVISION)
+
+
+def test_managed_prepare_routes_plan_then_run_without_recursive_reexec(monkeypatch, tmp_path):
+    calls = []
+
+    class ManagedResult:
+        returncode = 0
+
+    def fake_subprocess(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return ManagedResult()
+
+    monkeypatch.setattr(prep.subprocess, "run", fake_subprocess)
+    rc = prep.run_managed_prepare(
+        repo=tmp_path, output=tmp_path / "artifact.json", source_authority="proof-only"
+    )
+    assert rc == 0
+    assert len(calls) == 2
+    assert "plan" in calls[0][0]
+    assert "run" in calls[1][0]
+    for argv, kwargs in calls:
+        assert str(prep.MANAGED_BUILD) in argv
+        assert "--managed-worker" in argv
+        assert kwargs["env"][prep.MANAGED_WORKER_ENV] == "1"
+
+
+def test_managed_worker_env_alone_cannot_bypass_parent_context(monkeypatch):
+    monkeypatch.setenv(prep.MANAGED_WORKER_ENV, "1")
+    assert prep._managed_worker_context_valid() is False
+
+
+def test_unmanaged_worker_invocation_is_blocked(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv(prep.MANAGED_WORKER_ENV, raising=False)
+    assert prep.main([
+        "--managed-worker", "--repo", str(tmp_path),
+        "--output", str(tmp_path / "artifact.json"),
+    ]) == 2
+    assert "blocked by a safety check" in capsys.readouterr().err
+
+
+def test_artifact_publication_leaves_no_final_file_on_short_write(monkeypatch, tmp_path):
+    artifact = prep.make_artifact(
+        revision=REVISION,
+        system_path=SYSTEM_PATH,
+        nix_volume=NIX_VOLUME,
+        bundle_sha256="b" * 64,
+        closure_manifest_sha256=CLOSURE_SHA,
+        closure_path_count=CLOSURE_COUNT,
+    )
+    target = tmp_path / "artifact.json"
+    real_write = prep.os.write
+    count = {"value": 0}
+
+    def failing_write(fd, data):
+        count["value"] += 1
+        if count["value"] > 1:
+            raise OSError("synthetic write failure")
+        return min(1, len(data)) if data else real_write(fd, data)
+
+    monkeypatch.setattr(prep.os, "write", failing_write)
+    with pytest.raises(OSError, match="synthetic write failure"):
+        prep.write_artifact(target, artifact)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".artifact.json.*.tmp"))

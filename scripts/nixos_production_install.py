@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -36,6 +37,9 @@ SYSTEM_PATH_RE = re.compile(r"^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-nixos-
 NIX_VOLUME_RE = re.compile(r"^heim-pc-nixos-production-[0-9a-f]{12,40}$")
 KERNEL_NVME_RE = re.compile(r"^/dev/nvme\d+n\d+(?:p\d+)?$")
 PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
+FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
+EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
+INSTALL_ARTIFACT_AUTHORITIES = frozenset({"proof-only", "merged-main"})
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
@@ -60,6 +64,7 @@ POST_MUTATION_PUBLIC_MESSAGES = {
     "efi-nvram-changed": "nixos production install POST-MUTATION ALARM: EFI/NVRAM state changed; inspect firmware state before any retry",
     "efi-nvram-unverifiable": "nixos production install POST-MUTATION ALARM: EFI/NVRAM state could not be verified; inspect firmware state before any retry",
     "mapper-open-after-teardown": "nixos production install POST-MUTATION ALARM: encrypted mapper remains open after teardown; inspect mounts and mapper before any retry",
+    "teardown-incomplete": "nixos production install POST-MUTATION ALARM: target teardown did not complete cleanly; inspect target mounts and mapper before any retry",
     "protected-fallback-changed": "nixos production install POST-MUTATION ALARM: protected fallback fingerprint changed; stop and inspect the fallback disk before any retry",
     "protected-fallback-unverifiable": "nixos production install POST-MUTATION ALARM: protected fallback state could not be verified; stop and inspect the fallback disk before any retry",
 }
@@ -76,11 +81,11 @@ class PostMutationInstallError(ProductionInstallError):
 
 
 def canonical_json(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    return storage_identity.canonical_json(value)
 
 
 def sha256_json(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value)).hexdigest()
+    return storage_identity.sha256_json(value)
 
 
 def load_contract(
@@ -129,6 +134,23 @@ def load_contract(
         or any(not isinstance(label, str) or PARTLABEL_RE.fullmatch(label) is None for label in labels)
     ):
         raise ProductionInstallError("production PARTLABELs must be canonical and unique")
+    for partition in partitions:
+        filesystem = partition.get("filesystem")
+        filesystem_label = partition.get("filesystem_label")
+        if filesystem == "vfat" and (
+            not isinstance(filesystem_label, str)
+            or FAT_LABEL_RE.fullmatch(filesystem_label) is None
+        ):
+            raise ProductionInstallError(
+                "vfat filesystem label must fit the FAT 11-character limit"
+            )
+        if filesystem == "ext4" and (
+            not isinstance(filesystem_label, str)
+            or EXT4_LABEL_RE.fullmatch(filesystem_label) is None
+        ):
+            raise ProductionInstallError(
+                "ext4 filesystem label must fit the ext4 16-character limit"
+            )
     boot = value.get("boot", {})
     if (
         boot.get("own_esp_required") is not True
@@ -173,6 +195,8 @@ def validate_install_artifact(value: Any) -> dict[str, Any]:
         raise ProductionInstallError("install artifact Nix image is not the pinned image")
     if value.get("profile") != "heim-pc-storage-target":
         raise ProductionInstallError("install artifact profile mismatch")
+    if value.get("source_authority") not in INSTALL_ARTIFACT_AUTHORITIES:
+        raise ProductionInstallError("install artifact source authority is invalid")
     bundle_sha = value.get("source_bundle_sha256")
     if not isinstance(bundle_sha, str) or re.fullmatch(r"[0-9a-f]{64}", bundle_sha) is None:
         raise ProductionInstallError("install artifact source bundle digest is invalid")
@@ -193,12 +217,39 @@ def load_install_artifact(path: Path) -> dict[str, Any]:
     return validate_install_artifact(value)
 
 
-def _docker_tool_argv(artifact: dict[str, Any], tool: str, args: list[str], *, mounts: list[str] | None = None, nix_read_only: bool = True) -> list[str]:
+def _docker_tool_argv(
+    artifact: dict[str, Any],
+    tool: str,
+    args: list[str],
+    *,
+    mounts: list[str] | None = None,
+    devices: list[tuple[str, str]] | None = None,
+    cap_add: list[str] | None = None,
+    nix_read_only: bool = True,
+) -> list[str]:
     nix_mount = f"{artifact['nix_volume']}:/nix" + (":ro" if nix_read_only else "")
-    argv = ["docker", "run", "--rm", "--privileged", "--network", "none", "-v", nix_mount]
+    argv = ["docker", "run", "--rm", "--network", "none"]
+    for capability in cap_add or []:
+        if not isinstance(capability, str) or not re.fullmatch(r"[A-Z0-9_]+", capability):
+            raise ProductionInstallError("container capability is invalid")
+        argv += ["--cap-add", capability]
+    for source, destination in devices or []:
+        if (
+            not isinstance(source, str)
+            or not isinstance(destination, str)
+            or not source.startswith("/dev/")
+            or not destination.startswith("/dev/")
+            or os.path.normpath(source) != source
+            or os.path.normpath(destination) != destination
+        ):
+            raise ProductionInstallError("container device binding is invalid")
+        argv += ["--device", f"{source}:{destination}:rw"]
+    argv += ["-v", nix_mount]
     for mount in mounts or []:
         argv += ["-v", mount]
-    argv += ["--entrypoint", f"{artifact['system_path']}/sw/bin/{tool}", artifact["nix_image"]]
+    argv += [
+        "--entrypoint", f"{artifact['system_path']}/sw/bin/{tool}", artifact["nix_image"]
+    ]
     return argv + args
 
 
@@ -276,6 +327,14 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
     )
     if _identity_tuple(protected) != expected_identity:
         raise ProductionInstallError("protected WD identity mismatch")
+    if (
+        protected.get("partition_table") != "gpt"
+        or storage_identity.GPT_GUID_RE.fullmatch(str(protected.get("gpt_disk_guid", ""))) is None
+        or isinstance(protected.get("logical_sector_size"), bool)
+        or not isinstance(protected.get("logical_sector_size"), int)
+        or protected["logical_sector_size"] <= 0
+    ):
+        raise ProductionInstallError("protected WD GPT identity is incomplete")
     observed_parts = protected.get("partitions")
     if not isinstance(observed_parts, list):
         raise ProductionInstallError("protected partition observation missing")
@@ -283,6 +342,7 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
     if len(observed_by_number) != len(protected_contract["partition_table_fingerprint"]):
         raise ProductionInstallError("protected partition count mismatch")
     expected_paths: dict[str, str] = {}
+    live_fingerprint: list[dict[str, Any]] = []
     for expected in protected_contract["partition_table_fingerprint"]:
         actual = observed_by_number.get(expected["number"])
         if not isinstance(actual, dict):
@@ -294,10 +354,37 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
             or str(actual.get("uuid", "")) != str(expected.get("uuid", ""))
         ):
             raise ProductionInstallError(f"protected partition {expected['number']} fingerprint mismatch")
+        if (
+            isinstance(actual.get("start_sector"), bool)
+            or not isinstance(actual.get("start_sector"), int)
+            or isinstance(actual.get("end_sector"), bool)
+            or not isinstance(actual.get("end_sector"), int)
+            or actual["start_sector"] < 0
+            or actual["end_sector"] < actual["start_sector"]
+            or storage_identity.GPT_GUID_RE.fullmatch(str(actual.get("type_guid", ""))) is None
+            or not isinstance(actual.get("partlabel"), str)
+            or not isinstance(actual.get("partflags"), str)
+        ):
+            raise ProductionInstallError(
+                f"protected partition {expected['number']} GPT fingerprint is incomplete"
+            )
         path = actual.get("path")
         if not isinstance(path, str) or not KERNEL_NVME_RE.fullmatch(path):
             raise ProductionInstallError(f"protected partition {expected['number']} observed path is invalid")
         expected_paths[expected["role"]] = path
+        live_fingerprint.append({
+            "number": expected["number"],
+            "role": expected["role"],
+            "size_bytes": actual["size_bytes"],
+            "start_sector": actual["start_sector"],
+            "end_sector": actual["end_sector"],
+            "partuuid": str(actual["partuuid"]).lower(),
+            "type_guid": str(actual["type_guid"]).lower(),
+            "partlabel": actual["partlabel"],
+            "partflags": actual["partflags"],
+            "fstype": actual["fstype"],
+            "uuid": str(actual["uuid"]),
+        })
     if observation.get("root_source") != expected_paths.get("popos-root"):
         raise ProductionInstallError("current root is not the protected WD root partition")
     if observation.get("efi_source") != expected_paths.get("popos-esp"):
@@ -309,7 +396,10 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         "serial": protected_contract["serial"],
         "wwn": protected_contract["wwn"],
         "size_bytes": protected_contract["size_bytes"],
-        "partition_table_fingerprint": protected_contract["partition_table_fingerprint"],
+        "partition_table": "gpt",
+        "gpt_disk_guid": str(protected["gpt_disk_guid"]).lower(),
+        "logical_sector_size": protected["logical_sector_size"],
+        "partition_table_fingerprint": live_fingerprint,
         "root_source": observation["root_source"],
         "efi_source": observation["efi_source"],
     }
@@ -411,6 +501,7 @@ def compile_plan(
     encrypted = _partition_by_role(contract, "encrypted-system")
     mapper_name = contract["topology"]["luks"]["mapper_name"]
     mapper = f"/dev/mapper/{mapper_name}"
+    container_mapper = f"/dev/{mapper_name}"
     btrfs = contract["topology"]["btrfs"]
     commands: list[dict[str, Any]] = [{"effect": "partition-table-reset", "argv": ["sgdisk", "--zap-all", target]}]
     for partition in sorted(contract["topology"]["partitions"], key=lambda item: item["number"]):
@@ -426,13 +517,18 @@ def compile_plan(
         {"effect": "partition-table-reread", "argv": ["partprobe", target]},
         {"effect": "udev-settle", "argv": ["udevadm", "settle"]},
         {"effect": "mount-root-create", "argv": ["mkdir", "-p", MOUNT_ROOT, BTRFS_STAGE_ROOT]},
-        {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["label"], _target_partition_path(target, efi)]},
-        {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["label"], _target_partition_path(target, recovery)]},
+        {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["filesystem_label"], _target_partition_path(target, efi)]},
+        {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["filesystem_label"], _target_partition_path(target, recovery)]},
         {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-", _target_partition_path(target, encrypted)], "secret_binding": "luks-passphrase-v1"},
         {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _target_partition_path(target, encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
         {
             "effect": "btrfs-filesystem",
-            "argv": _docker_tool_argv(artifact, "mkfs.btrfs", ["-f", "-L", btrfs["label"], mapper], mounts=["/dev:/dev"]),
+            "argv": _docker_tool_argv(
+                artifact,
+                "mkfs.btrfs",
+                ["-f", "-L", btrfs["label"], container_mapper],
+                devices=[(mapper, container_mapper)],
+            ),
         },
         {"effect": "btrfs-stage-mount", "argv": ["mount", mapper, BTRFS_STAGE_ROOT]},
     ]
@@ -444,6 +540,7 @@ def compile_plan(
                 "btrfs",
                 ["subvolume", "create", f"{BTRFS_STAGE_ROOT}/{name}"],
                 mounts=[f"{BTRFS_STAGE_ROOT}:{BTRFS_STAGE_ROOT}"],
+                cap_add=["SYS_ADMIN"],
             ),
         })
     commands.append({"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]})
@@ -462,6 +559,7 @@ def compile_plan(
             "nixos-install",
             ["--root", "/mnt", "--system", artifact["system_path"], "--no-channel-copy", "--no-root-password"],
             mounts=[f"{MOUNT_ROOT}:/mnt"],
+            cap_add=["SYS_ADMIN"],
             nix_read_only=False,
         ),
     })
@@ -477,6 +575,7 @@ def compile_plan(
         "install_artifact_sha256": sha256_json(artifact),
         "install_artifact": artifact,
         "source_revision": source_revision,
+        "source_authority": artifact["source_authority"],
         "flake_source": flake,
         "system_path": artifact["system_path"],
         "target_authority": target,
@@ -491,6 +590,49 @@ def compile_plan(
         "execution_authorized": False,
     }
     return {**material, "plan_sha256": sha256_json(material)}
+
+
+def plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_plan_summary",
+        "plan_sha256": plan["plan_sha256"],
+        "source_revision": plan["source_revision"],
+        "source_authority": plan["source_authority"],
+        "system_path": plan["system_path"],
+        "execution_authorized": False,
+        "private_hardware_identity_redacted": True,
+    }
+
+
+def write_private_plan(path: Path, plan: dict[str, Any]) -> None:
+    if path.exists() or path.is_symlink():
+        raise ProductionInstallError("refusing to overwrite private production plan")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(plan, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ProductionInstallError("refusing to overwrite private production plan") from exc
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
 
 
 def confirmation_for(plan: dict[str, Any]) -> str:
@@ -625,17 +767,37 @@ def _json_command(argv: list[str]) -> dict[str, Any]:
         raise ProductionInstallError(f"invalid JSON from {argv[0]}") from exc
 
 
+def _partition_start_sector(path: str) -> int:
+    name = Path(path).name
+    if not name or "/" in name:
+        raise ProductionInstallError("partition path has no canonical kernel name")
+    try:
+        value = int((Path("/sys/class/block") / name / "start").read_text(encoding="ascii").strip())
+    except (OSError, ValueError) as exc:
+        raise ProductionInstallError("cannot observe protected partition start sector") from exc
+    if value < 0:
+        raise ProductionInstallError("protected partition start sector is invalid")
+    return value
+
+
 def _disk_observation(authority_path: str) -> dict[str, Any]:
     _require_by_id(authority_path, "disk observation authority")
     if not os.path.islink(authority_path):
         raise ProductionInstallError(f"by-id authority is missing: {authority_path}")
     resolved = os.path.realpath(authority_path)
-    data = _json_command(["lsblk", "--json", "--bytes", "--paths", "-o", "PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PARTUUID,PARTLABEL,MOUNTPOINTS", resolved])
+    data = _json_command([
+        "lsblk", "--json", "--bytes", "--paths", "-o",
+        "PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PTUUID,LOG-SEC,PARTUUID,PARTTYPE,PARTLABEL,PARTFLAGS,MOUNTPOINTS",
+        resolved,
+    ])
     devices = data.get("blockdevices") or []
     disks = [item for item in devices if item.get("type") == "disk" and item.get("path") == resolved]
     if len(disks) != 1:
         raise ProductionInstallError("lsblk did not return exactly the selected disk")
     disk = disks[0]
+    logical_sector_size = int(disk.get("log-sec") or 0)
+    if logical_sector_size <= 0:
+        raise ProductionInstallError("disk logical sector size is unavailable")
     children = list(disk.get("children") or [])
     if not children:
         partition_re = re.compile(re.escape(resolved) + r"p(\d+)$")
@@ -650,12 +812,21 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         path = child.get("path")
         match = re.search(r"p(\d+)$", path or "")
         if child.get("type") == "part" and match:
+            size_bytes = int(child.get("size") or 0)
+            if size_bytes <= 0 or size_bytes % logical_sector_size != 0:
+                raise ProductionInstallError("partition size is not sector aligned")
+            start_sector = _partition_start_sector(path)
+            sector_count = size_bytes // logical_sector_size
             parts.append({
                 "number": int(match.group(1)),
                 "path": path,
-                "size_bytes": int(child.get("size") or 0),
+                "size_bytes": size_bytes,
+                "start_sector": start_sector,
+                "end_sector": start_sector + sector_count - 1,
                 "partuuid": str(child.get("partuuid") or "").lower(),
+                "type_guid": str(child.get("parttype") or "").lower(),
                 "partlabel": str(child.get("partlabel") or ""),
+                "partflags": str(child.get("partflags") or ""),
                 "fstype": str(child.get("fstype") or ""),
                 "uuid": str(child.get("uuid") or ""),
             })
@@ -671,6 +842,8 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         "transport": str(disk.get("tran") or "").strip(),
         "filesystem": disk.get("fstype"),
         "partition_table": disk.get("pttype"),
+        "gpt_disk_guid": str(disk.get("ptuuid") or "").lower(),
+        "logical_sector_size": logical_sector_size,
         "mountpoints": mounts,
         "mounted": bool(mounts),
         "signatures": [],
@@ -679,11 +852,30 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
 
 
 def _findmnt(target: str) -> str:
-    result = _run(["findmnt", "--nofsroot", "-rn", "-o", "SOURCE", target])
-    return result.stdout.decode("utf-8").strip()
+    result = _run([
+        "findmnt", "--first-only", "--nofsroot", "-rn", "-o", "SOURCE", target
+    ])
+    source = result.stdout.decode("utf-8").strip()
+    if not source or "\n" in source:
+        raise ProductionInstallError(f"{target} did not resolve to one mount source")
+    resolved = os.path.realpath(source)
+    if KERNEL_NVME_RE.fullmatch(resolved) is None:
+        raise ProductionInstallError(f"{target} is not backed by one direct NVMe partition")
+    return resolved
+
+
+def _verify_protected_by_id_aliases(contract: dict[str, Any]) -> None:
+    protected = contract["protected_disks"][0]
+    authority = _require_by_id(protected["by_id"], "protected disk by-id")
+    resolved = os.path.realpath(authority)
+    for alias in protected.get("verified_by_id_aliases", []):
+        alias = _require_by_id(alias, "protected verified by-id alias")
+        if not os.path.islink(alias) or os.path.realpath(alias) != resolved:
+            raise ProductionInstallError("protected verified by-id alias no longer resolves to the WD")
 
 
 def observe_live(contract: dict[str, Any]) -> dict[str, Any]:
+    _verify_protected_by_id_aliases(contract)
     return {
         "target": _disk_observation(contract["target_identity"]["exact_by_id"]),
         "protected": _disk_observation(contract["protected_disks"][0]["by_id"]),
@@ -746,7 +938,7 @@ def verify_target_partition_bindings(contract: dict[str, Any]) -> dict[str, Any]
 def verify_persist_mount(mount_root: str, mapper: str) -> None:
     persist = str(PurePosixPath(mount_root, "persist"))
     result = _run([
-        "findmnt", "--nofsroot", "-rn", "-o", "SOURCE,FSTYPE,FSROOT",
+        "findmnt", "--first-only", "--nofsroot", "-rn", "-o", "SOURCE,FSTYPE,FSROOT",
         "--mountpoint", persist,
     ])
     fields = result.stdout.decode("utf-8", "replace").strip().split()
@@ -759,11 +951,7 @@ def verify_persist_mount(mount_root: str, mapper: str) -> None:
 
 def verify_no_hidden_target_signatures(target_authority: str) -> None:
     _require_by_id(target_authority, "target signature authority")
-    result = _run(["wipefs", "--no-act", "--json", target_authority])
-    try:
-        payload = json.loads(result.stdout.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ProductionInstallError("invalid JSON from wipefs signature check") from exc
+    payload = _json_command(["wipefs", "--no-act", "--json", target_authority])
     signatures = payload.get("signatures")
     if not isinstance(signatures, list):
         raise ProductionInstallError("wipefs signature check returned an unexpected shape")
@@ -838,6 +1026,42 @@ def verify_scratch_state(mapper_name: str) -> None:
         raise ProductionInstallError(f"LUKS mapper already exists: {mapper}")
 
 
+def _mountpoint_is_mounted(path: str) -> bool:
+    result = _run(
+        ["findmnt", "--first-only", "--noheadings", "--mountpoint", path],
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ProductionInstallError("cannot determine teardown mount state")
+
+
+def _attempt_teardown(
+    commands: list[dict[str, Any]], mapper_name: str
+) -> tuple[list[str], BaseException | None]:
+    failures: list[str] = []
+    first_exception: BaseException | None = None
+    mapper = Path("/dev/mapper") / mapper_name
+    for command in commands:
+        effect = str(command.get("effect", "unknown"))
+        try:
+            if effect in {"unmount-stage", "unmount"}:
+                if not _mountpoint_is_mounted(str(command["argv"][-1])):
+                    continue
+            elif effect == "luks-close" and not (mapper.exists() or mapper.is_symlink()):
+                continue
+            result = _run(command["argv"], check=False)
+            if result.returncode != 0:
+                failures.append(effect)
+        except BaseException as exc:
+            failures.append(effect)
+            if first_exception is None:
+                first_exception = exc
+    return failures, first_exception
+
+
 def efi_nvram_digest() -> str:
     return hashlib.sha256(_run(["efibootmgr", "-v"]).stdout).hexdigest()
 
@@ -878,6 +1102,10 @@ def execute_plan(
     if contract.get("identity_binding", {}).get("identity_contract_sha256") != plan.get("identity_contract_sha256"):
         raise ProductionInstallError("private storage identity no longer matches the reviewed plan")
     artifact = validate_install_artifact(plan.get("install_artifact"))
+    if artifact["source_authority"] != "merged-main":
+        raise ProductionInstallError(
+            "production apply requires a merged-main install artifact"
+        )
     if sha256_json(artifact) != plan.get("install_artifact_sha256"):
         raise ProductionInstallError("install artifact digest no longer matches the reviewed plan")
     if artifact["source_revision"] != plan.get("source_revision"):
@@ -910,8 +1138,11 @@ def execute_plan(
     nvram_before = efi_nvram_digest()
 
     completed_effects: list[str] = []
+    credential_staging_attempted = False
     credential_staged = False
     mutation_attempted = False
+    teardown_failures: list[str] = []
+    teardown_exception: BaseException | None = None
     failure: BaseException | None = None
     try:
         for command in plan["commands"]:
@@ -922,17 +1153,17 @@ def execute_plan(
                 verify_target_partition_bindings(contract)
         verify_installed_target(artifact)
         verify_persist_mount(MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}")
-        stage_firstboot_credentials(mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes)
+        credential_staging_attempted = True
+        stage_firstboot_credentials(
+            mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes
+        )
         credential_staged = True
     except BaseException as exc:
         failure = exc
     finally:
-        for command in plan["teardown_commands"]:
-            try:
-                _run(command["argv"], check=False)
-            except BaseException as exc:
-                if failure is None:
-                    failure = exc
+        teardown_failures, teardown_exception = _attempt_teardown(
+            plan["teardown_commands"], contract["topology"]["luks"]["mapper_name"]
+        )
 
     try:
         post = validate_protected_state(observer(contract), contract)
@@ -949,6 +1180,21 @@ def execute_plan(
     mapper = Path("/dev/mapper") / contract["topology"]["luks"]["mapper_name"]
     if mapper.exists() or mapper.is_symlink():
         raise PostMutationInstallError("mapper-open-after-teardown")
+    for command in plan["teardown_commands"]:
+        if command["effect"] in {"unmount-stage", "unmount"}:
+            try:
+                if _mountpoint_is_mounted(str(command["argv"][-1])):
+                    teardown_failures.append(command["effect"])
+            except BaseException as exc:
+                teardown_failures.append(command["effect"])
+                if teardown_exception is None:
+                    teardown_exception = exc
+    if teardown_failures:
+        raise PostMutationInstallError("teardown-incomplete") from (
+            failure if failure is not None else teardown_exception
+        )
+    if credential_staging_attempted and not credential_staged:
+        raise PostMutationInstallError("credential-staging-incomplete") from failure
     if failure is not None:
         if mutation_attempted:
             raise PostMutationInstallError("apply-failed-after-mutation-attempt") from failure
@@ -981,6 +1227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--credential-hash-file", type=Path)
+    parser.add_argument("--write-plan", type=Path)
     args = parser.parse_args(argv)
     try:
         artifact = load_install_artifact(args.install_artifact)
@@ -998,7 +1245,9 @@ def main(argv: list[str] | None = None) -> int:
             contract=contract,
         )
         if not args.apply:
-            print(json.dumps(plan, indent=2, sort_keys=True))
+            if args.write_plan is not None:
+                write_private_plan(args.write_plan.resolve(), plan)
+            print(json.dumps(plan_summary(plan), indent=2, sort_keys=True))
             print(f"confirmation={confirmation_for(plan)}", file=sys.stderr)
             return 0
         if args.credential_hash_file is None:

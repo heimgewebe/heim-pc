@@ -51,7 +51,7 @@ in
 
   # Placeholder boot surface for heim-pc and the VM proof only. The physical
   # storage target and gate profiles replace it with storage-layout.nix, derived
-  # from the same rehearsal contract. Neither profile authorizes installation.
+  # from the production storage contract. Neither profile authorizes installation.
   fileSystems."/" = {
     device = "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
     fsType = "ext4";
