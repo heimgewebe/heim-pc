@@ -1914,7 +1914,19 @@ def root_readback_authorize(
     authorization["receipt_sha256"] = _sha256_json(authorization)
     receipt_path = Path(plan["stage_path"]) / "root-readback.json"
     _atomic_json(receipt_path, authorization)
-    return {**authorization, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_root_readback_summary",
+        "status": "root-readback-authorized",
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "root_readback_sha256": authorization["root_readback_sha256"],
+        "apply_commands_sha256": _sha256_json(apply_commands),
+        "receipt_sha256": authorization["receipt_sha256"],
+        "receipt_path": str(receipt_path),
+        "verify_age_seconds": verified["age_seconds"],
+        "private_apply_commands_redacted": True,
+    }
 
 
 def _validate_root_readback_receipt(plan: dict[str, Any], policy: dict[str, Any], uid: int) -> dict[str, Any]:
@@ -2339,7 +2351,25 @@ def postflight(
         raise PlanError(f"postflight service health mismatch; receipt={receipt_path}")
     if not receipt["nvidia_smi_ok"]:
         raise PlanError(f"postflight NVIDIA health mismatch; receipt={receipt_path}")
-    return {**receipt, "receipt_path": str(receipt_path)}
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_postflight_summary",
+        "status": "postflight-verified",
+        "plan_id": receipt["plan_id"],
+        "plan_sha256": receipt["plan_sha256"],
+        "receipt_sha256": receipt["receipt_sha256"],
+        "receipt_path": str(receipt_path),
+        "all_apt_matched": receipt["all_apt_matched"],
+        "all_snap_matched": receipt["all_snap_matched"],
+        "dpkg_audit_ok": receipt["dpkg_audit_ok"],
+        "all_system_services_active": receipt["all_system_services_active"],
+        "all_user_services_active": receipt["all_user_services_active"],
+        "nvidia_smi_ok": receipt["nvidia_smi_ok"],
+        "reboot_required": receipt["reboot_required"],
+        "reboot_required_sources": receipt["reboot_required_sources"],
+        "reboot_marker_capable_packages": receipt["reboot_marker_capable_packages"],
+        "private_apply_authorization_redacted": True,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:

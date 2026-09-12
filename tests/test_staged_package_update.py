@@ -1106,8 +1106,13 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
         plan_path, "f" * 64, hash_output, hash_evidence
     )
     assert result["status"] == "root-readback-authorized"
-    assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
-    assert result["broker_output_evidence"]["request_id"] == "3" * 32
+    assert result["private_apply_commands_redacted"] is True
+    assert "apply_commands" not in result
+    private_receipt = json.loads(Path(result["receipt_path"]).read_text())
+    assert private_receipt["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
+    assert result["apply_commands_sha256"] == spu._sha256_json(private_receipt["apply_commands"])
+    assert "broker_output_evidence" not in result
+    assert private_receipt["broker_output_evidence"]["request_id"] == "3" * 32
 
     bad_output = f"{'b' * 64}  {root_path}\n"
     bad_evidence = _write_broker_evidence(

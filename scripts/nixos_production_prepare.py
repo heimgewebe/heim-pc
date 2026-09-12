@@ -110,8 +110,21 @@ def ensure_volume_absent(name: str) -> None:
         raise PrepareError(f"refusing existing production build volume: {name}")
 
 
-def create_volume(name: str) -> None:
-    created = run(["docker", "volume", "create", name]).stdout.decode().strip()
+def create_volume(name: str, *, backing_dir: Path | None = None) -> None:
+    argv = ["docker", "volume", "create"]
+    if backing_dir is not None:
+        if (
+            not backing_dir.is_absolute()
+            or backing_dir.is_symlink()
+            or not backing_dir.is_dir()
+            or os.path.normpath(str(backing_dir)) != str(backing_dir)
+        ):
+            raise PrepareError("managed Nix backing directory is unsafe")
+        argv += [
+            "--driver", "local", "--opt", "type=none", "--opt", "o=bind",
+            "--opt", f"device={backing_dir}",
+        ]
+    created = run([*argv, name]).stdout.decode().strip()
     if created != name:
         raise PrepareError(f"Docker created unexpected volume identity for {name}")
 
@@ -280,7 +293,8 @@ def write_artifact(path: Path, artifact: dict[str, object]) -> None:
 
 
 def prepare(
-    *, repo: Path, output: Path, source_authority: str = "proof-only"
+    *, repo: Path, output: Path, source_authority: str = "proof-only",
+    managed_nix_store_root: Path | None = None,
 ) -> dict[str, object]:
     revision = exact_source_revision(repo)
     if source_authority not in installer.INSTALL_ARTIFACT_AUTHORITIES:
@@ -302,7 +316,7 @@ def prepare(
         run(["git", "-C", str(repo), "bundle", "create", str(bundle), "HEAD"])
         bundle_sha = hashlib.sha256(bundle.read_bytes()).hexdigest()
         try:
-            create_volume(nix_volume)
+            create_volume(nix_volume, backing_dir=managed_nix_store_root)
             nix_created = True
             create_volume(source_volume)
             source_created = True
@@ -339,7 +353,7 @@ def managed_prepare_argv(
         str(MANAGED_BUILD),
         operation,
         "--repo", str(repo),
-        "--tool", "python",
+        "--tool", "nix",
         "--profile", MANAGED_PROFILE,
         "--",
         "python3",
@@ -351,7 +365,17 @@ def managed_prepare_argv(
     ]
 
 
-def _managed_worker_context_valid() -> bool:
+def _managed_worker_parent_argv_valid(
+    parent_argv: list[str], *, repo: Path, output: Path, source_authority: str
+) -> bool:
+    return parent_argv == managed_prepare_argv(
+        operation="run", repo=repo, output=output, source_authority=source_authority
+    )
+
+
+def _managed_worker_context_valid(
+    *, repo: Path, output: Path, source_authority: str
+) -> bool:
     if os.environ.get(MANAGED_WORKER_ENV) != "1":
         return False
     try:
@@ -362,7 +386,9 @@ def _managed_worker_context_valid() -> bool:
         ]
     except (OSError, UnicodeDecodeError):
         return False
-    return str(MANAGED_BUILD) in parent_argv and "run" in parent_argv
+    return _managed_worker_parent_argv_valid(
+        parent_argv, repo=repo, output=output, source_authority=source_authority
+    )
 
 
 def run_managed_prepare(
@@ -414,15 +440,21 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-    if not _managed_worker_context_valid():
+    if not _managed_worker_context_valid(
+        repo=repo, output=output, source_authority=args.source_authority
+    ):
         print(
             "nixos production artifact preparation blocked by a safety check",
             file=sys.stderr,
         )
         return 2
     try:
+        managed_store_raw = os.environ.get("HEIM_PC_MANAGED_NIX_STORE_ROOT")
+        if not managed_store_raw:
+            raise PrepareError("managed Nix worker lacks its managed store root")
         artifact = prepare(
-            repo=repo, output=output, source_authority=args.source_authority
+            repo=repo, output=output, source_authority=args.source_authority,
+            managed_nix_store_root=Path(managed_store_raw),
         )
         print(json.dumps(artifact, indent=2, sort_keys=True))
         return 0

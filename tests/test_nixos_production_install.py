@@ -302,6 +302,8 @@ def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
         "--rm",
         "--network",
         "none",
+        "--cap-drop",
+        "ALL",
         "--cap-add",
         "SYS_ADMIN",
         "-v",
@@ -345,6 +347,27 @@ def test_execute_plan_rejects_wrong_confirmation_before_any_effect(monkeypatch, 
     assert touched == []
 
 
+def test_apply_promotion_authority_reads_canonical_github_main(monkeypatch):
+    calls = []
+    class Result:
+        stdout = (REVISION + "\trefs/heads/main\n").encode()
+        returncode = 0
+        stderr = b""
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    prod.verify_promoted_main_revision(REVISION)
+    assert calls == [["git", "ls-remote", "--exit-code", prod.CANONICAL_MAIN_REMOTE, "refs/heads/main"]]
+
+
+def test_apply_promotion_authority_rejects_non_main_revision(monkeypatch):
+    class Result:
+        stdout = (("b" * 40) + "\trefs/heads/main\n").encode()
+        returncode = 0
+        stderr = b""
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    with pytest.raises(prod.ProductionInstallError, match="current canonical GitHub main"):
+        prod.verify_promoted_main_revision(REVISION)
+
+
 def test_invalid_artifact_source_revision_is_rejected():
     artifact = dict(ARTIFACT, source_revision="main")
     with pytest.raises(prod.ProductionInstallError, match="40-hex"):
@@ -368,7 +391,7 @@ def test_btrfs_tools_also_run_from_exact_artifact_without_global_device_access()
     for item in compiled["commands"]:
         by_effect.setdefault(item["effect"], item)
     mkfs = by_effect["btrfs-filesystem"]["argv"]
-    assert mkfs[:5] == ["docker", "run", "--rm", "--network", "none"]
+    assert mkfs[:7] == ["docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL"]
     assert "--privileged" not in mkfs
     assert "/dev:/dev" not in mkfs
     assert "--device" in mkfs
@@ -381,6 +404,28 @@ def test_btrfs_tools_also_run_from_exact_artifact_without_global_device_access()
     assert ["--cap-add", "SYS_ADMIN"] == subvol[subvol.index("--cap-add"):subvol.index("--cap-add") + 2]
     assert f"{SYSTEM_PATH}/sw/bin/btrfs" in subvol
     assert f"{prod.BTRFS_STAGE_ROOT}:{prod.BTRFS_STAGE_ROOT}" in subvol
+    for command in compiled["commands"]:
+        argv = command["argv"]
+        if argv[:2] == ["docker", "run"]:
+            index = argv.index("--cap-drop")
+            assert argv[index:index + 2] == ["--cap-drop", "ALL"]
+            assert "MKNOD" not in argv
+
+
+def test_success_receipt_redacts_target_authority():
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    post = compiled["preflight"]["protected"]
+    receipt = prod._success_receipt(
+        plan=compiled, artifact=MERGED_ARTIFACT, source_revision=REVISION, post=post,
+        completed_effects=["synthetic"], nvram_before="a" * 64, nvram_after="a" * 64,
+    )
+    encoded = json.dumps(receipt, sort_keys=True)
+    assert compiled["target_authority"] not in encoded
+    assert "target_authority" not in receipt
+    assert receipt["private_target_authority_redacted"] is True
+    assert receipt["target_authority_sha256"] == hashlib.sha256(
+        compiled["target_authority"].encode("utf-8")
+    ).hexdigest()
 
 
 def test_firstboot_staging_is_source_and_hash_bound_and_private(tmp_path):
@@ -442,6 +487,7 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
     monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
     compiled = plan()
     monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
@@ -473,6 +519,7 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     compiled = plan(artifact=MERGED_ARTIFACT)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
     monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
@@ -837,6 +884,7 @@ def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypat
     compiled = plan(artifact=MERGED_ARTIFACT)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
     monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])

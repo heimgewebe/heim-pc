@@ -30,6 +30,7 @@ BTRFS_STAGE_ROOT = "/mnt/heim-pc-nixos-production-btrfs-stage"
 CONFIRM_PREFIX = "APPLY-NIXOS-PRODUCTION:"
 PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
 TRUSTED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+CANONICAL_MAIN_REMOTE = "https://github.com/heimgewebe/heim-pc.git"
 READONLY_NIX_STORE = "local?root=/subject&read-only=true"
 READONLY_NIX_FEATURES = "nix-command flakes read-only-local-store"
 SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -228,7 +229,7 @@ def _docker_tool_argv(
     nix_read_only: bool = True,
 ) -> list[str]:
     nix_mount = f"{artifact['nix_volume']}:/nix" + (":ro" if nix_read_only else "")
-    argv = ["docker", "run", "--rm", "--network", "none"]
+    argv = ["docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL"]
     for capability in cap_add or []:
         if not isinstance(capability, str) or not re.fullmatch(r"[A-Z0-9_]+", capability):
             raise ProductionInstallError("container capability is invalid")
@@ -959,6 +960,17 @@ def verify_no_hidden_target_signatures(target_authority: str) -> None:
         raise ProductionInstallError("Seagate target is not blank: wipefs found signatures")
 
 
+def verify_promoted_main_revision(revision: str) -> None:
+    if SOURCE_REVISION_RE.fullmatch(revision) is None:
+        raise ProductionInstallError("promoted main revision must be exact 40-hex")
+    result = _run([
+        "git", "ls-remote", "--exit-code", CANONICAL_MAIN_REMOTE, "refs/heads/main"
+    ])
+    lines = [line.strip() for line in result.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    if lines != [f"{revision}\trefs/heads/main"]:
+        raise ProductionInstallError("production apply source is not the current canonical GitHub main")
+
+
 def verify_source(flake_source: str, expected_revision: str | None = None) -> str:
     path = Path(flake_source)
     if not path.is_absolute():
@@ -1090,6 +1102,29 @@ def verify_installed_target(artifact: dict[str, Any]) -> None:
         raise ProductionInstallError("systemd-boot files are missing from the Seagate ESP")
 
 
+def _success_receipt(
+    *, plan: dict[str, Any], artifact: dict[str, Any], source_revision: str,
+    post: dict[str, Any], completed_effects: list[str], nvram_before: str, nvram_after: str,
+) -> dict[str, Any]:
+    target_authority = str(plan["target_authority"])
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt",
+        "plan_sha256": plan["plan_sha256"],
+        "install_artifact_sha256": plan["install_artifact_sha256"],
+        "source_revision": source_revision,
+        "system_path": artifact["system_path"],
+        "target_authority_sha256": hashlib.sha256(target_authority.encode("utf-8")).hexdigest(),
+        "private_target_authority_redacted": True,
+        "protected_post_fingerprint": protected_fingerprint(post),
+        "completed_effects": completed_effects,
+        "credential_staged": True,
+        "efi_nvram_sha256_before": nvram_before,
+        "efi_nvram_sha256_after": nvram_after,
+        "efi_variables_touched": False,
+    }
+
+
 def execute_plan(
     plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
     credential_hash_file: Path, observer=observe_live,
@@ -1106,6 +1141,7 @@ def execute_plan(
         raise ProductionInstallError(
             "production apply requires a merged-main install artifact"
         )
+    verify_promoted_main_revision(artifact["source_revision"])
     if sha256_json(artifact) != plan.get("install_artifact_sha256"):
         raise ProductionInstallError("install artifact digest no longer matches the reviewed plan")
     if artifact["source_revision"] != plan.get("source_revision"):
@@ -1133,6 +1169,7 @@ def execute_plan(
     verify_partlabel_namespace_clear(contract)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     verify_install_artifact_environment(artifact)
+    verify_promoted_main_revision(artifact["source_revision"])
     if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("protected WD changed after interactive authorization")
     nvram_before = efi_nvram_digest()
@@ -1201,21 +1238,10 @@ def execute_plan(
         raise failure
     if not credential_staged:
         raise PostMutationInstallError("credential-staging-incomplete")
-    return {
-        "schema_version": 1,
-        "kind": "heim_pc.nixos_production_install_receipt",
-        "plan_sha256": plan["plan_sha256"],
-        "install_artifact_sha256": plan["install_artifact_sha256"],
-        "source_revision": source_revision,
-        "system_path": artifact["system_path"],
-        "target_authority": plan["target_authority"],
-        "protected_post_fingerprint": protected_fingerprint(post),
-        "completed_effects": completed_effects,
-        "credential_staged": True,
-        "efi_nvram_sha256_before": nvram_before,
-        "efi_nvram_sha256_after": nvram_after,
-        "efi_variables_touched": False,
-    }
+    return _success_receipt(
+        plan=plan, artifact=artifact, source_revision=source_revision, post=post,
+        completed_effects=completed_effects, nvram_before=nvram_before, nvram_after=nvram_after,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

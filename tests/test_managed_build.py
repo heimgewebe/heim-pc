@@ -57,7 +57,7 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(self.policy["schema_version"], 1)
         self.assertEqual(
             set(self.policy["tools"]),
-            {"cargo", "node", "python", "playwright"},
+            {"cargo", "node", "python", "nix", "playwright"},
         )
         self.assertFalse(self.policy["automatic_cleanup_authorized"])
 
@@ -348,6 +348,170 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(playwright["tool"], "playwright")
             self.assertIn("PLAYWRIGHT_BROWSERS_PATH", playwright["environment"])
             self.assertIn("PNPM_STORE_DIR", playwright["environment"])
+
+    def test_nix_prepare_worker_has_real_nix_guard_and_identity_bound_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            for relative, content in (
+                ("flake.lock", "{}\n"),
+                ("nixos/production/contract-v1.json", "{}\n"),
+                ("scripts/nixos_production_install.py", "# fixture\n"),
+                ("scripts/nixos_production_prepare.py", "# fixture\n"),
+            ):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
+            output = root / "artifact.json"
+            command = [
+                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                "--managed-worker", "--repo", str(repo),
+                "--output", str(output), "--source-authority", "proof-only",
+            ]
+            with patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()):
+                plan = managed_build.build_plan(
+                    self.policy, repo=repo, command=command, home=home,
+                    explicit_tool="nix", explicit_profile="nixos-production-prepare",
+                )
+            guard = plan["nix_guard"]
+            revision = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            self.assertEqual(plan["tool"], "nix")
+            self.assertEqual(guard["source_revision"], revision)
+            self.assertEqual(guard["docker_volume"], f"heim-pc-nixos-production-{revision[:12]}")
+            self.assertEqual(guard["lock_mode"], "flock-exclusive-nonblocking")
+            self.assertEqual(guard["store_budget_bytes"], self.policy["nix_store_budget_bytes"])
+            self.assertEqual(guard["runtime_budget_seconds"], self.policy["nix_runtime_budget_seconds"])
+            self.assertTrue(Path(guard["store_root"]).is_relative_to(home / ".cache/heim-pc/managed-builds/nix"))
+
+    def test_nix_managed_receipt_binds_exact_artifact_closure_and_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            for relative, content in (
+                ("flake.lock", "{}\n"),
+                ("nixos/production/contract-v1.json", "{}\n"),
+                ("scripts/nixos_production_install.py", "# fixture\n"),
+                ("scripts/nixos_production_prepare.py", "# fixture\n"),
+            ):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
+            output = root / "artifact.json"
+            command = [
+                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                "--managed-worker", "--repo", str(repo),
+                "--output", str(output), "--source-authority", "proof-only",
+            ]
+            with patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()):
+                plan = managed_build.build_plan(
+                    self.policy, repo=repo, command=command, home=home,
+                    explicit_tool="nix", explicit_profile="nixos-production-prepare",
+                )
+            guard = plan["nix_guard"]
+            closure = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-test"
+            def runner(argv, **kwargs):
+                store = Path(kwargs["env"]["HEIM_PC_MANAGED_NIX_STORE_ROOT"])
+                (store / "payload").write_bytes(b"store")
+                output.write_text(json.dumps({
+                    "source_revision": guard["source_revision"],
+                    "nix_volume": guard["docker_volume"],
+                    "system_path": closure,
+                    "closure_manifest_sha256": "a" * 64,
+                    "closure_path_count": 1,
+                }) + "\n", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0)
+            rc = managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+            self.assertEqual(rc, 0)
+            receipts = list((home / ".local/state/heim-pc/managed-builds/receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+            nix = receipt["nix_build"]
+            self.assertEqual(nix["source_revision"], guard["source_revision"])
+            self.assertEqual(nix["docker_volume"], guard["docker_volume"])
+            self.assertEqual(nix["system_closure"], closure)
+            self.assertEqual(nix["closure_manifest_sha256"], "a" * 64)
+            self.assertGreaterEqual(nix["store_allocated_bytes_after"], 5)
+            self.assertFalse(nix["store_hard_limit_exceeded"])
+            self.assertEqual(nix["lock_mode"], "flock-exclusive-nonblocking")
+
+    def test_nix_store_hard_budget_blocks_before_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_git_repo(root)
+            for relative, content in (
+                ("flake.lock", "{}\n"),
+                ("nixos/production/contract-v1.json", "{}\n"),
+                ("scripts/nixos_production_install.py", "# fixture\n"),
+                ("scripts/nixos_production_prepare.py", "# fixture\n"),
+            ):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
+            output = root / "artifact.json"
+            command = [
+                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                "--managed-worker", "--repo", str(repo),
+                "--output", str(output), "--source-authority", "proof-only",
+            ]
+            policy = json.loads(json.dumps(self.policy))
+            policy["nix_store_budget_bytes"] = {"warning": 0, "hard": 1}
+            with patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()):
+                resolved = managed_build.resolve_environment(
+                    policy, repo=repo, command=command, home=home,
+                    explicit_tool="nix", explicit_profile="nixos-production-prepare",
+                )
+                store = Path(resolved["environment"]["HEIM_PC_MANAGED_NIX_STORE_ROOT"])
+                store.mkdir(parents=True)
+                (store / "full").write_bytes(b"x")
+                plan = managed_build.build_plan(
+                    policy, repo=repo, command=command, home=home,
+                    explicit_tool="nix", explicit_profile="nixos-production-prepare",
+                )
+            self.assertTrue(plan["guard"]["blocked"])
+            runner = Mock()
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "hard budget"):
+                managed_build.execute_plan(policy, plan, command, home=home, runner=runner)
+            runner.assert_not_called()
+
+    def test_nix_explicit_tool_rejects_arbitrary_python_or_direct_nix(self) -> None:
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "reserved"):
+            managed_build.classify_tool(
+                self.policy, ["python3", "-c", "print('no')"], explicit_tool="nix"
+            )
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "reserved"):
+            managed_build.classify_tool(
+                self.policy, ["nix", "build"], explicit_tool="nix"
+            )
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "unsupported"):
+            managed_build.classify_tool(self.policy, ["nix", "build"])
+
+    def test_nix_profile_rejects_same_named_worker_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            output = root / "artifact.json"
+            command = [
+                sys.executable, str(root / "other" / "nixos_production_prepare.py"),
+                "--managed-worker", "--repo", str(repo),
+                "--output", str(output), "--source-authority", "proof-only",
+            ]
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "canonical repository prepare script"):
+                managed_build._require_nix_prepare_worker_binding(
+                    command, repo, "nixos-production-prepare"
+                )
 
     def test_real_storage_inventory_scan_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

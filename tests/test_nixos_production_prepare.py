@@ -91,6 +91,19 @@ def test_exact_source_revision_requires_clean_head(monkeypatch, tmp_path):
         prep.exact_source_revision(tmp_path)
 
 
+def test_managed_nix_volume_is_bound_to_managed_backing_directory(monkeypatch, tmp_path):
+    calls = []
+    backing = tmp_path / "store"
+    backing.mkdir()
+    monkeypatch.setattr(prep, "run", lambda argv, check=True: calls.append(argv) or Result((NIX_VOLUME + "\n").encode()))
+    prep.create_volume(NIX_VOLUME, backing_dir=backing)
+    argv = calls[0]
+    assert argv[:3] == ["docker", "volume", "create"]
+    assert ["--driver", "local"] == argv[3:5]
+    assert f"device={backing}" in argv
+    assert argv[-1] == NIX_VOLUME
+
+
 def test_existing_volume_is_rejected(monkeypatch):
     monkeypatch.setattr(prep, "run", lambda argv, check=True: Result(b"[]", returncode=0))
     with pytest.raises(prep.PrepareError, match="refusing existing production build volume"):
@@ -172,7 +185,7 @@ def test_prepare_failure_removes_created_volumes_and_does_not_publish_artifact(m
     monkeypatch.setattr(prep, "exact_source_revision", lambda repo: REVISION)
     monkeypatch.setattr(prep, "image_gate", lambda: None)
     monkeypatch.setattr(prep, "ensure_volume_absent", lambda name: None)
-    monkeypatch.setattr(prep, "create_volume", lambda name: created.append(name))
+    monkeypatch.setattr(prep, "create_volume", lambda name, **kwargs: created.append((name, kwargs.get("backing_dir"))))
     monkeypatch.setattr(prep, "remove_volume", lambda name: removed.append(name))
     def fake_run(argv, check=True):
         if len(argv) >= 6 and argv[0] == "git" and "bundle" in argv and "create" in argv:
@@ -183,7 +196,7 @@ def test_prepare_failure_removes_created_volumes_and_does_not_publish_artifact(m
     monkeypatch.setattr(prep, "build_exact_closure", lambda **kwargs: (_ for _ in ()).throw(prep.PrepareError("boom")))
     with pytest.raises(prep.PrepareError, match="boom"):
         prep.prepare(repo=tmp_path, output=output)
-    assert created == [NIX_VOLUME, SOURCE_VOLUME]
+    assert created == [(NIX_VOLUME, None), (SOURCE_VOLUME, None)]
     assert removed == [SOURCE_VOLUME, NIX_VOLUME]
     assert not output.exists()
 
@@ -208,7 +221,7 @@ def test_prepare_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsy
         lambda **kwargs: (_ for _ in ()).throw(prep.PrepareError("super-secret-material")),
     )
     monkeypatch.setenv(prep.MANAGED_WORKER_ENV, "1")
-    monkeypatch.setattr(prep, "_managed_worker_context_valid", lambda: True)
+    monkeypatch.setattr(prep, "_managed_worker_context_valid", lambda **_kwargs: True)
     assert prep.main([
         "--managed-worker", "--repo", str(tmp_path),
         "--output", str(tmp_path / "artifact.json"),
@@ -267,12 +280,31 @@ def test_managed_prepare_routes_plan_then_run_without_recursive_reexec(monkeypat
     for argv, kwargs in calls:
         assert str(prep.MANAGED_BUILD) in argv
         assert "--managed-worker" in argv
+        assert argv[argv.index("--tool") + 1] == "nix"
         assert kwargs["env"][prep.MANAGED_WORKER_ENV] == "1"
 
 
-def test_managed_worker_env_alone_cannot_bypass_parent_context(monkeypatch):
+def test_managed_worker_env_alone_cannot_bypass_parent_context(monkeypatch, tmp_path):
     monkeypatch.setenv(prep.MANAGED_WORKER_ENV, "1")
-    assert prep._managed_worker_context_valid() is False
+    output = tmp_path / "artifact.json"
+    assert prep._managed_worker_context_valid(
+        repo=tmp_path, output=output, source_authority="proof-only"
+    ) is False
+
+
+def test_managed_worker_parent_must_match_exact_nix_run_argv(tmp_path):
+    output = tmp_path / "artifact.json"
+    expected = prep.managed_prepare_argv(
+        operation="run", repo=tmp_path, output=output, source_authority="proof-only"
+    )
+    assert prep._managed_worker_parent_argv_valid(
+        expected, repo=tmp_path, output=output, source_authority="proof-only"
+    ) is True
+    tampered = list(expected)
+    tampered[tampered.index("--tool") + 1] = "python"
+    assert prep._managed_worker_parent_argv_valid(
+        tampered, repo=tmp_path, output=output, source_authority="proof-only"
+    ) is False
 
 
 def test_unmanaged_worker_invocation_is_blocked(monkeypatch, tmp_path, capsys):

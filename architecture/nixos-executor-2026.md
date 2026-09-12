@@ -286,11 +286,11 @@ Agenten vergleichen Soll und Ist. Sie schreiben Runtime-Beobachtungen niemals al
 
 ### Automatisierungs-Gate: Managed Nix Builds
 
-Die folgenden `nixos-rebuild`-Schritte beschreiben den **semantischen Executor-Pfad**, erteilen aber noch keine eigenständige Ausführungsautorität für Agenten. Der bestehende kanonische Vertrag `managed-builds` verlangt für automatisierte Operatorläufe einen verwalteten Build-Einstieg; dieser unterstützt derzeit Cargo, Node, Python und Playwright, aber noch keinen Nix/NixOS-Build.
+Die folgenden `nixos-rebuild`-Schritte beschreiben den **semantischen Executor-Pfad**, erteilen aber noch keine eigenständige Ausführungsautorität für Agenten. Der kanonische Vertrag `managed-builds` besitzt jetzt eine eng typisierte Nix-Profilklasse für den Produktions-Prepare-Worker. Sie akzeptiert nicht beliebige Python-Kommandos, sondern nur den gebundenen `nixos_production_prepare.py --managed-worker`-Pfad.
 
-Deshalb gilt fail-closed: **Bis ein reviewter Nix-Buildpfad in `managed-builds` oder ein dort ausdrücklich als gleichwertig gebundener Nachfolgevertrag existiert, dürfen autonome Operatoren `nix build`, `nixos-rebuild build`, `build-vm`, `test`, `boot` oder `switch` nicht direkt als produktiven Host-Deploy ausführen.**
+Der Nix-Pfad bindet Repository/Revision/Lock-/Produktionsvertrag an die Managed-Build-Identität, legt den revision-bound `/nix`-Store unter einen Managed-Cache-Pfad, schützt ihn mit einem exklusiven Lifecycle-Lock, wendet eigene Store-/Runtime-Hard-Budgets an und schreibt ein bounded Receipt mit exakter System-Closure, Closure-Manifest, Artifact-Digest und Docker-Volume-Bindung. `managed_nix.py` bleibt dabei ausdrücklich validation-only und wird nicht zum Executor erweitert.
 
-Vor Freigabe automatisierter NixOS-Änderungen muss der Managed-Nix-Buildvertrag mindestens Repository-/Revision-Bindung, Control-Release-Identität, Store-/Cache-Budgets, Prozess-/Lease-Schutz, bounded Receipts, zulässige Privilegien und den Übergang in die nachfolgenden Aktivierungs-Gates definieren. Menschliche Diagnose oder ein separat autorisierter Migrationslauf bleibt davon unterscheidbar und darf nicht als verwalteter Agentenlauf ausgegeben werden.
+Andere autonome `nix build`, `nixos-rebuild build`, `build-vm`, `test`, `boot` oder `switch`-Aufrufe bleiben fail-closed, solange sie nicht durch eine gleichwertig eng typisierte Managed-Build-Profilklasse gedeckt sind.
 
 Der Build-Receipt bindet zusätzlich die **exakte gebaute System-Closure** (`/nix/store/...-nixos-system-*` oder gleichwertige unveränderliche Identität) und den Control-Release-Set-Digest. Jede privilegierte Aktivierungsstufe nimmt ausschließlich diese vorab geprüfte Closure entgegen. Sie darf weder den Git-Checkout neu auswerten noch einen Branch, Lock oder Input erneut auflösen. Eine Source-/Lock-/Release-Set-Abweichung nach dem Build blockiert die Aktivierung statt still eine andere Closure zu erzeugen.
 

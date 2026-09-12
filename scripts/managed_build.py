@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import fcntl
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -144,14 +146,22 @@ def load_policy(path: Path) -> dict[str, Any]:
         policy.get("per_identity_cache_budget_bytes"),
         "per_identity_cache_budget_bytes",
     )
+    _require_nonnegative_budget(
+        policy.get("nix_store_budget_bytes"),
+        "nix_store_budget_bytes",
+    )
+    _require_nonnegative_budget(
+        policy.get("nix_runtime_budget_seconds"),
+        "nix_runtime_budget_seconds",
+    )
 
     max_receipts = policy.get("max_receipts")
     if not isinstance(max_receipts, int) or isinstance(max_receipts, bool) or max_receipts < 1:
         raise PolicyError("max_receipts must be a positive integer")
 
     tools = policy.get("tools")
-    if not isinstance(tools, dict) or set(tools) != {"cargo", "node", "python", "playwright"}:
-        raise PolicyError("tools must define cargo, node, python and playwright exactly")
+    if not isinstance(tools, dict) or set(tools) != {"cargo", "node", "python", "nix", "playwright"}:
+        raise PolicyError("tools must define cargo, node, python, nix and playwright exactly")
     executable_owners: dict[str, str] = {}
     for tool_name, spec in tools.items():
         if not isinstance(spec, dict):
@@ -301,6 +311,14 @@ def _command_basename(command: Sequence[str]) -> str:
     return Path(command[0]).name
 
 
+def _is_nix_prepare_worker(command: Sequence[str]) -> bool:
+    if not command or Path(str(command[0])).name not in {"python", "python3"}:
+        return False
+    args = [str(item) for item in command[1:]]
+    scripts = [item for item in args if Path(item).name == "nixos_production_prepare.py"]
+    return len(scripts) == 1 and "--managed-worker" in args and "--output" in args
+
+
 def classify_tool(
     policy: dict[str, Any],
     command: Sequence[str],
@@ -312,6 +330,10 @@ def classify_tool(
     if explicit_tool is not None:
         if explicit_tool not in policy["tools"]:
             raise ManagedBuildError(f"unknown managed build tool: {explicit_tool}")
+        if explicit_tool == "nix":
+            if _is_nix_prepare_worker(command):
+                return "nix"
+            raise ManagedBuildError("tool nix is reserved for the canonical production prepare worker")
         allowed = policy["tools"][explicit_tool]["executables"]
         if basename not in allowed:
             if not (
@@ -333,6 +355,8 @@ def classify_tool(
     }:
         return "playwright"
     for tool_name, spec in policy["tools"].items():
+        if tool_name == "nix":
+            continue
         if basename in spec["executables"]:
             return tool_name
     raise ManagedBuildError(f"unsupported managed build executable: {basename}")
@@ -391,6 +415,17 @@ def _toolchain_digest(
         observations["node"] = _run_readonly([node, "--version"], cwd=repo)
         if basename not in {"npx"}:
             observations[basename] = _run_readonly([command[0], "--version"], cwd=repo)
+    elif tool == "nix":
+        observations["python_runtime"] = sys.version
+        observations["docker"] = _run_readonly(["docker", "--version"], cwd=repo)
+        observations["nix_contract_files"] = _files_digest(
+            repo, [
+                "flake.lock",
+                "nixos/production/contract-v1.json",
+                "scripts/nixos_production_install.py",
+                "scripts/nixos_production_prepare.py",
+            ]
+        )["sha256"]
     else:
         observations["python_runtime"] = sys.version
         observations[basename] = _run_readonly([command[0], "--version"], cwd=repo)
@@ -491,6 +526,46 @@ def _build_environment(tool: str, base: Path, spec: dict[str, Any]) -> dict[str,
     return environment
 
 
+def _require_nix_prepare_worker_binding(
+    command: Sequence[str], root: Path, profile: str
+) -> None:
+    if profile != "nixos-production-prepare":
+        raise ManagedBuildError("managed Nix is restricted to the nixos-production-prepare profile")
+    args = [str(item) for item in command[1:]]
+    scripts = [item for item in args if Path(item).name == "nixos_production_prepare.py"]
+    expected_script = root / "scripts" / "nixos_production_prepare.py"
+    if (
+        len(scripts) != 1
+        or not Path(scripts[0]).is_absolute()
+        or os.path.normpath(scripts[0]) != scripts[0]
+        or Path(scripts[0]) != expected_script
+    ):
+        raise ManagedBuildError("managed Nix worker must use the canonical repository prepare script")
+    if args.count("--managed-worker") != 1:
+        raise ManagedBuildError("managed Nix worker marker is missing or ambiguous")
+
+    def option_value(option: str) -> str:
+        if args.count(option) != 1:
+            raise ManagedBuildError(f"managed Nix worker requires exactly one {option}")
+        index = args.index(option)
+        if index + 1 >= len(args) or not args[index + 1]:
+            raise ManagedBuildError(f"managed Nix worker {option} is missing its value")
+        return args[index + 1]
+
+    repo_value = option_value("--repo")
+    if (
+        not Path(repo_value).is_absolute()
+        or os.path.normpath(repo_value) != repo_value
+        or Path(repo_value) != root
+    ):
+        raise ManagedBuildError("managed Nix worker repository does not match the managed repository")
+    output_value = option_value("--output")
+    if not Path(output_value).is_absolute() or os.path.normpath(output_value) != output_value:
+        raise ManagedBuildError("managed Nix worker output must be an absolute canonical path")
+    if option_value("--source-authority") not in {"proof-only", "merged-main"}:
+        raise ManagedBuildError("managed Nix worker source authority is invalid")
+
+
 def _build_identity_context(
     policy: dict[str, Any],
     *,
@@ -504,6 +579,8 @@ def _build_identity_context(
     root = Path(facts["root"])
     tool = classify_tool(policy, command, explicit_tool=explicit_tool)
     profile = infer_profile(tool, command, explicit_profile)
+    if tool == "nix":
+        _require_nix_prepare_worker_binding(command, root, profile)
     spec = policy["tools"][tool]
     lockfiles = _files_digest(root, spec["lockfiles"])
     toolchain = _toolchain_digest(tool, command, root)
@@ -697,6 +774,41 @@ def build_plan(
         policy["per_identity_cache_budget_bytes"],
         "per_identity_cache_budget_bytes",
     )
+    nix_guard: dict[str, Any] | None = None
+    if tool == "nix":
+        source_revision = _git(root, "rev-parse", "HEAD")
+        if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+            raise ManagedBuildError("managed Nix source revision must be exact 40-hex")
+        store_root_raw = context["environment"].get("HEIM_PC_MANAGED_NIX_STORE_ROOT")
+        if not isinstance(store_root_raw, str):
+            raise ManagedBuildError("managed Nix store root is missing")
+        store_root = Path(store_root_raw)
+        store_scan = (
+            scan_worktree_payloads(store_root, ["."])
+            if store_root.exists() and store_root.is_dir() and not store_root.is_symlink()
+            else {"allocated_bytes": 0, "entries": []}
+        )
+        store_budget = _require_nonnegative_budget(
+            policy["nix_store_budget_bytes"], "nix_store_budget_bytes"
+        )
+        runtime_budget = _require_nonnegative_budget(
+            policy["nix_runtime_budget_seconds"], "nix_runtime_budget_seconds"
+        )
+        store_status = _status(store_scan["allocated_bytes"], store_budget)
+        if store_status == "hard_limit":
+            blocked = True
+        lock_path = state_root / "cache-locks" / "nix" / f"{context['cache_key']}.lock"
+        nix_guard = {
+            "source_revision": source_revision,
+            "docker_volume": f"heim-pc-nixos-production-{source_revision[:12]}",
+            "store_root": str(store_root),
+            "store_allocated_bytes": store_scan["allocated_bytes"],
+            "store_status": store_status,
+            "store_budget_bytes": store_budget,
+            "runtime_budget_seconds": runtime_budget,
+            "lifecycle_lock_path": str(lock_path),
+            "lock_mode": "flock-exclusive-nonblocking",
+        }
     return {
         "schema_version": 1,
         "kind": "heim_pc.managed_build_plan",
@@ -714,6 +826,7 @@ def build_plan(
             "status": _status(cache_scan["allocated_bytes"], cache_budget),
             "budget_bytes": cache_budget,
         },
+        "nix_guard": nix_guard,
         "interactive_shell_behavior": "unchanged",
         "automatic_cleanup_authorized": False,
         "does_not_establish": [
@@ -824,6 +937,53 @@ def _trim_receipts(directory: Path, max_receipts: int) -> None:
         path.unlink()
 
 
+def _command_option_value(command: Sequence[str], option: str) -> str:
+    values = [str(item) for item in command]
+    if values.count(option) != 1:
+        raise ManagedBuildError(f"managed command must contain exactly one {option}")
+    index = values.index(option)
+    if index + 1 >= len(values) or not values[index + 1]:
+        raise ManagedBuildError(f"managed command {option} is missing its value")
+    return values[index + 1]
+
+
+def _nix_artifact_receipt(command: Sequence[str], guard: dict[str, Any]) -> dict[str, Any]:
+    output = Path(_command_option_value(command, "--output"))
+    try:
+        info = output.lstat()
+    except OSError as exc:
+        raise ManagedBuildError("managed Nix worker did not publish its artifact") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ManagedBuildError("managed Nix artifact is not a single-link regular file")
+    try:
+        artifact = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManagedBuildError("managed Nix artifact is not valid JSON") from exc
+    expected_revision = guard["source_revision"]
+    expected_volume = guard["docker_volume"]
+    system_closure = artifact.get("system_path")
+    if (
+        artifact.get("source_revision") != expected_revision
+        or artifact.get("nix_volume") != expected_volume
+        or not isinstance(system_closure, str)
+        or re.fullmatch(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+", system_closure) is None
+        or not isinstance(artifact.get("closure_manifest_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact["closure_manifest_sha256"]) is None
+        or type(artifact.get("closure_path_count")) is not int
+        or artifact["closure_path_count"] < 1
+    ):
+        raise ManagedBuildError("managed Nix artifact is not bound to the planned revision/volume/closure")
+    return {
+        "artifact_path": str(output),
+        "artifact_sha256": _sha256_file(output),
+        "source_revision": expected_revision,
+        "docker_volume": expected_volume,
+        "system_closure": system_closure,
+        "closure_manifest_sha256": artifact["closure_manifest_sha256"],
+        "closure_path_count": artifact["closure_path_count"],
+    }
+
+
 def execute_plan(
     policy: dict[str, Any],
     plan: dict[str, Any],
@@ -834,7 +994,7 @@ def execute_plan(
 ) -> int:
     if plan["guard"]["blocked"]:
         raise ManagedBuildError(
-            "managed build blocked: worktree regenerable payload is at or above the hard budget"
+            "managed build blocked: a managed payload is at or above a hard budget"
         )
     root = Path(plan["repository_root"])
     cache_path = Path(plan["cache_path"])
@@ -846,46 +1006,104 @@ def execute_plan(
 
     environment = os.environ.copy()
     environment.update(plan["environment"])
+    nix_guard = plan.get("nix_guard")
+    lock_fd: int | None = None
+    if plan["tool"] == "nix":
+        if not isinstance(nix_guard, dict):
+            raise ManagedBuildError("managed Nix plan lacks its Nix guard")
+        observed_head = _git(root, "rev-parse", "HEAD")
+        if observed_head != nix_guard.get("source_revision") or _git(root, "status", "--porcelain"):
+            raise ManagedBuildError("managed Nix source changed after planning")
+        store_root = Path(str(nix_guard["store_root"]))
+        _ensure_secure_directory(store_root, home)
+        before_store = scan_worktree_payloads(store_root, ["."])
+        hard_store = int(nix_guard["store_budget_bytes"]["hard"])
+        if before_store["allocated_bytes"] >= hard_store:
+            raise ManagedBuildError("managed Nix store is at or above its hard budget")
+        lock_path = Path(str(nix_guard["lifecycle_lock_path"]))
+        _ensure_secure_directory(lock_path.parent, home)
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(lock_fd)
+            raise ManagedBuildError("managed Nix identity already has an active build lease") from exc
+
     started_at = _utc_now()
-    result = runner(
-        list(command),
-        cwd=root,
-        env=environment,
-        check=False,
-    )
-    finished_at = _utc_now()
-    after = scan_worktree_payloads(
-        root,
-        policy["tools"][plan["tool"]]["worktree_payloads"],
-    )
-    receipt = {
-        "schema_version": 1,
-        "kind": "heim_pc.managed_build_receipt",
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "plan_sha256": _sha256_json(plan),
-        "policy_sha256": plan["policy_sha256"],
-        "repository_identity_sha256": plan["repository_identity_sha256"],
-        "tool": plan["tool"],
-        "profile": plan["profile"],
-        "cache_key": plan["cache_key"],
-        "cache_path": plan["cache_path"],
-        "environment": plan["environment"],
-        "command": plan["command"],
-        "returncode": int(result.returncode),
-        "worktree_allocated_bytes_before": plan["guard"]["worktree"]["allocated_bytes"],
-        "worktree_allocated_bytes_after": after["allocated_bytes"],
-        "automatic_cleanup_authorized": False,
-    }
-    receipt_name = (
-        f"{int(time.time() * 1_000_000)}-"
-        f"{plan['repository_identity_sha256'][:12]}-{plan['tool']}.json"
-    )
-    receipts = state_root / "receipts"
-    receipt_path = receipts / receipt_name
-    _atomic_write_json(receipt_path, receipt)
-    _trim_receipts(receipts, int(policy["max_receipts"]))
-    return int(result.returncode)
+    try:
+        if plan["tool"] == "nix":
+            timeout_seconds = int(nix_guard["runtime_budget_seconds"]["hard"])
+            try:
+                result = runner(
+                    list(command), cwd=root, env=environment, check=False,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                result = subprocess.CompletedProcess(list(command), 124)
+        else:
+            result = runner(list(command), cwd=root, env=environment, check=False)
+        finished_at = _utc_now()
+        after = scan_worktree_payloads(
+            root, policy["tools"][plan["tool"]]["worktree_payloads"],
+        )
+        effective_returncode = int(result.returncode)
+        nix_receipt: dict[str, Any] | None = None
+        if plan["tool"] == "nix":
+            store_root = Path(str(nix_guard["store_root"]))
+            after_store = scan_worktree_payloads(store_root, ["."])
+            store_hard = int(nix_guard["store_budget_bytes"]["hard"])
+            store_over_hard = after_store["allocated_bytes"] >= store_hard
+            if store_over_hard and effective_returncode == 0:
+                effective_returncode = 75
+            nix_receipt = {
+                "source_revision": nix_guard["source_revision"],
+                "docker_volume": nix_guard["docker_volume"],
+                "store_root": nix_guard["store_root"],
+                "store_allocated_bytes_before": before_store["allocated_bytes"],
+                "store_allocated_bytes_after": after_store["allocated_bytes"],
+                "store_budget_bytes": nix_guard["store_budget_bytes"],
+                "store_hard_limit_exceeded": store_over_hard,
+                "runtime_budget_seconds": nix_guard["runtime_budget_seconds"],
+                "lifecycle_lock_path": nix_guard["lifecycle_lock_path"],
+                "lock_mode": nix_guard["lock_mode"],
+            }
+            if effective_returncode == 0:
+                nix_receipt.update(_nix_artifact_receipt(command, nix_guard))
+        receipt = {
+            "schema_version": 1,
+            "kind": "heim_pc.managed_build_receipt",
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "plan_sha256": _sha256_json(plan),
+            "policy_sha256": plan["policy_sha256"],
+            "repository_identity_sha256": plan["repository_identity_sha256"],
+            "tool": plan["tool"],
+            "profile": plan["profile"],
+            "cache_key": plan["cache_key"],
+            "cache_path": plan["cache_path"],
+            "environment": plan["environment"],
+            "command": plan["command"],
+            "returncode": effective_returncode,
+            "worktree_allocated_bytes_before": plan["guard"]["worktree"]["allocated_bytes"],
+            "worktree_allocated_bytes_after": after["allocated_bytes"],
+            "nix_build": nix_receipt,
+            "automatic_cleanup_authorized": False,
+        }
+        receipt_name = (
+            f"{int(time.time() * 1_000_000)}-"
+            f"{plan['repository_identity_sha256'][:12]}-{plan['tool']}.json"
+        )
+        receipts = state_root / "receipts"
+        receipt_path = receipts / receipt_name
+        _atomic_write_json(receipt_path, receipt)
+        _trim_receipts(receipts, int(policy["max_receipts"]))
+        return effective_returncode
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -895,7 +1113,7 @@ def _parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="emit a read-only managed-build plan")
     plan.add_argument("--repo", type=Path, required=True)
-    plan.add_argument("--tool", choices=["cargo", "node", "python", "playwright"])
+    plan.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"])
     plan.add_argument("--profile")
     plan.add_argument("command", nargs=argparse.REMAINDER)
 
@@ -904,7 +1122,7 @@ def _parser() -> argparse.ArgumentParser:
         help="resolve one identity-bound managed environment without executing or scanning payloads",
     )
     resolve.add_argument("--repo", type=Path, required=True)
-    resolve.add_argument("--tool", choices=["cargo", "node", "python", "playwright"], required=True)
+    resolve.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"], required=True)
     resolve.add_argument("--profile", required=True)
     resolve.add_argument("--executable", required=True)
 
@@ -913,24 +1131,24 @@ def _parser() -> argparse.ArgumentParser:
         help="prepare one identity-bound managed environment without executing a build",
     )
     prepare.add_argument("--repo", type=Path, required=True)
-    prepare.add_argument("--tool", choices=["cargo", "node", "python", "playwright"], required=True)
+    prepare.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"], required=True)
     prepare.add_argument("--profile", required=True)
     prepare.add_argument("--executable", required=True)
 
     guard = subparsers.add_parser("guard", help="inspect worktree build payloads")
     guard.add_argument("--repo", type=Path, required=True)
-    guard.add_argument("--tool", choices=["cargo", "node", "python", "playwright"])
+    guard.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"])
 
     run = subparsers.add_parser("run", help="execute through the managed environment")
     run.add_argument("--repo", type=Path, required=True)
-    run.add_argument("--tool", choices=["cargo", "node", "python", "playwright"])
+    run.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"])
     run.add_argument("--profile")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("command", nargs=argparse.REMAINDER)
 
     pin = subparsers.add_parser("pin", help="create one explicit expiring hard-budget pin")
     pin.add_argument("--repo", type=Path, required=True)
-    pin.add_argument("--tool", choices=["cargo", "node", "python", "playwright"], required=True)
+    pin.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"], required=True)
     pin.add_argument("--reason", required=True)
     pin.add_argument("--ttl-hours", type=int, default=24)
     return parser
