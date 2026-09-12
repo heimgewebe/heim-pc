@@ -1712,6 +1712,7 @@ def _directory_content_snapshot(root: Path) -> tuple[str, str]:
         raise ProductionInstallError("protected EFI content root cannot be opened safely") from exc
     digest = hashlib.sha256()
     metadata = hashlib.sha256()
+    directory_identities: dict[str, tuple[int, ...]] = {}
 
     def stable_identity(info: os.stat_result) -> tuple[int, ...]:
         return (
@@ -1726,11 +1727,35 @@ def _directory_content_snapshot(root: Path) -> tuple[str, str]:
             (":".join(str(item) for item in stable_identity(info)) + "\0").encode("ascii")
         )
 
+    def open_relative_directory(relative: str) -> int:
+        current_fd = os.dup(root_fd)
+        try:
+            for component in PurePosixPath(relative).parts:
+                next_fd = os.open(component, flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+                info = os.fstat(current_fd)
+                if not stat.S_ISDIR(info.st_mode) or info.st_dev != root_device:
+                    raise ProductionInstallError(
+                        "protected EFI directory path changed while hashing"
+                    )
+            return current_fd
+        except OSError as exc:
+            os.close(current_fd)
+            raise ProductionInstallError(
+                "protected EFI directory cannot be re-opened safely"
+            ) from exc
+        except BaseException:
+            os.close(current_fd)
+            raise
+
     try:
         root_before = os.fstat(root_fd)
         if not stat.S_ISDIR(root_before.st_mode):
             raise ProductionInstallError("protected EFI content root is not a directory")
         root_device = root_before.st_dev
+        root_identity = stable_identity(root_before)
+        directory_identities[""] = root_identity
         bind_metadata(b"D", "", root_before)
         for dirpath, dirnames, filenames, dir_fd in os.fwalk(
             ".", topdown=True, follow_symlinks=False, dir_fd=root_fd
@@ -1741,8 +1766,12 @@ def _directory_content_snapshot(root: Path) -> tuple[str, str]:
             opened_dir = os.fstat(dir_fd)
             if not stat.S_ISDIR(opened_dir.st_mode) or opened_dir.st_dev != root_device:
                 raise ProductionInstallError("protected EFI directory identity changed while hashing")
+            opened_directory_identity = stable_identity(opened_dir)
             if prefix:
+                directory_identities[prefix] = opened_directory_identity
                 bind_metadata(b"D", prefix, opened_dir)
+            elif opened_directory_identity != root_identity:
+                raise ProductionInstallError("protected EFI content root changed while hashing")
             for name in dirnames:
                 linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 if stat.S_ISLNK(linked.st_mode) or not stat.S_ISDIR(linked.st_mode) or linked.st_dev != root_device:
@@ -1788,8 +1817,21 @@ def _directory_content_snapshot(root: Path) -> tuple[str, str]:
                         raise ProductionInstallError("protected EFI file identity changed while hashing")
                 finally:
                     os.close(fd)
+        for relative, expected_identity in sorted(directory_identities.items()):
+            if not relative:
+                current = os.fstat(root_fd)
+            else:
+                check_fd = open_relative_directory(relative)
+                try:
+                    current = os.fstat(check_fd)
+                finally:
+                    os.close(check_fd)
+            if stable_identity(current) != expected_identity:
+                raise ProductionInstallError(
+                    "protected EFI directory changed after hashing"
+                )
         root_after = os.fstat(root_fd)
-        if stable_identity(root_after) != stable_identity(root_before):
+        if stable_identity(root_after) != root_identity:
             raise ProductionInstallError("protected EFI content root changed while hashing")
         return digest.hexdigest(), metadata.hexdigest()
     finally:

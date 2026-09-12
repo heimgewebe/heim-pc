@@ -464,6 +464,24 @@ def test_protected_efi_digest_retries_directory_mutation_without_returning_stale
     assert observed == prod._directory_content_sha256(root)
 
 
+def test_protected_efi_snapshot_revalidates_nested_directory_after_visit(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    nested = root / "EFI" / "BOOT"
+    nested.mkdir(parents=True)
+    (nested / "first.efi").write_bytes(b"one")
+    real_fwalk = prod.os.fwalk
+
+    def racing_fwalk(*args, **kwargs):
+        for row in real_fwalk(*args, **kwargs):
+            yield row
+            if row[0] == "./EFI/BOOT":
+                (nested / "late.efi").write_bytes(b"two")
+
+    monkeypatch.setattr(prod.os, "fwalk", racing_fwalk)
+    with pytest.raises(prod.ProductionInstallError, match="directory changed after hashing"):
+        prod._directory_content_snapshot(root)
+
+
 def test_protected_efi_digest_fails_closed_when_snapshot_never_stabilizes(monkeypatch, tmp_path):
     root = tmp_path / "efi"
     root.mkdir()
