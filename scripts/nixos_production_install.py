@@ -1261,6 +1261,24 @@ def preserve_private_receipt_reservation(reservation: dict[str, Any]) -> None:
         _close_private_receipt_reservation(reservation)
 
 
+def _restore_private_receipt_reservation_marker(reservation: dict[str, Any]) -> None:
+    _private_receipt_reservation_valid(reservation)
+    marker = _private_receipt_reservation_marker()
+    fd = reservation["fd"]
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        _write_all_fd(fd, marker)
+        os.fsync(fd)
+        _private_receipt_reservation_valid(reservation)
+        _private_receipt_reservation_marker_valid(reservation)
+        os.fsync(reservation["parent_fd"])
+    except OSError as exc:
+        raise ProductionInstallError(
+            "cannot restore private production receipt reservation marker"
+        ) from exc
+
+
 def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any]) -> None:
     _private_receipt_reservation_valid(reservation)
     _private_receipt_reservation_marker_valid(reservation)
@@ -1275,7 +1293,13 @@ def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any
         if os.fstat(fd).st_size != len(payload):
             raise ProductionInstallError("private production receipt final size is invalid")
         os.fsync(reservation["parent_fd"])
-    except OSError as exc:
+    except (OSError, ProductionInstallError) as exc:
+        try:
+            _restore_private_receipt_reservation_marker(reservation)
+        except (OSError, ProductionInstallError) as restore_exc:
+            raise ProductionInstallError(
+                "private production receipt finalization failed and reservation recovery is incomplete"
+            ) from restore_exc
         raise ProductionInstallError("cannot finalize private production receipt") from exc
     else:
         _close_private_receipt_reservation(reservation)

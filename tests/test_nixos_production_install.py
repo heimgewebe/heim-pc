@@ -780,6 +780,33 @@ def test_private_receipt_reservation_is_create_only_and_finalizes_same_inode(tmp
         prod.reserve_private_receipt(target)
 
 
+def test_private_receipt_finalization_failure_restores_reservation_marker(monkeypatch, tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    real_fsync = prod.os.fsync
+    calls = 0
+
+    def fail_first_fsync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("synthetic finalization fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fsync", fail_first_fsync)
+    with pytest.raises(prod.ProductionInstallError, match="cannot finalize"):
+        prod.finalize_private_receipt(
+            reservation,
+            {"schema_version": 1, "kind": "heim_pc.nixos_production_install_receipt"},
+        )
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+    prod.preserve_private_receipt_reservation(reservation)
+
+
 def test_private_receipt_discard_never_unlinks_replaced_target(tmp_path):
     target = tmp_path / "reserved-receipt.json"
     held = tmp_path / "held-reservation.json"
