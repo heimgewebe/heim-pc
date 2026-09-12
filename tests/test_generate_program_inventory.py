@@ -48,6 +48,16 @@ def test_build_snapshot_compacts_raw_inventory(tmp_path):
     snapshot = build_snapshot(raw, generated_at="2026-07-09T18:15:00Z")
 
     assert snapshot["schema"] == "program-inventory.v1"
+    assert snapshot["observation_scope"] == {
+        "kind": "point_in_time_runtime_observation",
+        "observed_at": "2026-07-09T18:15:00Z",
+        "does_not_establish": [
+            "current_state_after_observed_at",
+            "service_necessity",
+            "system_architecture",
+            "preferred_access_path",
+        ],
+    }
     assert snapshot["counts"]["running_process_rows"] == 3
     assert snapshot["counts"]["rootfs_executables_sudo"] == 12
     assert snapshot["counts"]["executables_added_by_sudo"] == 2
@@ -64,6 +74,10 @@ def test_render_and_write_outputs(tmp_path):
     summary = render_markdown(snapshot)
 
     assert "id: program-inventory-summary" in summary
+    assert "canonicality: observation" in summary
+    assert "temporal_scope: point_in_time" in summary
+    assert 'observed_at: "2026-07-09T18:15:00Z"' in summary
+    assert "does not establish current state after that timestamp" in summary
     assert "Raw artifact policy" in summary
     assert "Large raw inventories stay outside Git" in summary
 

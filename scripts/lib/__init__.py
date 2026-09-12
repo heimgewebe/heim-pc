@@ -1,1 +1,1 @@
-# Minimal Heimserver Kit Library
+# Minimal Heim-PC utility library

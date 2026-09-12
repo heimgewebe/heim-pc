@@ -2,6 +2,9 @@
 id: software-inventory
 role: reality
 status: canonical
+canonicality: observation
+temporal_scope: point_in_time
+observed_at: "2026-07-09T17:16:37Z"
 last_reviewed: 2026-07-09
 depends_on:
   - home-entry
@@ -16,7 +19,9 @@ Generated at: `2026-07-09T17:16:37Z`
 
 ## Boundary
 
-This is a small, reviewable inventory of operator-relevant software surfaces on heim-pc. It is not a full `/usr/bin`, dpkg, Home directory or private-content dump.
+This is a small, reviewable point-in-time observation of operator-relevant software surfaces on heim-pc. It is not a full `/usr/bin`, dpkg, Home directory or private-content dump.
+
+It is authoritative only for what was observed at the generated timestamp. It does not establish current state after that timestamp, service necessity, system architecture, or a preferred access path. Re-read live runtime before making present-tense claims.
 
 The inventory may record executable names, versions, package managers, local service URLs and safe configuration paths. It must not record secrets, browser profiles, keyrings, private documents or raw command histories.
 
