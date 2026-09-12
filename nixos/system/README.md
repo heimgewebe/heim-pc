@@ -27,7 +27,7 @@ The hard security assumption is that an arbitrary coding agent may become root i
 - `flake.nix`: host, VM, MicroVM, lifecycle and check graph.
 - `hosts/heim-pc/default.nix`: shared Heim-PC host assembly; the default root remains a non-installing placeholder unless `storage-layout.nix` is explicitly layered in.
 - `modules/storage-layout.nix`: production-contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles; it is intentionally separate from the disposable Freecom rehearsal contract.
-- `../production/contract-v1.json`: isolated parallel-disk production topology. It binds final mounts to fixed PARTUUIDs, protects the current WD/Pop!_OS fallback by stable identity, and binds the freshly observed Seagate by-id/model/serial/WWN/exact size and keeps the WD/Pop!_OS fallback slot-independent.
+- `../production/contract-v1.json`: isolated parallel-disk production topology. It contains only public structural expectations and non-unique model/size anchors. Exact target/fallback by-id, serial/WWN, filesystem UUIDs and GPT PARTUUIDs come from the mandatory local private identity contract, which is bound to the exact source revision and public-contract digest.
 - `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
 - `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
 - `tests/integration.nix`: scoped Grabowski/Bureau VM integration proof.
@@ -40,7 +40,7 @@ The hard security assumption is that an arbitrary coding agent may become root i
 The host-shaped configurations have deliberately different roles:
 
 - `heim-pc` is the desktop-shaped placeholder. Its root uses `NIXOS_PROTOTYPE_DO_NOT_INSTALL`, so it is not a bare-metal install target.
-- `heim-pc-storage-target` is the managed-build candidate. It layers `storage-layout.nix`, which derives `/`, `/nix`, `/boot`, `/recovery` and the LUKS mapper from the rehearsal contract. Physical proof gates are disabled.
+- `heim-pc-storage-target` is the managed-build candidate. It layers `storage-layout.nix`, which derives `/`, `/nix`, `/boot`, `/recovery` and the LUKS mapper from the production topology contract. Physical proof gates are disabled.
 - `heim-pc-physical-gate-proprietary` and `heim-pc-physical-gate-open` layer the **same** `storage-layout.nix` and enable the physical proof gates. Their intended A/B difference is only the NVIDIA kernel-module path.
 - `heim-pc-live-gate-*` are non-installing tmpfs ISO proof media. They do not use the storage target and no longer import the container module because Gate A/B does not require Podman/Docker.
 - `heim-pc-vm` keeps the placeholder root, disables physical hardware policy and evaluates without NVIDIA hardware enablement.

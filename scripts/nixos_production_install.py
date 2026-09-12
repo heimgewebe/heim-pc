@@ -3,8 +3,8 @@
 
 The default mode is effect-free: observe, validate and compile a plan. Destructive
 execution requires --apply plus a plan-hash-bound confirmation token. Kernel NVMe
-names may appear only as observed resolution; mutation authority is the exact
-contract by-id path or fixed by-partuuid paths.
+names may appear only as observed resolution; mutation authority is the private exact
+target by-id plus target-derived stable by-id partition paths.
 """
 from __future__ import annotations
 
