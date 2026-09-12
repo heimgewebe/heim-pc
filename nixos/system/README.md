@@ -26,7 +26,8 @@ The hard security assumption is that an arbitrary coding agent may become root i
 
 - `flake.nix`: host, VM, MicroVM, lifecycle and check graph.
 - `hosts/heim-pc/default.nix`: shared Heim-PC host assembly; the default root remains a non-installing placeholder unless `storage-layout.nix` is explicitly layered in.
-- `modules/storage-layout.nix`: contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles.
+- `modules/storage-layout.nix`: production-contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles; it is intentionally separate from the disposable Freecom rehearsal contract.
+- `../production/contract-v1.json`: isolated parallel-disk production topology. It contains only public structural expectations and non-unique model/size anchors. Exact target/fallback by-id, serial/WWN, filesystem UUIDs and GPT PARTUUIDs come from the mandatory local private identity contract, which is bound to the exact source revision and public-contract digest.
 - `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
 - `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
 - `tests/integration.nix`: scoped Grabowski/Bureau VM integration proof.
@@ -39,7 +40,7 @@ The hard security assumption is that an arbitrary coding agent may become root i
 The host-shaped configurations have deliberately different roles:
 
 - `heim-pc` is the desktop-shaped placeholder. Its root uses `NIXOS_PROTOTYPE_DO_NOT_INSTALL`, so it is not a bare-metal install target.
-- `heim-pc-storage-target` is the managed-build candidate. It layers `storage-layout.nix`, which derives `/`, `/nix`, `/boot`, `/recovery` and the LUKS mapper from the rehearsal contract. Physical proof gates are disabled.
+- `heim-pc-storage-target` is the managed-build candidate. It layers `storage-layout.nix`, which derives `/`, `/nix`, `/boot`, `/recovery` and the LUKS mapper from the production topology contract. Physical proof gates are disabled.
 - `heim-pc-physical-gate-proprietary` and `heim-pc-physical-gate-open` layer the **same** `storage-layout.nix` and enable the physical proof gates. Their intended A/B difference is only the NVIDIA kernel-module path.
 - `heim-pc-live-gate-*` are non-installing tmpfs ISO proof media. They do not use the storage target and no longer import the container module because Gate A/B does not require Podman/Docker.
 - `heim-pc-vm` keeps the placeholder root, disables physical hardware policy and evaluates without NVIDIA hardware enablement.
@@ -236,3 +237,12 @@ Current strategic hypothesis:
 - The decision remains reversible until the physical GPU/audio/Secure-Boot/recovery gates pass and long-duration real-workload behavior is acceptable.
 
 See `../../architecture/os-future-evaluation-20260901.md` for the evidence-weighted comparison and flip conditions.
+
+
+### Production Seagate installer
+
+The production path is deliberately split into **prepare -> plan -> apply** and remains separate from the disposable Freecom/T017 rehearsal authority. `../../scripts/nixos_production_prepare.py` accepts only a clean exact Git revision, bundles that revision, evaluates and builds `heim-pc-storage-target` in the pinned Nix Docker image, retains the resulting `/nix` closure in a revision-named Docker volume, and emits a private create-only install-artifact JSON. It has no block-device mutation surface. Because a squash merge changes the source revision, a branch-head artifact is proof-only; the artifact used for the physical installation must be regenerated from the final merged commit.
+
+`../../scripts/nixos_production_install.py` consumes the exact artifact plus a mandatory local `--identity-contract`. The private identity file is bound to the artifact source revision and public-contract digest and supplies the exact disk identities outside Git. Kernel names remain observation-only. Closure verification uses the pinned-image Nix binary against the prepared store mounted separately read-only.
+
+Before any effect, the planner requires the target to remain blank and unmounted, checks hidden signatures with read-only `wipefs`, proves `/` and `/boot/efi` still match the private fallback fingerprint, rejects target/protected alias collisions, verifies the exact artifact/source revision and scratch state, and binds the plan to the private identity digest. Apply additionally requires root, the exact plan confirmation, and interactive credentials. GPT creation uses private plan-bound PARTUUIDs; formatting and LUKS address only target-derived stable by-id partition paths. The installed profile, Seagate ESP, encrypted `@persist`, EFI/NVRAM state, fallback fingerprint and closed mapper are all verified after the run.

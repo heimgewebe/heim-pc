@@ -42,6 +42,13 @@ in
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
 
+  # Canonical local interaction policy for the physical workstation.  Reuse the
+  # XKB definition for the early console so LUKS and SDDM see the same layout.
+  services.xserver.xkb.layout = "de";
+  console.useXkbConfig = true;
+  i18n.defaultLocale = "de_DE.UTF-8";
+  time.timeZone = "Europe/Berlin";
+
   # Placeholder boot surface for heim-pc and the VM proof only. The physical
   # storage target and gate profiles replace it with storage-layout.nix, derived
   # from the same rehearsal contract. Neither profile authorizes installation.

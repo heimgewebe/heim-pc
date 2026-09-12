@@ -317,7 +317,7 @@
             live = map (name: configs.${name}.config) [
               "heim-pc-live-gate-proprietary" "heim-pc-live-gate-open"
             ];
-            contract = builtins.fromJSON (builtins.readFile ../rehearsal/contract-v1.json);
+            contract = builtins.fromJSON (builtins.readFile ../production/contract-v1.json);
             topology = contract.topology;
             byRole = role: builtins.head (builtins.filter (p: p.role == role) topology.partitions);
             mapperName = topology.luks.mapper_name;
@@ -345,6 +345,10 @@
             == "/dev/disk/by-partlabel/${(byRole "encrypted-system").label}";
           assert target.boot.loader.systemd-boot.enable;
           assert !target.boot.loader.efi.canTouchEfiVariables;
+          assert target.services.xserver.xkb.layout == "de";
+          assert target.console.useXkbConfig;
+          assert target.i18n.defaultLocale == "de_DE.UTF-8";
+          assert target.time.timeZone == "Europe/Berlin";
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;
