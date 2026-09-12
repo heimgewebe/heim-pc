@@ -9,6 +9,7 @@ target by-id plus target-derived stable by-id partition paths.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
 import hashlib
 import importlib.util
@@ -67,6 +68,9 @@ VERIFIER_ARCHIVE_BASE = Path("/var/lib/heim-pc/nixos-production-verifiers")
 CONTAINERD_SOCKET = Path("/run/containerd/containerd.sock")
 CONTAINERD_VERIFIER_NAMESPACE_PREFIX = "heim-pc-nixos-verify-"
 HOST_NIX_ROOT = Path("/nix")
+PRODUCTION_APPLY_LOCK_DIR = Path("/run/heim-pc-nixos-production-locks")
+PRODUCTION_APPLY_LOCK_OWNER_UID = 0
+PRODUCTION_APPLY_LOCK_OWNER_GID = 0
 MANAGED_NIX_STORE_ROOT_RE = re.compile(r"^/home/alex/\.cache/heim-pc/managed-builds/nix/[0-9a-f]{64}/nix-store$")
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -649,6 +653,159 @@ def _require_by_id(value: Any, label: str) -> str:
     if KERNEL_NVME_RE.fullmatch(value):
         raise ProductionInstallError(f"{label} must not use a kernel NVMe name")
     return value
+
+
+def _production_apply_lock_identity(plan: dict[str, Any]) -> tuple[str, str]:
+    target = _require_by_id(plan.get("target_authority"), "production apply lock target")
+    digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
+    return target, digest
+
+
+def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
+    _target, target_sha256 = _production_apply_lock_identity(plan)
+    if (
+        os.geteuid() != PRODUCTION_APPLY_LOCK_OWNER_UID
+        or os.getegid() != PRODUCTION_APPLY_LOCK_OWNER_GID
+    ):
+        raise ProductionInstallError("production apply lock requires root authority")
+    directory = PRODUCTION_APPLY_LOCK_DIR
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ProductionInstallError("production apply lock directory is unavailable") from exc
+    try:
+        linked_directory = directory.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("production apply lock directory is unavailable") from exc
+    if (
+        stat.S_ISLNK(linked_directory.st_mode)
+        or not stat.S_ISDIR(linked_directory.st_mode)
+        or linked_directory.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+        or linked_directory.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+        or stat.S_IMODE(linked_directory.st_mode) != 0o700
+    ):
+        raise ProductionInstallError("production apply lock directory identity is unsafe")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    directory_fd: int | None = None
+    lock_fd: int | None = None
+    locked = False
+    try:
+        directory_fd = os.open(directory, directory_flags)
+        opened_directory = os.fstat(directory_fd)
+        linked_directory_after = directory.lstat()
+        if (
+            opened_directory.st_dev != linked_directory_after.st_dev
+            or opened_directory.st_ino != linked_directory_after.st_ino
+            or opened_directory.st_mode != linked_directory_after.st_mode
+            or opened_directory.st_uid != linked_directory_after.st_uid
+            or opened_directory.st_gid != linked_directory_after.st_gid
+            or not stat.S_ISDIR(opened_directory.st_mode)
+            or stat.S_IMODE(opened_directory.st_mode) != 0o700
+        ):
+            raise ProductionInstallError("production apply lock directory identity changed")
+
+        lock_name = f"target-{target_sha256}.lock"
+        lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            lock_flags |= os.O_NOFOLLOW
+        lock_fd = os.open(lock_name, lock_flags, 0o600, dir_fd=directory_fd)
+        opened = os.fstat(lock_fd)
+        linked = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+            or opened.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or linked.st_dev != opened.st_dev
+            or linked.st_ino != opened.st_ino
+            or linked.st_mode != opened.st_mode
+            or linked.st_uid != opened.st_uid
+            or linked.st_gid != opened.st_gid
+            or linked.st_nlink != opened.st_nlink
+        ):
+            raise ProductionInstallError("production apply lock file identity is unsafe")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ProductionInstallError(
+                "another production apply already holds the selected target lock"
+            ) from exc
+        locked = True
+        linked_after_lock = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
+        opened_after_lock = os.fstat(lock_fd)
+        if (
+            linked_after_lock.st_dev != opened_after_lock.st_dev
+            or linked_after_lock.st_ino != opened_after_lock.st_ino
+            or linked_after_lock.st_mode != opened_after_lock.st_mode
+            or linked_after_lock.st_uid != opened_after_lock.st_uid
+            or linked_after_lock.st_gid != opened_after_lock.st_gid
+            or linked_after_lock.st_nlink != 1
+        ):
+            raise ProductionInstallError("production apply lock identity changed after acquisition")
+        return {
+            "fd": lock_fd,
+            "directory_fd": directory_fd,
+            "target_authority_sha256": target_sha256,
+        }
+    except ProductionInstallError:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        raise ProductionInstallError("cannot acquire production apply target lock") from exc
+
+
+def release_production_apply_lock(lock: dict[str, Any]) -> None:
+    lock_fd = lock.pop("fd", None)
+    directory_fd = lock.pop("directory_fd", None)
+    if type(lock_fd) is int:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+    if type(directory_fd) is int:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
 
 
 def _partition_by_role(contract: dict[str, Any], role: str) -> dict[str, Any]:
@@ -3377,44 +3534,48 @@ def main(argv: list[str] | None = None) -> int:
             raise ProductionInstallError("--apply requires --credential-hash-file")
         if args.write_receipt is None:
             raise ProductionInstallError("--apply requires --write-receipt")
-        receipt_reservation = reserve_private_receipt(args.write_receipt)
+        apply_lock = acquire_production_apply_lock(plan)
         try:
-            receipt = execute_plan(
-                plan, contract=contract, confirmation=args.confirm,
-                credential_hash_file=args.credential_hash_file,
-            )
-        except PostMutationInstallError as exc:
+            receipt_reservation = reserve_private_receipt(args.write_receipt)
             try:
-                failure_receipt = _post_mutation_failure_receipt(
-                    plan=plan, artifact=artifact, error=exc
+                receipt = execute_plan(
+                    plan, contract=contract, confirmation=args.confirm,
+                    credential_hash_file=args.credential_hash_file,
                 )
-                finalize_private_receipt(receipt_reservation, failure_receipt)
-            except BaseException as evidence_exc:
+            except PostMutationInstallError as exc:
+                try:
+                    failure_receipt = _post_mutation_failure_receipt(
+                        plan=plan, artifact=artifact, error=exc
+                    )
+                    finalize_private_receipt(receipt_reservation, failure_receipt)
+                except BaseException as evidence_exc:
+                    if "fd" in receipt_reservation:
+                        try:
+                            preserve_private_receipt_reservation(receipt_reservation)
+                        except BaseException:
+                            if "fd" in receipt_reservation:
+                                _close_private_receipt_reservation(receipt_reservation)
+                    raise PostMutationInstallError(
+                        "private-receipt-finalization-incomplete"
+                    ) from evidence_exc
+                raise
+            except BaseException:
+                discard_private_receipt_reservation(receipt_reservation)
+                raise
+            try:
+                finalize_private_receipt(receipt_reservation, receipt)
+            except BaseException as exc:
                 if "fd" in receipt_reservation:
-                    try:
-                        preserve_private_receipt_reservation(receipt_reservation)
-                    except BaseException:
-                        if "fd" in receipt_reservation:
-                            _close_private_receipt_reservation(receipt_reservation)
-                raise PostMutationInstallError(
-                    "private-receipt-finalization-incomplete"
-                ) from evidence_exc
-            raise
-        except BaseException:
-            discard_private_receipt_reservation(receipt_reservation)
-            raise
-        try:
-            finalize_private_receipt(receipt_reservation, receipt)
-        except BaseException as exc:
-            if "fd" in receipt_reservation:
-                _close_private_receipt_reservation(receipt_reservation)
-            raise PostMutationInstallError("private-receipt-finalization-incomplete") from exc
-        print(json.dumps({
-            "schema_version": 1,
-            "kind": "heim_pc.nixos_production_install_completed",
-            "private_receipt_redacted": True,
-        }, indent=2, sort_keys=True))
-        return 0
+                    _close_private_receipt_reservation(receipt_reservation)
+                raise PostMutationInstallError("private-receipt-finalization-incomplete") from exc
+            print(json.dumps({
+                "schema_version": 1,
+                "kind": "heim_pc.nixos_production_install_completed",
+                "private_receipt_redacted": True,
+            }, indent=2, sort_keys=True))
+            return 0
+        finally:
+            release_production_apply_lock(apply_lock)
     except PostMutationInstallError as exc:
         print(POST_MUTATION_PUBLIC_MESSAGES[exc.code], file=sys.stderr)
         return 3

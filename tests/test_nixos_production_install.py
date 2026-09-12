@@ -41,6 +41,14 @@ MANAGED_POLICY_SHA256 = "c" * 64
 SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_production_apply_lock(monkeypatch, tmp_path):
+    owner = tmp_path.stat()
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", tmp_path / "production-apply-locks")
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", owner.st_uid)
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", owner.st_gid)
+
+
 def managed_receipt(artifact):
     return {
         "schema_version": 1,
@@ -814,6 +822,22 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
     compiled = plan()
     monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    events = []
+    monkeypatch.setattr(
+        prod, "acquire_production_apply_lock",
+        lambda _plan: events.append("lock-acquired") or {"test": True},
+    )
+    real_finalize = prod.finalize_private_receipt
+
+    def finalize_with_event(reservation, receipt):
+        events.append("receipt-finalized")
+        return real_finalize(reservation, receipt)
+
+    monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
+    monkeypatch.setattr(
+        prod, "release_production_apply_lock",
+        lambda _lock: events.append("lock-released"),
+    )
     monkeypatch.setattr(
         prod,
         "execute_plan",
@@ -837,6 +861,7 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     receipt_path = tmp_path / "receipt.json"
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(receipt_path.read_text()) == {"secret": "super-secret-material"}
+    assert events == ["lock-acquired", "receipt-finalized", "lock-released"]
     with pytest.raises(prod.ProductionInstallError, match="overwrite"):
         prod.write_private_receipt(receipt_path, {"second": True})
 
@@ -996,6 +1021,31 @@ def test_private_receipt_discard_rejects_parent_replacement(tmp_path):
     assert json.loads((held_parent / target.name).read_text(encoding="utf-8"))["status"] == "reserved"
 
 
+def test_production_apply_lock_is_target_scoped_private_and_exclusive(tmp_path):
+    compiled = plan()
+    first = prod.acquire_production_apply_lock(compiled)
+    try:
+        lock_dir = prod.PRODUCTION_APPLY_LOCK_DIR
+        assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
+        entries = list(lock_dir.iterdir())
+        assert len(entries) == 1
+        assert stat.S_IMODE(entries[0].stat().st_mode) == 0o600
+        assert SEAGATE not in entries[0].name
+        assert hashlib.sha256(SEAGATE.encode("utf-8")).hexdigest() in entries[0].name
+        with pytest.raises(prod.ProductionInstallError, match="already holds"):
+            prod.acquire_production_apply_lock(compiled)
+
+        other = dict(compiled)
+        other["target_authority"] = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_0003"
+        second = prod.acquire_production_apply_lock(other)
+        prod.release_production_apply_lock(second)
+    finally:
+        prod.release_production_apply_lock(first)
+
+    reacquired = prod.acquire_production_apply_lock(compiled)
+    prod.release_production_apply_lock(reacquired)
+
+
 def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
@@ -1065,6 +1115,22 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
     compiled = plan()
     monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    events = []
+    monkeypatch.setattr(
+        prod, "acquire_production_apply_lock",
+        lambda _plan: events.append("lock-acquired") or {"test": True},
+    )
+    real_finalize = prod.finalize_private_receipt
+
+    def finalize_with_event(reservation, receipt):
+        events.append("failure-receipt-finalized")
+        return real_finalize(reservation, receipt)
+
+    monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
+    monkeypatch.setattr(
+        prod, "release_production_apply_lock",
+        lambda _lock: events.append("lock-released"),
+    )
     monkeypatch.setattr(
         prod,
         "execute_plan",
@@ -1103,6 +1169,7 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     assert failure_receipt["protected_post_fingerprint"] == "a" * 64
     assert failure_receipt["private_target_authority_redacted"] is True
     assert SEAGATE not in receipt_path.read_text(encoding="utf-8")
+    assert events == ["lock-acquired", "failure-receipt-finalized", "lock-released"]
 
 
 def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, tmp_path, capsys):
