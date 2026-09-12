@@ -439,8 +439,18 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(nix["system_closure"], closure)
             self.assertEqual(nix["closure_manifest_sha256"], "a" * 64)
             self.assertGreaterEqual(nix["store_allocated_bytes_after"], 5)
-            self.assertFalse(nix["store_hard_limit_exceeded"])
+            self.assertFalse(nix["store_budget_stop_triggered"])
+            self.assertFalse(nix["runtime_timeout_triggered"])
+            self.assertTrue(nix["container_cleanup_verified"])
             self.assertEqual(nix["lock_mode"], "flock-exclusive-nonblocking")
+            success_path = Path(str(output) + managed_build.NIX_RECEIPT_SUFFIX)
+            success = json.loads(success_path.read_text(encoding="utf-8"))
+            self.assertEqual(success["kind"], "heim_pc.nixos_managed_build_success_receipt")
+            self.assertEqual(success["artifact_json_sha256"], managed_build._sha256_json(json.loads(output.read_text())))
+            self.assertEqual(success["artifact_file_sha256"], managed_build._sha256_file(output))
+            self.assertTrue(success["container_cleanup_verified"])
+            self.assertTrue(success["lifecycle_fence_cleared"])
+            self.assertFalse(Path(guard["lifecycle_fence_path"]).exists())
 
     def test_nix_store_hard_budget_blocks_before_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -466,7 +476,7 @@ class ManagedBuildTests(unittest.TestCase):
                 "--output", str(output), "--source-authority", "proof-only",
             ]
             policy = json.loads(json.dumps(self.policy))
-            policy["nix_store_budget_bytes"] = {"warning": 0, "hard": 1}
+            policy["nix_store_budget_bytes"] = {"warning": 1, "hard": 2}
             with patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()):
                 resolved = managed_build.resolve_environment(
                     policy, repo=repo, command=command, home=home,
@@ -474,7 +484,7 @@ class ManagedBuildTests(unittest.TestCase):
                 )
                 store = Path(resolved["environment"]["HEIM_PC_MANAGED_NIX_STORE_ROOT"])
                 store.mkdir(parents=True)
-                (store / "full").write_bytes(b"x")
+                (store / "full").write_bytes(b"xx")
                 plan = managed_build.build_plan(
                     policy, repo=repo, command=command, home=home,
                     explicit_tool="nix", explicit_profile="nixos-production-prepare",
@@ -484,6 +494,155 @@ class ManagedBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(managed_build.ManagedBuildError, "hard budget"):
                 managed_build.execute_plan(policy, plan, command, home=home, runner=runner)
             runner.assert_not_called()
+
+    def test_nix_running_store_monitor_terminates_before_hard_and_cleans_container(self) -> None:
+        class Process:
+            pid = 4242
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        events = []
+        guard = {
+            "source_revision": "a" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "a" * 12,
+            "store_root": "/tmp/managed-nix-store-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+
+        def terminate(item):
+            events.append("terminate-process-group")
+            item.returncode = -15
+
+        def remove(label):
+            events.append("remove-exact-container")
+            return 1, True
+
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "scan_worktree_payloads",
+                side_effect=[{"allocated_bytes": 70}, {"allocated_bytes": 70}],
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_nix_container_ids", return_value=["a" * 64]),
+            patch.object(managed_build, "_remove_exact_nix_containers", side_effect=remove),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+        self.assertEqual(result.returncode, 75)
+        self.assertTrue(telemetry["store_budget_stop_triggered"])
+        self.assertTrue(telemetry["container_cleanup_verified"])
+        self.assertLess(guard["store_stop_threshold_bytes"], guard["store_budget_bytes"]["hard"])
+        self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
+
+    def test_nix_runtime_timeout_terminates_worker_then_container(self) -> None:
+        class Process:
+            pid = 4343
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        events = []
+        guard = {
+            "source_revision": "b" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "b" * 12,
+            "store_root": "/tmp/managed-nix-store-timeout-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 1},
+        }
+
+        def terminate(item):
+            events.append("terminate-process-group")
+            item.returncode = -15
+
+        def remove(label):
+            events.append("remove-exact-container")
+            return 0, True
+
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "scan_worktree_payloads",
+                side_effect=[{"allocated_bytes": 1}, {"allocated_bytes": 1}],
+            ),
+            patch.object(managed_build.time, "monotonic", side_effect=[0.0, 2.0]),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_nix_container_ids", return_value=[]),
+            patch.object(managed_build, "_remove_exact_nix_containers", side_effect=remove),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+        self.assertEqual(result.returncode, 124)
+        self.assertTrue(telemetry["runtime_timeout_triggered"])
+        self.assertTrue(telemetry["container_cleanup_verified"])
+        self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
+
+    def test_nix_monitor_exception_still_terminates_worker_and_exact_container(self) -> None:
+        class Process:
+            pid = 4444
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        events = []
+        guard = {
+            "source_revision": "c" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "c" * 12,
+            "store_root": "/tmp/managed-nix-store-exception-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 2},
+        }
+
+        def terminate(item):
+            events.append("terminate-process-group")
+            item.returncode = -15
+
+        def remove(label):
+            events.append("remove-exact-container")
+            return 1, True
+
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "scan_worktree_payloads",
+                side_effect=RuntimeError("synthetic monitor failure"),
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_remove_exact_nix_containers", side_effect=remove),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic monitor failure"):
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+        self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
 
     def test_nix_explicit_tool_rejects_arbitrary_python_or_direct_nix(self) -> None:
         with self.assertRaisesRegex(managed_build.ManagedBuildError, "reserved"):

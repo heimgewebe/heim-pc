@@ -34,6 +34,38 @@ ARTIFACT = {
     **CLOSURE,
 }
 MERGED_ARTIFACT = dict(ARTIFACT, source_authority="merged-main")
+MANAGED_POLICY_SHA256 = "c" * 64
+SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
+
+
+def managed_receipt(artifact):
+    return {
+        "schema_version": 1,
+        "kind": prod.MANAGED_BUILD_RECEIPT_KIND,
+        "status": "success",
+        "returncode": 0,
+        "tool": "nix",
+        "profile": "nixos-production-prepare",
+        "managed_plan_sha256": "1" * 64,
+        "managed_policy_sha256": MANAGED_POLICY_SHA256,
+        "managed_receipt_sha256": "2" * 64,
+        "artifact_file_sha256": "3" * 64,
+        "artifact_json_sha256": prod.sha256_json(artifact),
+        "source_revision": artifact["source_revision"],
+        "docker_volume": artifact["nix_volume"],
+        "system_closure": artifact["system_path"],
+        "closure_manifest_sha256": artifact["closure_manifest_sha256"],
+        "closure_path_count": artifact["closure_path_count"],
+        "store_stop_threshold_bytes": 64 * 1024 * 1024 * 1024,
+        "store_hard_limit_bytes": 90 * 1024 * 1024 * 1024,
+        "store_max_observed_bytes": 1024,
+        "store_budget_stop_triggered": False,
+        "runtime_timeout_triggered": False,
+        "container_cleanup_verified": True,
+        "lifecycle_fence_cleared": True,
+    }
+
+
 PARTUUIDS = [
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
@@ -121,10 +153,14 @@ def observation():
     }
 
 
-def plan(obs=None, artifact=None):
+def plan(obs=None, artifact=None, receipt=None):
+    selected_artifact = artifact or ARTIFACT
     return prod.compile_plan(
         obs or observation(),
-        install_artifact=artifact or ARTIFACT,
+        install_artifact=selected_artifact,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt or managed_receipt(selected_artifact),
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
         flake_source="/srv/exact-source",
         contract=CONTRACT,
     )
@@ -467,6 +503,12 @@ def test_plan_contains_no_secret_material():
 
 def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(
+        prod, "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
     monkeypatch.setattr(
         prod, "load_contract",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -484,6 +526,11 @@ def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
 
 def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(
+        prod, "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
     monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
     monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
@@ -519,6 +566,7 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     compiled = plan(artifact=MERGED_ARTIFACT)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *args, **kwargs: compiled["managed_build_receipt"])
     monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
@@ -746,6 +794,44 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
         prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
 
 
+def test_managed_build_receipt_is_plan_bound_and_rejects_failed_evidence():
+    receipt = managed_receipt(ARTIFACT)
+    compiled = plan(receipt=receipt)
+    assert compiled["managed_build_receipt_sha256"] == prod.sha256_json(receipt)
+    assert compiled["managed_policy_sha256"] == MANAGED_POLICY_SHA256
+    for field, value in (
+        ("artifact_json_sha256", "f" * 64),
+        ("managed_policy_sha256", "e" * 64),
+        ("store_budget_stop_triggered", True),
+        ("runtime_timeout_triggered", True),
+        ("container_cleanup_verified", False),
+        ("lifecycle_fence_cleared", False),
+    ):
+        changed = dict(receipt)
+        changed[field] = value
+        with pytest.raises(prod.ProductionInstallError):
+            plan(receipt=changed)
+
+
+def test_load_managed_build_receipt_binds_exact_artifact_file(monkeypatch, tmp_path):
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps(ARTIFACT, sort_keys=True) + "\n", encoding="utf-8")
+    receipt = managed_receipt(ARTIFACT)
+    receipt["artifact_file_sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    receipt_path = prod.managed_build_receipt_path(artifact_path)
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+    loaded = prod.load_managed_build_receipt(
+        receipt_path, ARTIFACT, expected_policy_sha256=MANAGED_POLICY_SHA256, artifact_path=artifact_path
+    )
+    assert loaded == receipt
+    artifact_path.write_text(json.dumps(dict(ARTIFACT, source_bundle_sha256="d" * 64)) + "\n", encoding="utf-8")
+    with pytest.raises(prod.ProductionInstallError, match="artifact file digest mismatch"):
+        prod.load_managed_build_receipt(
+            receipt_path, ARTIFACT, expected_policy_sha256=MANAGED_POLICY_SHA256, artifact_path=artifact_path
+        )
+
+
 def test_filesystem_labels_are_separate_bounded_and_gpt_labels_stay_unchanged():
     compiled = plan()
     by_effect = {item["effect"]: item for item in compiled["commands"]}
@@ -784,6 +870,7 @@ def test_proof_only_artifact_can_plan_but_cannot_apply(monkeypatch, tmp_path):
     compiled = plan()
     touched = []
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *args, **kwargs: compiled["managed_build_receipt"])
     monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: touched.append(args) or None)
     with pytest.raises(prod.ProductionInstallError, match="merged-main"):
         prod.execute_plan(
@@ -884,6 +971,7 @@ def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypat
     compiled = plan(artifact=MERGED_ARTIFACT)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *args, **kwargs: compiled["managed_build_receipt"])
     monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)

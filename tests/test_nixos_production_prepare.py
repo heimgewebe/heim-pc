@@ -340,3 +340,26 @@ def test_artifact_publication_leaves_no_final_file_on_short_write(monkeypatch, t
         prep.write_artifact(target, artifact)
     assert not target.exists()
     assert not list(tmp_path.glob(".artifact.json.*.tmp"))
+
+
+def test_managed_nix_container_label_is_injected_only_into_docker_run(monkeypatch):
+    calls = []
+    label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+    monkeypatch.setenv(prep.MANAGED_NIX_CONTAINER_LABEL_ENV, label)
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prep.subprocess, "run", lambda argv, **kwargs: calls.append(argv) or Result())
+    prep.run(["docker", "run", "--rm", "image", "true"] )
+    prep.run(["git", "status"] )
+    assert calls[0][:4] == ["docker", "run", "--label", label]
+    assert "--label" not in calls[1]
+
+
+def test_managed_nix_container_label_rejects_untrusted_value(monkeypatch):
+    monkeypatch.setenv(prep.MANAGED_NIX_CONTAINER_LABEL_ENV, "not-a-managed-label")
+    with pytest.raises(prep.PrepareError, match="container label"):
+        prep.run(["docker", "run", "--rm", "image", "true"] )

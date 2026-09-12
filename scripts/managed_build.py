@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -29,6 +30,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
+NIX_STORE_MONITOR_INTERVAL_SECONDS = 0.5
+NIX_CANCEL_GRACE_SECONDS = 5
+NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
+NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"
 
 
 class PolicyError(ValueError):
@@ -146,14 +152,20 @@ def load_policy(path: Path) -> dict[str, Any]:
         policy.get("per_identity_cache_budget_bytes"),
         "per_identity_cache_budget_bytes",
     )
-    _require_nonnegative_budget(
+    nix_store_budget = _require_nonnegative_budget(
         policy.get("nix_store_budget_bytes"),
         "nix_store_budget_bytes",
     )
-    _require_nonnegative_budget(
+    if not 0 < nix_store_budget["warning"] < nix_store_budget["hard"]:
+        raise PolicyError(
+            "nix_store_budget_bytes.warning must be a positive active stop threshold below hard"
+        )
+    nix_runtime_budget = _require_nonnegative_budget(
         policy.get("nix_runtime_budget_seconds"),
         "nix_runtime_budget_seconds",
     )
+    if nix_runtime_budget["hard"] <= 0:
+        raise PolicyError("nix_runtime_budget_seconds.hard must be positive")
 
     max_receipts = policy.get("max_receipts")
     if not isinstance(max_receipts, int) or isinstance(max_receipts, bool) or max_receipts < 1:
@@ -795,18 +807,22 @@ def build_plan(
             policy["nix_runtime_budget_seconds"], "nix_runtime_budget_seconds"
         )
         store_status = _status(store_scan["allocated_bytes"], store_budget)
-        if store_status == "hard_limit":
+        if store_scan["allocated_bytes"] >= int(store_budget["warning"]):
             blocked = True
         lock_path = state_root / "cache-locks" / "nix" / f"{context['cache_key']}.lock"
+        fence_path = state_root / "cache-locks" / "nix" / f"{context['cache_key']}.active.json"
         nix_guard = {
             "source_revision": source_revision,
             "docker_volume": f"heim-pc-nixos-production-{source_revision[:12]}",
+            "source_volume": f"heim-pc-nixos-source-{source_revision[:12]}",
             "store_root": str(store_root),
             "store_allocated_bytes": store_scan["allocated_bytes"],
             "store_status": store_status,
             "store_budget_bytes": store_budget,
+            "store_stop_threshold_bytes": store_budget["warning"],
             "runtime_budget_seconds": runtime_budget,
             "lifecycle_lock_path": str(lock_path),
+            "lifecycle_fence_path": str(fence_path),
             "lock_mode": "flock-exclusive-nonblocking",
         }
     return {
@@ -975,13 +991,224 @@ def _nix_artifact_receipt(command: Sequence[str], guard: dict[str, Any]) -> dict
         raise ManagedBuildError("managed Nix artifact is not bound to the planned revision/volume/closure")
     return {
         "artifact_path": str(output),
-        "artifact_sha256": _sha256_file(output),
+        "artifact_file_sha256": _sha256_file(output),
+        "artifact_json_sha256": _sha256_json(artifact),
         "source_revision": expected_revision,
         "docker_volume": expected_volume,
         "system_closure": system_closure,
         "closure_manifest_sha256": artifact["closure_manifest_sha256"],
         "closure_path_count": artifact["closure_path_count"],
     }
+
+
+def _atomic_create_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        data = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ManagedBuildError("short write while creating managed Nix receipt")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory(path.parent)
+
+
+def _managed_nix_success_receipt_path(command: Sequence[str]) -> Path:
+    return Path(_command_option_value(command, "--output") + NIX_RECEIPT_SUFFIX)
+
+
+def _nix_container_ids(label: str) -> list[str]:
+    if NIX_CONTAINER_LABEL_RE.fullmatch(label) is None:
+        raise ManagedBuildError("managed Nix container label is invalid")
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--no-trunc", "-aq", "--filter", f"label={label}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedBuildError("cannot inspect managed Nix containers") from exc
+    if result.returncode != 0:
+        raise ManagedBuildError("cannot inspect managed Nix containers")
+    try:
+        values = [line.strip() for line in result.stdout.decode("ascii", "strict").splitlines() if line.strip()]
+    except UnicodeDecodeError as exc:
+        raise ManagedBuildError("managed Nix container inventory is not ASCII") from exc
+    if any(NIX_CONTAINER_ID_RE.fullmatch(value) is None for value in values):
+        raise ManagedBuildError("managed Nix container inventory returned an invalid id")
+    return values
+
+
+def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
+    removed = 0
+    for _attempt in range(3):
+        ids = _nix_container_ids(label)
+        if not ids:
+            time.sleep(0.1)
+            if not _nix_container_ids(label):
+                return removed, True
+            continue
+        try:
+            result = subprocess.run(
+                ["docker", "rm", "--force", *ids],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                timeout=VERSION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return removed, False
+        if result.returncode != 0:
+            return removed, False
+        removed += len(ids)
+        time.sleep(0.1)
+    return removed, not _nix_container_ids(label)
+
+
+def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
+
+
+def _run_nix_worker_guarded(
+    command: Sequence[str], *, root: Path, environment: dict[str, str], guard: dict[str, Any]
+) -> tuple[subprocess.CompletedProcess[Any], dict[str, Any]]:
+    stop_threshold = int(guard["store_stop_threshold_bytes"])
+    hard_limit = int(guard["store_budget_bytes"]["hard"])
+    timeout_seconds = int(guard["runtime_budget_seconds"]["hard"])
+    if not 0 < stop_threshold < hard_limit or timeout_seconds <= 0:
+        raise ManagedBuildError("managed Nix runtime guard is invalid")
+    plan_digest = hashlib.sha256(_canonical_json({
+        "revision": guard["source_revision"], "volume": guard["docker_volume"],
+        "store": guard["store_root"], "stop": stop_threshold, "hard": hard_limit,
+    })).hexdigest()
+    nonce = hashlib.sha256(f"{os.getpid()}:{time.time_ns()}".encode("ascii")).hexdigest()[:12]
+    label = f"heim-pc.managed-nix={plan_digest}-{nonce}"
+    if NIX_CONTAINER_LABEL_RE.fullmatch(label) is None:
+        raise ManagedBuildError("managed Nix container label construction failed")
+    child_env = dict(environment)
+    child_env["HEIM_PC_MANAGED_NIX_CONTAINER_LABEL"] = label
+    store_root = Path(str(guard["store_root"]))
+    process = subprocess.Popen(
+        list(command), cwd=root, env=child_env, start_new_session=True,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    trigger: str | None = None
+    max_observed = 0
+    try:
+        while True:
+            observed = scan_worktree_payloads(store_root, ["."])["allocated_bytes"]
+            max_observed = max(max_observed, observed)
+            returncode = process.poll()
+            if observed >= stop_threshold:
+                trigger = "store-budget"
+                if returncode is None:
+                    _terminate_process_group(process)
+                break
+            if returncode is not None:
+                break
+            if time.monotonic() >= deadline:
+                trigger = "runtime-timeout"
+                _terminate_process_group(process)
+                break
+            time.sleep(NIX_STORE_MONITOR_INTERVAL_SECONDS)
+        if process.poll() is None:
+            process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
+        orphan_ids = _nix_container_ids(label)
+        orphan_detected = bool(orphan_ids)
+        removed, cleanup_verified = _remove_exact_nix_containers(label)
+        final_bytes = scan_worktree_payloads(store_root, ["."])["allocated_bytes"]
+        max_observed = max(max_observed, final_bytes)
+        if not cleanup_verified:
+            raise ManagedBuildError("managed Nix container cleanup could not be verified")
+    except BaseException as exc:
+        process_cleanup_error: BaseException | None = None
+        try:
+            _terminate_process_group(process)
+        except BaseException as cleanup_exc:
+            process_cleanup_error = cleanup_exc
+        container_cleanup_error: BaseException | None = None
+        containers_clean = False
+        try:
+            _removed, containers_clean = _remove_exact_nix_containers(label)
+        except BaseException as cleanup_exc:
+            container_cleanup_error = cleanup_exc
+        if process_cleanup_error is not None or container_cleanup_error is not None or not containers_clean:
+            raise ManagedBuildError(
+                "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
+            ) from exc
+        raise
+    if trigger == "store-budget" or final_bytes >= stop_threshold:
+        effective = 75
+    elif trigger == "runtime-timeout":
+        effective = 124
+    elif orphan_detected:
+        effective = 76
+    else:
+        effective = int(process.returncode or 0)
+    return subprocess.CompletedProcess(list(command), effective), {
+        "container_label_sha256": hashlib.sha256(label.encode("ascii")).hexdigest(),
+        "container_orphan_detected": orphan_detected,
+        "container_count_force_removed": removed,
+        "container_cleanup_verified": cleanup_verified,
+        "store_stop_threshold_bytes": stop_threshold,
+        "store_hard_limit_bytes": hard_limit,
+        "store_max_observed_bytes": max_observed,
+        "store_budget_stop_triggered": trigger == "store-budget" or final_bytes >= stop_threshold,
+        "runtime_timeout_triggered": trigger == "runtime-timeout",
+    }
+
+
+def _remove_failed_nix_outputs(command: Sequence[str], guard: dict[str, Any]) -> None:
+    output = Path(_command_option_value(command, "--output"))
+    receipt = _managed_nix_success_receipt_path(command)
+    for path in (receipt, output):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ManagedBuildError("refusing unsafe managed Nix failure-output cleanup")
+        path.unlink()
+        _fsync_directory(path.parent)
+    for volume in (str(guard["source_volume"]), str(guard["docker_volume"])):
+        inspected = subprocess.run(
+            ["docker", "volume", "inspect", volume],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if inspected.returncode == 0:
+            removed = subprocess.run(
+                ["docker", "volume", "rm", "--force", volume],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            if removed.returncode != 0:
+                raise ManagedBuildError("failed to remove rejected managed Nix volume")
+        verified = subprocess.run(
+            ["docker", "volume", "inspect", volume],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if verified.returncode == 0:
+            raise ManagedBuildError("rejected managed Nix volume still exists")
 
 
 def execute_plan(
@@ -993,9 +1220,7 @@ def execute_plan(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     if plan["guard"]["blocked"]:
-        raise ManagedBuildError(
-            "managed build blocked: a managed payload is at or above a hard budget"
-        )
+        raise ManagedBuildError("managed build blocked: a managed payload is at or above a hard budget")
     root = Path(plan["repository_root"])
     cache_path = Path(plan["cache_path"])
     state_root = Path(plan["state_root"])
@@ -1008,6 +1233,11 @@ def execute_plan(
     environment.update(plan["environment"])
     nix_guard = plan.get("nix_guard")
     lock_fd: int | None = None
+    fence_path: Path | None = None
+    fence_created = False
+    cleanup_verified = plan["tool"] != "nix"
+    before_store = {"allocated_bytes": 0}
+    telemetry: dict[str, Any] | None = None
     if plan["tool"] == "nix":
         if not isinstance(nix_guard, dict):
             raise ManagedBuildError("managed Nix plan lacks its Nix guard")
@@ -1017,88 +1247,156 @@ def execute_plan(
         store_root = Path(str(nix_guard["store_root"]))
         _ensure_secure_directory(store_root, home)
         before_store = scan_worktree_payloads(store_root, ["."])
+        stop_store = int(nix_guard["store_stop_threshold_bytes"])
         hard_store = int(nix_guard["store_budget_bytes"]["hard"])
-        if before_store["allocated_bytes"] >= hard_store:
-            raise ManagedBuildError("managed Nix store is at or above its hard budget")
+        if before_store["allocated_bytes"] >= stop_store:
+            raise ManagedBuildError("managed Nix store is at or above its active stop threshold")
+        if not 0 < stop_store < hard_store:
+            raise ManagedBuildError("managed Nix store budget has no fail-closed headroom")
+        output = Path(_command_option_value(command, "--output"))
+        success_receipt = _managed_nix_success_receipt_path(command)
+        if output.exists() or output.is_symlink() or success_receipt.exists() or success_receipt.is_symlink():
+            raise ManagedBuildError("managed Nix output or success receipt already exists")
+        for volume in (str(nix_guard["source_volume"]), str(nix_guard["docker_volume"])):
+            if subprocess.run(["docker", "volume", "inspect", volume], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode == 0:
+                raise ManagedBuildError("managed Nix volume already exists before execution")
         lock_path = Path(str(nix_guard["lifecycle_lock_path"]))
+        fence_path = Path(str(nix_guard["lifecycle_fence_path"]))
         _ensure_secure_directory(lock_path.parent, home)
+        if fence_path.exists() or fence_path.is_symlink():
+            raise ManagedBuildError("managed Nix lifecycle fence requires reconciliation")
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(lock_fd)
             raise ManagedBuildError("managed Nix identity already has an active build lease") from exc
+        _atomic_create_json(fence_path, {
+            "schema_version": 1, "kind": "heim_pc.managed_nix_active_fence",
+            "source_revision": nix_guard["source_revision"],
+            "docker_volume": nix_guard["docker_volume"],
+        })
+        fence_created = True
 
     started_at = _utc_now()
+    effective_returncode = 1
+    receipt_path: Path | None = None
     try:
         if plan["tool"] == "nix":
-            timeout_seconds = int(nix_guard["runtime_budget_seconds"]["hard"])
-            try:
-                result = runner(
-                    list(command), cwd=root, env=environment, check=False,
-                    timeout=timeout_seconds,
+            if runner is subprocess.run:
+                result, telemetry = _run_nix_worker_guarded(
+                    command, root=root, environment=environment, guard=nix_guard
                 )
-            except subprocess.TimeoutExpired:
-                result = subprocess.CompletedProcess(list(command), 124)
+            else:
+                # Unit-test injection stays explicit; production always uses the guarded Popen path.
+                result = runner(list(command), cwd=root, env=environment, check=False)
+                after_injected = scan_worktree_payloads(Path(str(nix_guard["store_root"])), ["."])["allocated_bytes"]
+                telemetry = {
+                    "container_label_sha256": "0" * 64,
+                    "container_orphan_detected": False,
+                    "container_count_force_removed": 0,
+                    "container_cleanup_verified": True,
+                    "store_stop_threshold_bytes": int(nix_guard["store_stop_threshold_bytes"]),
+                    "store_hard_limit_bytes": int(nix_guard["store_budget_bytes"]["hard"]),
+                    "store_max_observed_bytes": after_injected,
+                    "store_budget_stop_triggered": after_injected >= int(nix_guard["store_stop_threshold_bytes"]),
+                    "runtime_timeout_triggered": False,
+                }
+                if telemetry["store_budget_stop_triggered"] and result.returncode == 0:
+                    result = subprocess.CompletedProcess(list(command), 75)
+            cleanup_verified = bool(telemetry["container_cleanup_verified"])
         else:
             result = runner(list(command), cwd=root, env=environment, check=False)
         finished_at = _utc_now()
-        after = scan_worktree_payloads(
-            root, policy["tools"][plan["tool"]]["worktree_payloads"],
-        )
+        after = scan_worktree_payloads(root, policy["tools"][plan["tool"]]["worktree_payloads"])
         effective_returncode = int(result.returncode)
         nix_receipt: dict[str, Any] | None = None
         if plan["tool"] == "nix":
             store_root = Path(str(nix_guard["store_root"]))
             after_store = scan_worktree_payloads(store_root, ["."])
-            store_hard = int(nix_guard["store_budget_bytes"]["hard"])
-            store_over_hard = after_store["allocated_bytes"] >= store_hard
-            if store_over_hard and effective_returncode == 0:
+            if after_store["allocated_bytes"] >= int(nix_guard["store_stop_threshold_bytes"]) and effective_returncode == 0:
                 effective_returncode = 75
             nix_receipt = {
                 "source_revision": nix_guard["source_revision"],
                 "docker_volume": nix_guard["docker_volume"],
+                "source_volume": nix_guard["source_volume"],
                 "store_root": nix_guard["store_root"],
                 "store_allocated_bytes_before": before_store["allocated_bytes"],
                 "store_allocated_bytes_after": after_store["allocated_bytes"],
                 "store_budget_bytes": nix_guard["store_budget_bytes"],
-                "store_hard_limit_exceeded": store_over_hard,
                 "runtime_budget_seconds": nix_guard["runtime_budget_seconds"],
                 "lifecycle_lock_path": nix_guard["lifecycle_lock_path"],
                 "lock_mode": nix_guard["lock_mode"],
+                **(telemetry or {}),
             }
             if effective_returncode == 0:
                 nix_receipt.update(_nix_artifact_receipt(command, nix_guard))
+            else:
+                cleanup_verified = False
+                _remove_failed_nix_outputs(command, nix_guard)
+                cleanup_verified = True
         receipt = {
-            "schema_version": 1,
-            "kind": "heim_pc.managed_build_receipt",
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "plan_sha256": _sha256_json(plan),
-            "policy_sha256": plan["policy_sha256"],
+            "schema_version": 1, "kind": "heim_pc.managed_build_receipt",
+            "started_at": started_at, "finished_at": finished_at,
+            "plan_sha256": _sha256_json(plan), "policy_sha256": plan["policy_sha256"],
             "repository_identity_sha256": plan["repository_identity_sha256"],
-            "tool": plan["tool"],
-            "profile": plan["profile"],
-            "cache_key": plan["cache_key"],
-            "cache_path": plan["cache_path"],
-            "environment": plan["environment"],
-            "command": plan["command"],
-            "returncode": effective_returncode,
+            "tool": plan["tool"], "profile": plan["profile"], "cache_key": plan["cache_key"],
+            "cache_path": plan["cache_path"], "environment": plan["environment"],
+            "command": plan["command"], "returncode": effective_returncode,
             "worktree_allocated_bytes_before": plan["guard"]["worktree"]["allocated_bytes"],
             "worktree_allocated_bytes_after": after["allocated_bytes"],
-            "nix_build": nix_receipt,
-            "automatic_cleanup_authorized": False,
+            "nix_build": nix_receipt, "automatic_cleanup_authorized": False,
         }
-        receipt_name = (
-            f"{int(time.time() * 1_000_000)}-"
-            f"{plan['repository_identity_sha256'][:12]}-{plan['tool']}.json"
-        )
-        receipts = state_root / "receipts"
-        receipt_path = receipts / receipt_name
+        receipt_name = f"{int(time.time() * 1_000_000)}-{plan['repository_identity_sha256'][:12]}-{plan['tool']}.json"
+        receipt_path = state_root / "receipts" / receipt_name
         _atomic_write_json(receipt_path, receipt)
-        _trim_receipts(receipts, int(policy["max_receipts"]))
+        _trim_receipts(state_root / "receipts", int(policy["max_receipts"]))
+        if plan["tool"] == "nix" and effective_returncode == 0:
+            if not cleanup_verified:
+                raise ManagedBuildError("managed Nix success requires verified container cleanup")
+            if fence_created and fence_path is not None:
+                fence_path.unlink()
+                _fsync_directory(fence_path.parent)
+                fence_created = False
+            artifact_path = Path(_command_option_value(command, "--output"))
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            success = {
+                "schema_version": 1,
+                "kind": "heim_pc.nixos_managed_build_success_receipt",
+                "status": "success",
+                "returncode": 0,
+                "tool": "nix",
+                "profile": plan["profile"],
+                "managed_plan_sha256": _sha256_json(plan),
+                "managed_policy_sha256": plan["policy_sha256"],
+                "managed_receipt_sha256": _sha256_file(receipt_path),
+                "artifact_file_sha256": _sha256_file(artifact_path),
+                "artifact_json_sha256": _sha256_json(artifact),
+                "source_revision": nix_guard["source_revision"],
+                "docker_volume": nix_guard["docker_volume"],
+                "system_closure": nix_receipt["system_closure"],
+                "closure_manifest_sha256": nix_receipt["closure_manifest_sha256"],
+                "closure_path_count": nix_receipt["closure_path_count"],
+                "store_stop_threshold_bytes": telemetry["store_stop_threshold_bytes"],
+                "store_hard_limit_bytes": telemetry["store_hard_limit_bytes"],
+                "store_max_observed_bytes": telemetry["store_max_observed_bytes"],
+                "store_budget_stop_triggered": False,
+                "runtime_timeout_triggered": False,
+                "container_cleanup_verified": cleanup_verified,
+                "lifecycle_fence_cleared": True,
+            }
+            _atomic_create_json(_managed_nix_success_receipt_path(command), success)
+        elif plan["tool"] == "nix":
+            if not cleanup_verified:
+                raise ManagedBuildError("managed Nix failure cleanup was not verified")
+            if fence_created and fence_path is not None:
+                fence_path.unlink()
+                _fsync_directory(fence_path.parent)
+                fence_created = False
         return effective_returncode
     finally:
+        # Any exceptional Nix path deliberately leaves the durable fence behind.
+        # The flock is process-scoped; the retained fence blocks reuse until recovery.
         if lock_fd is not None:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)

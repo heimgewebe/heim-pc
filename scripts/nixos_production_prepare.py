@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,8 @@ GIT_BIN = "/root/.nix-profile/bin/git"
 MANAGED_BUILD = ROOT / "scripts" / "managed_build.py"
 MANAGED_WORKER_ENV = "HEIM_PC_NIXOS_PRODUCTION_PREPARE_MANAGED"
 MANAGED_PROFILE = "nixos-production-prepare"
+MANAGED_NIX_CONTAINER_LABEL_ENV = "HEIM_PC_MANAGED_NIX_CONTAINER_LABEL"
+MANAGED_NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
 
 
 class PrepareError(RuntimeError):
@@ -32,6 +35,13 @@ class PrepareError(RuntimeError):
 
 
 def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    argv = list(argv)
+    managed_label = os.environ.get(MANAGED_NIX_CONTAINER_LABEL_ENV)
+    if managed_label is not None:
+        if MANAGED_NIX_CONTAINER_LABEL_RE.fullmatch(managed_label) is None:
+            raise PrepareError("managed Nix container label is invalid")
+        if argv[:2] == ["docker", "run"]:
+            argv[2:2] = ["--label", managed_label]
     command_env = {
         "PATH": installer.TRUSTED_PATH,
         "LC_ALL": "C",

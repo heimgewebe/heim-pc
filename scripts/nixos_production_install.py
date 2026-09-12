@@ -41,6 +41,9 @@ PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
 FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
 EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
 INSTALL_ARTIFACT_AUTHORITIES = frozenset({"proof-only", "merged-main"})
+MANAGED_BUILD_RECEIPT_SUFFIX = ".managed-build-receipt.json"
+MANAGED_BUILD_RECEIPT_KIND = "heim_pc.nixos_managed_build_success_receipt"
+MANAGED_BUILD_POLICY_RELATIVE = Path("config/managed-build.v1.json")
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
@@ -216,6 +219,156 @@ def load_install_artifact(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ProductionInstallError(f"cannot read production install artifact: {exc}") from exc
     return validate_install_artifact(value)
+
+
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def managed_build_receipt_path(artifact_path: Path) -> Path:
+    artifact_path = Path(artifact_path)
+    if not artifact_path.is_absolute() or os.path.normpath(str(artifact_path)) != str(artifact_path):
+        raise ProductionInstallError("install artifact path must be canonical and absolute")
+    return Path(str(artifact_path) + MANAGED_BUILD_RECEIPT_SUFFIX)
+
+
+def managed_policy_sha256_for_source(flake_source: str) -> str:
+    result = _run(["git", "-C", flake_source, "rev-parse", "--show-toplevel"])
+    try:
+        root_text = result.stdout.decode("utf-8", "strict").strip()
+    except UnicodeDecodeError as exc:
+        raise ProductionInstallError("managed-build source root is not UTF-8") from exc
+    root = Path(root_text)
+    if not root.is_absolute() or os.path.normpath(str(root)) != str(root):
+        raise ProductionInstallError("managed-build source root is not canonical")
+    policy_path = root / MANAGED_BUILD_POLICY_RELATIVE
+    try:
+        info = policy_path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("managed-build policy is unavailable from exact source") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ProductionInstallError("managed-build policy is not a single-link regular file")
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProductionInstallError("managed-build policy is invalid") from exc
+    return sha256_json(policy)
+
+
+def validate_managed_build_receipt(
+    value: Any,
+    artifact: dict[str, Any],
+    *,
+    expected_policy_sha256: str,
+    artifact_file_sha256: str | None = None,
+) -> dict[str, Any]:
+    artifact = validate_install_artifact(artifact)
+    if not isinstance(value, dict):
+        raise ProductionInstallError("managed-build success receipt must be an object")
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != MANAGED_BUILD_RECEIPT_KIND
+        or value.get("status") != "success"
+        or value.get("returncode") != 0
+        or value.get("tool") != "nix"
+        or value.get("profile") != "nixos-production-prepare"
+        or value.get("source_revision") != artifact["source_revision"]
+        or value.get("docker_volume") != artifact["nix_volume"]
+        or value.get("system_closure") != artifact["system_path"]
+        or value.get("closure_manifest_sha256") != artifact["closure_manifest_sha256"]
+        or value.get("closure_path_count") != artifact["closure_path_count"]
+        or value.get("artifact_json_sha256") != sha256_json(artifact)
+        or value.get("managed_policy_sha256") != expected_policy_sha256
+        or value.get("store_budget_stop_triggered") is not False
+        or value.get("runtime_timeout_triggered") is not False
+        or value.get("container_cleanup_verified") is not True
+        or value.get("lifecycle_fence_cleared") is not True
+    ):
+        raise ProductionInstallError("managed-build success receipt does not authorize this artifact")
+    for name in (
+        "managed_plan_sha256",
+        "managed_policy_sha256",
+        "managed_receipt_sha256",
+        "artifact_file_sha256",
+        "artifact_json_sha256",
+    ):
+        if not isinstance(value.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", value[name]) is None:
+            raise ProductionInstallError("managed-build success receipt digest is invalid")
+    if artifact_file_sha256 is not None and value["artifact_file_sha256"] != artifact_file_sha256:
+        raise ProductionInstallError("managed-build success receipt artifact file digest mismatch")
+    stop = value.get("store_stop_threshold_bytes")
+    hard = value.get("store_hard_limit_bytes")
+    maximum = value.get("store_max_observed_bytes")
+    if (
+        type(stop) is not int
+        or type(hard) is not int
+        or type(maximum) is not int
+        or not 0 < stop < hard
+        or maximum < 0
+        or maximum >= stop
+    ):
+        raise ProductionInstallError("managed-build success receipt store budget evidence is invalid")
+    return json.loads(json.dumps(value))
+
+
+def load_managed_build_receipt(
+    path: Path,
+    artifact: dict[str, Any],
+    *,
+    expected_policy_sha256: str,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise ProductionInstallError("managed-build success receipt is not a private single-link regular file")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        artifact_file_sha256 = _sha256_file(artifact_path)
+    except ProductionInstallError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProductionInstallError("cannot load managed-build success receipt") from exc
+    return validate_managed_build_receipt(
+        value,
+        artifact,
+        expected_policy_sha256=expected_policy_sha256,
+        artifact_file_sha256=artifact_file_sha256,
+    )
+
+
+def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    artifact_path_raw = plan.get("install_artifact_path")
+    if not isinstance(artifact_path_raw, str):
+        raise ProductionInstallError("reviewed plan lacks install artifact path")
+    artifact_path = Path(artifact_path_raw)
+    observed_artifact = load_install_artifact(artifact_path)
+    if sha256_json(observed_artifact) != sha256_json(artifact):
+        raise ProductionInstallError("install artifact file changed after planning")
+    policy_sha256 = managed_policy_sha256_for_source(str(plan.get("flake_source", "")))
+    if policy_sha256 != plan.get("managed_policy_sha256"):
+        raise ProductionInstallError("managed-build policy changed after planning")
+    receipt = load_managed_build_receipt(
+        managed_build_receipt_path(artifact_path),
+        artifact,
+        expected_policy_sha256=policy_sha256,
+        artifact_path=artifact_path,
+    )
+    if sha256_json(receipt) != plan.get("managed_build_receipt_sha256"):
+        raise ProductionInstallError("managed-build success receipt changed after planning")
+    if receipt != plan.get("managed_build_receipt"):
+        raise ProductionInstallError("managed-build success receipt no longer matches reviewed plan")
+    return receipt
 
 
 def _docker_tool_argv(
@@ -487,10 +640,19 @@ def compile_plan(
     observation: dict[str, Any],
     *,
     install_artifact: dict[str, Any],
+    install_artifact_path: Path,
+    managed_build_receipt: dict[str, Any],
+    managed_policy_sha256: str,
     flake_source: str,
     contract: dict[str, Any],
 ) -> dict[str, Any]:
     artifact = validate_install_artifact(install_artifact)
+    artifact_path = Path(install_artifact_path)
+    if not artifact_path.is_absolute() or os.path.normpath(str(artifact_path)) != str(artifact_path):
+        raise ProductionInstallError("install artifact path must be canonical and absolute")
+    managed_receipt = validate_managed_build_receipt(
+        managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
+    )
     source_revision = artifact["source_revision"]
     flake = str(PurePosixPath(flake_source))
     if not flake.startswith("/") or os.path.normpath(flake) != flake:
@@ -574,7 +736,11 @@ def compile_plan(
         "contract_sha256": sha256_json(contract),
         "identity_contract_sha256": contract["identity_binding"]["identity_contract_sha256"],
         "install_artifact_sha256": sha256_json(artifact),
+        "install_artifact_path": str(artifact_path),
         "install_artifact": artifact,
+        "managed_policy_sha256": managed_policy_sha256,
+        "managed_build_receipt_sha256": sha256_json(managed_receipt),
+        "managed_build_receipt": managed_receipt,
         "source_revision": source_revision,
         "source_authority": artifact["source_authority"],
         "flake_source": flake,
@@ -601,6 +767,7 @@ def plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
         "source_revision": plan["source_revision"],
         "source_authority": plan["source_authority"],
         "system_path": plan["system_path"],
+        "managed_build_receipt_sha256": plan["managed_build_receipt_sha256"],
         "execution_authorized": False,
         "private_hardware_identity_redacted": True,
     }
@@ -1137,6 +1304,7 @@ def execute_plan(
     if contract.get("identity_binding", {}).get("identity_contract_sha256") != plan.get("identity_contract_sha256"):
         raise ProductionInstallError("private storage identity no longer matches the reviewed plan")
     artifact = validate_install_artifact(plan.get("install_artifact"))
+    verify_managed_build_binding(plan, artifact)
     if artifact["source_authority"] != "merged-main":
         raise ProductionInstallError(
             "production apply requires a merged-main install artifact"
@@ -1169,6 +1337,7 @@ def execute_plan(
     verify_partlabel_namespace_clear(contract)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     verify_install_artifact_environment(artifact)
+    verify_managed_build_binding(plan, artifact)
     verify_promoted_main_revision(artifact["source_revision"])
     if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("protected WD changed after interactive authorization")
@@ -1256,17 +1425,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-plan", type=Path)
     args = parser.parse_args(argv)
     try:
-        artifact = load_install_artifact(args.install_artifact)
+        artifact_path = args.install_artifact.resolve()
+        artifact = load_install_artifact(artifact_path)
+        verify_source(args.flake_source, artifact["source_revision"])
+        managed_policy_sha256 = managed_policy_sha256_for_source(args.flake_source)
+        managed_receipt = load_managed_build_receipt(
+            managed_build_receipt_path(artifact_path),
+            artifact,
+            expected_policy_sha256=managed_policy_sha256,
+            artifact_path=artifact_path,
+        )
         contract = load_contract(
             args.identity_contract, expected_revision=artifact["source_revision"]
         )
         observation = json.loads(args.observation_json.read_text()) if args.observation_json else observe_live(contract)
-        verify_source(args.flake_source, artifact["source_revision"])
         if args.observation_json is None:
             verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         plan = compile_plan(
             observation,
             install_artifact=artifact,
+            install_artifact_path=artifact_path,
+            managed_build_receipt=managed_receipt,
+            managed_policy_sha256=managed_policy_sha256,
             flake_source=args.flake_source,
             contract=contract,
         )
