@@ -159,7 +159,8 @@ def test_verify_closure_checks_store_and_exact_closure_in_offline_container(monk
     calls = []
     monkeypatch.setattr(prep, "run", lambda argv, check=True: calls.append(argv) or Result())
     prep.verify_closure(nix_volume=NIX_VOLUME, system_path=SYSTEM_PATH)
-    assert len(calls) == 5
+    assert len(calls) == 6
+    assert any(f"{SYSTEM_PATH}/sw/bin/nix" in argv for argv in calls[1:])
     verify = calls[0]
     assert "store" in verify and "verify" in verify and "--no-trust" in verify and "--recursive" in verify
     assert verify[verify.index("--entrypoint") + 1] == prep.NIX_BIN

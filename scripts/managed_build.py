@@ -1457,6 +1457,7 @@ def execute_plan(
                 "artifact_json_sha256": _sha256_json(artifact),
                 "source_revision": nix_guard["source_revision"],
                 "docker_volume": nix_guard["docker_volume"],
+                "store_root": nix_guard["store_root"],
                 "system_closure": nix_receipt["system_closure"],
                 "closure_manifest_sha256": nix_receipt["closure_manifest_sha256"],
                 "closure_path_count": nix_receipt["closure_path_count"],

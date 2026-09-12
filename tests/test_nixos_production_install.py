@@ -1,6 +1,9 @@
 import hashlib
+import io
+import tarfile
 import importlib.util
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -53,6 +56,7 @@ def managed_receipt(artifact):
         "artifact_json_sha256": prod.sha256_json(artifact),
         "source_revision": artifact["source_revision"],
         "docker_volume": artifact["nix_volume"],
+        "store_root": "/home/alex/.cache/heim-pc/managed-builds/nix/" + "1" * 64 + "/nix-store",
         "system_closure": artifact["system_path"],
         "closure_manifest_sha256": artifact["closure_manifest_sha256"],
         "closure_path_count": artifact["closure_path_count"],
@@ -190,6 +194,59 @@ def plan(obs=None, artifact=None, receipt=None):
         contract=CONTRACT,
         managed_build_attestation_verification=verification,
     )
+
+
+def mock_trusted_build_gate(monkeypatch, compiled, events=None):
+    log = events if events is not None else []
+    docker_state = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_docker_quiesce_state",
+        "service_active": True,
+        "socket_active": True,
+        "running_container_ids": ["1" * 64, "2" * 64, "3" * 64],
+        "running_pid_count": 3,
+    }
+    image = compiled["sealed_nix_image"]
+    seal = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_build_seal",
+        "seal_root": str(Path(image).parent),
+        "image": image,
+        "loop_device": "/dev/loop99",
+        "mountpoint": "/nix",
+        "immutable_image": True,
+        "closure_manifest_sha256": compiled["install_artifact"]["closure_manifest_sha256"],
+    }
+    archive = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_pinned_verifier_archive",
+        "path": compiled["verifier_image_archive"],
+        "archive_sha256": "9" * 64,
+        "image_id": compiled["install_artifact"]["nix_image"],
+        "image_tag": prod.PINNED_NIX_IMAGE_TAG,
+        "layer_count": 1,
+    }
+    verification = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_root_only_seal_verification",
+        "namespace": compiled["containerd_verifier_namespace"],
+        "archive_sha256": archive["archive_sha256"],
+        "image_id": compiled["install_artifact"]["nix_image"],
+        "closure_manifest_sha256": compiled["install_artifact"]["closure_manifest_sha256"],
+        "closure_path_count": compiled["install_artifact"]["closure_path_count"],
+    }
+    monkeypatch.setattr(prod, "verify_host_nix_root_absent", lambda: log.append("nix-root-absent"))
+    monkeypatch.setattr(prod, "prepare_verifier_image_archive", lambda _plan, _artifact: log.append("archive-create") or archive)
+    monkeypatch.setattr(prod, "validate_verifier_image_archive", lambda *args, **kwargs: log.append("archive-verify") or archive)
+    monkeypatch.setattr(prod, "stop_docker_for_apply", lambda: log.append("docker-stop") or docker_state)
+    monkeypatch.setattr(prod, "verify_docker_quiesced", lambda: log.append("docker-quiesced"))
+    monkeypatch.setattr(prod, "create_sealed_nix_store", lambda _plan, _artifact: log.append("seal-create") or seal)
+    monkeypatch.setattr(prod, "verify_sealed_nix_structure", lambda _artifact, _seal=None: log.append("seal-structure"))
+    monkeypatch.setattr(prod, "verify_sealed_nix_with_containerd", lambda *_args: log.append("containerd-verify") or verification)
+    monkeypatch.setattr(prod, "cleanup_verifier_image_archive", lambda _metadata: log.append("archive-cleanup"))
+    monkeypatch.setattr(prod, "cleanup_sealed_nix_store", lambda _seal: log.append("seal-cleanup"))
+    monkeypatch.setattr(prod, "restore_docker_after_apply", lambda _state: log.append("docker-restore"))
+    return log
 
 
 def test_contract_is_bound_to_physical_seagate_and_protected_wd():
@@ -355,26 +412,13 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert compiled["partition_binding_verification_required"] is True
 
 
-def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
+def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
     compiled = plan()
     install = next(item for item in compiled["commands"] if item["effect"] == "nixos-install")
     assert install["argv"] == [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--cap-drop",
-        "ALL",
-        "--cap-add",
-        "SYS_ADMIN",
-        "-v",
-        f"{NIX_VOLUME}:/nix",
-        "-v",
-        f"{prod.MOUNT_ROOT}:/mnt",
-        "--entrypoint",
+        "/usr/bin/env",
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
         f"{SYSTEM_PATH}/sw/bin/nixos-install",
-        prod.PINNED_NIX_IMAGE,
         "--root",
         "/mnt",
         "--system",
@@ -385,10 +429,10 @@ def test_nixos_install_uses_exact_offline_artifact_without_host_nix():
     assert compiled["install_artifact"] == ARTIFACT
     assert compiled["source_revision"] == REVISION
     assert compiled["source_authority"] == "proof-only"
-    assert "--privileged" not in install["argv"]
-    assert "/dev:/dev" not in install["argv"]
-    assert compiled["efi_variables_must_remain_untouched"] is True
-    assert compiled["execution_authorized"] is False
+    assert compiled["host_nix_root"] == "/nix"
+    assert compiled["trusted_build_seal_required"] is False
+    assert compiled["docker_quiesce_required"] is False
+    assert "docker" not in install["argv"]
 
 
 def test_confirmation_is_bound_to_exact_plan_digest():
@@ -447,31 +491,26 @@ def test_install_artifact_rejects_unpinned_image_volume_or_closure_metadata():
         prod.validate_install_artifact(dict(ARTIFACT, closure_path_count=0))
 
 
-def test_btrfs_tools_also_run_from_exact_artifact_without_global_device_access():
+def test_btrfs_tools_run_directly_from_exact_sealed_closure_without_docker():
     compiled = plan()
     by_effect = {}
     for item in compiled["commands"]:
         by_effect.setdefault(item["effect"], item)
     mkfs = by_effect["btrfs-filesystem"]["argv"]
-    assert mkfs[:7] == ["docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL"]
-    assert "--privileged" not in mkfs
-    assert "/dev:/dev" not in mkfs
-    assert "--device" in mkfs
-    assert "/dev/mapper/heimpc-nixos-crypt:/dev/heimpc-nixos-crypt:rw" in mkfs
-    assert f"{NIX_VOLUME}:/nix:ro" in mkfs
-    assert f"{SYSTEM_PATH}/sw/bin/mkfs.btrfs" in mkfs
+    assert mkfs[:3] == [
+        "/usr/bin/env",
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/mkfs.btrfs",
+    ]
+    assert mkfs[-1] == "/dev/mapper/heimpc-nixos-crypt"
     subvol = by_effect["btrfs-subvolume-create"]["argv"]
-    assert "--privileged" not in subvol
-    assert "/dev:/dev" not in subvol
-    assert ["--cap-add", "SYS_ADMIN"] == subvol[subvol.index("--cap-add"):subvol.index("--cap-add") + 2]
-    assert f"{SYSTEM_PATH}/sw/bin/btrfs" in subvol
-    assert f"{prod.BTRFS_STAGE_ROOT}:{prod.BTRFS_STAGE_ROOT}" in subvol
-    for command in compiled["commands"]:
-        argv = command["argv"]
-        if argv[:2] == ["docker", "run"]:
-            index = argv.index("--cap-drop")
-            assert argv[index:index + 2] == ["--cap-drop", "ALL"]
-            assert "MKNOD" not in argv
+    assert subvol[:3] == [
+        "/usr/bin/env",
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/btrfs",
+    ]
+    assert all("docker" not in item["argv"] for item in compiled["commands"])
+    assert compiled["sealed_nix_image"].startswith("/var/lib/heim-pc/nixos-production-seals/")
 
 
 def test_success_receipt_redacts_target_authority():
@@ -582,6 +621,359 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     assert "super-secret-material" not in captured.err
 
 
+def test_managed_build_receipt_rejects_noncanonical_store_root():
+    receipt = managed_receipt(ARTIFACT)
+    receipt["store_root"] = "/tmp/user-controlled-nix-store"
+    with pytest.raises(prod.ProductionInstallError, match="does not authorize"):
+        prod.validate_managed_build_receipt(
+            receipt, ARTIFACT, expected_policy_sha256=MANAGED_POLICY_SHA256
+        )
+
+
+def test_production_plan_requires_root_seal_and_docker_quiesce_only_for_merged_main():
+    proof = plan()
+    production = plan(artifact=MERGED_ARTIFACT)
+    assert proof["trusted_build_seal_required"] is False
+    assert proof["docker_quiesce_required"] is False
+    assert production["trusted_build_seal_required"] is True
+    assert production["docker_quiesce_required"] is True
+    assert production["host_nix_root"] == "/nix"
+    assert production["sealed_nix_image"].startswith(
+        "/var/lib/heim-pc/nixos-production-seals/" + REVISION + "-"
+    )
+
+
+def test_stop_docker_quiesces_service_socket_and_binds_running_containers(monkeypatch):
+    states = {
+        "docker.service": [True, False],
+        "docker.socket": [True, False],
+    }
+    container_ids = ["a" * 64, "b" * 64]
+    calls = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_systemd_active", lambda unit: states[unit].pop(0))
+    monkeypatch.setattr(prod, "_running_docker_container_ids", lambda: container_ids)
+    monkeypatch.setattr(
+        prod,
+        "_running_docker_container_pids",
+        lambda ids: [111, 222] if ids == container_ids else [],
+    )
+    monkeypatch.setattr(prod, "_process_exists", lambda _pid: False)
+    monkeypatch.setattr(prod, "_moby_shim_pids", lambda: [])
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    state = prod.stop_docker_for_apply()
+    assert calls == [["systemctl", "stop", "docker.socket", "docker.service"]]
+    assert state == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_docker_quiesce_state",
+        "service_active": True,
+        "socket_active": True,
+        "running_container_ids": container_ids,
+        "running_pid_count": 2,
+    }
+
+
+def test_failed_docker_quiesce_restores_pre_apply_state(monkeypatch):
+    activity = {
+        "docker.service": iter([True, True, True]),
+        "docker.socket": iter([True, True]),
+    }
+    calls = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_systemd_active", lambda unit: next(activity[unit]))
+    monkeypatch.setattr(prod, "_running_docker_container_ids", lambda: [])
+    monkeypatch.setattr(prod, "_running_docker_container_pids", lambda _ids: [])
+    monkeypatch.setattr(prod, "_moby_shim_pids", lambda: [])
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    with pytest.raises(prod.ProductionInstallError, match="did not become inactive"):
+        prod.stop_docker_for_apply()
+    assert ["systemctl", "start", "docker.socket"] in calls
+    assert ["systemctl", "start", "docker.service"] in calls
+
+
+def test_restore_docker_restarts_missing_pre_apply_containers_and_verifies(monkeypatch):
+    first = "a" * 64
+    second = "b" * 64
+    inventories = iter([[first], [first, second]])
+    calls = []
+    monkeypatch.setattr(prod, "_running_docker_container_ids", lambda: next(inventories))
+    monkeypatch.setattr(prod, "_systemd_active", lambda _unit: True)
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    prod.restore_docker_after_apply({
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_docker_quiesce_state",
+        "service_active": True,
+        "socket_active": True,
+        "running_container_ids": [first, second],
+        "running_pid_count": 2,
+    })
+    assert ["docker", "start", second] in calls
+    assert calls[:2] == [
+        ["systemctl", "start", "docker.socket"],
+        ["systemctl", "start", "docker.service"],
+    ]
+
+
+def test_restore_docker_fails_closed_when_pre_apply_container_stays_down(monkeypatch):
+    first = "a" * 64
+    second = "b" * 64
+    inventories = iter([[first], [first]])
+    calls = []
+    monkeypatch.setattr(prod, "_running_docker_container_ids", lambda: next(inventories))
+    monkeypatch.setattr(prod, "_systemd_active", lambda _unit: True)
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    with pytest.raises(prod.ProductionInstallError, match="container state restore"):
+        prod.restore_docker_after_apply({
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_docker_quiesce_state",
+            "service_active": True,
+            "socket_active": True,
+            "running_container_ids": [first, second],
+            "running_pid_count": 2,
+        })
+    assert ["docker", "start", second] in calls
+
+
+def test_docker_container_inventory_rejects_short_or_duplicate_ids():
+    with pytest.raises(prod.ProductionInstallError, match="inventory is invalid"):
+        prod._validate_docker_container_ids(["short"])
+    with pytest.raises(prod.ProductionInstallError, match="inventory is invalid"):
+        prod._validate_docker_container_ids(["a" * 64, "a" * 64])
+
+
+def test_verify_docker_quiesced_rejects_surviving_moby_shim(monkeypatch):
+    monkeypatch.setattr(prod, "_systemd_active", lambda _unit: False)
+    monkeypatch.setattr(prod, "_moby_shim_pids", lambda: [2767])
+    with pytest.raises(prod.ProductionInstallError, match="shim appeared"):
+        prod.verify_docker_quiesced()
+
+
+def test_sealed_tool_argv_uses_exact_attested_store_path_and_no_shell():
+    argv = prod._sealed_tool_argv(
+        MERGED_ARTIFACT, "nixos-install", ["--root", "/mnt", "--system", SYSTEM_PATH]
+    )
+    assert argv[:3] == [
+        "/usr/bin/env",
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/nixos-install",
+    ]
+    assert "sh" not in argv
+    assert "bash" not in argv
+    assert "docker" not in argv
+
+
+def test_seal_cleanup_keeps_image_immutable_if_unmount_is_uncertain(monkeypatch, tmp_path):
+    base = tmp_path / "heim-pc" / "nixos-production-seals"
+    root = base / (REVISION + "-" + "1" * 16)
+    image = root / "nix.squashfs"
+    root.mkdir(parents=True)
+    image.write_bytes(b"seal")
+    fake_nix = tmp_path / "nix"
+    (fake_nix / "store").mkdir(parents=True)
+    monkeypatch.setattr(prod, "SEALED_NIX_BASE", base)
+    monkeypatch.setattr(prod, "HOST_NIX_ROOT", fake_nix)
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: True)
+    calls = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = b""
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["/usr/bin/umount", str(fake_nix)]:
+            return Result(1)
+        return Result(0)
+
+    monkeypatch.setattr(prod, "_run", fake_run)
+    seal = {
+        "seal_root": str(root),
+        "image": str(image),
+        "loop_device": "/dev/loop7",
+    }
+    with pytest.raises(prod.ProductionInstallError, match="teardown"):
+        prod.cleanup_sealed_nix_store(seal)
+    assert ["/usr/bin/chattr", "-i", str(image)] not in calls
+    assert image.exists()
+
+
+def _write_synthetic_verifier_archive(path, *, config_bytes, config_name, repo_tag=None):
+    layer_digest = hashlib.sha256(b"synthetic-layer").hexdigest()
+    layer_name = f"blobs/sha256/{layer_digest}"
+    manifest = [{
+        "Config": config_name,
+        "RepoTags": [repo_tag or prod.PINNED_NIX_IMAGE_TAG],
+        "Layers": [layer_name],
+    }]
+    entries = {
+        "manifest.json": json.dumps(manifest, separators=(",", ":")).encode(),
+        config_name: config_bytes,
+        layer_name: b"synthetic-layer",
+    }
+    with tarfile.open(path, "w") as tar:
+        for name, payload in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o400
+            tar.addfile(info, io.BytesIO(payload))
+    path.chmod(0o400)
+
+
+def _pretend_root_owned_archive(monkeypatch, path):
+    real_lstat = prod.Path.lstat
+    def fake_lstat(self):
+        if self == path:
+            return type("Stat", (), {
+                "st_mode": stat.S_IFREG | 0o400,
+                "st_uid": 0,
+                "st_gid": 0,
+                "st_nlink": 1,
+            })()
+        return real_lstat(self)
+    monkeypatch.setattr(prod.Path, "lstat", fake_lstat)
+
+
+def test_verifier_archive_config_digest_is_exact_pinned_image_authority(monkeypatch, tmp_path):
+    config = {
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(b"synthetic-layer").hexdigest()]},
+        "config": {"User": "0:0"},
+    }
+    config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(config_bytes).hexdigest()
+    pinned = "sha256:" + digest
+    artifact = dict(ARTIFACT, nix_image=pinned)
+    monkeypatch.setattr(prod, "PINNED_NIX_IMAGE", pinned)
+    archive = tmp_path / "verifier.tar"
+    _write_synthetic_verifier_archive(
+        archive, config_bytes=config_bytes, config_name=f"blobs/sha256/{digest}"
+    )
+    _pretend_root_owned_archive(monkeypatch, archive)
+    result = prod.validate_verifier_image_archive(archive, artifact)
+    assert result["image_id"] == pinned
+    assert result["layer_count"] == 1
+
+
+def test_verifier_archive_rejects_config_bytes_not_matching_pinned_image(monkeypatch, tmp_path):
+    authorized_config = json.dumps({
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(b"synthetic-layer").hexdigest()]},
+    }, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(authorized_config).hexdigest()
+    pinned = "sha256:" + digest
+    artifact = dict(ARTIFACT, nix_image=pinned)
+    monkeypatch.setattr(prod, "PINNED_NIX_IMAGE", pinned)
+    archive = tmp_path / "verifier.tar"
+    tampered = json.dumps({
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(b"synthetic-layer").hexdigest()]},
+        "config": {"Env": ["TAMPERED=1"]},
+    }, sort_keys=True, separators=(",", ":")).encode()
+    _write_synthetic_verifier_archive(
+        archive, config_bytes=tampered, config_name=f"blobs/sha256/{digest}"
+    )
+    _pretend_root_owned_archive(monkeypatch, archive)
+    with pytest.raises(prod.ProductionInstallError, match="config digest mismatch"):
+        prod.validate_verifier_image_archive(archive, artifact)
+
+
+def test_root_only_containerd_verifier_argv_is_readonly_and_plan_bounded():
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    namespace = compiled["containerd_verifier_namespace"]
+    assert namespace == "heim-pc-nixos-verify-" + compiled["managed_build_receipt"]["artifact_file_sha256"][:16]
+    argv = prod._containerd_nix_run_argv(
+        namespace,
+        namespace + "-info",
+        ["path-info", "--json", "--recursive", SYSTEM_PATH],
+    )
+    assert argv[:4] == [
+        "/usr/bin/ctr", "--address", "/run/containerd/containerd.sock", "--namespace"
+    ]
+    assert "--read-only" in argv
+    assert "type=bind,src=/nix,dst=/subject/nix,options=rbind:ro" in argv
+    assert "type=tmpfs,dst=/tmp,options=nosuid:nodev:mode=1777" in argv
+    assert "docker.io/nixos/nix:2.35.2" in argv
+    assert "/nix/var/nix/profiles/default/bin/nix" in argv
+    assert prod.READONLY_NIX_STORE in argv
+    assert "--net-host" not in argv
+    assert "--cni" not in argv
+
+
+def test_structural_seal_verifier_never_executes_nix(monkeypatch, tmp_path):
+    fake_nix = tmp_path / "nix"
+    (fake_nix / "store").mkdir(parents=True)
+    (fake_nix / "var").mkdir()
+    root = tmp_path / "resolved-root"
+    root.mkdir()
+    executable = tmp_path / "executable"
+    executable.write_text("x")
+    executable.chmod(0o755)
+    service = tmp_path / "service"
+    service.write_text("x")
+    monkeypatch.setattr(prod, "HOST_NIX_ROOT", fake_nix)
+    monkeypatch.setattr(
+        prod,
+        "_sealed_mount_record",
+        lambda _path: {"target": str(fake_nix), "source": "/dev/loop7", "fstype": "squashfs", "options": "ro"},
+    )
+    def resolve(path):
+        value = str(path)
+        if value.endswith("heim-pc-firstboot-credentials.service"):
+            return service
+        if "/sw/bin/" in value:
+            return executable
+        return root
+    monkeypatch.setattr(prod, "_resolve_inside_sealed_store", resolve)
+    monkeypatch.setattr(prod, "_verify_immutable_image", lambda _path: None)
+    monkeypatch.setattr(
+        prod,
+        "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("structural verifier must not execute commands")),
+    )
+    seal_root = prod.SEALED_NIX_BASE / (REVISION + "-" + "1" * 16)
+    seal = {
+        "kind": "heim_pc.nixos_production_build_seal",
+        "seal_root": str(seal_root),
+        "image": str(seal_root / "nix.squashfs"),
+        "loop_device": "/dev/loop7",
+        "mountpoint": str(fake_nix),
+        "closure_manifest_sha256": ARTIFACT["closure_manifest_sha256"],
+    }
+    prod.verify_sealed_nix_structure(ARTIFACT, seal)
+
+
+def test_plan_binds_root_only_verifier_archive_and_namespace():
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    digest = compiled["managed_build_receipt"]["artifact_file_sha256"]
+    assert compiled["verifier_image_archive"] == (
+        f"/var/lib/heim-pc/nixos-production-verifiers/{REVISION}-{digest[:16]}.docker.tar"
+    )
+    assert compiled["containerd_verifier_namespace"] == f"heim-pc-nixos-verify-{digest[:16]}"
+
+
 def test_post_mutation_alarm_codes_are_closed_and_non_secret():
     with pytest.raises(ValueError, match="unknown post-mutation alarm code"):
         prod.PostMutationInstallError("super-secret-material")
@@ -605,6 +997,7 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
     monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
+    gate_events = mock_trusted_build_gate(monkeypatch, compiled)
 
     first_argv = compiled["commands"][0]["argv"]
 
@@ -629,6 +1022,18 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
         )
     assert exc.value.code == "apply-failed-after-mutation-attempt"
     assert "private command detail" not in prod.POST_MUTATION_PUBLIC_MESSAGES[exc.value.code]
+    assert gate_events[:9] == [
+        "nix-root-absent",
+        "archive-create",
+        "docker-stop",
+        "docker-quiesced",
+        "archive-verify",
+        "seal-create",
+        "docker-quiesced",
+        "seal-structure",
+        "containerd-verify",
+    ]
+    assert gate_events[-2:] == ["seal-cleanup", "docker-restore"]
 
 
 def test_run_uses_fixed_trusted_environment(monkeypatch):
@@ -805,8 +1210,12 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
 
     def fake_run(argv, *, input_bytes=None, check=True):
         calls.append(argv)
-        if argv[:4] == ["docker", "image", "inspect", "--format"]:
-            return Result((prod.PINNED_NIX_IMAGE + "\n").encode())
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return Result(json.dumps([{
+                "Id": prod.PINNED_NIX_IMAGE,
+                "RepoTags": [prod.PINNED_NIX_IMAGE_TAG],
+                "RepoDigests": [prod.PINNED_NIX_IMAGE_REF],
+            }]).encode())
         if "path-info" in argv:
             return Result(json.dumps(CLOSURE_PATH_INFO).encode())
         return Result()
@@ -1171,6 +1580,7 @@ def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypat
         lambda **kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("private staging detail")),
     )
     monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
+    mock_trusted_build_gate(monkeypatch, compiled)
 
     class Result:
         returncode = 0

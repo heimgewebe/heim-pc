@@ -246,6 +246,7 @@ def verify_closure(*, nix_volume: str, system_path: str) -> None:
         args=["store", "verify", "--no-trust", "--recursive", system_path],
     ))
     checks = [
+        ("-x", f"{system_path}/sw/bin/nix"),
         ("-x", f"{system_path}/sw/bin/nixos-install"),
         ("-x", f"{system_path}/sw/bin/mkfs.btrfs"),
         ("-x", f"{system_path}/sw/bin/btrfs"),

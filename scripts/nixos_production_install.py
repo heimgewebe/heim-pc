@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -29,6 +30,8 @@ MOUNT_ROOT = "/mnt/heim-pc-nixos-production"
 BTRFS_STAGE_ROOT = "/mnt/heim-pc-nixos-production-btrfs-stage"
 CONFIRM_PREFIX = "APPLY-NIXOS-PRODUCTION:"
 PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
+PINNED_NIX_IMAGE_TAG = "nixos/nix:2.35.2"
+PINNED_NIX_IMAGE_REF = "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c"
 TRUSTED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 CANONICAL_MAIN_REMOTE = "https://github.com/heimgewebe/heim-pc.git"
 READONLY_NIX_STORE = "local?root=/subject&read-only=true"
@@ -57,6 +60,12 @@ INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "closure_path_count",
 )
 GH_BIN = "/usr/bin/gh"
+SEALED_NIX_BASE = Path("/var/lib/heim-pc/nixos-production-seals")
+VERIFIER_ARCHIVE_BASE = Path("/var/lib/heim-pc/nixos-production-verifiers")
+CONTAINERD_SOCKET = Path("/run/containerd/containerd.sock")
+CONTAINERD_VERIFIER_NAMESPACE_PREFIX = "heim-pc-nixos-verify-"
+HOST_NIX_ROOT = Path("/nix")
+MANAGED_NIX_STORE_ROOT_RE = re.compile(r"^/home/alex/\.cache/heim-pc/managed-builds/nix/[0-9a-f]{64}/nix-store$")
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
@@ -84,6 +93,8 @@ POST_MUTATION_PUBLIC_MESSAGES = {
     "teardown-incomplete": "nixos production install POST-MUTATION ALARM: target teardown did not complete cleanly; inspect target mounts and mapper before any retry",
     "protected-fallback-changed": "nixos production install POST-MUTATION ALARM: protected fallback fingerprint changed; stop and inspect the fallback disk before any retry",
     "protected-fallback-unverifiable": "nixos production install POST-MUTATION ALARM: protected fallback state could not be verified; stop and inspect the fallback disk before any retry",
+    "trusted-build-seal-teardown-incomplete": "nixos production install POST-MUTATION ALARM: the root-protected build seal could not be fully torn down; inspect /nix and the seal before any retry",
+    "docker-quiesce-restore-incomplete": "nixos production install POST-MUTATION ALARM: the pre-apply Docker service state could not be restored safely; inspect Docker before any retry",
 }
 
 
@@ -293,6 +304,8 @@ def validate_managed_build_receipt(
         or value.get("profile") != "nixos-production-prepare"
         or value.get("source_revision") != artifact["source_revision"]
         or value.get("docker_volume") != artifact["nix_volume"]
+        or not isinstance(value.get("store_root"), str)
+        or MANAGED_NIX_STORE_ROOT_RE.fullmatch(value["store_root"]) is None
         or value.get("system_closure") != artifact["system_path"]
         or value.get("closure_manifest_sha256") != artifact["closure_manifest_sha256"]
         or value.get("closure_path_count") != artifact["closure_path_count"]
@@ -576,40 +589,40 @@ def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any])
     return receipt
 
 
-def _docker_tool_argv(
-    artifact: dict[str, Any],
-    tool: str,
-    args: list[str],
-    *,
-    mounts: list[str] | None = None,
-    devices: list[tuple[str, str]] | None = None,
-    cap_add: list[str] | None = None,
-    nix_read_only: bool = True,
-) -> list[str]:
-    nix_mount = f"{artifact['nix_volume']}:/nix" + (":ro" if nix_read_only else "")
-    argv = ["docker", "run", "--rm", "--network", "none", "--cap-drop", "ALL"]
-    for capability in cap_add or []:
-        if not isinstance(capability, str) or not re.fullmatch(r"[A-Z0-9_]+", capability):
-            raise ProductionInstallError("container capability is invalid")
-        argv += ["--cap-add", capability]
-    for source, destination in devices or []:
-        if (
-            not isinstance(source, str)
-            or not isinstance(destination, str)
-            or not source.startswith("/dev/")
-            or not destination.startswith("/dev/")
-            or os.path.normpath(source) != source
-            or os.path.normpath(destination) != destination
-        ):
-            raise ProductionInstallError("container device binding is invalid")
-        argv += ["--device", f"{source}:{destination}:rw"]
-    argv += ["-v", nix_mount]
-    for mount in mounts or []:
-        argv += ["-v", mount]
-    argv += [
-        "--entrypoint", f"{artifact['system_path']}/sw/bin/{tool}", artifact["nix_image"]
-    ]
-    return argv + args
+def _sealed_nix_paths(artifact: dict[str, Any], artifact_file_sha256: str) -> dict[str, Path]:
+    artifact = validate_install_artifact(artifact)
+    if not isinstance(artifact_file_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_file_sha256) is None:
+        raise ProductionInstallError("sealed Nix artifact digest is invalid")
+    seal_id = f"{artifact['source_revision']}-{artifact_file_sha256[:16]}"
+    root = SEALED_NIX_BASE / seal_id
+    return {
+        "seal_root": root,
+        "image": root / "nix.squashfs",
+        "mountpoint": HOST_NIX_ROOT,
+    }
+
+
+def _verifier_archive_path(artifact: dict[str, Any], artifact_file_sha256: str) -> Path:
+    artifact = validate_install_artifact(artifact)
+    if not isinstance(artifact_file_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_file_sha256) is None:
+        raise ProductionInstallError("verifier artifact digest is invalid")
+    name = f"{artifact['source_revision']}-{artifact_file_sha256[:16]}.docker.tar"
+    return VERIFIER_ARCHIVE_BASE / name
+
+
+def _verifier_namespace(artifact_file_sha256: str) -> str:
+    if not isinstance(artifact_file_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_file_sha256) is None:
+        raise ProductionInstallError("verifier artifact digest is invalid")
+    return CONTAINERD_VERIFIER_NAMESPACE_PREFIX + artifact_file_sha256[:16]
+
+
+def _sealed_tool_argv(artifact: dict[str, Any], tool: str, args: list[str]) -> list[str]:
+    artifact = validate_install_artifact(artifact)
+    if tool not in {"mkfs.btrfs", "btrfs", "nixos-install"}:
+        raise ProductionInstallError("sealed Nix tool is not allowlisted")
+    executable = f"{artifact['system_path']}/sw/bin/{tool}"
+    path_value = f"{artifact['system_path']}/sw/bin:{TRUSTED_PATH}"
+    return ["/usr/bin/env", f"PATH={path_value}", executable, *args]
 
 
 def _require_by_id(value: Any, label: str) -> str:
@@ -871,6 +884,9 @@ def compile_plan(
         )
     elif managed_build_attestation_verification is not None:
         raise ProductionInstallError("proof-only artifact must not carry production attestation authority")
+    sealed_paths = _sealed_nix_paths(artifact, managed_receipt["artifact_file_sha256"])
+    verifier_archive = _verifier_archive_path(artifact, managed_receipt["artifact_file_sha256"])
+    verifier_namespace = _verifier_namespace(managed_receipt["artifact_file_sha256"])
     flake = str(PurePosixPath(flake_source))
     if not flake.startswith("/") or os.path.normpath(flake) != flake:
         raise ProductionInstallError("flake source must be a canonical absolute path")
@@ -881,7 +897,6 @@ def compile_plan(
     encrypted = _partition_by_role(contract, "encrypted-system")
     mapper_name = contract["topology"]["luks"]["mapper_name"]
     mapper = f"/dev/mapper/{mapper_name}"
-    container_mapper = f"/dev/{mapper_name}"
     btrfs = contract["topology"]["btrfs"]
     commands: list[dict[str, Any]] = [{"effect": "partition-table-reset", "argv": ["sgdisk", "--zap-all", target]}]
     for partition in sorted(contract["topology"]["partitions"], key=lambda item: item["number"]):
@@ -903,11 +918,8 @@ def compile_plan(
         {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _target_partition_path(target, encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
         {
             "effect": "btrfs-filesystem",
-            "argv": _docker_tool_argv(
-                artifact,
-                "mkfs.btrfs",
-                ["-f", "-L", btrfs["label"], container_mapper],
-                devices=[(mapper, container_mapper)],
+            "argv": _sealed_tool_argv(
+                artifact, "mkfs.btrfs", ["-f", "-L", btrfs["label"], mapper]
             ),
         },
         {"effect": "btrfs-stage-mount", "argv": ["mount", mapper, BTRFS_STAGE_ROOT]},
@@ -915,12 +927,8 @@ def compile_plan(
     for name, _mountpoint in _subvolume_mounts(contract):
         commands.append({
             "effect": "btrfs-subvolume-create",
-            "argv": _docker_tool_argv(
-                artifact,
-                "btrfs",
-                ["subvolume", "create", f"{BTRFS_STAGE_ROOT}/{name}"],
-                mounts=[f"{BTRFS_STAGE_ROOT}:{BTRFS_STAGE_ROOT}"],
-                cap_add=["SYS_ADMIN"],
+            "argv": _sealed_tool_argv(
+                artifact, "btrfs", ["subvolume", "create", f"{BTRFS_STAGE_ROOT}/{name}"]
             ),
         })
     commands.append({"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]})
@@ -934,13 +942,9 @@ def compile_plan(
         commands.append({"effect": "surface-mount", "argv": ["mount", _target_partition_path(target, partition), dest]})
     commands.append({
         "effect": "nixos-install",
-        "argv": _docker_tool_argv(
-            artifact,
-            "nixos-install",
+        "argv": _sealed_tool_argv(
+            artifact, "nixos-install",
             ["--root", "/mnt", "--system", artifact["system_path"], "--no-channel-copy", "--no-root-password"],
-            mounts=[f"{MOUNT_ROOT}:/mnt"],
-            cap_add=["SYS_ADMIN"],
-            nix_read_only=False,
         ),
     })
     mounted = [_mount_path(logical) for _, logical in _subvolume_mounts(contract)] + [_mount_path(efi["mountpoint"]), _mount_path(recovery["mountpoint"])]
@@ -968,6 +972,12 @@ def compile_plan(
         "source_authority": artifact["source_authority"],
         "flake_source": flake,
         "system_path": artifact["system_path"],
+        "sealed_nix_image": str(sealed_paths["image"]),
+        "verifier_image_archive": str(verifier_archive),
+        "containerd_verifier_namespace": verifier_namespace,
+        "host_nix_root": str(HOST_NIX_ROOT),
+        "trusted_build_seal_required": artifact["source_authority"] == "merged-main",
+        "docker_quiesce_required": artifact["source_authority"] == "merged-main",
         "target_authority": target,
         "protected_authority": contract["protected_disks"][0]["by_id"],
         "preflight": preflight,
@@ -993,6 +1003,8 @@ def plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
         "managed_build_receipt_sha256": plan["managed_build_receipt_sha256"],
         "managed_build_attestation_required": plan["managed_build_attestation_required"],
         "managed_build_attestation_sha256": plan["managed_build_attestation_sha256"],
+        "trusted_build_seal_required": plan["trusted_build_seal_required"],
+        "docker_quiesce_required": plan["docker_quiesce_required"],
         "execution_authorized": False,
         "private_hardware_identity_redacted": True,
     }
@@ -1390,11 +1402,36 @@ def _nix_volume_argv(artifact: dict[str, Any], args: list[str]) -> list[str]:
     ]
 
 
+def verify_pinned_nix_image_identity(artifact: dict[str, Any]) -> dict[str, Any]:
+    artifact = validate_install_artifact(artifact)
+    raw = _run(["docker", "image", "inspect", artifact["nix_image"]]).stdout
+    try:
+        payload = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProductionInstallError("pinned Nix image metadata is invalid") from exc
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        raise ProductionInstallError("pinned Nix image metadata is ambiguous")
+    image = payload[0]
+    repo_tags = image.get("RepoTags")
+    repo_digests = image.get("RepoDigests")
+    if (
+        image.get("Id") != artifact["nix_image"]
+        or not isinstance(repo_tags, list)
+        or PINNED_NIX_IMAGE_TAG not in repo_tags
+        or not isinstance(repo_digests, list)
+        or PINNED_NIX_IMAGE_REF not in repo_digests
+    ):
+        raise ProductionInstallError("pinned Nix image identity mismatch")
+    return {
+        "image_id": artifact["nix_image"],
+        "image_tag": PINNED_NIX_IMAGE_TAG,
+        "image_ref": PINNED_NIX_IMAGE_REF,
+    }
+
+
 def verify_install_artifact_environment(artifact: dict[str, Any]) -> None:
     artifact = validate_install_artifact(artifact)
-    image = _run(["docker", "image", "inspect", "--format", "{{.Id}}", artifact["nix_image"]]).stdout.decode().strip()
-    if image != artifact["nix_image"]:
-        raise ProductionInstallError("pinned Nix image identity mismatch")
+    verify_pinned_nix_image_identity(artifact)
     _run(["docker", "volume", "inspect", artifact["nix_volume"]])
     path_info = _json_command(_nix_volume_argv(artifact, ["path-info", "--json", "--recursive", artifact["system_path"]]))
     closure = closure_manifest_metadata(path_info)
@@ -1415,6 +1452,801 @@ def verify_install_artifact_environment(artifact: dict[str, Any]) -> None:
             artifact["nix_image"], mode, path,
         ])
 
+
+
+def verify_host_nix_root_absent() -> None:
+    if HOST_NIX_ROOT.exists() or HOST_NIX_ROOT.is_symlink():
+        raise ProductionInstallError("canonical /nix must be absent before production apply")
+    if _mountpoint_is_mounted(str(HOST_NIX_ROOT)):
+        raise ProductionInstallError("canonical /nix is already mounted")
+
+
+def _systemd_active(unit: str) -> bool:
+    result = _run(["systemctl", "is-active", "--quiet", unit], check=False)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 3:
+        return False
+    raise ProductionInstallError(f"cannot determine {unit} state")
+
+
+def _validate_docker_container_ids(value: Any) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or len(value) != len(set(value))
+        or any(
+            not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None
+            for item in value
+        )
+    ):
+        raise ProductionInstallError("Docker container inventory is invalid")
+    return sorted(value)
+
+
+def _running_docker_container_ids() -> list[str]:
+    ids = [
+        line.strip()
+        for line in _run(["docker", "ps", "--no-trunc", "-q"]).stdout.decode(
+            "utf-8", "replace"
+        ).splitlines()
+        if line.strip()
+    ]
+    return _validate_docker_container_ids(ids)
+
+
+def _running_docker_container_pids(container_ids: list[str] | None = None) -> list[int]:
+    ids = (
+        _running_docker_container_ids()
+        if container_ids is None
+        else _validate_docker_container_ids(container_ids)
+    )
+    if not ids:
+        return []
+    rows = _json_command(["docker", "inspect", *ids])
+    if not isinstance(rows, list) or len(rows) != len(ids):
+        raise ProductionInstallError("Docker process inventory is invalid")
+    expected_ids = set(ids)
+    observed_ids: set[str] = set()
+    pids: list[int] = []
+    for row in rows:
+        identity = row.get("Id") if isinstance(row, dict) else None
+        state = row.get("State") if isinstance(row, dict) else None
+        pid = state.get("Pid") if isinstance(state, dict) else None
+        running = state.get("Running") if isinstance(state, dict) else None
+        if (
+            not isinstance(identity, str)
+            or identity not in expected_ids
+            or identity in observed_ids
+            or running is not True
+            or type(pid) is not int
+            or pid <= 0
+        ):
+            raise ProductionInstallError("Docker process inventory is incomplete")
+        observed_ids.add(identity)
+        pids.append(pid)
+    if observed_ids != expected_ids or len(pids) != len(set(pids)):
+        raise ProductionInstallError("Docker process inventory is incomplete")
+    return sorted(pids)
+
+
+def _process_exists(pid: int) -> bool:
+    return type(pid) is int and pid > 0 and Path(f"/proc/{pid}").exists()
+
+
+def _moby_shim_pids() -> list[int]:
+    result: list[int] = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError as exc:
+        raise ProductionInstallError("cannot inspect Docker container shims") from exc
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [item.decode("utf-8", "replace") for item in raw.split(b"\0") if item]
+        if not argv or not argv[0].endswith("containerd-shim-runc-v2"):
+            continue
+        if "-namespace" not in argv:
+            continue
+        index = argv.index("-namespace")
+        if index + 1 < len(argv) and argv[index + 1] == "moby":
+            result.append(int(entry.name))
+    return sorted(result)
+
+
+def stop_docker_for_apply() -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise ProductionInstallError("Docker quiesce requires root")
+    state = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_docker_quiesce_state",
+        "service_active": _systemd_active("docker.service"),
+        "socket_active": _systemd_active("docker.socket"),
+        "running_container_ids": [],
+        "running_pid_count": 0,
+    }
+    running_ids = _running_docker_container_ids() if state["service_active"] else []
+    running_pids = _running_docker_container_pids(running_ids) if running_ids else []
+    state["running_container_ids"] = running_ids
+    state["running_pid_count"] = len(running_pids)
+    try:
+        _run(["systemctl", "stop", "docker.socket", "docker.service"])
+        if _systemd_active("docker.service") or _systemd_active("docker.socket"):
+            raise ProductionInstallError("Docker did not become inactive before production apply")
+        survivors = [pid for pid in running_pids if _process_exists(pid)]
+        shim_survivors = _moby_shim_pids()
+        if survivors or shim_survivors:
+            raise ProductionInstallError("Docker containers survived service quiesce")
+        return state
+    except BaseException as exc:
+        try:
+            restore_docker_after_apply(state)
+        except BaseException as restore_exc:
+            raise ProductionInstallError(
+                "Docker quiesce failed and the pre-apply service/container state could not be restored"
+            ) from restore_exc
+        raise exc
+
+
+def verify_docker_quiesced() -> None:
+    if _systemd_active("docker.service") or _systemd_active("docker.socket"):
+        raise ProductionInstallError("Docker reactivated during production apply")
+    if _moby_shim_pids():
+        raise ProductionInstallError("Docker container shim appeared during production apply")
+
+
+def restore_docker_after_apply(state: dict[str, Any]) -> None:
+    if (
+        not isinstance(state, dict)
+        or state.get("schema_version") != 1
+        or state.get("kind") != "heim_pc.nixos_docker_quiesce_state"
+        or not isinstance(state.get("service_active"), bool)
+        or not isinstance(state.get("socket_active"), bool)
+        or type(state.get("running_pid_count")) is not int
+        or state["running_pid_count"] < 0
+    ):
+        raise ProductionInstallError("Docker quiesce state is invalid")
+    running_ids = _validate_docker_container_ids(state.get("running_container_ids"))
+    if state["running_pid_count"] != len(running_ids) or (
+        running_ids and not state["service_active"]
+    ):
+        raise ProductionInstallError("Docker quiesce state is invalid")
+    if state["socket_active"]:
+        _run(["systemctl", "start", "docker.socket"])
+    if state["service_active"]:
+        _run(["systemctl", "start", "docker.service"])
+        current_ids = set(_running_docker_container_ids())
+        missing = [container_id for container_id in running_ids if container_id not in current_ids]
+        if missing:
+            _run(["docker", "start", *missing])
+        restored_ids = set(_running_docker_container_ids())
+        if any(container_id not in restored_ids for container_id in running_ids):
+            raise ProductionInstallError("Docker pre-apply container state restore could not be verified")
+    if not state["service_active"] and _systemd_active("docker.service"):
+        _run(["systemctl", "stop", "docker.service"])
+    if not state["socket_active"] and _systemd_active("docker.socket"):
+        _run(["systemctl", "stop", "docker.socket"])
+    if _systemd_active("docker.service") != state["service_active"]:
+        raise ProductionInstallError("Docker service state restore could not be verified")
+    if _systemd_active("docker.socket") != state["socket_active"]:
+        raise ProductionInstallError("Docker socket state restore could not be verified")
+
+
+def _managed_nix_source_root(receipt: dict[str, Any]) -> Path:
+    raw = receipt.get("store_root")
+    if not isinstance(raw, str) or MANAGED_NIX_STORE_ROOT_RE.fullmatch(raw) is None:
+        raise ProductionInstallError("managed Nix source root is outside canonical authority")
+    path = Path(raw)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("managed Nix source root is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ProductionInstallError("managed Nix source root is unsafe")
+    return path
+
+
+def _sealed_mount_record(path: Path) -> dict[str, str]:
+    path = Path(path)
+    result = _run([
+        "/usr/bin/findmnt", "-rn", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS", "-T", str(path)
+    ])
+    line = result.stdout.decode("utf-8", "strict").strip()
+    fields = line.split(None, 3)
+    if len(fields) != 4:
+        raise ProductionInstallError("sealed Nix mount identity is unreadable")
+    target, source, fstype, options = fields
+    if (
+        target != str(HOST_NIX_ROOT)
+        or re.fullmatch(r"/dev/loop[0-9]+", source) is None
+        or fstype != "squashfs"
+        or "ro" not in set(options.split(","))
+    ):
+        raise ProductionInstallError("sealed Nix mount identity is invalid")
+    return {"target": target, "source": source, "fstype": fstype, "options": options}
+
+
+def _resolve_inside_sealed_store(path: Path) -> Path:
+    path = Path(path)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ProductionInstallError(f"sealed Nix path is unavailable: {path}") from exc
+    store_root = HOST_NIX_ROOT / "store"
+    try:
+        resolved.relative_to(store_root)
+    except ValueError as exc:
+        raise ProductionInstallError(f"sealed Nix path escapes /nix/store: {path}") from exc
+    _sealed_mount_record(resolved)
+    return resolved
+
+
+def _verify_immutable_image(path: Path) -> None:
+    path = Path(path)
+    result = _run(["/usr/bin/lsattr", "-d", str(path)])
+    line = result.stdout.decode("utf-8", "strict").strip()
+    fields = line.split(None, 1)
+    if len(fields) != 2 or "i" not in fields[0]:
+        raise ProductionInstallError("production Nix seal image is not immutable")
+
+
+def verify_sealed_nix_structure(
+    artifact: dict[str, Any], seal: dict[str, Any] | None = None
+) -> None:
+    artifact = validate_install_artifact(artifact)
+    try:
+        store_info = (HOST_NIX_ROOT / "store").lstat()
+        var_info = (HOST_NIX_ROOT / "var").lstat()
+    except OSError as exc:
+        raise ProductionInstallError("sealed Nix root is incomplete") from exc
+    if (
+        stat.S_ISLNK(store_info.st_mode)
+        or not stat.S_ISDIR(store_info.st_mode)
+        or stat.S_ISLNK(var_info.st_mode)
+        or not stat.S_ISDIR(var_info.st_mode)
+    ):
+        raise ProductionInstallError("sealed Nix root contains unsafe store/state paths")
+    mount = _sealed_mount_record(HOST_NIX_ROOT / "store")
+    _resolve_inside_sealed_store(Path(artifact["system_path"]))
+    for relative in (
+        "sw/bin/nix",
+        "sw/bin/nixos-install",
+        "sw/bin/mkfs.btrfs",
+        "sw/bin/btrfs",
+        "etc/systemd/system/heim-pc-firstboot-credentials.service",
+    ):
+        path = Path(artifact["system_path"]) / relative
+        resolved = _resolve_inside_sealed_store(path)
+        if relative.startswith("sw/bin/"):
+            if not resolved.is_file() or not os.access(resolved, os.X_OK):
+                raise ProductionInstallError(f"sealed Nix closure lacks executable {relative}")
+        elif not resolved.exists():
+            raise ProductionInstallError(f"sealed Nix closure lacks {relative}")
+    if seal is not None:
+        image = Path(str(seal.get("image", "")))
+        if (
+            seal.get("kind") != "heim_pc.nixos_production_build_seal"
+            or seal.get("mountpoint") != str(HOST_NIX_ROOT)
+            or image.parent != Path(str(seal.get("seal_root", "")))
+            or image.name != "nix.squashfs"
+            or seal.get("loop_device") != mount["source"]
+            or seal.get("closure_manifest_sha256") != artifact["closure_manifest_sha256"]
+        ):
+            raise ProductionInstallError("sealed Nix runtime identity is inconsistent")
+        _verify_immutable_image(image)
+
+
+def _require_root_owned_directory(path: Path, *, mode: int) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError(f"root-owned directory is unavailable: {path}") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) != mode
+    ):
+        raise ProductionInstallError(f"root-owned directory has unsafe identity: {path}")
+
+
+def _safe_tar_member_name(name: str) -> bool:
+    if not isinstance(name, str) or not name or "\\" in name:
+        return False
+    path = PurePosixPath(name)
+    return not path.is_absolute() and ".." not in path.parts and path.parts[0] not in {"", "."}
+
+
+def _read_tar_member(tar: tarfile.TarFile, name: str, *, max_bytes: int) -> bytes:
+    try:
+        member = tar.getmember(name)
+    except KeyError as exc:
+        raise ProductionInstallError(f"pinned verifier archive lacks {name}") from exc
+    if not member.isfile() or member.size < 0 or member.size > max_bytes:
+        raise ProductionInstallError(f"pinned verifier archive member is invalid: {name}")
+    stream = tar.extractfile(member)
+    if stream is None:
+        raise ProductionInstallError(f"pinned verifier archive member is unreadable: {name}")
+    payload = stream.read(max_bytes + 1)
+    if len(payload) != member.size or len(payload) > max_bytes:
+        raise ProductionInstallError(f"pinned verifier archive member size changed: {name}")
+    return payload
+
+
+def _sha256_tar_member(tar: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+    if not member.isfile() or member.size <= 0:
+        raise ProductionInstallError(f"pinned verifier image layer is invalid: {member.name}")
+    stream = tar.extractfile(member)
+    if stream is None:
+        raise ProductionInstallError(f"pinned verifier image layer is unreadable: {member.name}")
+    digest = hashlib.sha256()
+    remaining = member.size
+    while remaining:
+        chunk = stream.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ProductionInstallError(f"pinned verifier image layer is truncated: {member.name}")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if stream.read(1):
+        raise ProductionInstallError(f"pinned verifier image layer exceeds declared size: {member.name}")
+    return digest.hexdigest()
+
+
+def validate_verifier_image_archive(
+    path: Path,
+    artifact: dict[str, Any],
+    *,
+    expected_archive_sha256: str | None = None,
+) -> dict[str, Any]:
+    artifact = validate_install_artifact(artifact)
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("pinned verifier image archive is unavailable") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o400
+    ):
+        raise ProductionInstallError("pinned verifier image archive identity is unsafe")
+    archive_sha256 = _sha256_file(path)
+    if expected_archive_sha256 is not None and archive_sha256 != expected_archive_sha256:
+        raise ProductionInstallError("pinned verifier image archive changed after Docker quiesce")
+    try:
+        with tarfile.open(path, mode="r:*") as tar:
+            members = tar.getmembers()
+            names = [member.name for member in members]
+            if len(names) != len(set(names)) or not all(_safe_tar_member_name(name) for name in names):
+                raise ProductionInstallError("pinned verifier image archive contains unsafe member names")
+            manifest_raw = _read_tar_member(tar, "manifest.json", max_bytes=1024 * 1024)
+            try:
+                manifest = json.loads(manifest_raw.decode("utf-8", "strict"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProductionInstallError("pinned verifier image manifest is invalid") from exc
+            if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+                raise ProductionInstallError("pinned verifier image manifest is ambiguous")
+            entry = manifest[0]
+            config_name = entry.get("Config")
+            repo_tags = entry.get("RepoTags")
+            layers = entry.get("Layers")
+            pinned_hex = artifact["nix_image"].removeprefix("sha256:")
+            if (
+                config_name != f"blobs/sha256/{pinned_hex}"
+                or not isinstance(repo_tags, list)
+                or PINNED_NIX_IMAGE_TAG not in repo_tags
+                or not isinstance(layers, list)
+                or not layers
+                or len(layers) != len(set(layers))
+                or not all(isinstance(item, str) and _safe_tar_member_name(item) for item in layers)
+            ):
+                raise ProductionInstallError("pinned verifier image manifest does not match authority")
+            config_raw = _read_tar_member(tar, config_name, max_bytes=4 * 1024 * 1024)
+            config_sha256 = hashlib.sha256(config_raw).hexdigest()
+            if config_sha256 != pinned_hex:
+                raise ProductionInstallError("pinned verifier image config digest mismatch")
+            try:
+                config = json.loads(config_raw.decode("utf-8", "strict"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProductionInstallError("pinned verifier image config is invalid") from exc
+            rootfs = config.get("rootfs") if isinstance(config, dict) else None
+            diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+            if (
+                not isinstance(diff_ids, list)
+                or len(diff_ids) != len(layers)
+                or not all(
+                    isinstance(item, str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}", item) is not None
+                    for item in diff_ids
+                )
+            ):
+                raise ProductionInstallError("pinned verifier image layer identity is invalid")
+            by_name = {member.name: member for member in members}
+            for layer, diff_id in zip(layers, diff_ids):
+                expected_hex = diff_id.removeprefix("sha256:")
+                if layer != f"blobs/sha256/{expected_hex}":
+                    raise ProductionInstallError("pinned verifier image layer path/diff-id mismatch")
+                member = by_name.get(layer)
+                if member is None:
+                    raise ProductionInstallError("pinned verifier image layer is missing")
+                if _sha256_tar_member(tar, member) != expected_hex:
+                    raise ProductionInstallError("pinned verifier image layer digest mismatch")
+    except (tarfile.TarError, OSError) as exc:
+        raise ProductionInstallError("pinned verifier image archive is invalid") from exc
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_pinned_verifier_archive",
+        "path": str(path),
+        "archive_sha256": archive_sha256,
+        "image_id": artifact["nix_image"],
+        "image_tag": PINNED_NIX_IMAGE_TAG,
+        "layer_count": len(layers),
+    }
+
+
+def prepare_verifier_image_archive(plan: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise ProductionInstallError("pinned verifier archive preparation requires root")
+    artifact = validate_install_artifact(artifact)
+    expected = _verifier_archive_path(artifact, plan["managed_build_receipt"]["artifact_file_sha256"])
+    if plan.get("verifier_image_archive") != str(expected):
+        raise ProductionInstallError("reviewed verifier archive identity is inconsistent")
+    _require_root_owned_directory(VERIFIER_ARCHIVE_BASE.parent, mode=0o700)
+    if VERIFIER_ARCHIVE_BASE.exists() or VERIFIER_ARCHIVE_BASE.is_symlink():
+        _require_root_owned_directory(VERIFIER_ARCHIVE_BASE, mode=0o700)
+    else:
+        VERIFIER_ARCHIVE_BASE.mkdir(mode=0o700)
+        _require_root_owned_directory(VERIFIER_ARCHIVE_BASE, mode=0o700)
+    if expected.exists() or expected.is_symlink():
+        raise ProductionInstallError("refusing existing pinned verifier image archive")
+    verify_pinned_nix_image_identity(artifact)
+    immutable = False
+    try:
+        _run(["docker", "image", "save", "--output", str(expected), PINNED_NIX_IMAGE_TAG])
+        try:
+            info = expected.lstat()
+        except OSError as exc:
+            raise ProductionInstallError("pinned verifier image export did not materialize") from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or info.st_nlink != 1
+        ):
+            raise ProductionInstallError("pinned verifier image export identity is unsafe")
+        os.chmod(expected, 0o400, follow_symlinks=False)
+        metadata = validate_verifier_image_archive(expected, artifact)
+        _run(["/usr/bin/chattr", "+i", str(expected)])
+        immutable = True
+        _verify_immutable_image(expected)
+        verify_pinned_nix_image_identity(artifact)
+        return metadata
+    except BaseException:
+        if immutable:
+            _run(["/usr/bin/chattr", "-i", str(expected)], check=False)
+        _run(["/usr/bin/rm", "-f", "--", str(expected)], check=False)
+        raise
+
+
+def cleanup_verifier_image_archive(metadata: dict[str, Any]) -> None:
+    path = Path(str(metadata.get("path", "")))
+    if path.parent != VERIFIER_ARCHIVE_BASE or not re.fullmatch(
+        r"[0-9a-f]{40}-[0-9a-f]{16}\.docker\.tar", path.name
+    ):
+        raise ProductionInstallError("pinned verifier archive cleanup identity is invalid")
+    if path.exists() or path.is_symlink():
+        if _run(["/usr/bin/chattr", "-i", str(path)], check=False).returncode != 0:
+            raise ProductionInstallError("cannot clear pinned verifier archive immutable bit")
+        if _run(["/usr/bin/rm", "--", str(path)], check=False).returncode != 0:
+            raise ProductionInstallError("cannot remove pinned verifier archive")
+    if path.exists() or path.is_symlink():
+        raise ProductionInstallError("pinned verifier archive cleanup could not be verified")
+
+
+def _verify_containerd_socket() -> None:
+    try:
+        info = CONTAINERD_SOCKET.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("root-only containerd socket is unavailable") from exc
+    mode = stat.S_IMODE(info.st_mode)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISSOCK(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or mode & 0o007
+        or mode & 0o600 != 0o600
+    ):
+        raise ProductionInstallError("root-only containerd socket identity is unsafe")
+
+
+def _ctr_argv(namespace: str | None, args: list[str]) -> list[str]:
+    argv = ["/usr/bin/ctr", "--address", str(CONTAINERD_SOCKET)]
+    if namespace is not None:
+        if re.fullmatch(r"heim-pc-nixos-verify-[0-9a-f]{16}", namespace) is None:
+            raise ProductionInstallError("containerd verifier namespace is invalid")
+        argv += ["--namespace", namespace]
+    return [*argv, *args]
+
+
+def _containerd_namespaces() -> list[str]:
+    output = _run(_ctr_argv(None, ["namespaces", "list", "-q"])).stdout.decode("utf-8", "strict")
+    result = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(result) != len(set(result)):
+        raise ProductionInstallError("containerd namespace inventory is ambiguous")
+    return result
+
+
+def _containerd_nix_run_argv(
+    namespace: str, container_id: str, args: list[str]
+) -> list[str]:
+    if re.fullmatch(r"heim-pc-nixos-verify-[0-9a-f]{16}-(info|verify)", container_id) is None:
+        raise ProductionInstallError("containerd verifier container identity is invalid")
+    return _ctr_argv(namespace, [
+        "run", "--rm", "--read-only",
+        "--mount", "type=bind,src=/nix,dst=/subject/nix,options=rbind:ro",
+        "--mount", "type=tmpfs,dst=/tmp,options=nosuid:nodev:mode=1777",
+        "--env", "HOME=/tmp",
+        "--env", "TMPDIR=/tmp",
+        "docker.io/nixos/nix:2.35.2", container_id,
+        "/nix/var/nix/profiles/default/bin/nix",
+        "--extra-experimental-features", READONLY_NIX_FEATURES,
+        "--store", READONLY_NIX_STORE,
+        *args,
+    ])
+
+
+def _cleanup_containerd_verifier_namespace(namespace: str) -> None:
+    tasks = _run(_ctr_argv(namespace, ["tasks", "list", "-q"]), check=False)
+    containers = _run(_ctr_argv(namespace, ["containers", "list", "-q"]), check=False)
+    if tasks.returncode != 0 or containers.returncode != 0:
+        raise ProductionInstallError("cannot prove containerd verifier task cleanup")
+    if tasks.stdout.strip() or containers.stdout.strip():
+        raise ProductionInstallError("containerd verifier left tasks or containers behind")
+    _run(_ctr_argv(namespace, ["images", "remove", "docker.io/nixos/nix:2.35.2"]), check=False)
+    result = _run(_ctr_argv(None, ["namespaces", "remove", namespace]), check=False)
+    if result.returncode != 0 or namespace in _containerd_namespaces():
+        raise ProductionInstallError("containerd verifier namespace cleanup could not be verified")
+
+
+def verify_sealed_nix_with_containerd(
+    plan: dict[str, Any],
+    artifact: dict[str, Any],
+    seal: dict[str, Any],
+    archive_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise ProductionInstallError("independent sealed Nix verification requires root")
+    artifact = validate_install_artifact(artifact)
+    verify_docker_quiesced()
+    verify_sealed_nix_structure(artifact, seal)
+    _verify_containerd_socket()
+    archive = Path(plan["verifier_image_archive"])
+    expected_archive = _verifier_archive_path(
+        artifact, plan["managed_build_receipt"]["artifact_file_sha256"]
+    )
+    if archive != expected_archive or archive_metadata.get("path") != str(archive):
+        raise ProductionInstallError("containerd verifier archive identity changed after planning")
+    archive_check = validate_verifier_image_archive(
+        archive,
+        artifact,
+        expected_archive_sha256=str(archive_metadata.get("archive_sha256", "")),
+    )
+    _verify_immutable_image(archive)
+    namespace = str(plan.get("containerd_verifier_namespace", ""))
+    expected_namespace = _verifier_namespace(plan["managed_build_receipt"]["artifact_file_sha256"])
+    if namespace != expected_namespace:
+        raise ProductionInstallError("containerd verifier namespace changed after planning")
+    if namespace in _containerd_namespaces():
+        raise ProductionInstallError("refusing existing containerd verifier namespace")
+    created = False
+    try:
+        _run(_ctr_argv(None, ["namespaces", "create", namespace]))
+        created = True
+        _run(_ctr_argv(namespace, ["images", "import", str(archive)]))
+        image_refs = _run(_ctr_argv(namespace, ["images", "list", "-q"])).stdout.decode(
+            "utf-8", "strict"
+        ).splitlines()
+        image_refs = [item.strip() for item in image_refs if item.strip()]
+        if image_refs != ["docker.io/nixos/nix:2.35.2"]:
+            raise ProductionInstallError("containerd verifier imported unexpected image references")
+        ready_refs = _run(_ctr_argv(namespace, ["images", "check", "--quiet"])).stdout.decode(
+            "utf-8", "strict"
+        ).splitlines()
+        ready_refs = [item.strip() for item in ready_refs if item.strip()]
+        if ready_refs != ["docker.io/nixos/nix:2.35.2"]:
+            raise ProductionInstallError("containerd verifier image is not fully ready")
+        info_id = f"{namespace}-info"
+        path_info = _json_command(_containerd_nix_run_argv(
+            namespace,
+            info_id,
+            ["path-info", "--json", "--recursive", artifact["system_path"]],
+        ))
+        closure = closure_manifest_metadata(path_info)
+        if (
+            closure["closure_manifest_sha256"] != artifact["closure_manifest_sha256"]
+            or closure["closure_path_count"] != artifact["closure_path_count"]
+        ):
+            raise ProductionInstallError("root-only verifier found sealed Nix closure drift")
+        verify_id = f"{namespace}-verify"
+        _run(_containerd_nix_run_argv(
+            namespace,
+            verify_id,
+            ["store", "verify", "--no-trust", "--recursive", artifact["system_path"]],
+        ))
+        verify_docker_quiesced()
+        verify_sealed_nix_structure(artifact, seal)
+        return {
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_root_only_seal_verification",
+            "namespace": namespace,
+            "archive_sha256": archive_check["archive_sha256"],
+            "image_id": artifact["nix_image"],
+            "closure_manifest_sha256": closure["closure_manifest_sha256"],
+            "closure_path_count": closure["closure_path_count"],
+        }
+    finally:
+        if created:
+            _cleanup_containerd_verifier_namespace(namespace)
+
+
+def create_sealed_nix_store(plan: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    if os.geteuid() != 0:
+        raise ProductionInstallError("trusted build seal requires root")
+    artifact = validate_install_artifact(artifact)
+    receipt = validate_managed_build_receipt(
+        plan["managed_build_receipt"],
+        artifact,
+        expected_policy_sha256=plan["managed_policy_sha256"],
+    )
+    expected = _sealed_nix_paths(artifact, receipt["artifact_file_sha256"])
+    if (
+        plan.get("sealed_nix_image") != str(expected["image"])
+        or plan.get("host_nix_root") != str(HOST_NIX_ROOT)
+    ):
+        raise ProductionInstallError("reviewed plan sealed Nix identity is inconsistent")
+    verify_host_nix_root_absent()
+    source = _managed_nix_source_root(receipt)
+    for path, label in ((source, "root"), (source / "store", "store"), (source / "var", "state")):
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise ProductionInstallError(f"managed Nix {label} source is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ProductionInstallError(f"managed Nix {label} source is unsafe")
+
+    _require_root_owned_directory(SEALED_NIX_BASE.parent, mode=0o700)
+    root = expected["seal_root"]
+    if root.exists() or root.is_symlink():
+        raise ProductionInstallError("refusing existing production Nix seal")
+    if SEALED_NIX_BASE.exists() or SEALED_NIX_BASE.is_symlink():
+        _require_root_owned_directory(SEALED_NIX_BASE, mode=0o700)
+    else:
+        SEALED_NIX_BASE.mkdir(mode=0o700)
+        _require_root_owned_directory(SEALED_NIX_BASE, mode=0o700)
+    root.mkdir(mode=0o700)
+    _require_root_owned_directory(root, mode=0o700)
+    HOST_NIX_ROOT.mkdir(mode=0o755)
+
+    loop_device: str | None = None
+    mounted = False
+    immutable = False
+    try:
+        _run(
+            [
+                "/usr/bin/mksquashfs",
+                str(source),
+                str(expected["image"]),
+                "-noappend",
+                "-no-progress",
+                "-quiet",
+            ]
+        )
+        image_info = expected["image"].lstat()
+        if (
+            not stat.S_ISREG(image_info.st_mode)
+            or image_info.st_uid != 0
+            or image_info.st_gid != 0
+            or image_info.st_nlink != 1
+        ):
+            raise ProductionInstallError("production Nix seal image is unsafe")
+        os.chmod(expected["image"], 0o400, follow_symlinks=False)
+        _run(["/usr/bin/chattr", "+i", str(expected["image"])])
+        immutable = True
+        _verify_immutable_image(expected["image"])
+        loop_result = _run(
+            [
+                "/usr/sbin/losetup",
+                "--find",
+                "--show",
+                "--read-only",
+                str(expected["image"]),
+            ]
+        )
+        loop_device = loop_result.stdout.decode("utf-8", "strict").strip()
+        if re.fullmatch(r"/dev/loop[0-9]+", loop_device) is None:
+            raise ProductionInstallError("production Nix seal loop identity is invalid")
+        _run(
+            [
+                "/usr/bin/mount",
+                "-t",
+                "squashfs",
+                "-o",
+                "ro,nodev,nosuid",
+                loop_device,
+                str(expected["mountpoint"]),
+            ]
+        )
+        mounted = True
+        seal = {
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_production_build_seal",
+            "seal_root": str(root),
+            "image": str(expected["image"]),
+            "loop_device": loop_device,
+            "mountpoint": str(expected["mountpoint"]),
+            "immutable_image": True,
+            "closure_manifest_sha256": artifact["closure_manifest_sha256"],
+        }
+        verify_sealed_nix_structure(artifact, seal)
+        return seal
+    except BaseException:
+        if mounted:
+            _run(["/usr/bin/umount", str(expected["mountpoint"])], check=False)
+        if loop_device is not None:
+            _run(["/usr/sbin/losetup", "-d", loop_device], check=False)
+        if HOST_NIX_ROOT.exists() and not HOST_NIX_ROOT.is_symlink():
+            _run(["/usr/bin/rm", "-rf", "--", str(HOST_NIX_ROOT)], check=False)
+        if immutable:
+            _run(["/usr/bin/chattr", "-i", str(expected["image"])], check=False)
+        _run(["/usr/bin/rm", "-rf", "--", str(root)], check=False)
+        raise
+
+
+def cleanup_sealed_nix_store(seal: dict[str, Any]) -> None:
+    root = Path(str(seal.get("seal_root", "")))
+    if (
+        root.parent != SEALED_NIX_BASE
+        or re.fullmatch(r"[0-9a-f]{40}-[0-9a-f]{16}", root.name) is None
+    ):
+        raise ProductionInstallError("sealed Nix cleanup identity is invalid")
+    image = Path(str(seal.get("image", "")))
+    if image != root / "nix.squashfs":
+        raise ProductionInstallError("sealed Nix cleanup image identity is invalid")
+    mountpoint = HOST_NIX_ROOT
+    loop_device = seal.get("loop_device")
+    failures: list[str] = []
+    if _mountpoint_is_mounted(str(mountpoint)):
+        if _run(["/usr/bin/umount", str(mountpoint)], check=False).returncode != 0:
+            failures.append("umount")
+    if isinstance(loop_device, str) and re.fullmatch(r"/dev/loop[0-9]+", loop_device):
+        if _run(["/usr/sbin/losetup", "-d", loop_device], check=False).returncode != 0:
+            failures.append("losetup")
+    if not failures and (HOST_NIX_ROOT.exists() or HOST_NIX_ROOT.is_symlink()):
+        if _run(["/usr/bin/rm", "-rf", "--", str(HOST_NIX_ROOT)], check=False).returncode != 0:
+            failures.append("nix-root-rm")
+    if not failures and (image.exists() or image.is_symlink()):
+        if _run(["/usr/bin/chattr", "-i", str(image)], check=False).returncode != 0:
+            failures.append("chattr")
+    if not failures and (root.exists() or root.is_symlink()):
+        if _run(["/usr/bin/rm", "-rf", "--", str(root)], check=False).returncode != 0:
+            failures.append("seal-rm")
+    if (
+        failures
+        or HOST_NIX_ROOT.exists()
+        or HOST_NIX_ROOT.is_symlink()
+        or root.exists()
+        or root.is_symlink()
+    ):
+        raise ProductionInstallError("production Nix seal teardown could not be verified")
 
 def verify_scratch_state(mapper_name: str) -> None:
     for raw in (MOUNT_ROOT, BTRFS_STAGE_ROOT):
@@ -1556,86 +2388,167 @@ def execute_plan(
     secret = first.encode("utf-8")
 
     # Final race-closing gate immediately before the first destructive command.
-    final_pre = validate_preflight(observer(contract), contract)
-    verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
-    verify_partuuid_namespace_clear(contract)
-    verify_partlabel_namespace_clear(contract)
-    verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
-    verify_install_artifact_environment(artifact)
-    verify_managed_build_binding(plan, artifact)
-    verify_promoted_main_revision(artifact["source_revision"])
-    if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
-        raise ProductionInstallError("protected WD changed after interactive authorization")
-    nvram_before = efi_nvram_digest()
-
+    docker_state: dict[str, Any] | None = None
+    seal: dict[str, Any] | None = None
+    verifier_archive: dict[str, Any] | None = None
+    seal_verification: dict[str, Any] | None = None
+    mutation_attempted = False
     completed_effects: list[str] = []
     credential_staging_attempted = False
     credential_staged = False
-    mutation_attempted = False
     teardown_failures: list[str] = []
     teardown_exception: BaseException | None = None
     failure: BaseException | None = None
     try:
-        for command in plan["commands"]:
-            mutation_attempted = True
-            _run(command["argv"], input_bytes=secret if command.get("secret_binding") else None)
-            completed_effects.append(command["effect"])
-            if command["effect"] == "udev-settle":
-                verify_target_partition_bindings(contract)
-        verify_installed_target(artifact)
-        verify_persist_mount(MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}")
-        credential_staging_attempted = True
-        stage_firstboot_credentials(
-            mount_root=MOUNT_ROOT, source_revision=source_revision, hash_bytes=hash_bytes
+        verify_host_nix_root_absent()
+        verifier_archive = prepare_verifier_image_archive(plan, artifact)
+        docker_state = stop_docker_for_apply()
+        verify_docker_quiesced()
+        validate_verifier_image_archive(
+            Path(plan["verifier_image_archive"]),
+            artifact,
+            expected_archive_sha256=verifier_archive["archive_sha256"],
         )
-        credential_staged = True
-    except BaseException as exc:
-        failure = exc
-    finally:
-        teardown_failures, teardown_exception = _attempt_teardown(
-            plan["teardown_commands"], contract["topology"]["luks"]["mapper_name"]
+        seal = create_sealed_nix_store(plan, artifact)
+        verify_docker_quiesced()
+        verify_sealed_nix_structure(artifact, seal)
+        seal_verification = verify_sealed_nix_with_containerd(
+            plan, artifact, seal, verifier_archive
         )
+        if (
+            seal_verification["closure_manifest_sha256"]
+            != artifact["closure_manifest_sha256"]
+            or seal_verification["closure_path_count"] != artifact["closure_path_count"]
+        ):
+            raise ProductionInstallError("root-only sealed Nix verification changed unexpectedly")
+        cleanup_verifier_image_archive(verifier_archive)
+        verifier_archive = None
 
-    try:
-        post = validate_protected_state(observer(contract), contract)
-    except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
-        raise PostMutationInstallError("protected-fallback-unverifiable") from exc
-    if protected_fingerprint(post) != plan["protected_pre_fingerprint"]:
-        raise PostMutationInstallError("protected-fallback-changed")
-    try:
-        nvram_after = efi_nvram_digest()
-    except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
-        raise PostMutationInstallError("efi-nvram-unverifiable") from exc
-    if nvram_after != nvram_before:
-        raise PostMutationInstallError("efi-nvram-changed")
-    mapper = Path("/dev/mapper") / contract["topology"]["luks"]["mapper_name"]
-    if mapper.exists() or mapper.is_symlink():
-        raise PostMutationInstallError("mapper-open-after-teardown")
-    for command in plan["teardown_commands"]:
-        if command["effect"] in {"unmount-stage", "unmount"}:
-            try:
-                if _mountpoint_is_mounted(str(command["argv"][-1])):
+        final_pre = validate_preflight(observer(contract), contract)
+        verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
+        verify_partuuid_namespace_clear(contract)
+        verify_partlabel_namespace_clear(contract)
+        verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
+        verify_managed_build_binding(plan, artifact)
+        verify_promoted_main_revision(artifact["source_revision"])
+        verify_docker_quiesced()
+        verify_sealed_nix_structure(artifact, seal)
+        if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
+            raise ProductionInstallError("protected WD changed after interactive authorization")
+        nvram_before = efi_nvram_digest()
+
+        try:
+            for command in plan["commands"]:
+                verify_docker_quiesced()
+                verify_sealed_nix_structure(artifact, seal)
+                mutation_attempted = True
+                _run(
+                    command["argv"],
+                    input_bytes=secret if command.get("secret_binding") else None,
+                )
+                completed_effects.append(command["effect"])
+                if command["effect"] == "udev-settle":
+                    verify_target_partition_bindings(contract)
+            verify_installed_target(artifact)
+            verify_persist_mount(
+                MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}"
+            )
+            credential_staging_attempted = True
+            stage_firstboot_credentials(
+                mount_root=MOUNT_ROOT,
+                source_revision=source_revision,
+                hash_bytes=hash_bytes,
+            )
+            credential_staged = True
+        except BaseException as exc:
+            failure = exc
+        finally:
+            teardown_failures, teardown_exception = _attempt_teardown(
+                plan["teardown_commands"], contract["topology"]["luks"]["mapper_name"]
+            )
+
+        try:
+            post = validate_protected_state(observer(contract), contract)
+        except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
+            raise PostMutationInstallError("protected-fallback-unverifiable") from exc
+        if protected_fingerprint(post) != plan["protected_pre_fingerprint"]:
+            raise PostMutationInstallError("protected-fallback-changed")
+        try:
+            nvram_after = efi_nvram_digest()
+        except (ProductionInstallError, OSError, json.JSONDecodeError) as exc:
+            raise PostMutationInstallError("efi-nvram-unverifiable") from exc
+        if nvram_after != nvram_before:
+            raise PostMutationInstallError("efi-nvram-changed")
+        mapper = Path("/dev/mapper") / contract["topology"]["luks"]["mapper_name"]
+        if mapper.exists() or mapper.is_symlink():
+            raise PostMutationInstallError("mapper-open-after-teardown")
+        for command in plan["teardown_commands"]:
+            if command["effect"] in {"unmount-stage", "unmount"}:
+                try:
+                    if _mountpoint_is_mounted(str(command["argv"][-1])):
+                        teardown_failures.append(command["effect"])
+                except BaseException as exc:
                     teardown_failures.append(command["effect"])
-            except BaseException as exc:
-                teardown_failures.append(command["effect"])
-                if teardown_exception is None:
-                    teardown_exception = exc
-    if teardown_failures:
-        raise PostMutationInstallError("teardown-incomplete") from (
-            failure if failure is not None else teardown_exception
+                    if teardown_exception is None:
+                        teardown_exception = exc
+        if teardown_failures:
+            raise PostMutationInstallError("teardown-incomplete") from (
+                failure if failure is not None else teardown_exception
+            )
+        if credential_staging_attempted and not credential_staged:
+            raise PostMutationInstallError("credential-staging-incomplete") from failure
+        if failure is not None:
+            if mutation_attempted:
+                raise PostMutationInstallError("apply-failed-after-mutation-attempt") from failure
+            raise failure
+        if not credential_staged:
+            raise PostMutationInstallError("credential-staging-incomplete")
+        return _success_receipt(
+            plan=plan,
+            artifact=artifact,
+            source_revision=source_revision,
+            post=post,
+            completed_effects=completed_effects,
+            nvram_before=nvram_before,
+            nvram_after=nvram_after,
         )
-    if credential_staging_attempted and not credential_staged:
-        raise PostMutationInstallError("credential-staging-incomplete") from failure
-    if failure is not None:
-        if mutation_attempted:
-            raise PostMutationInstallError("apply-failed-after-mutation-attempt") from failure
-        raise failure
-    if not credential_staged:
-        raise PostMutationInstallError("credential-staging-incomplete")
-    return _success_receipt(
-        plan=plan, artifact=artifact, source_revision=source_revision, post=post,
-        completed_effects=completed_effects, nvram_before=nvram_before, nvram_after=nvram_after,
-    )
+    finally:
+        archive_failure: BaseException | None = None
+        seal_failure: BaseException | None = None
+        docker_failure: BaseException | None = None
+        if verifier_archive is not None:
+            try:
+                cleanup_verifier_image_archive(verifier_archive)
+            except BaseException as exc:
+                archive_failure = exc
+        if seal is not None:
+            try:
+                cleanup_sealed_nix_store(seal)
+            except BaseException as exc:
+                seal_failure = exc
+        if docker_state is not None:
+            try:
+                restore_docker_after_apply(docker_state)
+            except BaseException as exc:
+                docker_failure = exc
+        if archive_failure is not None:
+            if mutation_attempted:
+                raise PostMutationInstallError("trusted-build-seal-teardown-incomplete") from archive_failure
+            raise ProductionInstallError(
+                "pinned verifier archive cleanup failed before storage mutation"
+            ) from archive_failure
+        if docker_failure is not None:
+            if mutation_attempted:
+                raise PostMutationInstallError("docker-quiesce-restore-incomplete") from docker_failure
+            raise ProductionInstallError(
+                "Docker state restore failed before storage mutation"
+            ) from docker_failure
+        if seal_failure is not None:
+            if mutation_attempted:
+                raise PostMutationInstallError("trusted-build-seal-teardown-incomplete") from seal_failure
+            raise ProductionInstallError(
+                "trusted build seal teardown failed before storage mutation"
+            ) from seal_failure
 
 
 def main(argv: list[str] | None = None) -> int:
