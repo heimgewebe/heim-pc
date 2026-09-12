@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from scripts import managed_build
 
@@ -418,6 +419,7 @@ class ManagedBuildTests(unittest.TestCase):
             guard = plan["nix_guard"]
             closure = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-test"
             def runner(argv, **kwargs):
+                self.assertEqual(kwargs["env"]["HEIM_PC_NIXOS_PRODUCTION_PREPARE_MANAGED"], "1")
                 store = Path(kwargs["env"]["HEIM_PC_MANAGED_NIX_STORE_ROOT"])
                 (store / "payload").write_bytes(b"store")
                 output.write_text(json.dumps({
@@ -495,6 +497,54 @@ class ManagedBuildTests(unittest.TestCase):
                 managed_build.execute_plan(policy, plan, command, home=home, runner=runner)
             runner.assert_not_called()
 
+    def test_terminate_process_group_kills_surviving_group_after_leader_exit(self) -> None:
+        class Process:
+            pid = 4141
+
+            def poll(self):
+                return 0
+
+        process = Process()
+        with (
+            patch.object(managed_build, '_process_group_exists', return_value=True),
+            patch.object(
+                managed_build, '_wait_for_process_group_exit', side_effect=[False, True]
+            ) as wait_for_group,
+            patch.object(managed_build.os, 'killpg') as killpg,
+        ):
+            managed_build._terminate_process_group(process)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(process.pid, signal.SIGTERM), call(process.pid, signal.SIGKILL)],
+        )
+        self.assertEqual(wait_for_group.call_count, 2)
+
+    def test_terminate_process_group_fails_closed_if_group_survives_sigkill(self) -> None:
+        class Process:
+            pid = 4142
+
+            def poll(self):
+                return 0
+
+        process = Process()
+        with (
+            patch.object(managed_build, '_process_group_exists', return_value=True),
+            patch.object(
+                managed_build, '_wait_for_process_group_exit', side_effect=[False, False]
+            ),
+            patch.object(managed_build.os, 'killpg') as killpg,
+        ):
+            with self.assertRaisesRegex(
+                managed_build.ManagedBuildError, 'process group cleanup could not be verified'
+            ):
+                managed_build._terminate_process_group(process)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(process.pid, signal.SIGTERM), call(process.pid, signal.SIGKILL)],
+        )
+
     def test_nix_running_store_monitor_terminates_before_hard_and_cleans_container(self) -> None:
         class Process:
             pid = 4242
@@ -531,7 +581,7 @@ class ManagedBuildTests(unittest.TestCase):
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "scan_worktree_payloads",
-                side_effect=[{"allocated_bytes": 70}, {"allocated_bytes": 70}],
+                side_effect=[{"allocated_bytes": 70, "error_count": 0}, {"allocated_bytes": 70, "error_count": 0}],
             ),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
             patch.object(managed_build, "_nix_container_ids", return_value=["a" * 64]),
@@ -582,7 +632,7 @@ class ManagedBuildTests(unittest.TestCase):
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "scan_worktree_payloads",
-                side_effect=[{"allocated_bytes": 1}, {"allocated_bytes": 1}],
+                side_effect=[{"allocated_bytes": 1, "error_count": 0}, {"allocated_bytes": 1, "error_count": 0}],
             ),
             patch.object(managed_build.time, "monotonic", side_effect=[0.0, 2.0]),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
@@ -594,6 +644,60 @@ class ManagedBuildTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 124)
         self.assertTrue(telemetry["runtime_timeout_triggered"])
+        self.assertTrue(telemetry["container_cleanup_verified"])
+        self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
+
+    def test_nix_store_scan_error_stops_worker_and_retains_error_telemetry(self) -> None:
+        class Process:
+            pid = 4393
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        events = []
+        guard = {
+            "source_revision": "d" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "d" * 12,
+            "store_root": "/tmp/managed-nix-store-scan-error-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+
+        def terminate(item):
+            events.append("terminate-process-group")
+            item.returncode = -15
+
+        def remove(label):
+            events.append("remove-exact-container")
+            return 0, True
+
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "scan_worktree_payloads",
+                side_effect=[
+                    {"allocated_bytes": 1, "error_count": 1},
+                    {"allocated_bytes": 1, "error_count": 1},
+                ],
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_nix_container_ids", return_value=[]),
+            patch.object(managed_build, "_remove_exact_nix_containers", side_effect=remove),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 77)
+        self.assertTrue(telemetry["store_scan_error_detected"])
         self.assertTrue(telemetry["container_cleanup_verified"])
         self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
 

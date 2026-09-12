@@ -60,9 +60,29 @@ def managed_receipt(artifact):
         "store_hard_limit_bytes": 90 * 1024 * 1024 * 1024,
         "store_max_observed_bytes": 1024,
         "store_budget_stop_triggered": False,
+        "store_scan_error_detected": False,
         "runtime_timeout_triggered": False,
         "container_cleanup_verified": True,
         "lifecycle_fence_cleared": True,
+    }
+
+
+def managed_attestation_verification(artifact, receipt=None):
+    selected_receipt = receipt or managed_receipt(artifact)
+    semantic_identity = {field: artifact[field] for field in prod.INDEPENDENT_REBUILD_MATCH_FIELDS}
+    return {
+        "schema_version": 1,
+        "kind": prod.MANAGED_BUILD_ATTESTATION_KIND,
+        "artifact_sha256": selected_receipt["artifact_file_sha256"],
+        "attestation_bundle_sha256": "6" * 64,
+        "verifier_argv_sha256": "7" * 64,
+        "predicate_sha256": "8" * 64,
+        "independent_artifact_sha256": "9" * 64,
+        "independent_receipt_sha256": "a" * 64,
+        "independent_managed_receipt_sha256": "b" * 64,
+        "managed_policy_sha256": MANAGED_POLICY_SHA256,
+        "semantic_identity_sha256": prod.sha256_json(semantic_identity),
+        "verified_attestation_count": 1,
     }
 
 
@@ -155,14 +175,20 @@ def observation():
 
 def plan(obs=None, artifact=None, receipt=None):
     selected_artifact = artifact or ARTIFACT
+    selected_receipt = receipt or managed_receipt(selected_artifact)
+    verification = (
+        managed_attestation_verification(selected_artifact, selected_receipt)
+        if selected_artifact["source_authority"] == "merged-main" else None
+    )
     return prod.compile_plan(
         obs or observation(),
         install_artifact=selected_artifact,
         install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
-        managed_build_receipt=receipt or managed_receipt(selected_artifact),
+        managed_build_receipt=selected_receipt,
         managed_policy_sha256=MANAGED_POLICY_SHA256,
         flake_source="/srv/exact-source",
         contract=CONTRACT,
+        managed_build_attestation_verification=verification,
     )
 
 
@@ -794,6 +820,157 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
         prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
 
 
+def test_attestation_verify_argv_pins_exact_artifact_repository_workflow_source_and_runner(tmp_path):
+    artifact_path = (tmp_path / "artifact.json").resolve()
+    bundle_path = (tmp_path / "artifact.managed-build-attestation.json").resolve()
+    argv = prod.managed_build_attestation_verify_argv(artifact_path, bundle_path, REVISION)
+    assert argv == [
+        "/usr/bin/gh", "attestation", "verify", str(artifact_path),
+        "--repo", "heimgewebe/heim-pc",
+        "--bundle", str(bundle_path),
+        "--signer-workflow", "heimgewebe/heim-pc/.github/workflows/nixos-production-build-attest.yml",
+        "--signer-digest", REVISION,
+        "--source-digest", REVISION,
+        "--source-ref", "refs/heads/main",
+        "--predicate-type", "https://heimgewebe.local/attestations/nixos-independent-managed-build/v1",
+        "--deny-self-hosted-runners",
+        "--format", "json",
+    ]
+
+
+def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
+    artifact = (tmp_path / "artifact.json").resolve()
+    bundle = (tmp_path / "bundle.json").resolve()
+    artifact.write_text("{}\n", encoding="utf-8")
+    bundle.write_text("{}\n", encoding="utf-8")
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    artifact_value = dict(MERGED_ARTIFACT)
+    artifact.write_text(json.dumps(artifact_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    semantic_identity = {field: artifact_value[field] for field in prod.INDEPENDENT_REBUILD_MATCH_FIELDS}
+    predicate = {
+        "schema_version": 1,
+        "kind": prod.MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
+        "candidate_artifact_sha256": artifact_sha,
+        "independent_artifact_sha256": "9" * 64,
+        "independent_receipt_sha256": "a" * 64,
+        "independent_managed_receipt_sha256": "b" * 64,
+        "managed_policy_sha256": MANAGED_POLICY_SHA256,
+        "semantic_identity_sha256": prod.sha256_json(semantic_identity),
+        "excluded_nonsemantic_fields": ["source_bundle_sha256"],
+    }
+    output = json.dumps([{
+        "verificationResult": {"statement": {"predicate": predicate}}
+    }]).encode()
+    summary = prod.verify_managed_build_attestation(
+        artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+        runner=lambda _argv: Result(output),
+    )
+    assert summary["verified_attestation_count"] == 1
+    assert summary["artifact_sha256"] == artifact_sha
+    assert summary["attestation_bundle_sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+    assert summary["independent_managed_receipt_sha256"] == "b" * 64
+    assert summary["managed_policy_sha256"] == MANAGED_POLICY_SHA256
+    with pytest.raises(prod.ProductionInstallError, match="no unique verified attestation"):
+        prod.verify_managed_build_attestation(
+            artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+            runner=lambda _argv: Result(b"[]"),
+        )
+    with pytest.raises(prod.ProductionInstallError, match="invalid JSON"):
+        prod.verify_managed_build_attestation(
+            artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+            runner=lambda _argv: Result(b"not-json"),
+        )
+    forged = dict(predicate, managed_policy_sha256="f" * 64)
+    forged_output = json.dumps([{
+        "verificationResult": {"statement": {"predicate": forged}}
+    }]).encode()
+    with pytest.raises(prod.ProductionInstallError, match="does not bind current artifact"):
+        prod.verify_managed_build_attestation(
+            artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+            runner=lambda _argv: Result(forged_output),
+        )
+
+
+def test_independent_rebuild_validates_remote_managed_success_and_semantic_identity(monkeypatch, tmp_path):
+    candidate_path = (tmp_path / "candidate.json").resolve()
+    independent_path = (tmp_path / "independent.json").resolve()
+    candidate = dict(MERGED_ARTIFACT)
+    independent = dict(MERGED_ARTIFACT)
+    independent["source_bundle_sha256"] = "9" * 64
+    candidate_path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    independent_path.write_text(json.dumps(independent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    receipt = managed_receipt(independent)
+    receipt["artifact_file_sha256"] = hashlib.sha256(independent_path.read_bytes()).hexdigest()
+    receipt_path = prod.managed_build_receipt_path(independent_path)
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda _source: MANAGED_POLICY_SHA256)
+
+    result = prod.verify_independent_rebuild_candidate(
+        candidate_path, independent_path, flake_source="/synthetic/source"
+    )
+    assert result["candidate_artifact_sha256"] == hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    assert result["independent_receipt_sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    assert result["excluded_nonsemantic_fields"] == ["source_bundle_sha256"]
+
+    changed = dict(independent)
+    changed["closure_manifest_sha256"] = "8" * 64
+    independent_path.write_text(json.dumps(changed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(prod.ProductionInstallError, match="closure_manifest_sha256"):
+        prod.verify_independent_rebuild_candidate(
+            candidate_path, independent_path, flake_source="/synthetic/source"
+        )
+
+
+def test_merged_main_plan_requires_independent_attestation():
+    receipt = managed_receipt(MERGED_ARTIFACT)
+    with pytest.raises(prod.ProductionInstallError, match="requires independent managed-build attestation"):
+        prod.compile_plan(
+            observation(), install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source="/srv/exact-source", contract=CONTRACT,
+        )
+    compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
+    assert compiled["managed_build_attestation_required"] is True
+    assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
+
+
+def test_proof_only_plan_does_not_claim_production_attestation():
+    compiled = plan()
+    assert compiled["managed_build_attestation_required"] is False
+    assert compiled["managed_build_attestation_verification"] is None
+    assert compiled["managed_build_attestation_sha256"] is None
+
+
+def test_production_attestation_workflow_independently_rebuilds_local_candidate():
+    workflow = (ROOT / ".github" / "workflows" / "nixos-production-build-attest.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "artifact_b64:" in workflow
+    assert "pull_request:" not in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "id-token: write" in workflow
+    assert "attestations: write" in workflow
+    assert "artifact-metadata: write" not in workflow
+    assert "python3 scripts/nixos_production_prepare.py" in workflow
+    assert "--source-authority merged-main" in workflow
+    assert "verify_independent_rebuild_candidate" in workflow
+    assert "subject-path: ${{ runner.temp }}/candidate-install-artifact.json" in workflow
+    assert "predicate-type: https://heimgewebe.local/attestations/nixos-independent-managed-build/v1" in workflow
+    assert "predicate-path: ${{ runner.temp }}/independent-managed-rebuild-predicate.json" in workflow
+    assert "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c" in workflow
+    assert "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
+    assert "self-hosted" not in workflow
+    assert "remote-install-artifact.json" in workflow
+
+
 def test_managed_build_receipt_is_plan_bound_and_rejects_failed_evidence():
     receipt = managed_receipt(ARTIFACT)
     compiled = plan(receipt=receipt)
@@ -803,6 +980,7 @@ def test_managed_build_receipt_is_plan_bound_and_rejects_failed_evidence():
         ("artifact_json_sha256", "f" * 64),
         ("managed_policy_sha256", "e" * 64),
         ("store_budget_stop_triggered", True),
+        ("store_scan_error_detected", True),
         ("runtime_timeout_triggered", True),
         ("container_cleanup_verified", False),
         ("lifecycle_fence_cleared", False),

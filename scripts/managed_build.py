@@ -458,6 +458,7 @@ def scan_worktree_payloads(
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     total = 0
+    error_count = 0
     for relative in sorted(set(payloads)):
         path = repo if relative == "." else repo / relative
         if not path.exists() and not path.is_symlink():
@@ -473,7 +474,8 @@ def scan_worktree_payloads(
         }
         entries.append(entry)
         total += result.size_bytes
-    return {"allocated_bytes": total, "entries": entries}
+        error_count += result.error_count
+    return {"allocated_bytes": total, "error_count": error_count, "entries": entries}
 
 
 def _pin_path(state_root: Path, repository_id: str, tool: str) -> Path:
@@ -612,6 +614,7 @@ def _build_identity_context(
         raise ManagedBuildError("managed cache path must stay outside the repository")
     if state_root == root or root in state_root.parents:
         raise ManagedBuildError("managed state path must stay outside the repository")
+    environment = _build_environment(tool, cache_path, spec)
     return {
         "policy_sha256": _sha256_json(policy),
         "repository_root": str(root),
@@ -623,7 +626,7 @@ def _build_identity_context(
         "cache_key": cache_key,
         "cache_path": str(cache_path),
         "state_root": str(state_root),
-        "environment": _build_environment(tool, cache_path, spec),
+        "environment": environment,
         "command": {
             "executable": _command_basename(command),
             "argv_sha256": _sha256_json(list(command)),
@@ -780,7 +783,7 @@ def build_plan(
     cache_scan = (
         scan_worktree_payloads(cache_path, ["."])
         if cache_path.exists() and cache_path.is_dir() and not cache_path.is_symlink()
-        else {"allocated_bytes": 0, "entries": []}
+        else {"allocated_bytes": 0, "error_count": 0, "entries": []}
     )
     cache_budget = _require_nonnegative_budget(
         policy["per_identity_cache_budget_bytes"],
@@ -798,7 +801,7 @@ def build_plan(
         store_scan = (
             scan_worktree_payloads(store_root, ["."])
             if store_root.exists() and store_root.is_dir() and not store_root.is_symlink()
-            else {"allocated_bytes": 0, "entries": []}
+            else {"allocated_bytes": 0, "error_count": 0, "entries": []}
         )
         store_budget = _require_nonnegative_budget(
             policy["nix_store_budget_bytes"], "nix_store_budget_bytes"
@@ -807,7 +810,7 @@ def build_plan(
             policy["nix_runtime_budget_seconds"], "nix_runtime_budget_seconds"
         )
         store_status = _status(store_scan["allocated_bytes"], store_budget)
-        if store_scan["allocated_bytes"] >= int(store_budget["warning"]):
+        if store_scan["error_count"] != 0 or store_scan["allocated_bytes"] >= int(store_budget["warning"]):
             blocked = True
         lock_path = state_root / "cache-locks" / "nix" / f"{context['cache_key']}.lock"
         fence_path = state_root / "cache-locks" / "nix" / f"{context['cache_key']}.active.json"
@@ -817,6 +820,8 @@ def build_plan(
             "source_volume": f"heim-pc-nixos-source-{source_revision[:12]}",
             "store_root": str(store_root),
             "store_allocated_bytes": store_scan["allocated_bytes"],
+            "store_scan_error_count": store_scan["error_count"],
+            "store_scan_complete": store_scan["error_count"] == 0,
             "store_status": store_status,
             "store_budget_bytes": store_budget,
             "store_stop_threshold_bytes": store_budget["warning"],
@@ -1071,23 +1076,57 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
     return removed, not _nix_container_ids(label)
 
 
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[Any], pgid: int, timeout_seconds: float
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        # Reap the group leader as soon as it exits so a zombie leader does not
+        # make an otherwise empty process group appear live indefinitely.
+        process.poll()
+        if not _process_group_exists(pgid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
 def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
+    pgid = process.pid
+    leader_returncode = process.poll()
+    if not _process_group_exists(pgid):
+        # A just-exited leader can race the first probe; re-poll before treating
+        # a missing group as inconsistent.
+        if leader_returncode is None and process.poll() is None:
+            raise ManagedBuildError(
+                'managed Nix process group disappeared while its leader remained active'
+            )
         return
+
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
-        return
-    except subprocess.TimeoutExpired:
         pass
+    if _wait_for_process_group_exit(process, pgid, NIX_CANCEL_GRACE_SECONDS):
+        return
+
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
+    if not _wait_for_process_group_exit(process, pgid, NIX_CANCEL_GRACE_SECONDS):
+        raise ManagedBuildError('managed Nix process group cleanup could not be verified')
 
 
 def _run_nix_worker_guarded(
@@ -1115,9 +1154,17 @@ def _run_nix_worker_guarded(
     deadline = time.monotonic() + timeout_seconds
     trigger: str | None = None
     max_observed = 0
+    store_scan_error_detected = False
     try:
         while True:
-            observed = scan_worktree_payloads(store_root, ["."])["allocated_bytes"]
+            scan = scan_worktree_payloads(store_root, ["."])
+            if scan["error_count"] != 0:
+                store_scan_error_detected = True
+                trigger = "store-scan-error"
+                if process.poll() is None:
+                    _terminate_process_group(process)
+                break
+            observed = scan["allocated_bytes"]
             max_observed = max(max_observed, observed)
             returncode = process.poll()
             if observed >= stop_threshold:
@@ -1137,7 +1184,12 @@ def _run_nix_worker_guarded(
         orphan_ids = _nix_container_ids(label)
         orphan_detected = bool(orphan_ids)
         removed, cleanup_verified = _remove_exact_nix_containers(label)
-        final_bytes = scan_worktree_payloads(store_root, ["."])["allocated_bytes"]
+        final_scan = scan_worktree_payloads(store_root, ["."])
+        if final_scan["error_count"] != 0:
+            store_scan_error_detected = True
+            if trigger is None:
+                trigger = "store-scan-error"
+        final_bytes = final_scan["allocated_bytes"]
         max_observed = max(max_observed, final_bytes)
         if not cleanup_verified:
             raise ManagedBuildError("managed Nix container cleanup could not be verified")
@@ -1158,7 +1210,9 @@ def _run_nix_worker_guarded(
                 "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
             ) from exc
         raise
-    if trigger == "store-budget" or final_bytes >= stop_threshold:
+    if store_scan_error_detected:
+        effective = 77
+    elif trigger == "store-budget" or final_bytes >= stop_threshold:
         effective = 75
     elif trigger == "runtime-timeout":
         effective = 124
@@ -1175,6 +1229,7 @@ def _run_nix_worker_guarded(
         "store_hard_limit_bytes": hard_limit,
         "store_max_observed_bytes": max_observed,
         "store_budget_stop_triggered": trigger == "store-budget" or final_bytes >= stop_threshold,
+        "store_scan_error_detected": store_scan_error_detected,
         "runtime_timeout_triggered": trigger == "runtime-timeout",
     }
 
@@ -1231,6 +1286,10 @@ def execute_plan(
 
     environment = os.environ.copy()
     environment.update(plan["environment"])
+    if plan["tool"] == "nix" and plan.get("profile") == "nixos-production-prepare":
+        # Establish the worker marker inside the managed executor, after the
+        # path-only managed environment has been validated.
+        environment["HEIM_PC_NIXOS_PRODUCTION_PREPARE_MANAGED"] = "1"
     nix_guard = plan.get("nix_guard")
     lock_fd: int | None = None
     fence_path: Path | None = None
@@ -1247,9 +1306,10 @@ def execute_plan(
         store_root = Path(str(nix_guard["store_root"]))
         _ensure_secure_directory(store_root, home)
         before_store = scan_worktree_payloads(store_root, ["."])
+        pre_run_store_scan_error = before_store["error_count"] != 0
         stop_store = int(nix_guard["store_stop_threshold_bytes"])
         hard_store = int(nix_guard["store_budget_bytes"]["hard"])
-        if before_store["allocated_bytes"] >= stop_store:
+        if not pre_run_store_scan_error and before_store["allocated_bytes"] >= stop_store:
             raise ManagedBuildError("managed Nix store is at or above its active stop threshold")
         if not 0 < stop_store < hard_store:
             raise ManagedBuildError("managed Nix store budget has no fail-closed headroom")
@@ -1277,6 +1337,15 @@ def execute_plan(
             "docker_volume": nix_guard["docker_volume"],
         })
         fence_created = True
+        if pre_run_store_scan_error:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+                lock_fd = None
+            raise ManagedBuildError(
+                "managed Nix pre-run store scan is incomplete; lifecycle fence retained"
+            )
 
     started_at = _utc_now()
     effective_returncode = 1
@@ -1290,7 +1359,10 @@ def execute_plan(
             else:
                 # Unit-test injection stays explicit; production always uses the guarded Popen path.
                 result = runner(list(command), cwd=root, env=environment, check=False)
-                after_injected = scan_worktree_payloads(Path(str(nix_guard["store_root"])), ["."])["allocated_bytes"]
+                after_injected_scan = scan_worktree_payloads(
+                    Path(str(nix_guard["store_root"])), ["."]
+                )
+                after_injected = after_injected_scan["allocated_bytes"]
                 telemetry = {
                     "container_label_sha256": "0" * 64,
                     "container_orphan_detected": False,
@@ -1300,9 +1372,12 @@ def execute_plan(
                     "store_hard_limit_bytes": int(nix_guard["store_budget_bytes"]["hard"]),
                     "store_max_observed_bytes": after_injected,
                     "store_budget_stop_triggered": after_injected >= int(nix_guard["store_stop_threshold_bytes"]),
+                    "store_scan_error_detected": after_injected_scan["error_count"] != 0,
                     "runtime_timeout_triggered": False,
                 }
-                if telemetry["store_budget_stop_triggered"] and result.returncode == 0:
+                if telemetry["store_scan_error_detected"]:
+                    result = subprocess.CompletedProcess(list(command), 77)
+                elif telemetry["store_budget_stop_triggered"] and result.returncode == 0:
                     result = subprocess.CompletedProcess(list(command), 75)
             cleanup_verified = bool(telemetry["container_cleanup_verified"])
         else:
@@ -1314,7 +1389,13 @@ def execute_plan(
         if plan["tool"] == "nix":
             store_root = Path(str(nix_guard["store_root"]))
             after_store = scan_worktree_payloads(store_root, ["."])
-            if after_store["allocated_bytes"] >= int(nix_guard["store_stop_threshold_bytes"]) and effective_returncode == 0:
+            store_scan_error_detected = (
+                bool((telemetry or {}).get("store_scan_error_detected"))
+                or after_store["error_count"] != 0
+            )
+            if store_scan_error_detected:
+                effective_returncode = 77
+            elif after_store["allocated_bytes"] >= int(nix_guard["store_stop_threshold_bytes"]) and effective_returncode == 0:
                 effective_returncode = 75
             nix_receipt = {
                 "source_revision": nix_guard["source_revision"],
@@ -1323,6 +1404,8 @@ def execute_plan(
                 "store_root": nix_guard["store_root"],
                 "store_allocated_bytes_before": before_store["allocated_bytes"],
                 "store_allocated_bytes_after": after_store["allocated_bytes"],
+                "store_scan_error_count_after": after_store["error_count"],
+                "store_scan_error_detected": store_scan_error_detected,
                 "store_budget_bytes": nix_guard["store_budget_bytes"],
                 "runtime_budget_seconds": nix_guard["runtime_budget_seconds"],
                 "lifecycle_lock_path": nix_guard["lifecycle_lock_path"],
@@ -1381,6 +1464,7 @@ def execute_plan(
                 "store_hard_limit_bytes": telemetry["store_hard_limit_bytes"],
                 "store_max_observed_bytes": telemetry["store_max_observed_bytes"],
                 "store_budget_stop_triggered": False,
+                "store_scan_error_detected": False,
                 "runtime_timeout_triggered": False,
                 "container_cleanup_verified": cleanup_verified,
                 "lifecycle_fence_cleared": True,
@@ -1389,10 +1473,13 @@ def execute_plan(
         elif plan["tool"] == "nix":
             if not cleanup_verified:
                 raise ManagedBuildError("managed Nix failure cleanup was not verified")
-            if fence_created and fence_path is not None:
-                fence_path.unlink()
-                _fsync_directory(fence_path.parent)
-                fence_created = False
+            if not bool((telemetry or {}).get("store_scan_error_detected")) and not (
+                isinstance(nix_receipt, dict) and nix_receipt.get("store_scan_error_detected") is True
+            ):
+                if fence_created and fence_path is not None:
+                    fence_path.unlink()
+                    _fsync_directory(fence_path.parent)
+                    fence_created = False
         return effective_returncode
     finally:
         # Any exceptional Nix path deliberately leaves the durable fence behind.

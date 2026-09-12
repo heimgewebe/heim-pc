@@ -44,6 +44,19 @@ INSTALL_ARTIFACT_AUTHORITIES = frozenset({"proof-only", "merged-main"})
 MANAGED_BUILD_RECEIPT_SUFFIX = ".managed-build-receipt.json"
 MANAGED_BUILD_RECEIPT_KIND = "heim_pc.nixos_managed_build_success_receipt"
 MANAGED_BUILD_POLICY_RELATIVE = Path("config/managed-build.v1.json")
+MANAGED_BUILD_ATTESTATION_SUFFIX = ".managed-build-attestation.json"
+MANAGED_BUILD_ATTESTATION_REPOSITORY = "heimgewebe/heim-pc"
+MANAGED_BUILD_ATTESTATION_WORKFLOW = "heimgewebe/heim-pc/.github/workflows/nixos-production-build-attest.yml"
+MANAGED_BUILD_ATTESTATION_SOURCE_REF = "refs/heads/main"
+MANAGED_BUILD_ATTESTATION_KIND = "heim_pc.nixos_independent_managed_build_attestation_verification"
+MANAGED_BUILD_ATTESTATION_PREDICATE_TYPE = "https://heimgewebe.local/attestations/nixos-independent-managed-build/v1"
+MANAGED_BUILD_ATTESTATION_PREDICATE_KIND = "heim_pc.nixos_independent_managed_rebuild_match"
+INDEPENDENT_REBUILD_MATCH_FIELDS = (
+    "schema_version", "kind", "source_revision", "system_path", "nix_volume",
+    "nix_image", "profile", "source_authority", "closure_manifest_sha256",
+    "closure_path_count",
+)
+GH_BIN = "/usr/bin/gh"
 YESCRYPT_RE = re.compile(r"^\$y\$j9T\$[./0-9A-Za-z]{22}\$[./0-9A-Za-z]{43}$")
 CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 YESCRYPT_SALT_LAST = frozenset(CRYPT64[:4])
@@ -286,6 +299,7 @@ def validate_managed_build_receipt(
         or value.get("artifact_json_sha256") != sha256_json(artifact)
         or value.get("managed_policy_sha256") != expected_policy_sha256
         or value.get("store_budget_stop_triggered") is not False
+        or value.get("store_scan_error_detected") is not False
         or value.get("runtime_timeout_triggered") is not False
         or value.get("container_cleanup_verified") is not True
         or value.get("lifecycle_fence_cleared") is not True
@@ -347,6 +361,186 @@ def load_managed_build_receipt(
     )
 
 
+def managed_build_attestation_path(artifact_path: Path) -> Path:
+    artifact_path = Path(artifact_path)
+    if not artifact_path.is_absolute() or os.path.normpath(str(artifact_path)) != str(artifact_path):
+        raise ProductionInstallError("install artifact path must be canonical and absolute")
+    return Path(str(artifact_path) + MANAGED_BUILD_ATTESTATION_SUFFIX)
+
+
+def verify_independent_rebuild_candidate(
+    candidate_path: Path, independent_path: Path, *, flake_source: str
+) -> dict[str, Any]:
+    candidate_path = Path(candidate_path)
+    independent_path = Path(independent_path)
+    candidate = load_install_artifact(candidate_path)
+    independent = load_install_artifact(independent_path)
+    if candidate["source_authority"] != "merged-main" or independent["source_authority"] != "merged-main":
+        raise ProductionInstallError("independent rebuild comparison requires merged-main artifacts")
+    mismatches = [
+        field for field in INDEPENDENT_REBUILD_MATCH_FIELDS
+        if candidate.get(field) != independent.get(field)
+    ]
+    if mismatches:
+        raise ProductionInstallError(
+            "independent managed rebuild differs from candidate: " + ", ".join(mismatches)
+        )
+    policy_sha256 = managed_policy_sha256_for_source(flake_source)
+    receipt_path = managed_build_receipt_path(independent_path)
+    receipt = load_managed_build_receipt(
+        receipt_path,
+        independent,
+        expected_policy_sha256=policy_sha256,
+        artifact_path=independent_path,
+    )
+    semantic_identity = {field: candidate[field] for field in INDEPENDENT_REBUILD_MATCH_FIELDS}
+    return {
+        "schema_version": 1,
+        "kind": MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
+        "candidate_artifact_sha256": _sha256_file(candidate_path),
+        "independent_artifact_sha256": _sha256_file(independent_path),
+        "independent_receipt_sha256": _sha256_file(receipt_path),
+        "independent_managed_receipt_sha256": receipt["managed_receipt_sha256"],
+        "managed_policy_sha256": policy_sha256,
+        "semantic_identity_sha256": sha256_json(semantic_identity),
+        "excluded_nonsemantic_fields": ["source_bundle_sha256"],
+    }
+
+
+def _attestation_bundle_sha256(path: Path) -> str:
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("managed-build attestation bundle is unavailable") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_size <= 0
+        or info.st_size > 2 * 1024 * 1024
+    ):
+        raise ProductionInstallError("managed-build attestation bundle file is not trusted")
+    return _sha256_file(path)
+
+
+def managed_build_attestation_verify_argv(
+    artifact_path: Path, bundle_path: Path, source_revision: str
+) -> list[str]:
+    if SOURCE_REVISION_RE.fullmatch(source_revision) is None:
+        raise ProductionInstallError("managed-build attestation source revision is invalid")
+    for path, label in ((Path(artifact_path), "artifact"), (Path(bundle_path), "bundle")):
+        if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
+            raise ProductionInstallError(f"managed-build attestation {label} path is not canonical")
+    return [
+        GH_BIN, "attestation", "verify", str(artifact_path),
+        "--repo", MANAGED_BUILD_ATTESTATION_REPOSITORY,
+        "--bundle", str(bundle_path),
+        "--signer-workflow", MANAGED_BUILD_ATTESTATION_WORKFLOW,
+        "--signer-digest", source_revision,
+        "--source-digest", source_revision,
+        "--source-ref", MANAGED_BUILD_ATTESTATION_SOURCE_REF,
+        "--predicate-type", MANAGED_BUILD_ATTESTATION_PREDICATE_TYPE,
+        "--deny-self-hosted-runners",
+        "--format", "json",
+    ]
+
+
+def verify_managed_build_attestation(
+    artifact_path: Path,
+    bundle_path: Path,
+    source_revision: str,
+    *,
+    expected_policy_sha256: str,
+    runner=None,
+) -> dict[str, Any]:
+    artifact_path = Path(artifact_path)
+    bundle_path = Path(bundle_path)
+    artifact = load_install_artifact(artifact_path)
+    artifact_sha256 = _sha256_file(artifact_path)
+    bundle_sha256 = _attestation_bundle_sha256(bundle_path)
+    if not isinstance(expected_policy_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_policy_sha256) is None:
+        raise ProductionInstallError("managed-build attestation policy digest is invalid")
+    argv = managed_build_attestation_verify_argv(artifact_path, bundle_path, source_revision)
+    run_command = _run if runner is None else runner
+    result = run_command(argv)
+    try:
+        output = json.loads(result.stdout.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
+        raise ProductionInstallError("managed-build attestation verifier returned invalid JSON") from exc
+    if not isinstance(output, list) or len(output) != 1 or not isinstance(output[0], dict):
+        raise ProductionInstallError("managed-build attestation verifier returned no unique verified attestation")
+    verification_result = output[0].get("verificationResult")
+    statement = verification_result.get("statement") if isinstance(verification_result, dict) else None
+    predicate = statement.get("predicate") if isinstance(statement, dict) else None
+    required_predicate = {
+        "schema_version", "kind", "candidate_artifact_sha256",
+        "independent_artifact_sha256", "independent_receipt_sha256",
+        "independent_managed_receipt_sha256", "managed_policy_sha256",
+        "semantic_identity_sha256", "excluded_nonsemantic_fields",
+    }
+    if not isinstance(predicate, dict) or set(predicate) != required_predicate:
+        raise ProductionInstallError("managed-build attestation predicate is invalid")
+    semantic_identity = {field: artifact[field] for field in INDEPENDENT_REBUILD_MATCH_FIELDS}
+    if (
+        predicate.get("schema_version") != 1
+        or predicate.get("kind") != MANAGED_BUILD_ATTESTATION_PREDICATE_KIND
+        or predicate.get("candidate_artifact_sha256") != artifact_sha256
+        or predicate.get("managed_policy_sha256") != expected_policy_sha256
+        or predicate.get("semantic_identity_sha256") != sha256_json(semantic_identity)
+        or predicate.get("excluded_nonsemantic_fields") != ["source_bundle_sha256"]
+    ):
+        raise ProductionInstallError("managed-build attestation predicate does not bind current artifact")
+    for field in (
+        "candidate_artifact_sha256", "independent_artifact_sha256",
+        "independent_receipt_sha256", "independent_managed_receipt_sha256",
+        "managed_policy_sha256", "semantic_identity_sha256",
+    ):
+        if not isinstance(predicate.get(field), str) or re.fullmatch(r"[0-9a-f]{64}", predicate[field]) is None:
+            raise ProductionInstallError("managed-build attestation predicate digest is invalid")
+    return {
+        "schema_version": 1,
+        "kind": MANAGED_BUILD_ATTESTATION_KIND,
+        "artifact_sha256": artifact_sha256,
+        "attestation_bundle_sha256": bundle_sha256,
+        "verifier_argv_sha256": sha256_json(argv),
+        "predicate_sha256": sha256_json(predicate),
+        "independent_artifact_sha256": predicate["independent_artifact_sha256"],
+        "independent_receipt_sha256": predicate["independent_receipt_sha256"],
+        "independent_managed_receipt_sha256": predicate["independent_managed_receipt_sha256"],
+        "managed_policy_sha256": predicate["managed_policy_sha256"],
+        "semantic_identity_sha256": predicate["semantic_identity_sha256"],
+        "verified_attestation_count": 1,
+    }
+
+
+def validate_managed_build_attestation_summary(
+    value: Any, *, expected_artifact_sha256: str, expected_policy_sha256: str
+) -> dict[str, Any]:
+    required = {
+        "schema_version", "kind", "artifact_sha256", "attestation_bundle_sha256",
+        "verifier_argv_sha256", "predicate_sha256", "independent_artifact_sha256",
+        "independent_receipt_sha256", "independent_managed_receipt_sha256",
+        "managed_policy_sha256", "semantic_identity_sha256", "verified_attestation_count",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ProductionInstallError("managed-build attestation verification summary is invalid")
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != MANAGED_BUILD_ATTESTATION_KIND
+        or value.get("artifact_sha256") != expected_artifact_sha256
+        or value.get("managed_policy_sha256") != expected_policy_sha256
+        or isinstance(value.get("verified_attestation_count"), bool)
+        or not isinstance(value.get("verified_attestation_count"), int)
+        or value["verified_attestation_count"] != 1
+    ):
+        raise ProductionInstallError("managed-build attestation verification summary is invalid")
+    for field in required - {"schema_version", "kind", "verified_attestation_count"}:
+        if not isinstance(value.get(field), str) or re.fullmatch(r"[0-9a-f]{64}", value[field]) is None:
+            raise ProductionInstallError("managed-build attestation verification digest is invalid")
+    return json.loads(json.dumps(value))
+
+
 def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
     artifact_path_raw = plan.get("install_artifact_path")
     if not isinstance(artifact_path_raw, str):
@@ -368,6 +562,17 @@ def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any])
         raise ProductionInstallError("managed-build success receipt changed after planning")
     if receipt != plan.get("managed_build_receipt"):
         raise ProductionInstallError("managed-build success receipt no longer matches reviewed plan")
+    if artifact["source_authority"] == "merged-main":
+        verification = verify_managed_build_attestation(
+            artifact_path,
+            managed_build_attestation_path(artifact_path),
+            artifact["source_revision"],
+            expected_policy_sha256=policy_sha256,
+        )
+        if verification != plan.get("managed_build_attestation_verification"):
+            raise ProductionInstallError("independent managed-build attestation changed after planning")
+        if verification["attestation_bundle_sha256"] != plan.get("managed_build_attestation_sha256"):
+            raise ProductionInstallError("independent managed-build attestation digest changed after planning")
     return receipt
 
 
@@ -645,6 +850,7 @@ def compile_plan(
     managed_policy_sha256: str,
     flake_source: str,
     contract: dict[str, Any],
+    managed_build_attestation_verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact = validate_install_artifact(install_artifact)
     artifact_path = Path(install_artifact_path)
@@ -654,6 +860,17 @@ def compile_plan(
         managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
     )
     source_revision = artifact["source_revision"]
+    attestation_verification = None
+    if artifact["source_authority"] == "merged-main":
+        if managed_build_attestation_verification is None:
+            raise ProductionInstallError("merged-main artifact requires independent managed-build attestation")
+        attestation_verification = validate_managed_build_attestation_summary(
+            managed_build_attestation_verification,
+            expected_artifact_sha256=managed_receipt["artifact_file_sha256"],
+            expected_policy_sha256=managed_policy_sha256,
+        )
+    elif managed_build_attestation_verification is not None:
+        raise ProductionInstallError("proof-only artifact must not carry production attestation authority")
     flake = str(PurePosixPath(flake_source))
     if not flake.startswith("/") or os.path.normpath(flake) != flake:
         raise ProductionInstallError("flake source must be a canonical absolute path")
@@ -741,6 +958,12 @@ def compile_plan(
         "managed_policy_sha256": managed_policy_sha256,
         "managed_build_receipt_sha256": sha256_json(managed_receipt),
         "managed_build_receipt": managed_receipt,
+        "managed_build_attestation_required": artifact["source_authority"] == "merged-main",
+        "managed_build_attestation_sha256": (
+            attestation_verification["attestation_bundle_sha256"]
+            if attestation_verification is not None else None
+        ),
+        "managed_build_attestation_verification": attestation_verification,
         "source_revision": source_revision,
         "source_authority": artifact["source_authority"],
         "flake_source": flake,
@@ -768,6 +991,8 @@ def plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
         "source_authority": plan["source_authority"],
         "system_path": plan["system_path"],
         "managed_build_receipt_sha256": plan["managed_build_receipt_sha256"],
+        "managed_build_attestation_required": plan["managed_build_attestation_required"],
+        "managed_build_attestation_sha256": plan["managed_build_attestation_sha256"],
         "execution_authorized": False,
         "private_hardware_identity_redacted": True,
     }
@@ -1435,6 +1660,14 @@ def main(argv: list[str] | None = None) -> int:
             expected_policy_sha256=managed_policy_sha256,
             artifact_path=artifact_path,
         )
+        managed_attestation_verification = None
+        if artifact["source_authority"] == "merged-main":
+            managed_attestation_verification = verify_managed_build_attestation(
+                artifact_path,
+                managed_build_attestation_path(artifact_path),
+                artifact["source_revision"],
+                expected_policy_sha256=managed_policy_sha256,
+            )
         contract = load_contract(
             args.identity_contract, expected_revision=artifact["source_revision"]
         )
@@ -1449,6 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
             managed_policy_sha256=managed_policy_sha256,
             flake_source=args.flake_source,
             contract=contract,
+            managed_build_attestation_verification=managed_attestation_verification,
         )
         if not args.apply:
             if args.write_plan is not None:
