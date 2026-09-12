@@ -16,13 +16,14 @@ verifies_with:
 # Program Inventory Summary
 
 Generated at: `2026-07-09T18:15:00Z`
+Observed at: `2026-07-09T18:15:00Z`
 Raw inventory source: `~/.local/share/heim-utilities/program-inventory/20260709-195458`
 
 ## Boundary
 
 This document is a compact, reviewable point-in-time observation of the heim-pc program surface. Large raw inventories stay outside Git under `~/.local/share/heim-utilities/program-inventory/`.
 
-It is authoritative only for what was observed at the generated timestamp. It does not establish current state after that timestamp, service necessity, system architecture, or a preferred access path. Re-read live runtime before making present-tense claims.
+It is authoritative only for what was observed at the observed timestamp. It does not establish current state after that timestamp, service necessity, system architecture, or a preferred access path. Re-read live runtime before making present-tense claims.
 
 The summary may include program names, executable metadata counts, package managers, service/container names and safe paths to local inventory artifacts. It must not contain secrets, browser profiles, private file contents, keyrings or raw history.
 
