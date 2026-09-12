@@ -545,6 +545,50 @@ class ManagedBuildTests(unittest.TestCase):
             [call(process.pid, signal.SIGTERM), call(process.pid, signal.SIGKILL)],
         )
 
+    def test_nix_normal_leader_exit_still_quiesces_surviving_process_group(self) -> None:
+        class Process:
+            pid = 4199
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "e" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "e" * 12,
+            "store_root": "/tmp/managed-nix-store-normal-exit-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "scan_worktree_payloads",
+                side_effect=[
+                    {"allocated_bytes": 1, "error_count": 0},
+                    {"allocated_bytes": 1, "error_count": 0},
+                ],
+            ),
+            patch.object(managed_build, "_process_group_exists", return_value=True),
+            patch.object(managed_build, "_wait_for_process_group_exit", return_value=True) as wait_for_group,
+            patch.object(managed_build.os, "killpg") as killpg,
+            patch.object(managed_build, "_nix_container_ids", return_value=[]),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(telemetry["container_cleanup_verified"])
+        killpg.assert_called_once_with(process.pid, signal.SIGTERM)
+        wait_for_group.assert_called_once()
+
     def test_nix_running_store_monitor_terminates_before_hard_and_cleans_container(self) -> None:
         class Process:
             pid = 4242

@@ -38,7 +38,11 @@ let
       load_identity() {
         [[ -f "$identity" && ! -L "$identity" ]] || fail "private identity is missing or unsafe"
         [[ "$(stat -c '%u:%g:%a' -- "$identity")" == "0:0:600" ]] || fail "private identity ownership/mode mismatch"
-        schema_version= efi_partuuid= recovery_partuuid= encrypted_partuuid= file_mapper_name=
+        schema_version=""
+        efi_partuuid=""
+        recovery_partuuid=""
+        encrypted_partuuid=""
+        file_mapper_name=""
         seen_schema=0; seen_efi=0; seen_recovery=0; seen_encrypted=0; seen_mapper=0
         while IFS='=' read -r key value; do
           [[ -n "$key" && -n "$value" ]] || fail "private identity contains an empty field"

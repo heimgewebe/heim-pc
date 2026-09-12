@@ -1166,24 +1166,22 @@ def _run_nix_worker_guarded(
             if scan["error_count"] != 0:
                 store_scan_error_detected = True
                 trigger = "store-scan-error"
-                if process.poll() is None:
-                    _terminate_process_group(process)
                 break
             observed = scan["allocated_bytes"]
             max_observed = max(max_observed, observed)
             returncode = process.poll()
             if observed >= stop_threshold:
                 trigger = "store-budget"
-                if returncode is None:
-                    _terminate_process_group(process)
                 break
             if returncode is not None:
                 break
             if time.monotonic() >= deadline:
                 trigger = "runtime-timeout"
-                _terminate_process_group(process)
                 break
             time.sleep(NIX_STORE_MONITOR_INTERVAL_SECONDS)
+        # Every terminal monitor path must prove the entire worker process group is gone.
+        # A successful group leader can exit while a local descendant remains alive.
+        _terminate_process_group(process)
         if process.poll() is None:
             process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
         orphan_ids = _nix_container_ids(label)

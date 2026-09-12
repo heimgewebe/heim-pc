@@ -1786,4 +1786,7 @@ def test_mounted_nvme_partition_uses_first_only_and_resolves_alias(monkeypatch):
     )
     monkeypatch.setattr(spu.os.path, "realpath", lambda _value: "/dev/nvme1n1p3")
     assert spu._mounted_nvme_partition("/") == "/dev/nvme1n1p3"
-    assert "--first-only" in calls[0]
+    assert calls[0] == [
+        "/usr/bin/findmnt", "--first-only", "--nofsroot", "-rn",
+        "-o", "SOURCE", "--mountpoint", "/",
+    ]

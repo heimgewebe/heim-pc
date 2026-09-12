@@ -138,7 +138,7 @@ def _mounted_nvme_partition(mountpoint: str) -> str:
     result = _run(
         [
             "/usr/bin/findmnt", "--first-only", "--nofsroot", "-rn",
-            "-o", "SOURCE", mountpoint,
+            "-o", "SOURCE", "--mountpoint", mountpoint,
         ],
         env=_host_readback_env(),
     )

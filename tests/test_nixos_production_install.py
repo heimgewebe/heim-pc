@@ -1728,7 +1728,10 @@ def test_findmnt_uses_first_only_and_canonicalizes_by_uuid(monkeypatch):
     monkeypatch.setattr(prod, "_run", lambda argv: calls.append(argv) or Result())
     monkeypatch.setattr(prod.os.path, "realpath", lambda path: "/dev/nvme1n1p3")
     assert prod._findmnt("/") == "/dev/nvme1n1p3"
-    assert "--first-only" in calls[0]
+    assert calls[0] == [
+        "findmnt", "--first-only", "--nofsroot", "-rn", "-o", "SOURCE",
+        "--mountpoint", "/",
+    ]
 
 
 def test_verified_protected_aliases_are_rebound_live(monkeypatch):

@@ -1610,7 +1610,8 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
 
 def _findmnt(target: str) -> str:
     result = _run([
-        "findmnt", "--first-only", "--nofsroot", "-rn", "-o", "SOURCE", target
+        "findmnt", "--first-only", "--nofsroot", "-rn", "-o", "SOURCE",
+        "--mountpoint", target
     ])
     source = result.stdout.decode("utf-8").strip()
     if not source or "\n" in source:
