@@ -43,6 +43,8 @@ KERNEL_NVME_RE = re.compile(r"^/dev/nvme\d+n\d+(?:p\d+)?$")
 PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
 FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
 EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+PRIVATE_STORAGE_IDENTITY_RELATIVE = PurePosixPath("persist/heim-pc/private-storage-identity.env")
 INSTALL_ARTIFACT_AUTHORITIES = frozenset({"proof-only", "merged-main"})
 MANAGED_BUILD_RECEIPT_SUFFIX = ".managed-build-receipt.json"
 MANAGED_BUILD_RECEIPT_KIND = "heim_pc.nixos_managed_build_success_receipt"
@@ -382,10 +384,13 @@ def managed_build_attestation_path(artifact_path: Path) -> Path:
 
 
 def verify_independent_rebuild_candidate(
-    candidate_path: Path, independent_path: Path, *, flake_source: str
+    candidate_path: Path, independent_path: Path, *, candidate_receipt_path: Path, flake_source: str
 ) -> dict[str, Any]:
     candidate_path = Path(candidate_path)
     independent_path = Path(independent_path)
+    candidate_receipt_path = Path(candidate_receipt_path)
+    if candidate_receipt_path != managed_build_receipt_path(candidate_path):
+        raise ProductionInstallError("candidate managed-build receipt path is not canonical")
     candidate = load_install_artifact(candidate_path)
     independent = load_install_artifact(independent_path)
     if candidate["source_authority"] != "merged-main" or independent["source_authority"] != "merged-main":
@@ -399,18 +404,22 @@ def verify_independent_rebuild_candidate(
             "independent managed rebuild differs from candidate: " + ", ".join(mismatches)
         )
     policy_sha256 = managed_policy_sha256_for_source(flake_source)
+    candidate_receipt = load_managed_build_receipt(
+        candidate_receipt_path, candidate,
+        expected_policy_sha256=policy_sha256, artifact_path=candidate_path,
+    )
     receipt_path = managed_build_receipt_path(independent_path)
     receipt = load_managed_build_receipt(
-        receipt_path,
-        independent,
-        expected_policy_sha256=policy_sha256,
-        artifact_path=independent_path,
+        receipt_path, independent,
+        expected_policy_sha256=policy_sha256, artifact_path=independent_path,
     )
     semantic_identity = {field: candidate[field] for field in INDEPENDENT_REBUILD_MATCH_FIELDS}
     return {
         "schema_version": 1,
         "kind": MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
         "candidate_artifact_sha256": _sha256_file(candidate_path),
+        "candidate_receipt_sha256": _sha256_file(candidate_receipt_path),
+        "candidate_managed_receipt_sha256": candidate_receipt["managed_receipt_sha256"],
         "independent_artifact_sha256": _sha256_file(independent_path),
         "independent_receipt_sha256": _sha256_file(receipt_path),
         "independent_managed_receipt_sha256": receipt["managed_receipt_sha256"],
@@ -488,6 +497,7 @@ def verify_managed_build_attestation(
     predicate = statement.get("predicate") if isinstance(statement, dict) else None
     required_predicate = {
         "schema_version", "kind", "candidate_artifact_sha256",
+        "candidate_receipt_sha256", "candidate_managed_receipt_sha256",
         "independent_artifact_sha256", "independent_receipt_sha256",
         "independent_managed_receipt_sha256", "managed_policy_sha256",
         "semantic_identity_sha256", "excluded_nonsemantic_fields",
@@ -505,7 +515,8 @@ def verify_managed_build_attestation(
     ):
         raise ProductionInstallError("managed-build attestation predicate does not bind current artifact")
     for field in (
-        "candidate_artifact_sha256", "independent_artifact_sha256",
+        "candidate_artifact_sha256", "candidate_receipt_sha256",
+        "candidate_managed_receipt_sha256", "independent_artifact_sha256",
         "independent_receipt_sha256", "independent_managed_receipt_sha256",
         "managed_policy_sha256", "semantic_identity_sha256",
     ):
@@ -518,6 +529,8 @@ def verify_managed_build_attestation(
         "attestation_bundle_sha256": bundle_sha256,
         "verifier_argv_sha256": sha256_json(argv),
         "predicate_sha256": sha256_json(predicate),
+        "candidate_receipt_sha256": predicate["candidate_receipt_sha256"],
+        "candidate_managed_receipt_sha256": predicate["candidate_managed_receipt_sha256"],
         "independent_artifact_sha256": predicate["independent_artifact_sha256"],
         "independent_receipt_sha256": predicate["independent_receipt_sha256"],
         "independent_managed_receipt_sha256": predicate["independent_managed_receipt_sha256"],
@@ -532,7 +545,8 @@ def validate_managed_build_attestation_summary(
 ) -> dict[str, Any]:
     required = {
         "schema_version", "kind", "artifact_sha256", "attestation_bundle_sha256",
-        "verifier_argv_sha256", "predicate_sha256", "independent_artifact_sha256",
+        "verifier_argv_sha256", "predicate_sha256", "candidate_receipt_sha256",
+        "candidate_managed_receipt_sha256", "independent_artifact_sha256",
         "independent_receipt_sha256", "independent_managed_receipt_sha256",
         "managed_policy_sha256", "semantic_identity_sha256", "verified_attestation_count",
     }
@@ -565,11 +579,9 @@ def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any])
     policy_sha256 = managed_policy_sha256_for_source(str(plan.get("flake_source", "")))
     if policy_sha256 != plan.get("managed_policy_sha256"):
         raise ProductionInstallError("managed-build policy changed after planning")
+    receipt_path = managed_build_receipt_path(artifact_path)
     receipt = load_managed_build_receipt(
-        managed_build_receipt_path(artifact_path),
-        artifact,
-        expected_policy_sha256=policy_sha256,
-        artifact_path=artifact_path,
+        receipt_path, artifact, expected_policy_sha256=policy_sha256, artifact_path=artifact_path,
     )
     if sha256_json(receipt) != plan.get("managed_build_receipt_sha256"):
         raise ProductionInstallError("managed-build success receipt changed after planning")
@@ -584,6 +596,10 @@ def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any])
         )
         if verification != plan.get("managed_build_attestation_verification"):
             raise ProductionInstallError("independent managed-build attestation changed after planning")
+        if verification["candidate_receipt_sha256"] != _sha256_file(receipt_path):
+            raise ProductionInstallError("independent attestation does not authenticate local managed-build receipt bytes")
+        if verification["candidate_managed_receipt_sha256"] != receipt["managed_receipt_sha256"]:
+            raise ProductionInstallError("independent attestation does not authenticate local managed-build receipt identity")
         if verification["attestation_bundle_sha256"] != plan.get("managed_build_attestation_sha256"):
             raise ProductionInstallError("independent managed-build attestation digest changed after planning")
     return receipt
@@ -707,6 +723,12 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         or protected["logical_sector_size"] <= 0
     ):
         raise ProductionInstallError("protected WD GPT identity is incomplete")
+    protected_signatures = _normalize_signature_records(
+        protected.get("signatures"), "protected WD"
+    )
+    efi_content_sha256 = observation.get("efi_content_sha256")
+    if not isinstance(efi_content_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", efi_content_sha256) is None:
+        raise ProductionInstallError("protected EFI content digest is missing or invalid")
     observed_parts = protected.get("partitions")
     if not isinstance(observed_parts, list):
         raise ProductionInstallError("protected partition observation missing")
@@ -744,6 +766,9 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         if not isinstance(path, str) or not KERNEL_NVME_RE.fullmatch(path):
             raise ProductionInstallError(f"protected partition {expected['number']} observed path is invalid")
         expected_paths[expected["role"]] = path
+        partition_signatures = _normalize_signature_records(
+            actual.get("signatures"), f"protected partition {expected['number']}"
+        )
         live_fingerprint.append({
             "number": expected["number"],
             "role": expected["role"],
@@ -756,6 +781,7 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
             "partflags": actual["partflags"],
             "fstype": actual["fstype"],
             "uuid": str(actual["uuid"]),
+            "signatures": partition_signatures,
         })
     if observation.get("root_source") != expected_paths.get("popos-root"):
         raise ProductionInstallError("current root is not the protected WD root partition")
@@ -771,9 +797,11 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         "partition_table": "gpt",
         "gpt_disk_guid": str(protected["gpt_disk_guid"]).lower(),
         "logical_sector_size": protected["logical_sector_size"],
+        "signatures": protected_signatures,
         "partition_table_fingerprint": live_fingerprint,
         "root_source": observation["root_source"],
         "efi_source": observation["efi_source"],
+        "efi_content_sha256": efi_content_sha256,
     }
 
 
@@ -914,7 +942,7 @@ def compile_plan(
         {"effect": "mount-root-create", "argv": ["mkdir", "-p", MOUNT_ROOT, BTRFS_STAGE_ROOT]},
         {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["filesystem_label"], _target_partition_path(target, efi)]},
         {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["filesystem_label"], _target_partition_path(target, recovery)]},
-        {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--key-file", "-", _target_partition_path(target, encrypted)], "secret_binding": "luks-passphrase-v1"},
+        {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--uuid", encrypted["partuuid"], "--key-file", "-", _target_partition_path(target, encrypted)], "secret_binding": "luks-passphrase-v1"},
         {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _target_partition_path(target, encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
         {
             "effect": "btrfs-filesystem",
@@ -944,7 +972,7 @@ def compile_plan(
         "effect": "nixos-install",
         "argv": _sealed_tool_argv(
             artifact, "nixos-install",
-            ["--root", "/mnt", "--system", artifact["system_path"], "--no-channel-copy", "--no-root-password"],
+            ["--root", MOUNT_ROOT, "--system", artifact["system_path"], "--no-channel-copy", "--no-root-password"],
         ),
     })
     mounted = [_mount_path(logical) for _, logical in _subvolume_mounts(contract)] + [_mount_path(efi["mountpoint"]), _mount_path(recovery["mountpoint"])]
@@ -1021,6 +1049,36 @@ def write_private_plan(path: Path, plan: dict[str, Any]) -> None:
             os.link(temporary, path, follow_symlinks=False)
         except FileExistsError as exc:
             raise ProductionInstallError("refusing to overwrite private production plan") from exc
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def write_private_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    if path.exists() or path.is_symlink():
+        raise ProductionInstallError("refusing to overwrite private production receipt")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ProductionInstallError("refusing to overwrite private production receipt") from exc
         directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             os.fsync(directory_fd)
@@ -1136,6 +1194,194 @@ def stage_firstboot_credentials(*, mount_root: str, source_revision: str, hash_b
     return {"schema_version": 1, "source_revision": source_revision, "password_hash_sha256": digest, "staged": True}
 
 
+def _private_storage_identity_values(contract: dict[str, Any]) -> dict[str, str]:
+    values = {
+        "efi_partuuid": str(_partition_by_role(contract, "efi-system-partition")["partuuid"]).lower(),
+        "recovery_partuuid": str(_partition_by_role(contract, "recovery-surface")["partuuid"]).lower(),
+        "encrypted_partuuid": str(_partition_by_role(contract, "encrypted-system")["partuuid"]).lower(),
+        "mapper_name": str(contract["topology"]["luks"]["mapper_name"]),
+    }
+    uuids = [values["efi_partuuid"], values["recovery_partuuid"], values["encrypted_partuuid"]]
+    if any(UUID_RE.fullmatch(value) is None for value in uuids) or len(set(uuids)) != 3:
+        raise ProductionInstallError("private boot PARTUUID identity is invalid")
+    if values["mapper_name"] != "heimpc-nixos-crypt":
+        raise ProductionInstallError("private boot mapper identity is invalid")
+    return values
+
+
+def _private_storage_identity_bytes(contract: dict[str, Any]) -> bytes:
+    values = _private_storage_identity_values(contract)
+    return (
+        "schema_version=1\n"
+        f"efi_partuuid={values['efi_partuuid']}\n"
+        f"recovery_partuuid={values['recovery_partuuid']}\n"
+        f"encrypted_partuuid={values['encrypted_partuuid']}\n"
+        f"mapper_name={values['mapper_name']}\n"
+    ).encode("ascii")
+
+
+def _private_storage_identity_path(mount_root: str) -> Path:
+    root = Path(mount_root)
+    if not root.is_absolute() or os.path.normpath(str(root)) != str(root):
+        raise ProductionInstallError("private storage mount root is invalid")
+    return root / str(PRIVATE_STORAGE_IDENTITY_RELATIVE)
+
+
+def stage_private_storage_identity(*, mount_root: str, contract: dict[str, Any]) -> dict[str, Any]:
+    destination = _private_storage_identity_path(mount_root)
+    persist = Path(mount_root) / "persist"
+    try:
+        persist_info = persist.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("target /persist mount is missing for private storage identity") from exc
+    if stat.S_ISLNK(persist_info.st_mode) or not stat.S_ISDIR(persist_info.st_mode):
+        raise ProductionInstallError("target /persist mount is unsafe for private storage identity")
+    parent = destination.parent
+    parent.mkdir(mode=0o700, exist_ok=True)
+    parent_info = parent.lstat()
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise ProductionInstallError("private storage identity directory is unsafe")
+    os.chmod(parent, 0o700)
+    if destination.exists() or destination.is_symlink():
+        raise ProductionInstallError("private storage identity staging refuses existing destination")
+    payload = _private_storage_identity_bytes(contract)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(destination, flags, 0o600)
+    try:
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(destination, 0o600)
+    directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return {"schema_version": 1, "identity_sha256": hashlib.sha256(payload).hexdigest(), "staged": True}
+
+
+def _read_private_storage_identity(*, mount_root: str, contract: dict[str, Any]) -> dict[str, str]:
+    path = _private_storage_identity_path(mount_root)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionInstallError("private storage identity is unavailable") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ProductionInstallError("private storage identity file is unsafe")
+        payload = os.read(fd, 4097)
+        if len(payload) > 4096 or os.read(fd, 1):
+            raise ProductionInstallError("private storage identity file is unexpectedly large")
+    finally:
+        os.close(fd)
+    expected = _private_storage_identity_bytes(contract)
+    if payload != expected:
+        raise ProductionInstallError("private storage identity file does not match reviewed contract")
+    return _private_storage_identity_values(contract)
+
+
+def _private_luks_token(contract: dict[str, Any]) -> str:
+    values = _private_storage_identity_values(contract)
+    return f"rd.luks.name={values['encrypted_partuuid']}={values['mapper_name']}"
+
+
+def _nixos_loader_entries(mount_root: str) -> list[Path]:
+    directory = Path(mount_root) / "boot/loader/entries"
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("systemd-boot loader entry directory is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ProductionInstallError("systemd-boot loader entry directory is unsafe")
+    result: list[Path] = []
+    for path in sorted(directory.glob("*.conf")):
+        linked = path.lstat()
+        if stat.S_ISLNK(linked.st_mode) or not stat.S_ISREG(linked.st_mode) or linked.st_nlink != 1:
+            raise ProductionInstallError("systemd-boot loader entry is unsafe")
+        text = path.read_text(encoding="utf-8")
+        if any(line == "sort-key nixos" for line in text.splitlines()):
+            result.append(path)
+    if not result:
+        raise ProductionInstallError("no NixOS systemd-boot loader entries found")
+    return result
+
+
+def _loader_options_with_private_luks(text: str, expected_token: str, mapper_name: str) -> str:
+    lines = text.splitlines()
+    indexes = [index for index, line in enumerate(lines) if line.startswith("options ")]
+    if len(indexes) != 1:
+        raise ProductionInstallError("NixOS loader entry must contain exactly one options line")
+    index = indexes[0]
+    tokens = lines[index][len("options "):].split()
+    kept: list[str] = []
+    seen = 0
+    suffix = "=" + mapper_name
+    for token in tokens:
+        if token.startswith("rd.luks.name=") and token.endswith(suffix):
+            if token != expected_token or seen:
+                raise ProductionInstallError("conflicting private LUKS token in loader entry")
+            seen += 1
+        else:
+            kept.append(token)
+    lines[index] = "options " + " ".join([*kept, expected_token])
+    return "\n".join(lines) + "\n"
+
+
+def bind_private_boot_entries(*, mount_root: str, contract: dict[str, Any]) -> None:
+    _read_private_storage_identity(mount_root=mount_root, contract=contract)
+    token = _private_luks_token(contract)
+    mapper_name = contract["topology"]["luks"]["mapper_name"]
+    for entry in _nixos_loader_entries(mount_root):
+        updated = _loader_options_with_private_luks(entry.read_text(encoding="utf-8"), token, mapper_name)
+        temporary_fd, temporary_name = tempfile.mkstemp(dir=entry.parent, prefix=f".{entry.name}.", suffix=".tmp")
+        temporary = Path(temporary_name)
+        try:
+            mode = stat.S_IMODE(entry.lstat().st_mode)
+            os.fchmod(temporary_fd, mode)
+            _write_all_fd(temporary_fd, updated.encode("utf-8"))
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = -1
+            os.replace(temporary, entry)
+            directory_fd = os.open(entry.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary_fd >= 0:
+                os.close(temporary_fd)
+            temporary.unlink(missing_ok=True)
+
+
+def verify_private_luks_uuid(contract: dict[str, Any]) -> None:
+    encrypted = _partition_by_role(contract, "encrypted-system")
+    expected = _private_storage_identity_values(contract)["encrypted_partuuid"]
+    path = _target_partition_path(contract["target_identity"]["exact_by_id"], encrypted)
+    observed = _run(["cryptsetup", "luksUUID", path]).stdout.decode("utf-8", "strict").strip().lower()
+    if observed != expected:
+        raise ProductionInstallError("LUKS UUID does not match private encrypted partition identity")
+
+
+def verify_private_boot_binding(*, mount_root: str, contract: dict[str, Any]) -> None:
+    _read_private_storage_identity(mount_root=mount_root, contract=contract)
+    verify_private_luks_uuid(contract)
+    expected = _private_luks_token(contract)
+    mapper_name = contract["topology"]["luks"]["mapper_name"]
+    for entry in _nixos_loader_entries(mount_root):
+        text = entry.read_text(encoding="utf-8")
+        rewritten = _loader_options_with_private_luks(text, expected, mapper_name)
+        if rewritten != text:
+            raise ProductionInstallError("systemd-boot loader entry is not bound to private LUKS identity")
+
+
 def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     command_env = {
         "PATH": TRUSTED_PATH,
@@ -1177,6 +1423,115 @@ def _partition_start_sector(path: str) -> int:
     return value
 
 
+def _normalize_signature_records(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ProductionInstallError(f"{label} signature inventory is invalid")
+    normalized: list[dict[str, Any]] = []
+    for record in value:
+        if not isinstance(record, dict) or not record:
+            raise ProductionInstallError(f"{label} signature inventory is invalid")
+        clean: dict[str, Any] = {}
+        for key, raw in record.items():
+            if not isinstance(key, str) or not key or not isinstance(raw, (str, int, float, bool, type(None))):
+                raise ProductionInstallError(f"{label} signature inventory is invalid")
+            clean[key] = raw
+        normalized.append(clean)
+    return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+
+
+def _wipefs_signatures(authority_path: str) -> list[dict[str, Any]]:
+    _require_by_id(authority_path, "wipefs observation authority")
+    payload = _json_command(["wipefs", "--no-act", "--json", authority_path])
+    return _normalize_signature_records(payload.get("signatures"), authority_path)
+
+
+def _directory_content_sha256(root: Path) -> str:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise ProductionInstallError("protected EFI content root cannot be opened safely") from exc
+    digest = hashlib.sha256()
+    try:
+        root_before = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_before.st_mode):
+            raise ProductionInstallError("protected EFI content root is not a directory")
+        root_device = root_before.st_dev
+        for dirpath, dirnames, filenames, dir_fd in os.fwalk(
+            ".", topdown=True, follow_symlinks=False, dir_fd=root_fd
+        ):
+            dirnames.sort()
+            filenames.sort()
+            prefix = "" if dirpath == "." else dirpath.removeprefix("./")
+            for name in dirnames:
+                linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISLNK(linked.st_mode) or not stat.S_ISDIR(linked.st_mode) or linked.st_dev != root_device:
+                    raise ProductionInstallError("protected EFI content contains unsafe directory entries")
+                relative = str(PurePosixPath(prefix, name))
+                digest.update(b"D\0" + relative.encode("utf-8") + b"\0")
+            for name in filenames:
+                linked_before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISLNK(linked_before.st_mode) or not stat.S_ISREG(linked_before.st_mode) or linked_before.st_dev != root_device:
+                    raise ProductionInstallError("protected EFI content contains unsafe file entries")
+                file_flags = os.O_RDONLY | os.O_CLOEXEC
+                if hasattr(os, "O_NOFOLLOW"):
+                    file_flags |= os.O_NOFOLLOW
+                try:
+                    fd = os.open(name, file_flags, dir_fd=dir_fd)
+                except OSError as exc:
+                    raise ProductionInstallError("protected EFI file cannot be opened safely") from exc
+                try:
+                    opened = os.fstat(fd)
+                    before_identity = (
+                        linked_before.st_dev, linked_before.st_ino,
+                        stat.S_IFMT(linked_before.st_mode), linked_before.st_size,
+                    )
+                    opened_identity = (
+                        opened.st_dev, opened.st_ino,
+                        stat.S_IFMT(opened.st_mode), opened.st_size,
+                    )
+                    if opened_identity != before_identity or opened.st_dev != root_device or not stat.S_ISREG(opened.st_mode):
+                        raise ProductionInstallError("protected EFI file identity changed before hashing")
+                    relative = str(PurePosixPath(prefix, name))
+                    digest.update(b"F\0" + relative.encode("utf-8") + b"\0")
+                    digest.update(str(opened.st_size).encode("ascii") + b"\0")
+                    remaining = opened.st_size
+                    while remaining:
+                        chunk = os.read(fd, min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ProductionInstallError("protected EFI file changed while hashing")
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if os.read(fd, 1):
+                        raise ProductionInstallError("protected EFI file exceeds observed size")
+                    opened_after = os.fstat(fd)
+                    linked_after = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                    after_identity = (
+                        opened_after.st_dev, opened_after.st_ino,
+                        stat.S_IFMT(opened_after.st_mode), opened_after.st_size,
+                    )
+                    linked_after_identity = (
+                        linked_after.st_dev, linked_after.st_ino,
+                        stat.S_IFMT(linked_after.st_mode), linked_after.st_size,
+                    )
+                    if after_identity != opened_identity or linked_after_identity != opened_identity:
+                        raise ProductionInstallError("protected EFI file identity changed while hashing")
+                finally:
+                    os.close(fd)
+        root_after = os.fstat(root_fd)
+        if (
+            root_after.st_dev != root_before.st_dev
+            or root_after.st_ino != root_before.st_ino
+            or stat.S_IFMT(root_after.st_mode) != stat.S_IFMT(root_before.st_mode)
+        ):
+            raise ProductionInstallError("protected EFI content root changed while hashing")
+        return digest.hexdigest()
+    finally:
+        os.close(root_fd)
+
+
 def _disk_observation(authority_path: str) -> dict[str, Any]:
     _require_by_id(authority_path, "disk observation authority")
     if not os.path.islink(authority_path):
@@ -1209,13 +1564,17 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         path = child.get("path")
         match = re.search(r"p(\d+)$", path or "")
         if child.get("type") == "part" and match:
+            number = int(match.group(1))
+            partition_authority = f"{authority_path}-part{number}"
+            if not os.path.islink(partition_authority) or os.path.realpath(partition_authority) != path:
+                raise ProductionInstallError(f"stable by-id alias for partition {number} is missing or mismatched")
             size_bytes = int(child.get("size") or 0)
             if size_bytes <= 0 or size_bytes % logical_sector_size != 0:
                 raise ProductionInstallError("partition size is not sector aligned")
             start_sector = _partition_start_sector(path)
             sector_count = size_bytes // logical_sector_size
             parts.append({
-                "number": int(match.group(1)),
+                "number": number,
                 "path": path,
                 "size_bytes": size_bytes,
                 "start_sector": start_sector,
@@ -1226,6 +1585,7 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
                 "partflags": str(child.get("partflags") or ""),
                 "fstype": str(child.get("fstype") or ""),
                 "uuid": str(child.get("uuid") or ""),
+                "signatures": _wipefs_signatures(partition_authority),
             })
     mounts = _normalize_mounts(disk.get("mountpoints"))
     mounts += [m for child in children for m in _normalize_mounts(child.get("mountpoints"))]
@@ -1243,7 +1603,7 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         "logical_sector_size": logical_sector_size,
         "mountpoints": mounts,
         "mounted": bool(mounts),
-        "signatures": [],
+        "signatures": _wipefs_signatures(authority_path),
         "partitions": parts,
     }
 
@@ -1273,11 +1633,17 @@ def _verify_protected_by_id_aliases(contract: dict[str, Any]) -> None:
 
 def observe_live(contract: dict[str, Any]) -> dict[str, Any]:
     _verify_protected_by_id_aliases(contract)
+    root_source = _findmnt("/")
+    efi_source = _findmnt("/boot/efi")
+    efi_content_sha256 = _directory_content_sha256(Path("/boot/efi"))
+    if _findmnt("/boot/efi") != efi_source:
+        raise ProductionInstallError("protected EFI mount changed while hashing content")
     return {
         "target": _disk_observation(contract["target_identity"]["exact_by_id"]),
         "protected": _disk_observation(contract["protected_disks"][0]["by_id"]),
-        "root_source": _findmnt("/"),
-        "efi_source": _findmnt("/boot/efi"),
+        "root_source": root_source,
+        "efi_source": efi_source,
+        "efi_content_sha256": efi_content_sha256,
     }
 
 
@@ -1615,8 +1981,8 @@ def restore_docker_after_apply(state: dict[str, Any]) -> None:
         if missing:
             _run(["docker", "start", *missing])
         restored_ids = set(_running_docker_container_ids())
-        if any(container_id not in restored_ids for container_id in running_ids):
-            raise ProductionInstallError("Docker pre-apply container state restore could not be verified")
+        if restored_ids != set(running_ids):
+            raise ProductionInstallError("Docker pre-apply container state restore could not be verified exactly")
     if not state["service_active"] and _systemd_active("docker.service"):
         _run(["systemctl", "stop", "docker.service"])
     if not state["socket_active"] and _systemd_active("docker.socket"):
@@ -2191,15 +2557,17 @@ def create_sealed_nix_store(plan: dict[str, Any], artifact: dict[str, Any]) -> d
         verify_sealed_nix_structure(artifact, seal)
         return seal
     except BaseException:
-        if mounted:
-            _run(["/usr/bin/umount", str(expected["mountpoint"])], check=False)
-        if loop_device is not None:
-            _run(["/usr/sbin/losetup", "-d", loop_device], check=False)
-        if HOST_NIX_ROOT.exists() and not HOST_NIX_ROOT.is_symlink():
-            _run(["/usr/bin/rm", "-rf", "--", str(HOST_NIX_ROOT)], check=False)
-        if immutable:
-            _run(["/usr/bin/chattr", "-i", str(expected["image"])], check=False)
-        _run(["/usr/bin/rm", "-rf", "--", str(root)], check=False)
+        partial_seal = {
+            "seal_root": str(root),
+            "image": str(expected["image"]),
+            "loop_device": loop_device,
+        }
+        try:
+            cleanup_sealed_nix_store(partial_seal)
+        except BaseException as cleanup_exc:
+            raise ProductionInstallError(
+                "production Nix seal creation cleanup could not be verified"
+            ) from cleanup_exc
         raise
 
 
@@ -2219,7 +2587,11 @@ def cleanup_sealed_nix_store(seal: dict[str, Any]) -> None:
     if _mountpoint_is_mounted(str(mountpoint)):
         if _run(["/usr/bin/umount", str(mountpoint)], check=False).returncode != 0:
             failures.append("umount")
-    if isinstance(loop_device, str) and re.fullmatch(r"/dev/loop[0-9]+", loop_device):
+    if (
+        not failures
+        and isinstance(loop_device, str)
+        and re.fullmatch(r"/dev/loop[0-9]+", loop_device)
+    ):
         if _run(["/usr/sbin/losetup", "-d", loop_device], check=False).returncode != 0:
             failures.append("losetup")
     if not failures and (HOST_NIX_ROOT.exists() or HOST_NIX_ROOT.is_symlink()):
@@ -2388,6 +2760,7 @@ def execute_plan(
     completed_effects: list[str] = []
     credential_staging_attempted = False
     credential_staged = False
+    private_storage_identity_staged = False
     teardown_failures: list[str] = []
     teardown_exception: BaseException | None = None
     failure: BaseException | None = None
@@ -2433,6 +2806,10 @@ def execute_plan(
             for command in plan["commands"]:
                 verify_docker_quiesced()
                 verify_sealed_nix_structure(artifact, seal)
+                if command["effect"] == "nixos-install":
+                    stage_private_storage_identity(mount_root=MOUNT_ROOT, contract=contract)
+                    private_storage_identity_staged = True
+                    completed_effects.append("private-storage-identity-staged")
                 mutation_attempted = True
                 _run(
                     command["argv"],
@@ -2441,7 +2818,14 @@ def execute_plan(
                 completed_effects.append(command["effect"])
                 if command["effect"] == "udev-settle":
                     verify_target_partition_bindings(contract)
+                if command["effect"] == "luks-format":
+                    verify_private_luks_uuid(contract)
+            if not private_storage_identity_staged:
+                raise ProductionInstallError("private storage identity was not staged before installation")
             verify_installed_target(artifact)
+            bind_private_boot_entries(mount_root=MOUNT_ROOT, contract=contract)
+            completed_effects.append("private-boot-entries-bound")
+            verify_private_boot_binding(mount_root=MOUNT_ROOT, contract=contract)
             verify_persist_mount(
                 MOUNT_ROOT, f"/dev/mapper/{contract['topology']['luks']['mapper_name']}"
             )
@@ -2553,6 +2937,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm")
     parser.add_argument("--credential-hash-file", type=Path)
     parser.add_argument("--write-plan", type=Path)
+    parser.add_argument("--write-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         artifact_path = args.install_artifact.resolve()
@@ -2597,10 +2982,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.credential_hash_file is None:
             raise ProductionInstallError("--apply requires --credential-hash-file")
-        execute_plan(
+        if args.write_receipt is None:
+            raise ProductionInstallError("--apply requires --write-receipt")
+        receipt = execute_plan(
             plan, contract=contract, confirmation=args.confirm,
             credential_hash_file=args.credential_hash_file,
         )
+        write_private_receipt(args.write_receipt.resolve(), receipt)
         print(json.dumps({
             "schema_version": 1,
             "kind": "heim_pc.nixos_production_install_completed",

@@ -776,6 +776,25 @@ class ManagedBuildTests(unittest.TestCase):
                     command, repo, "nixos-production-prepare"
                 )
 
+    def test_nix_profile_rejects_token_smuggled_python_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            script = repo / "scripts/nixos_production_prepare.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fixture\n", encoding="utf-8")
+            output = root / "artifact.json"
+            command = [
+                sys.executable, "-c", "print('payload')", str(script),
+                "--managed-worker", "--repo", str(repo),
+                "--output", str(output), "--source-authority", "proof-only",
+            ]
+            self.assertFalse(managed_build._is_nix_prepare_worker(command))
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "exact canonical managed-worker argv"):
+                managed_build._require_nix_prepare_worker_binding(
+                    command, repo, "nixos-production-prepare"
+                )
+
     def test_real_storage_inventory_scan_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

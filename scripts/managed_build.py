@@ -327,8 +327,17 @@ def _is_nix_prepare_worker(command: Sequence[str]) -> bool:
     if not command or Path(str(command[0])).name not in {"python", "python3"}:
         return False
     args = [str(item) for item in command[1:]]
-    scripts = [item for item in args if Path(item).name == "nixos_production_prepare.py"]
-    return len(scripts) == 1 and "--managed-worker" in args and "--output" in args
+    return (
+        len(args) == 8
+        and Path(args[0]).name == "nixos_production_prepare.py"
+        and args[1] == "--managed-worker"
+        and args[2] == "--repo"
+        and bool(args[3])
+        and args[4] == "--output"
+        and bool(args[5])
+        and args[6] == "--source-authority"
+        and args[7] in {"proof-only", "merged-main"}
+    )
 
 
 def classify_tool(
@@ -546,37 +555,33 @@ def _require_nix_prepare_worker_binding(
     if profile != "nixos-production-prepare":
         raise ManagedBuildError("managed Nix is restricted to the nixos-production-prepare profile")
     args = [str(item) for item in command[1:]]
-    scripts = [item for item in args if Path(item).name == "nixos_production_prepare.py"]
     expected_script = root / "scripts" / "nixos_production_prepare.py"
     if (
-        len(scripts) != 1
-        or not Path(scripts[0]).is_absolute()
-        or os.path.normpath(scripts[0]) != scripts[0]
-        or Path(scripts[0]) != expected_script
+        len(args) != 8
+        or args[1] != "--managed-worker"
+        or args[2] != "--repo"
+        or args[4] != "--output"
+        or args[6] != "--source-authority"
+    ):
+        raise ManagedBuildError("managed Nix worker requires the exact canonical managed-worker argv")
+    script_value = args[0]
+    if (
+        not Path(script_value).is_absolute()
+        or os.path.normpath(script_value) != script_value
+        or Path(script_value) != expected_script
     ):
         raise ManagedBuildError("managed Nix worker must use the canonical repository prepare script")
-    if args.count("--managed-worker") != 1:
-        raise ManagedBuildError("managed Nix worker marker is missing or ambiguous")
-
-    def option_value(option: str) -> str:
-        if args.count(option) != 1:
-            raise ManagedBuildError(f"managed Nix worker requires exactly one {option}")
-        index = args.index(option)
-        if index + 1 >= len(args) or not args[index + 1]:
-            raise ManagedBuildError(f"managed Nix worker {option} is missing its value")
-        return args[index + 1]
-
-    repo_value = option_value("--repo")
+    repo_value = args[3]
     if (
         not Path(repo_value).is_absolute()
         or os.path.normpath(repo_value) != repo_value
         or Path(repo_value) != root
     ):
         raise ManagedBuildError("managed Nix worker repository does not match the managed repository")
-    output_value = option_value("--output")
+    output_value = args[5]
     if not Path(output_value).is_absolute() or os.path.normpath(output_value) != output_value:
         raise ManagedBuildError("managed Nix worker output must be an absolute canonical path")
-    if option_value("--source-authority") not in {"proof-only", "merged-main"}:
+    if args[7] not in {"proof-only", "merged-main"}:
         raise ManagedBuildError("managed Nix worker source authority is invalid")
 
 

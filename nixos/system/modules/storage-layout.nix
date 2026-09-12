@@ -1,4 +1,4 @@
-{ lib, ... }:
+{ lib, pkgs, ... }:
 let
   contract = builtins.fromJSON (builtins.readFile ../../production/contract-v1.json);
   topology = contract.topology;
@@ -26,19 +26,125 @@ let
     };
   }) topology.btrfs.subvolumes);
 
-  # PARTLABELs describe public topology. Exact PARTUUIDs remain private and
-  # are enforced by the installer before this closure is ever booted.
-  partitionDevice = partition: "/dev/disk/by-partlabel/${partition.label}";
+  privateStorageTool = pkgs.writeShellApplication {
+    name = "heim-pc-private-storage";
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux pkgs.gnugrep ];
+    text = ''
+      set -euo pipefail
+      identity=/persist/heim-pc/private-storage-identity.env
+      mapper_name=${lib.escapeShellArg mapperName}
+      fail() { printf '%s\n' "heim-pc private storage: $*" >&2; exit 1; }
 
-  surfaceFileSystems = {
-    ${efi.mountpoint} = {
-      device = partitionDevice efi;
-      fsType = efi.filesystem;
-    };
-    ${recovery.mountpoint} = {
-      device = partitionDevice recovery;
-      fsType = recovery.filesystem;
-    };
+      load_identity() {
+        [[ -f "$identity" && ! -L "$identity" ]] || fail "private identity is missing or unsafe"
+        [[ "$(stat -c '%u:%g:%a' -- "$identity")" == "0:0:600" ]] || fail "private identity ownership/mode mismatch"
+        schema_version= efi_partuuid= recovery_partuuid= encrypted_partuuid= file_mapper_name=
+        seen_schema=0; seen_efi=0; seen_recovery=0; seen_encrypted=0; seen_mapper=0
+        while IFS='=' read -r key value; do
+          [[ -n "$key" && -n "$value" ]] || fail "private identity contains an empty field"
+          case "$key" in
+            schema_version) (( seen_schema == 0 )) || fail "duplicate schema_version"; schema_version="$value"; seen_schema=1 ;;
+            efi_partuuid) (( seen_efi == 0 )) || fail "duplicate efi_partuuid"; efi_partuuid="$value"; seen_efi=1 ;;
+            recovery_partuuid) (( seen_recovery == 0 )) || fail "duplicate recovery_partuuid"; recovery_partuuid="$value"; seen_recovery=1 ;;
+            encrypted_partuuid) (( seen_encrypted == 0 )) || fail "duplicate encrypted_partuuid"; encrypted_partuuid="$value"; seen_encrypted=1 ;;
+            mapper_name) (( seen_mapper == 0 )) || fail "duplicate mapper_name"; file_mapper_name="$value"; seen_mapper=1 ;;
+            *) fail "unexpected private identity field" ;;
+          esac
+        done < "$identity"
+        [[ "$schema_version" == 1 && "$file_mapper_name" == "$mapper_name" ]] || fail "private identity schema/mapper mismatch"
+        uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        [[ "$efi_partuuid" =~ $uuid_re && "$recovery_partuuid" =~ $uuid_re && "$encrypted_partuuid" =~ $uuid_re ]] || fail "private PARTUUID is invalid"
+        [[ "$efi_partuuid" != "$recovery_partuuid" && "$efi_partuuid" != "$encrypted_partuuid" && "$recovery_partuuid" != "$encrypted_partuuid" ]] || fail "private PARTUUIDs are not unique"
+      }
+
+      resolve_partuuid() {
+        local uuid="$1" link real
+        link="/dev/disk/by-partuuid/$uuid"
+        [[ -L "$link" ]] || fail "private PARTUUID alias is missing"
+        real="$(readlink -f -- "$link")"
+        [[ -b "$real" ]] || fail "private PARTUUID alias does not resolve to a block device"
+        printf '%s\n' "$real"
+      }
+
+      ensure_mount() {
+        local target="$1" uuid="$2" fs="$3" expected current
+        expected="$(resolve_partuuid "$uuid")"
+        install -d -m 0755 -- "$target"
+        current="$(findmnt -rn -o SOURCE -T "$target" 2>/dev/null || true)"
+        if [[ -n "$current" ]]; then
+          [[ "$(readlink -f -- "$current")" == "$expected" ]] || fail "$target is mounted from the wrong device"
+          return 0
+        fi
+        mount -t "$fs" "/dev/disk/by-partuuid/$uuid" "$target"
+        current="$(findmnt -rn -o SOURCE -T "$target")"
+        [[ "$(readlink -f -- "$current")" == "$expected" ]] || fail "$target mount identity could not be verified"
+      }
+
+      patch_entries() {
+        load_identity
+        local boot_source expected_boot entry options_count options expected_token token seen tmp persist_target
+        expected_boot="$(resolve_partuuid "$efi_partuuid")"
+        boot_source="$(findmnt -rn -o SOURCE -T /boot 2>/dev/null || true)"
+        [[ -n "$boot_source" && "$(readlink -f -- "$boot_source")" == "$expected_boot" ]] || fail "/boot is not the private EFI partition"
+        expected_token="rd.luks.name=$encrypted_partuuid=$mapper_name"
+        shopt -s nullglob
+        entries=(/boot/loader/entries/*.conf)
+        found=0
+        tmp=
+        cleanup_tmp() { [[ -z "$tmp" ]] || rm -f -- "$tmp"; }
+        trap cleanup_tmp EXIT
+        for entry in "''${entries[@]}"; do
+          [[ -f "$entry" && ! -L "$entry" ]] || fail "loader entry is unsafe"
+          grep -qx 'sort-key nixos' "$entry" || continue
+          found=$((found + 1))
+          options_count="$(grep -c '^options ' "$entry" || true)"
+          [[ "$options_count" == 1 ]] || fail "NixOS loader entry must contain exactly one options line"
+          options="$(grep '^options ' "$entry")"
+          read -r -a words <<< "''${options#options }"
+          kept=(); seen=0
+          for token in "''${words[@]}"; do
+            if [[ "$token" == rd.luks.name=*="${mapperName}" ]]; then
+              [[ "$token" == "$expected_token" && "$seen" == 0 ]] || fail "conflicting private LUKS token in loader entry"
+              seen=1
+            else
+              kept+=("$token")
+            fi
+          done
+          new_options="options"
+          for token in "''${kept[@]}"; do new_options+=" $token"; done
+          new_options+=" $expected_token"
+          tmp="$(mktemp --tmpdir="$(dirname -- "$entry")" .heim-pc-loader.XXXXXX)"
+          chmod --reference="$entry" "$tmp"
+          chown --reference="$entry" "$tmp"
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == options\ * ]]; then printf '%s\n' "$new_options"; else printf '%s\n' "$line"; fi
+          done < "$entry" > "$tmp"
+          sync -f "$tmp"
+          mv -T -- "$tmp" "$entry"
+          tmp=
+        done
+        (( found > 0 )) || fail "no NixOS systemd-boot entries found"
+        sync -f /boot/loader/entries
+        trap - EXIT
+      }
+
+      case "''${1:-}" in
+        mount-surfaces)
+          load_identity
+          ensure_mount /boot "$efi_partuuid" vfat
+          ensure_mount /recovery "$recovery_partuuid" ext4
+          ;;
+        patch-loader-entries)
+          if [[ ! -e "$identity" ]]; then
+            persist_target="$(findmnt -rn -o TARGET -T /persist 2>/dev/null || true)"
+            [[ "$persist_target" != /persist ]] || fail "private identity is missing from mounted /persist"
+            exit 0
+          fi
+          patch_entries
+          ;;
+        *) fail "expected mount-surfaces or patch-loader-entries" ;;
+      esac
+    '';
   };
 in
 {
@@ -65,12 +171,24 @@ in
     }
   ];
 
-  boot.initrd.luks.devices.${mapperName}.device = partitionDevice encrypted;
+  boot.initrd.systemd.enable = true;
+  boot.initrd.luks.forceLuksSupportInInitrd = true;
+  fileSystems = lib.mkForce btrfsFileSystems;
 
-  fileSystems = lib.mkForce (btrfsFileSystems // surfaceFileSystems);
+  systemd.services.heim-pc-private-storage-mounts = {
+    description = "Mount Heim-PC private EFI and recovery surfaces";
+    requiresMountsFor = [ "/persist" ];
+    after = [ "local-fs.target" ];
+    before = [ "multi-user.target" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${privateStorageTool}/bin/heim-pc-private-storage mount-surfaces";
+    };
+  };
 
-  # This closure describes only the isolated production boot/storage topology.
-  # Runtime target selection remains a separate exact by-id gate; this module
-  # cannot partition/format disks or mutate EFI variables by itself.
+  boot.loader.systemd-boot.extraInstallCommands =
+    "${privateStorageTool}/bin/heim-pc-private-storage patch-loader-entries";
   boot.loader.efi.canTouchEfiVariables = false;
 }

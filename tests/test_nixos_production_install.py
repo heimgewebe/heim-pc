@@ -81,6 +81,8 @@ def managed_attestation_verification(artifact, receipt=None):
         "attestation_bundle_sha256": "6" * 64,
         "verifier_argv_sha256": "7" * 64,
         "predicate_sha256": "8" * 64,
+        "candidate_receipt_sha256": "d" * 64,
+        "candidate_managed_receipt_sha256": selected_receipt["managed_receipt_sha256"],
         "independent_artifact_sha256": "9" * 64,
         "independent_receipt_sha256": "a" * 64,
         "independent_managed_receipt_sha256": "b" * 64,
@@ -164,16 +166,17 @@ def observation():
             "logical_sector_size": 512,
             "mountpoints": ["/boot/efi", "/recovery", "/"],
             "mounted": True,
-            "signatures": [],
+            "signatures": [{"device": WD, "offset": "0x200", "type": "gpt", "uuid": "99999999-9999-4999-8999-999999999999"}],
             "partitions": [
-                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "start_sector": 2048, "end_sector": 2095102, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "ESP", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN1-0001"},
-                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "start_sector": 2095103, "end_sector": 10483709, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "RECOVERY", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN2-0002"},
-                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "start_sector": 10483710, "end_sector": 3898634408, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "POP_ROOT", "partflags": "0x0", "fstype": "ext4", "uuid": "SYNTH-ROOT-UUID"},
-                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "start_sector": 3898634409, "end_sector": 3907023015, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "type_guid": "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "partlabel": "SWAP", "partflags": "0x0", "fstype": "swap", "uuid": "SYNTH-SWAP-UUID"},
+                {"number": 1, "path": "/dev/nvme1n1p1", "size_bytes": 1071644160, "start_sector": 2048, "end_sector": 2095102, "partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "ESP", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN1-0001", "signatures": [{"device": f"{WD}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN1-0001"}]},
+                {"number": 2, "path": "/dev/nvme1n1p2", "size_bytes": 4294966784, "start_sector": 2095103, "end_sector": 10483709, "partuuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "RECOVERY", "partflags": "0x0", "fstype": "vfat", "uuid": "SYN2-0002", "signatures": [{"device": f"{WD}-part2", "offset": "0x100", "type": "vfat", "uuid": "SYN2-0002"}]},
+                {"number": 3, "path": "/dev/nvme1n1p3", "size_bytes": 1990733157888, "start_sector": 10483710, "end_sector": 3898634408, "partuuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc3", "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "POP_ROOT", "partflags": "0x0", "fstype": "ext4", "uuid": "SYNTH-ROOT-UUID", "signatures": [{"device": f"{WD}-part3", "offset": "0x100", "type": "ext4", "uuid": "SYNTH-ROOT-UUID"}]},
+                {"number": 4, "path": "/dev/nvme1n1p4", "size_bytes": 4294966784, "start_sector": 3898634409, "end_sector": 3907023015, "partuuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd4", "type_guid": "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "partlabel": "SWAP", "partflags": "0x0", "fstype": "swap", "uuid": "SYNTH-SWAP-UUID", "signatures": [{"device": f"{WD}-part4", "offset": "0x100", "type": "swap", "uuid": "SYNTH-SWAP-UUID"}]},
             ],
         },
         "root_source": "/dev/nvme1n1p3",
         "efi_source": "/dev/nvme1n1p1",
+        "efi_content_sha256": "e" * 64,
     }
 
 
@@ -246,6 +249,10 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
     monkeypatch.setattr(prod, "cleanup_verifier_image_archive", lambda _metadata: log.append("archive-cleanup"))
     monkeypatch.setattr(prod, "cleanup_sealed_nix_store", lambda _seal: log.append("seal-cleanup"))
     monkeypatch.setattr(prod, "restore_docker_after_apply", lambda _state: log.append("docker-restore"))
+    monkeypatch.setattr(prod, "stage_private_storage_identity", lambda **kwargs: log.append("private-identity-stage") or {"staged": True})
+    monkeypatch.setattr(prod, "verify_private_luks_uuid", lambda _contract: log.append("private-luks-verify"))
+    monkeypatch.setattr(prod, "bind_private_boot_entries", lambda **kwargs: log.append("private-loader-bind"))
+    monkeypatch.setattr(prod, "verify_private_boot_binding", lambda **kwargs: log.append("private-boot-verify"))
     return log
 
 
@@ -383,6 +390,40 @@ def test_protected_filesystem_signature_mismatch_is_rejected():
     with pytest.raises(prod.ProductionInstallError, match="fingerprint mismatch"):
         prod.validate_preflight(obs, CONTRACT)
 
+def test_protected_signature_and_efi_content_are_bound_into_fingerprint():
+    baseline = prod.validate_preflight(observation(), CONTRACT)["protected"]
+    changed_partition = observation()
+    changed_partition["protected"]["partitions"][0]["signatures"][0]["offset"] = "0x101"
+    changed_disk = observation()
+    changed_disk["protected"]["signatures"][0]["offset"] = "0x201"
+    changed_efi = observation()
+    changed_efi["efi_content_sha256"] = "f" * 64
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_partition, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_disk, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_efi, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+
+
+def test_protected_efi_content_digest_changes_with_bytes_and_rejects_symlinks(tmp_path):
+    root = tmp_path / "efi"
+    nested = root / "EFI" / "BOOT"
+    nested.mkdir(parents=True)
+    image = nested / "BOOTX64.EFI"
+    image.write_bytes(b"first")
+    first = prod._directory_content_sha256(root)
+    image.write_bytes(b"second")
+    second = prod._directory_content_sha256(root)
+    assert first != second
+    link = root / "unsafe-link"
+    link.symlink_to(image)
+    with pytest.raises(prod.ProductionInstallError, match="unsafe file entries"):
+        prod._directory_content_sha256(root)
+
+
+def test_signature_inventory_rejects_nested_or_ambiguous_values():
+    with pytest.raises(prod.ProductionInstallError, match="signature inventory is invalid"):
+        prod._normalize_signature_records([{"type": "ext4", "nested": {"bad": True}}], "test")
+
+
 def test_plan_has_exact_partition_guids_and_never_mutates_wd():
     compiled = plan()
     commands = compiled["commands"]
@@ -408,8 +449,53 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert crypt in by_effect["luks-open"]["argv"]
     assert f"/dev/disk/by-partuuid/{PARTUUIDS[0]}" not in by_effect["efi-filesystem"]["argv"]
     assert by_effect["luks-format"]["secret_binding"] == "luks-passphrase-v1"
+    assert by_effect["luks-format"]["argv"][by_effect["luks-format"]["argv"].index("--uuid") + 1] == PARTUUIDS[2]
     assert by_effect["luks-open"]["secret_binding"] == "luks-passphrase-v1"
     assert compiled["partition_binding_verification_required"] is True
+
+
+def test_private_storage_identity_and_loader_entry_are_bound_create_only(monkeypatch, tmp_path):
+    (tmp_path / "persist").mkdir()
+    result = prod.stage_private_storage_identity(mount_root=str(tmp_path), contract=CONTRACT)
+    identity = tmp_path / prod.PRIVATE_STORAGE_IDENTITY_RELATIVE
+    assert result["staged"] is True
+    assert identity.stat().st_mode & 0o777 == 0o600
+    assert identity.read_text() == (
+        "schema_version=1\n"
+        f"efi_partuuid={PARTUUIDS[0]}\n"
+        f"recovery_partuuid={PARTUUIDS[1]}\n"
+        f"encrypted_partuuid={PARTUUIDS[2]}\n"
+        "mapper_name=heimpc-nixos-crypt\n"
+    )
+    with pytest.raises(prod.ProductionInstallError, match="refuses existing"):
+        prod.stage_private_storage_identity(mount_root=str(tmp_path), contract=CONTRACT)
+    entries = tmp_path / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    entry = entries / "nixos-generation-1.conf"
+    entry.write_text("title NixOS\nsort-key nixos\nlinux /EFI/nixos/kernel.efi\noptions quiet root=/dev/mapper/heimpc-nixos-crypt\n")
+    prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
+    expected = f"rd.luks.name={PARTUUIDS[2]}=heimpc-nixos-crypt"
+    assert entry.read_text().count(expected) == 1
+    class Result:
+        stdout = (PARTUUIDS[2] + "\n").encode()
+        returncode = 0
+        stderr = b""
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    prod.verify_private_boot_binding(mount_root=str(tmp_path), contract=CONTRACT)
+
+
+def test_loader_entry_rejects_conflicting_private_luks_token(tmp_path):
+    (tmp_path / "persist").mkdir()
+    prod.stage_private_storage_identity(mount_root=str(tmp_path), contract=CONTRACT)
+    entries = tmp_path / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    entry = entries / "nixos-generation-1.conf"
+    entry.write_text(
+        "title NixOS\nsort-key nixos\noptions "
+        "rd.luks.name=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa=heimpc-nixos-crypt\n"
+    )
+    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS"):
+        prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
 
 
 def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
@@ -420,7 +506,7 @@ def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
         f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
         f"{SYSTEM_PATH}/sw/bin/nixos-install",
         "--root",
-        "/mnt",
+        prod.MOUNT_ROOT,
         "--system",
         SYSTEM_PATH,
         "--no-channel-copy",
@@ -628,6 +714,7 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
         "--identity-contract", str(tmp_path / "private-identity.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(tmp_path / "receipt.json"),
     ]) == 3
     captured = capsys.readouterr()
     assert captured.err == prod.POST_MUTATION_PUBLIC_MESSAGES["protected-fallback-changed"] + "\n"
@@ -658,6 +745,7 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
         "--identity-contract", str(tmp_path / "private-identity.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(tmp_path / "receipt.json"),
     ]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
@@ -667,6 +755,11 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     }
     assert "super-secret-material" not in captured.out
     assert "super-secret-material" not in captured.err
+    receipt_path = tmp_path / "receipt.json"
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(receipt_path.read_text()) == {"secret": "super-secret-material"}
+    with pytest.raises(prod.ProductionInstallError, match="overwrite"):
+        prod.write_private_receipt(receipt_path, {"second": True})
 
 
 def test_managed_build_receipt_rejects_noncanonical_store_root():
@@ -806,6 +899,27 @@ def test_restore_docker_fails_closed_when_pre_apply_container_stays_down(monkeyp
     assert ["docker", "start", second] in calls
 
 
+def test_restore_docker_fails_closed_on_unexpected_running_container(monkeypatch):
+    first = "a" * 64
+    extra = "c" * 64
+    inventories = iter([[first, extra], [first, extra]])
+    calls = []
+    monkeypatch.setattr(prod, "_running_docker_container_ids", lambda: next(inventories))
+    monkeypatch.setattr(prod, "_systemd_active", lambda _unit: True)
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: calls.append(argv) or Result())
+    with pytest.raises(prod.ProductionInstallError, match="restore could not be verified exactly"):
+        prod.restore_docker_after_apply({
+            "schema_version": 1, "kind": "heim_pc.nixos_docker_quiesce_state",
+            "service_active": True, "socket_active": True,
+            "running_container_ids": [first], "running_pid_count": 1,
+        })
+    assert not any(argv[:2] == ["docker", "stop"] for argv in calls)
+
+
 def test_docker_container_inventory_rejects_short_or_duplicate_ids():
     with pytest.raises(prod.ProductionInstallError, match="inventory is invalid"):
         prod._validate_docker_container_ids(["short"])
@@ -822,7 +936,7 @@ def test_verify_docker_quiesced_rejects_surviving_moby_shim(monkeypatch):
 
 def test_sealed_tool_argv_uses_exact_attested_store_path_and_no_shell():
     argv = prod._sealed_tool_argv(
-        MERGED_ARTIFACT, "nixos-install", ["--root", "/mnt", "--system", SYSTEM_PATH]
+        MERGED_ARTIFACT, "nixos-install", ["--root", prod.MOUNT_ROOT, "--system", SYSTEM_PATH]
     )
     assert argv[:3] == [
         "/usr/bin/env",
@@ -868,6 +982,55 @@ def test_seal_cleanup_keeps_image_immutable_if_unmount_is_uncertain(monkeypatch,
     with pytest.raises(prod.ProductionInstallError, match="teardown"):
         prod.cleanup_sealed_nix_store(seal)
     assert ["/usr/bin/chattr", "-i", str(image)] not in calls
+    assert image.exists()
+
+
+def test_seal_creation_cleanup_fails_closed_on_uncertain_unmount(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    base = tmp_path / "nixos-production-seals"
+    source = tmp_path / "managed-nix"
+    (source / "store").mkdir(parents=True)
+    (source / "var").mkdir()
+    fake_nix = tmp_path / "nix"
+    seal_root = base / (REVISION + "-" + "3" * 16)
+    image = seal_root / "nix.squashfs"
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "SEALED_NIX_BASE", base)
+    monkeypatch.setattr(prod, "HOST_NIX_ROOT", fake_nix)
+    monkeypatch.setattr(prod, "validate_managed_build_receipt", lambda *args, **kwargs: compiled["managed_build_receipt"])
+    monkeypatch.setattr(prod, "_sealed_nix_paths", lambda *args, **kwargs: {"seal_root": seal_root, "image": image, "mountpoint": fake_nix})
+    monkeypatch.setattr(prod, "verify_host_nix_root_absent", lambda: None)
+    monkeypatch.setattr(prod, "_managed_nix_source_root", lambda _receipt: source)
+    monkeypatch.setattr(prod, "_require_root_owned_directory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(prod, "_verify_immutable_image", lambda _path: None)
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: True)
+    monkeypatch.setattr(
+        prod, "verify_sealed_nix_structure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("synthetic seal verify failure")),
+    )
+    calls = []
+    class Result:
+        def __init__(self, returncode=0, stdout=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = b""
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "/usr/bin/mksquashfs":
+            image.write_bytes(b"seal")
+            return Result()
+        if argv[:3] == ["/usr/sbin/losetup", "--find", "--show"]:
+            return Result(stdout=b"/dev/loop7\n")
+        if argv[:2] == ["/usr/bin/umount", str(fake_nix)]:
+            return Result(returncode=1)
+        return Result()
+    monkeypatch.setattr(prod, "_run", fake_run)
+    compiled = dict(compiled, sealed_nix_image=str(image), host_nix_root=str(fake_nix))
+    with pytest.raises(prod.ProductionInstallError, match="creation cleanup could not be verified"):
+        prod.create_sealed_nix_store(compiled, MERGED_ARTIFACT)
+    assert ["/usr/sbin/losetup", "-d", "/dev/loop7"] not in calls
+    assert ["/usr/bin/chattr", "-i", str(image)] not in calls
+    assert ["/usr/bin/rm", "-rf", "--", str(seal_root)] not in calls
     assert image.exists()
 
 
@@ -1313,6 +1476,8 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
         "schema_version": 1,
         "kind": prod.MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
         "candidate_artifact_sha256": artifact_sha,
+        "candidate_receipt_sha256": "c" * 64,
+        "candidate_managed_receipt_sha256": "d" * 64,
         "independent_artifact_sha256": "9" * 64,
         "independent_receipt_sha256": "a" * 64,
         "independent_managed_receipt_sha256": "b" * 64,
@@ -1330,6 +1495,8 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
     assert summary["verified_attestation_count"] == 1
     assert summary["artifact_sha256"] == artifact_sha
     assert summary["attestation_bundle_sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+    assert summary["candidate_receipt_sha256"] == "c" * 64
+    assert summary["candidate_managed_receipt_sha256"] == "d" * 64
     assert summary["independent_managed_receipt_sha256"] == "b" * 64
     assert summary["managed_policy_sha256"] == MANAGED_POLICY_SHA256
     with pytest.raises(prod.ProductionInstallError, match="no unique verified attestation"):
@@ -1361,6 +1528,11 @@ def test_independent_rebuild_validates_remote_managed_success_and_semantic_ident
     independent["source_bundle_sha256"] = "9" * 64
     candidate_path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     independent_path.write_text(json.dumps(independent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt = managed_receipt(candidate)
+    candidate_receipt["artifact_file_sha256"] = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    candidate_receipt_path = prod.managed_build_receipt_path(candidate_path)
+    candidate_receipt_path.write_text(json.dumps(candidate_receipt, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt_path.chmod(0o600)
     receipt = managed_receipt(independent)
     receipt["artifact_file_sha256"] = hashlib.sha256(independent_path.read_bytes()).hexdigest()
     receipt_path = prod.managed_build_receipt_path(independent_path)
@@ -1369,9 +1541,12 @@ def test_independent_rebuild_validates_remote_managed_success_and_semantic_ident
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda _source: MANAGED_POLICY_SHA256)
 
     result = prod.verify_independent_rebuild_candidate(
-        candidate_path, independent_path, flake_source="/synthetic/source"
+        candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+        flake_source="/synthetic/source"
     )
     assert result["candidate_artifact_sha256"] == hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    assert result["candidate_receipt_sha256"] == hashlib.sha256(candidate_receipt_path.read_bytes()).hexdigest()
+    assert result["candidate_managed_receipt_sha256"] == candidate_receipt["managed_receipt_sha256"]
     assert result["independent_receipt_sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
     assert result["excluded_nonsemantic_fields"] == ["source_bundle_sha256"]
 
@@ -1380,7 +1555,8 @@ def test_independent_rebuild_validates_remote_managed_success_and_semantic_ident
     independent_path.write_text(json.dumps(changed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(prod.ProductionInstallError, match="closure_manifest_sha256"):
         prod.verify_independent_rebuild_candidate(
-            candidate_path, independent_path, flake_source="/synthetic/source"
+            candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+            flake_source="/synthetic/source"
         )
 
 
@@ -1410,6 +1586,10 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     workflow = (ROOT / ".github" / "workflows" / "nixos-production-build-attest.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     assert "artifact_b64:" in workflow
+    assert "managed_receipt_b64:" in workflow
+    assert "candidate-install-artifact.json.managed-build-receipt.json" in workflow
+    assert "load_managed_build_receipt" in workflow
+    assert "candidate_receipt_path=" in workflow
     assert "pull_request:" not in workflow
     assert "runs-on: ubuntu-latest" in workflow
     assert "id-token: write" in workflow

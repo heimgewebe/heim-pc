@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d1cc8c5815e860d91a5ea035303299be3cd72445eb077b6a4846c96d6366e37b"
+SOURCE_SNAPSHOT_SHA256 = "0ebb96a0b667e3d3d35575d609f7e40a199b98b57d14f4c689d193d58de38eae"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -187,8 +187,14 @@ class T(unittest.TestCase):
         self.assertIn("./modules/storage-layout.nix", flake)
         self.assertIn("../../production/contract-v1.json", layout)
         self.assertNotIn("../../rehearsal/contract-v1.json", layout)
-        self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
-        self.assertIn("/dev/disk/by-partlabel/${partition.label}", layout)
+        self.assertNotIn("boot.initrd.luks.devices.${mapperName}", layout)
+        self.assertNotIn("/dev/disk/by-partlabel/${partition.label}", layout)
+        self.assertIn("boot.initrd.luks.forceLuksSupportInInitrd = true;", layout)
+        self.assertIn("private-storage-identity.env", layout)
+        self.assertIn("/dev/disk/by-partuuid/", layout)
+        self.assertIn("patch-loader-entries", layout)
+        self.assertIn("heim-pc-private-storage-mounts", layout)
+        self.assertIsNone(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", layout))
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)
         self.assertIn("console.useXkbConfig = true;", host)
