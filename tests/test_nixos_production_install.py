@@ -560,6 +560,19 @@ def test_firstboot_staging_refuses_existing_secret(tmp_path):
         prod.stage_firstboot_credentials(mount_root=str(tmp_path), source_revision=REVISION, hash_bytes=password_hash)
 
 
+def test_plan_summary_is_constant_and_never_echoes_plan_payload():
+    summary = prod.plan_summary({"secret": "super-secret-material", "private": {"device": "hidden"}})
+    assert summary == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_plan_summary",
+        "execution_authorized": False,
+        "private_plan_redacted": True,
+        "private_hardware_identity_redacted": True,
+    }
+    assert "super-secret-material" not in json.dumps(summary)
+    assert "hidden" not in json.dumps(summary)
+
+
 def test_plan_contains_no_secret_material():
     serialized = json.dumps(plan())
     assert "passphrase" not in serialized.lower() or "luks-passphrase-v1" in serialized

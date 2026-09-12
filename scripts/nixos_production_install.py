@@ -992,20 +992,12 @@ def compile_plan(
     return {**material, "plan_sha256": sha256_json(material)}
 
 
-def plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
+def plan_summary(_plan: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "kind": "heim_pc.nixos_production_install_plan_summary",
-        "plan_sha256": plan["plan_sha256"],
-        "source_revision": plan["source_revision"],
-        "source_authority": plan["source_authority"],
-        "system_path": plan["system_path"],
-        "managed_build_receipt_sha256": plan["managed_build_receipt_sha256"],
-        "managed_build_attestation_required": plan["managed_build_attestation_required"],
-        "managed_build_attestation_sha256": plan["managed_build_attestation_sha256"],
-        "trusted_build_seal_required": plan["trusted_build_seal_required"],
-        "docker_quiesce_required": plan["docker_quiesce_required"],
         "execution_authorized": False,
+        "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
     }
 
