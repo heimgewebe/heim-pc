@@ -3665,6 +3665,27 @@ def _persist_completion_failure_receipt(
         raise error from close_exc
 
 
+def _completion_recovery_async_baseexception(
+    exc: BaseException,
+) -> BaseException | None:
+    """Return a deferred non-Exception BaseException from an explicit cause chain.
+
+    Recovery helpers deliberately wrap failures with ``raise ... from ...``.  By
+    following only explicit causes, the outer recovery loop can distinguish a
+    KeyboardInterrupt/SystemExit that happened *during recovery* from the
+    original exception context that caused recovery to start.
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        if not isinstance(current, Exception):
+            return current
+        cause = current.__cause__
+        current = cause if isinstance(cause, BaseException) else None
+    return None
+
+
 def _finalize_apply_completion(
     *,
     plan: dict[str, Any],
@@ -3698,56 +3719,76 @@ def _finalize_apply_completion(
             )
         _close_private_receipt_reservation(receipt_reservation)
     except BaseException as phase_exc:
-        freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
-        receipt_owned = "fd" in receipt_reservation
-        parent_owned = "parent_fd" in receipt_reservation
-        if not freeze_owned and not receipt_owned:
-            # The protected filesystem is released and the exact receipt FD has
-            # been surrendered. A remaining parent directory FD is cleanup only:
-            # there is no longer safe authority to rewrite the receipt inode.
-            if parent_owned:
-                try:
-                    _close_private_receipt_reservation(receipt_reservation)
-                except BaseException:
-                    pass
-            if execution_error is not None:
-                raise execution_error from phase_exc
-            if isinstance(phase_exc, PostMutationInstallError):
-                raise phase_exc
-            return
-
-        recovery_release_error = release_error
-        if recovery_release_error is None and freeze_owned:
-            recovery_release_error = _release_handed_off_protected_efi(
-                freeze_handoff
-            )
-
-        if recovery_release_error is not None:
-            completion_error = _protected_efi_release_post_mutation_error(
-                recovery_release_error, private_evidence=evidence
-            )
-        elif execution_error is not None:
-            completion_error = execution_error
-        elif isinstance(phase_exc, PostMutationInstallError):
-            completion_error = phase_exc
-        else:
-            completion_error = PostMutationInstallError(
-                "private-receipt-finalization-incomplete",
-                private_evidence=evidence,
-            )
-
-        _persist_completion_failure_receipt(
-            plan=plan,
-            artifact=artifact,
-            receipt_reservation=receipt_reservation,
-            error=completion_error,
-        )
-        if "parent_fd" in receipt_reservation:
+        deferred_recovery_interrupt: BaseException | None = None
+        completion_error: PostMutationInstallError | None = None
+        while True:
             try:
-                _close_private_receipt_reservation(receipt_reservation)
-            except BaseException as close_exc:
-                raise completion_error from close_exc
-        raise completion_error from phase_exc
+                freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
+                receipt_owned = "fd" in receipt_reservation
+                parent_owned = "parent_fd" in receipt_reservation
+                if not freeze_owned and not receipt_owned:
+                    # The protected filesystem is released and the exact receipt
+                    # FD has been surrendered. A remaining parent directory FD is
+                    # cleanup only; there is no authority to rewrite the inode.
+                    if parent_owned:
+                        _close_private_receipt_reservation(receipt_reservation)
+                    if execution_error is not None:
+                        completion_error = execution_error
+                    elif isinstance(phase_exc, PostMutationInstallError):
+                        completion_error = phase_exc
+                    else:
+                        completion_error = None
+                    break
+
+                recovery_release_error = release_error
+                if recovery_release_error is None and freeze_owned:
+                    recovery_release_error = _release_handed_off_protected_efi(
+                        freeze_handoff
+                    )
+
+                if recovery_release_error is not None:
+                    completion_error = _protected_efi_release_post_mutation_error(
+                        recovery_release_error, private_evidence=evidence
+                    )
+                elif execution_error is not None:
+                    completion_error = execution_error
+                elif isinstance(phase_exc, PostMutationInstallError):
+                    completion_error = phase_exc
+                else:
+                    completion_error = PostMutationInstallError(
+                        "private-receipt-finalization-incomplete",
+                        private_evidence=evidence,
+                    )
+
+                _persist_completion_failure_receipt(
+                    plan=plan,
+                    artifact=artifact,
+                    receipt_reservation=receipt_reservation,
+                    error=completion_error,
+                )
+                if "parent_fd" in receipt_reservation:
+                    _close_private_receipt_reservation(receipt_reservation)
+                break
+            except BaseException as recovery_exc:
+                # Exceptions raised inside an ``except`` suite are not caught by
+                # that same handler. Defer only truly asynchronous BaseExceptions
+                # from this recovery attempt, then retry from freshly observed
+                # ownership state. Ordinary Exceptions remain terminal and are
+                # never spun on indefinitely.
+                async_exc = _completion_recovery_async_baseexception(recovery_exc)
+                if async_exc is None:
+                    raise
+                if deferred_recovery_interrupt is None:
+                    deferred_recovery_interrupt = async_exc
+                continue
+
+        if completion_error is None:
+            return
+        raise completion_error from (
+            deferred_recovery_interrupt
+            if deferred_recovery_interrupt is not None
+            else phase_exc
+        )
 
     if execution_error is not None:
         raise execution_error
