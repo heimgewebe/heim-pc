@@ -20,6 +20,14 @@
     "warning": 10737418240,
     "hard": 21474836480
   },
+  "nix_store_budget_bytes": {
+    "warning": 68719476736,
+    "hard": 96636764160
+  },
+  "nix_runtime_budget_seconds": {
+    "warning": 3600,
+    "hard": 5400
+  },
   "cargo_cache_retention": {
     "minimum_unused_seconds": 86400,
     "target_total_bytes": 32212254720,
@@ -101,6 +109,21 @@
         "PIP_CACHE_DIR": "pip",
         "PYTHONPYCACHEPREFIX": "pycache",
         "UV_CACHE_DIR": "uv"
+      }
+    },
+    "nix": {
+      "executables": [
+        "nix"
+      ],
+      "lockfiles": [
+        "flake.lock",
+        "nixos/production/contract-v1.json",
+        "scripts/nixos_production_install.py",
+        "scripts/nixos_production_prepare.py"
+      ],
+      "worktree_payloads": [],
+      "environment": {
+        "HEIM_PC_MANAGED_NIX_STORE_ROOT": "nix-store"
       }
     },
     "playwright": {

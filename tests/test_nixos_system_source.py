@@ -1,6 +1,7 @@
 from pathlib import Path
 import fcntl
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "48372a61d5a9a6d89671a8a37609d746757112725fe347f6243e244a597e22f1"
+SOURCE_SNAPSHOT_SHA256 = "18b850c1bc8d4943c64814aa9784578a232fed51838f524847fb95d1d05b5be6"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -176,16 +177,62 @@ class T(unittest.TestCase):
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)
         self.assertIn("boot.loader.efi.canTouchEfiVariables = false", host)
 
-    def test_storage_target_build_is_contract_derived_and_separate_from_prototype(self):
+    def test_storage_target_build_is_production_contract_derived_and_separate_from_rehearsal(self):
         flake = (SOURCE / "flake.nix").read_text()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         layout = (SOURCE / "modules/storage-layout.nix").read_text()
         deployment = (ROOT / "nixos" / "deployment" / "contract-v1.json").read_text()
+        production = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
         self.assertIn("nixosConfigurations.heim-pc-storage-target", flake)
         self.assertIn("./modules/storage-layout.nix", flake)
-        self.assertIn("../../rehearsal/contract-v1.json", layout)
-        self.assertIn("boot.initrd.luks.devices.${mapperName}", layout)
+        self.assertIn("../../production/contract-v1.json", layout)
+        self.assertNotIn("../../rehearsal/contract-v1.json", layout)
+        self.assertNotIn("boot.initrd.luks.devices.${mapperName}", layout)
+        self.assertNotIn("/dev/disk/by-partlabel/${partition.label}", layout)
+        self.assertIn("boot.initrd.luks.forceLuksSupportInInitrd = true;", layout)
+        self.assertIn("private-storage-identity.env", layout)
+        self.assertIn("/dev/disk/by-partuuid/", layout)
+        self.assertIn("patch-loader-entries", layout)
+        self.assertIn("heim-pc-private-storage-mounts", layout)
+        self.assertIn('--mountpoint "$target"', layout)
+        self.assertIn("--mountpoint /boot", layout)
+        self.assertIn("        else\n          rc=$?\n        fi\n        (( rc == 1 ))", layout)
+        self.assertNotIn('-T "$target"', layout)
+        self.assertNotIn("-T /boot", layout)
+        self.assertIsNone(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", layout))
         self.assertIn("fileSystems = lib.mkForce", layout)
+        self.assertIn('services.xserver.xkb.layout = "de";', host)
+        self.assertIn("console.useXkbConfig = true;", host)
+        self.assertIn('i18n.defaultLocale = "de_DE.UTF-8";', host)
+        self.assertIn('time.timeZone = "Europe/Berlin";', host)
+        self.assertEqual(production["kind"], "heim_pc.nixos_production_storage_contract")
+        self.assertEqual(production["migration_mode"], "isolated-parallel-disk")
+        self.assertTrue(production["target_identity"]["capture_required_before_mutation"])
+        self.assertFalse(production["target_identity"]["kernel_name_authoritative"])
+        self.assertNotIn("exact_by_id", production["target_identity"])
+        self.assertEqual(production["target_identity"]["exact_model"], "Seagate ZP4000GP304001")
+        self.assertNotIn("exact_serial", production["target_identity"])
+        self.assertNotIn("exact_wwn", production["target_identity"])
+        self.assertEqual(production["target_identity"]["exact_size_bytes"], 4000787030016)
+        self.assertTrue(production["mutation_policy"]["target_by_id_only"])
+        self.assertTrue(production["mutation_policy"]["kernel_device_name_forbidden"])
+        protected = production["protected_disks"]
+        self.assertEqual(len(protected), 1)
+        self.assertEqual(protected[0]["role"], "popos-fallback")
+        self.assertNotIn("serial", protected[0])
+        self.assertNotIn("wwn", protected[0])
+        self.assertNotIn("by_id", protected[0])
+        self.assertEqual(len(protected[0]["partition_table_fingerprint"]), 4)
+        self.assertTrue(all("partuuid" not in item and "uuid" not in item for item in protected[0]["partition_table_fingerprint"]))
+        self.assertEqual(production["identity_policy"]["source"], "local-private-contract")
+        self.assertTrue(production["identity_policy"]["unique_identifiers_forbidden_in_public_contract"])
+        partitions = production["topology"]["partitions"]
+        self.assertTrue(all("partuuid" not in item for item in partitions))
+        self.assertEqual(len({item["label"] for item in partitions}), 3)
+        self.assertEqual(production["topology"]["partition_identity_policy"], "private-identity-contract-assigned-partuuid")
+        self.assertTrue(all(item["label"].startswith("HEIMPC_NIXOS_") for item in partitions))
+        self.assertTrue(production["boot"]["own_esp_required"])
+        self.assertTrue(production["boot"]["shared_esp_forbidden"])
         self.assertIn(
             ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
             deployment,
