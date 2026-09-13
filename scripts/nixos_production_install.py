@@ -9,6 +9,7 @@ target by-id plus target-derived stable by-id partition paths.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import getpass
 import hashlib
@@ -1625,13 +1626,73 @@ def reserve_private_receipt(path: Path) -> dict[str, Any]:
         raise
 
 
+def _private_receipt_descriptor_owned(
+    reservation: dict[str, Any], *, key: str, device_key: str, inode_key: str,
+    label: str,
+) -> bool:
+    """Reconcile one held descriptor without ever closing a reused fd number."""
+    fd = reservation.get(key)
+    if type(fd) is not int:
+        return False
+    try:
+        current = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            if reservation.get(key) == fd:
+                reservation.pop(key, None)
+            return False
+        raise ProductionInstallError(
+            f"{label} descriptor state is unavailable"
+        ) from exc
+    if (
+        current.st_dev != reservation.get(device_key)
+        or current.st_ino != reservation.get(inode_key)
+    ):
+        # The numeric descriptor is no longer the exact resource we reserved.
+        # Never close a potentially reused descriptor on behalf of this receipt.
+        if reservation.get(key) == fd:
+            reservation.pop(key, None)
+        raise ProductionInstallError(
+            f"{label} descriptor identity changed before close"
+        )
+    return True
+
+
 def _close_private_receipt_reservation(reservation: dict[str, Any]) -> None:
-    fd = reservation.pop("fd", None)
-    parent_fd = reservation.pop("parent_fd", None)
-    if type(fd) is int:
-        os.close(fd)
-    if type(parent_fd) is int:
-        os.close(parent_fd)
+    for key, device_key, inode_key, label in (
+        ("fd", "device", "inode", "private receipt"),
+        ("parent_fd", "parent_device", "parent_inode", "private receipt directory"),
+    ):
+        if not _private_receipt_descriptor_owned(
+            reservation,
+            key=key,
+            device_key=device_key,
+            inode_key=inode_key,
+            label=label,
+        ):
+            continue
+        fd = reservation[key]
+        try:
+            os.close(fd)
+        except OSError as exc:
+            # close(2) may report an error after the kernel has already released
+            # the descriptor. Re-observe identity before deciding ownership.
+            if not _private_receipt_descriptor_owned(
+                reservation,
+                key=key,
+                device_key=device_key,
+                inode_key=inode_key,
+                label=label,
+            ):
+                continue
+            raise ProductionInstallError(
+                f"{label} descriptor could not be closed safely"
+            ) from exc
+        # Keep the ownership key through the close call itself. If an asynchronous
+        # BaseException arrives after the kernel close but before this bookkeeping,
+        # the next recovery pass will prove EBADF and retire the stale key safely.
+        if reservation.get(key) == fd:
+            reservation.pop(key, None)
 
 
 def discard_private_receipt_reservation(reservation: dict[str, Any]) -> None:
@@ -3671,7 +3732,7 @@ def _completion_recovery_async_baseexception(
     """Return a deferred non-Exception BaseException from an explicit cause chain.
 
     Recovery helpers deliberately wrap failures with ``raise ... from ...``.  By
-    following only explicit causes, the outer recovery loop can distinguish a
+    following only explicit causes, the recovery loop can distinguish a
     KeyboardInterrupt/SystemExit that happened *during recovery* from the
     original exception context that caused recovery to start.
     """
@@ -3686,6 +3747,124 @@ def _completion_recovery_async_baseexception(
     return None
 
 
+def _apply_completion_evidence(
+    receipt: dict[str, Any],
+    execution_error: PostMutationInstallError | None,
+) -> dict[str, Any]:
+    return (
+        dict(execution_error.private_evidence)
+        if execution_error is not None
+        else _post_mutation_evidence_from_success_receipt(receipt)
+    )
+
+
+def _recover_apply_completion_resources(
+    *,
+    plan: dict[str, Any],
+    artifact: dict[str, Any],
+    receipt_reservation: dict[str, Any],
+    freeze_handoff: dict[str, Any],
+    evidence: dict[str, Any],
+    execution_error: PostMutationInstallError | None,
+    phase_exc: BaseException,
+    release_error: BaseException | None = None,
+) -> None:
+    """Drive owned completion resources to a terminal state before propagating.
+
+    This routine is intentionally callable both from inside the completion helper
+    and from its caller. That keeps the boundary *entering* the helper under the
+    same ownership contract as interruptions between its internal phases.
+    """
+    deferred_recovery_interrupt: BaseException | None = None
+    completion_error: PostMutationInstallError | None = None
+    effective_release_error = release_error
+
+    while True:
+        try:
+            freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
+            receipt_owned = _private_receipt_descriptor_owned(
+                receipt_reservation,
+                key="fd",
+                device_key="device",
+                inode_key="inode",
+                label="private receipt",
+            )
+            parent_owned = _private_receipt_descriptor_owned(
+                receipt_reservation,
+                key="parent_fd",
+                device_key="parent_device",
+                inode_key="parent_inode",
+                label="private receipt directory",
+            )
+
+            if not freeze_owned and not receipt_owned:
+                if parent_owned:
+                    _close_private_receipt_reservation(receipt_reservation)
+                completion_error = None
+                break
+
+            if effective_release_error is None and freeze_owned:
+                candidate_release_error = _release_handed_off_protected_efi(
+                    freeze_handoff
+                )
+                if (
+                    candidate_release_error is not None
+                    and not isinstance(candidate_release_error, Exception)
+                ):
+                    if deferred_recovery_interrupt is None:
+                        deferred_recovery_interrupt = candidate_release_error
+                    # If the exact freeze is still owned, retry the release from
+                    # freshly observed state. If it was already released, preserve
+                    # the original phase classification and continue to evidence.
+                    if isinstance(freeze_handoff.get("freeze"), dict):
+                        continue
+                    candidate_release_error = None
+                effective_release_error = candidate_release_error
+
+            if effective_release_error is not None:
+                completion_error = _protected_efi_release_post_mutation_error(
+                    effective_release_error, private_evidence=evidence
+                )
+            elif execution_error is not None:
+                completion_error = execution_error
+            elif isinstance(phase_exc, PostMutationInstallError):
+                completion_error = phase_exc
+            else:
+                completion_error = PostMutationInstallError(
+                    "private-receipt-finalization-incomplete",
+                    private_evidence=evidence,
+                )
+
+            _persist_completion_failure_receipt(
+                plan=plan,
+                artifact=artifact,
+                receipt_reservation=receipt_reservation,
+                error=completion_error,
+            )
+            if "parent_fd" in receipt_reservation:
+                _close_private_receipt_reservation(receipt_reservation)
+            break
+        except BaseException as recovery_exc:
+            # Exceptions raised inside an ``except`` suite are not caught by that
+            # same handler. Defer only truly asynchronous BaseExceptions from this
+            # recovery attempt, then retry from freshly observed ownership state.
+            # Ordinary Exceptions remain terminal and are never spun indefinitely.
+            async_exc = _completion_recovery_async_baseexception(recovery_exc)
+            if async_exc is None:
+                raise
+            if deferred_recovery_interrupt is None:
+                deferred_recovery_interrupt = async_exc
+            continue
+
+    if completion_error is None:
+        raise phase_exc
+    raise completion_error from (
+        deferred_recovery_interrupt
+        if deferred_recovery_interrupt is not None
+        else phase_exc
+    )
+
+
 def _finalize_apply_completion(
     *,
     plan: dict[str, Any],
@@ -3695,18 +3874,8 @@ def _finalize_apply_completion(
     receipt: dict[str, Any],
     execution_error: PostMutationInstallError | None,
 ) -> None:
-    """Commit receipt + protected-EFI release as one interrupt-safe phase.
-
-    The success payload is not a terminal outcome while either the exact receipt
-    descriptor or the protected-EFI freeze handoff is still owned. Therefore a
-    BaseException between helper calls enters the same recovery path before the
-    outer apply lock can be released.
-    """
-    evidence = (
-        dict(execution_error.private_evidence)
-        if execution_error is not None
-        else _post_mutation_evidence_from_success_receipt(receipt)
-    )
+    """Commit receipt + protected-EFI release as one interrupt-safe phase."""
+    evidence = _apply_completion_evidence(receipt, execution_error)
     release_error: BaseException | None = None
     try:
         finalize_private_receipt(receipt_reservation, receipt, keep_open=True)
@@ -3719,75 +3888,15 @@ def _finalize_apply_completion(
             )
         _close_private_receipt_reservation(receipt_reservation)
     except BaseException as phase_exc:
-        deferred_recovery_interrupt: BaseException | None = None
-        completion_error: PostMutationInstallError | None = None
-        while True:
-            try:
-                freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
-                receipt_owned = "fd" in receipt_reservation
-                parent_owned = "parent_fd" in receipt_reservation
-                if not freeze_owned and not receipt_owned:
-                    # The protected filesystem is released and the exact receipt
-                    # FD has been surrendered. A remaining parent directory FD is
-                    # cleanup only; there is no authority to rewrite the inode.
-                    if parent_owned:
-                        _close_private_receipt_reservation(receipt_reservation)
-                    if execution_error is not None:
-                        completion_error = execution_error
-                    elif isinstance(phase_exc, PostMutationInstallError):
-                        completion_error = phase_exc
-                    else:
-                        completion_error = None
-                    break
-
-                recovery_release_error = release_error
-                if recovery_release_error is None and freeze_owned:
-                    recovery_release_error = _release_handed_off_protected_efi(
-                        freeze_handoff
-                    )
-
-                if recovery_release_error is not None:
-                    completion_error = _protected_efi_release_post_mutation_error(
-                        recovery_release_error, private_evidence=evidence
-                    )
-                elif execution_error is not None:
-                    completion_error = execution_error
-                elif isinstance(phase_exc, PostMutationInstallError):
-                    completion_error = phase_exc
-                else:
-                    completion_error = PostMutationInstallError(
-                        "private-receipt-finalization-incomplete",
-                        private_evidence=evidence,
-                    )
-
-                _persist_completion_failure_receipt(
-                    plan=plan,
-                    artifact=artifact,
-                    receipt_reservation=receipt_reservation,
-                    error=completion_error,
-                )
-                if "parent_fd" in receipt_reservation:
-                    _close_private_receipt_reservation(receipt_reservation)
-                break
-            except BaseException as recovery_exc:
-                # Exceptions raised inside an ``except`` suite are not caught by
-                # that same handler. Defer only truly asynchronous BaseExceptions
-                # from this recovery attempt, then retry from freshly observed
-                # ownership state. Ordinary Exceptions remain terminal and are
-                # never spun on indefinitely.
-                async_exc = _completion_recovery_async_baseexception(recovery_exc)
-                if async_exc is None:
-                    raise
-                if deferred_recovery_interrupt is None:
-                    deferred_recovery_interrupt = async_exc
-                continue
-
-        if completion_error is None:
-            return
-        raise completion_error from (
-            deferred_recovery_interrupt
-            if deferred_recovery_interrupt is not None
-            else phase_exc
+        _recover_apply_completion_resources(
+            plan=plan,
+            artifact=artifact,
+            receipt_reservation=receipt_reservation,
+            freeze_handoff=freeze_handoff,
+            evidence=evidence,
+            execution_error=execution_error,
+            phase_exc=phase_exc,
+            release_error=release_error,
         )
 
     if execution_error is not None:
@@ -4044,10 +4153,12 @@ def execute_plan(
                 restore_docker_after_apply(docker_state)
             except BaseException as exc:
                 docker_failure = exc
-        if (
+        handoff_owns_protected_efi_freeze = (
             protected_efi_freeze is not None
-            and protected_efi_freeze_handoff is None
-        ):
+            and protected_efi_freeze_handoff is not None
+            and protected_efi_freeze_handoff.get("freeze") is protected_efi_freeze
+        )
+        if protected_efi_freeze is not None and not handoff_owns_protected_efi_freeze:
             try:
                 release_protected_efi_freeze(protected_efi_freeze)
             except BaseException as exc:
@@ -4266,14 +4377,32 @@ def main(argv: list[str] | None = None) -> int:
                     ) from exc
                 raise
 
-            _finalize_apply_completion(
-                plan=plan,
-                artifact=artifact,
-                receipt_reservation=receipt_reservation,
-                freeze_handoff=freeze_handoff,
-                receipt=receipt,
-                execution_error=execution_error,
-            )
+            try:
+                _finalize_apply_completion(
+                    plan=plan,
+                    artifact=artifact,
+                    receipt_reservation=receipt_reservation,
+                    freeze_handoff=freeze_handoff,
+                    receipt=receipt,
+                    execution_error=execution_error,
+                )
+            except BaseException as completion_exc:
+                # A PostMutationInstallError returned by the completion helper is
+                # already the result of its state-bound recovery contract. Do not
+                # enter caller recovery a second time (notably, do not retry a
+                # thaw that already failed). The caller guard exists for an
+                # asynchronous interruption that prevents/escapes helper entry.
+                if isinstance(completion_exc, PostMutationInstallError):
+                    raise
+                _recover_apply_completion_resources(
+                    plan=plan,
+                    artifact=artifact,
+                    receipt_reservation=receipt_reservation,
+                    freeze_handoff=freeze_handoff,
+                    evidence=_apply_completion_evidence(receipt, execution_error),
+                    execution_error=execution_error,
+                    phase_exc=completion_exc,
+                )
             print(json.dumps({
                 "schema_version": 1,
                 "kind": "heim_pc.nixos_production_install_completed",

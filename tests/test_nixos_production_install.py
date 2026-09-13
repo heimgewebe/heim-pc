@@ -891,14 +891,36 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
-    "boundary",
+    ("scope", "boundary", "expected_events"),
     (
-        "release_error = _release_handed_off_protected_efi(",
-        "_close_private_receipt_reservation(receipt_reservation)",
+        (
+            "completion",
+            "release_error = _release_handed_off_protected_efi(",
+            [
+                "lock-acquired", "execute", "receipt-finalized", "efi-thaw",
+                "receipt-closed", "lock-released",
+            ],
+        ),
+        (
+            "completion",
+            "_close_private_receipt_reservation(receipt_reservation)",
+            [
+                "lock-acquired", "execute", "receipt-finalized", "efi-thaw",
+                "receipt-closed", "lock-released",
+            ],
+        ),
+        (
+            "main",
+            "_finalize_apply_completion(",
+            [
+                "lock-acquired", "execute", "efi-thaw", "receipt-closed",
+                "lock-released",
+            ],
+        ),
     ),
 )
 def test_main_completion_phase_interrupt_recovers_before_lock_release(
-    monkeypatch, tmp_path, capsys, boundary
+    monkeypatch, tmp_path, capsys, scope, boundary, expected_events
 ):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
     monkeypatch.setattr(
@@ -956,7 +978,12 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
     monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
 
     lines = MODULE_PATH.read_text(encoding="utf-8").splitlines()
-    first = prod._finalize_apply_completion.__code__.co_firstlineno
+    target_code = (
+        prod.main.__code__
+        if scope == "main"
+        else prod._finalize_apply_completion.__code__
+    )
+    first = target_code.co_firstlineno
     target_line = next(
         number
         for number in range(first, len(lines) + 1)
@@ -969,7 +996,7 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
         if (
             not fired
             and event == "line"
-            and frame.f_code is prod._finalize_apply_completion.__code__
+            and frame.f_code is target_code
             and frame.f_lineno == target_line
         ):
             fired = True
@@ -1001,14 +1028,7 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
     assert failure["kind"] == "heim_pc.nixos_production_install_failure_receipt"
     assert failure["status"] == "failure"
     assert failure["alarm_code"] == "private-receipt-finalization-incomplete"
-    assert events == [
-        "lock-acquired",
-        "execute",
-        "receipt-finalized",
-        "efi-thaw",
-        "receipt-closed",
-        "lock-released",
-    ]
+    assert events == expected_events
 
 
 def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
@@ -1073,7 +1093,8 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
     monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
 
     lines = MODULE_PATH.read_text(encoding="utf-8").splitlines()
-    first = prod._finalize_apply_completion.__code__.co_firstlineno
+    recovery_code = prod._recover_apply_completion_resources.__code__
+    first = recovery_code.co_firstlineno
     target_line = next(
         number
         for number in range(first, len(lines) + 1)
@@ -1086,7 +1107,7 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
         if (
             not fired
             and event == "line"
-            and frame.f_code is prod._finalize_apply_completion.__code__
+            and frame.f_code is recovery_code
             and frame.f_lineno == target_line
         ):
             fired = True
@@ -1125,6 +1146,76 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
         "receipt-closed",
         "lock-released",
     ]
+
+
+def test_private_receipt_close_interrupt_retains_exact_fd_until_retry(
+    monkeypatch, tmp_path
+):
+    target = tmp_path / "receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    fd = reservation["fd"]
+    parent_fd = reservation["parent_fd"]
+    real_close = prod.os.close
+    fired = False
+
+    def interrupt_before_close(value):
+        nonlocal fired
+        if value == fd and not fired:
+            fired = True
+            raise KeyboardInterrupt("synthetic close-before-kernel interrupt")
+        return real_close(value)
+
+    monkeypatch.setattr(prod.os, "close", interrupt_before_close)
+    with pytest.raises(KeyboardInterrupt, match="close-before-kernel"):
+        prod._close_private_receipt_reservation(reservation)
+    assert reservation["fd"] == fd
+    assert reservation["parent_fd"] == parent_fd
+    prod.os.fstat(fd)
+    prod.os.fstat(parent_fd)
+
+    prod._close_private_receipt_reservation(reservation)
+    assert "fd" not in reservation
+    assert "parent_fd" not in reservation
+    with pytest.raises(OSError):
+        prod.os.fstat(fd)
+    with pytest.raises(OSError):
+        prod.os.fstat(parent_fd)
+
+
+def test_private_receipt_close_post_kernel_interrupt_reconciles_ebadf(
+    monkeypatch, tmp_path
+):
+    target = tmp_path / "receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    fd = reservation["fd"]
+    parent_fd = reservation["parent_fd"]
+    real_close = prod.os.close
+    fired = False
+
+    def close_then_interrupt(value):
+        nonlocal fired
+        if value == fd and not fired:
+            fired = True
+            real_close(value)
+            raise KeyboardInterrupt("synthetic close-after-kernel interrupt")
+        return real_close(value)
+
+    monkeypatch.setattr(prod.os, "close", close_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="close-after-kernel"):
+        prod._close_private_receipt_reservation(reservation)
+    # Bookkeeping deliberately still claims ownership until the next exact
+    # observation proves the kernel already closed this descriptor.
+    assert reservation["fd"] == fd
+    assert reservation["parent_fd"] == parent_fd
+    with pytest.raises(OSError):
+        prod.os.fstat(fd)
+    prod.os.fstat(parent_fd)
+
+    prod._close_private_receipt_reservation(reservation)
+    assert "fd" not in reservation
+    assert "parent_fd" not in reservation
+    with pytest.raises(OSError):
+        prod.os.fstat(parent_fd)
 
 
 def test_private_receipt_reservation_is_create_only_and_finalizes_same_inode(tmp_path):
@@ -2677,6 +2768,71 @@ def test_post_mutation_alarm_codes_are_closed_and_non_secret():
     with pytest.raises(ValueError, match="unknown post-mutation alarm code"):
         prod.PostMutationInstallError("super-secret-material")
     assert all("secret" not in message.lower() for message in prod.POST_MUTATION_PUBLIC_MESSAGES.values())
+
+
+def test_execute_plan_interrupt_before_freeze_handoff_thaws_local_owner(
+    monkeypatch, tmp_path
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod,
+        "verify_managed_build_binding",
+        lambda *args, **kwargs: compiled["managed_build_receipt"],
+    )
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    gate_events = mock_trusted_build_gate(monkeypatch, compiled)
+    handoff = {}
+
+    lines = MODULE_PATH.read_text(encoding="utf-8").splitlines()
+    code = prod.execute_plan.__code__
+    target_line = next(
+        number
+        for number in range(code.co_firstlineno, len(lines) + 1)
+        if lines[number - 1].strip()
+        == 'protected_efi_freeze_handoff["freeze"] = protected_efi_freeze'
+    )
+    fired = False
+
+    def interrupt_before_handoff(frame, event, _arg):
+        nonlocal fired
+        if (
+            not fired
+            and event == "line"
+            and frame.f_code is code
+            and frame.f_lineno == target_line
+        ):
+            fired = True
+            raise KeyboardInterrupt("synthetic freeze-handoff interrupt")
+        return interrupt_before_handoff
+
+    sys.settrace(interrupt_before_handoff)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="freeze-handoff"):
+            prod.execute_plan(
+                compiled,
+                contract=CONTRACT,
+                confirmation=prod.confirmation_for(compiled),
+                credential_hash_file=tmp_path / "credential.hash",
+                observer=lambda _contract: observation(),
+                protected_efi_freeze_handoff=handoff,
+            )
+    finally:
+        sys.settrace(None)
+
+    assert fired is True
+    assert handoff == {}
+    assert "efi-freeze" in gate_events
+    assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
 def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatch, tmp_path):
