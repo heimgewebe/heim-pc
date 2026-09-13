@@ -4274,6 +4274,13 @@ def execute_plan(
 
     try:
         verify_host_nix_root_absent()
+        # Signal ownership must begin before the first installer-owned setup
+        # effect. The archive, Docker quiesce and seal lifecycle all require
+        # terminal cleanup before an operator signal may regain its caller
+        # disposition. SIGTERM remains handler-deferred rather than masked so
+        # exec'd child processes still receive their default SIGTERM semantics.
+        if completion_signal_handoff is not None:
+            _begin_apply_signal_deferral(completion_signal_handoff)
         verifier_archive = prepare_verifier_image_archive(plan, artifact)
         docker_state = stop_docker_for_apply()
         verify_docker_quiesced()
@@ -4297,8 +4304,6 @@ def execute_plan(
         cleanup_verifier_image_archive(verifier_archive)
         verifier_archive = None
 
-        if completion_signal_handoff is not None:
-            _begin_apply_signal_deferral(completion_signal_handoff)
         try:
             protected_efi_freeze = acquire_protected_efi_freeze(
                 pre_now["protected"]["efi_source"]

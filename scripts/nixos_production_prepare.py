@@ -116,7 +116,15 @@ def image_gate() -> None:
 
 
 def ensure_volume_absent(name: str) -> None:
-    if run(["docker", "volume", "inspect", name], check=False).returncode == 0:
+    inspected = run(["docker", "volume", "inspect", name], check=False)
+    if inspected.returncode == 0:
+        raise PrepareError(f"refusing existing production build volume: {name}")
+    # A failed inspect alone is ambiguous (missing object vs daemon/transport
+    # failure). Require a successful daemon-wide listing and exact-name absence
+    # before treating the volume as absent.
+    listed = run(["docker", "volume", "ls", "--quiet"])
+    names = {line.strip() for line in listed.stdout.decode("utf-8", "strict").splitlines()}
+    if name in names:
         raise PrepareError(f"refusing existing production build volume: {name}")
 
 
@@ -140,7 +148,11 @@ def create_volume(name: str, *, backing_dir: Path | None = None) -> None:
 
 
 def remove_volume(name: str) -> None:
-    run(["docker", "volume", "rm", "-f", name], check=False)
+    removed = run(["docker", "volume", "rm", "-f", name], check=False)
+    if removed.returncode != 0:
+        stderr = removed.stderr.decode("utf-8", "replace")[-8000:]
+        raise PrepareError(f"failed to remove production build volume {name}: {stderr}")
+    ensure_volume_absent(name)
 
 
 def clone_bundle_to_volume(*, bundle: Path, source_volume: str, revision: str) -> None:
@@ -344,13 +356,22 @@ def prepare(
                 closure_path_count=int(closure["closure_path_count"]),
                 source_authority=source_authority,
             )
+            # The transient source clone is outside the retained Nix-volume
+            # budget. Its successful, observed removal is part of completion,
+            # not best-effort hygiene after artifact publication.
+            remove_volume(source_volume)
+            source_created = False
             write_artifact(output, artifact)
             success = True
             return artifact
         finally:
             if source_created:
-                remove_volume(source_volume)
-            if nix_created and not success:
+                try:
+                    remove_volume(source_volume)
+                finally:
+                    if nix_created and not success:
+                        remove_volume(nix_volume)
+            elif nix_created and not success:
                 remove_volume(nix_volume)
 
 

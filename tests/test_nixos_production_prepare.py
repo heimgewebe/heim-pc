@@ -110,6 +110,38 @@ def test_existing_volume_is_rejected(monkeypatch):
         prep.ensure_volume_absent(NIX_VOLUME)
 
 
+def test_remove_volume_requires_successful_rm(monkeypatch):
+    calls = []
+
+    def fake_run(argv, check=True):
+        calls.append((argv, check))
+        return Result(returncode=1, stderr=b"synthetic busy volume")
+
+    monkeypatch.setattr(prep, "run", fake_run)
+    with pytest.raises(prep.PrepareError, match="failed to remove production build volume"):
+        prep.remove_volume(SOURCE_VOLUME)
+    assert calls == [(["docker", "volume", "rm", "-f", SOURCE_VOLUME], False)]
+
+
+def test_remove_volume_confirms_volume_is_absent(monkeypatch):
+    responses = iter([
+        Result(returncode=0),
+        Result(returncode=1),
+        Result(stdout=b"unrelated-volume\n", returncode=0),
+    ])
+    monkeypatch.setattr(prep, "run", lambda argv, check=True: next(responses))
+    prep.remove_volume(SOURCE_VOLUME)
+
+    responses = iter([
+        Result(returncode=0),
+        Result(returncode=1),
+        Result(stdout=(SOURCE_VOLUME + "\n").encode(), returncode=0),
+    ])
+    monkeypatch.setattr(prep, "run", lambda argv, check=True: next(responses))
+    with pytest.raises(prep.PrepareError, match="refusing existing production build volume"):
+        prep.remove_volume(SOURCE_VOLUME)
+
+
 def test_write_artifact_is_create_only_and_private(tmp_path):
     artifact = prep.make_artifact(
         revision=REVISION,
@@ -199,6 +231,53 @@ def test_prepare_failure_removes_created_volumes_and_does_not_publish_artifact(m
         prep.prepare(repo=tmp_path, output=output)
     assert created == [(NIX_VOLUME, None), (SOURCE_VOLUME, None)]
     assert removed == [SOURCE_VOLUME, NIX_VOLUME]
+    assert not output.exists()
+
+
+def test_prepare_source_cleanup_failure_blocks_artifact_publication(
+    monkeypatch, tmp_path
+):
+    output = tmp_path / "artifact.json"
+    removed = []
+    published = []
+    monkeypatch.setattr(prep, "exact_source_revision", lambda repo: REVISION)
+    monkeypatch.setattr(prep, "image_gate", lambda: None)
+    monkeypatch.setattr(prep, "ensure_volume_absent", lambda name: None)
+    monkeypatch.setattr(prep, "create_volume", lambda name, **kwargs: None)
+
+    def fake_run(argv, check=True):
+        if len(argv) >= 6 and argv[0] == "git" and "bundle" in argv and "create" in argv:
+            Path(argv[-2]).write_bytes(b"fake-bundle")
+        return Result()
+
+    monkeypatch.setattr(prep, "run", fake_run)
+    monkeypatch.setattr(prep, "clone_bundle_to_volume", lambda **kwargs: None)
+    monkeypatch.setattr(prep, "build_exact_closure", lambda **kwargs: SYSTEM_PATH)
+    monkeypatch.setattr(prep, "verify_closure", lambda **kwargs: None)
+    monkeypatch.setattr(
+        prep,
+        "capture_closure_manifest",
+        lambda **kwargs: {
+            "closure_manifest_sha256": CLOSURE_SHA,
+            "closure_path_count": CLOSURE_COUNT,
+        },
+    )
+    monkeypatch.setattr(
+        prep, "write_artifact", lambda *_args, **_kwargs: published.append(True)
+    )
+
+    def fail_source_cleanup(name):
+        removed.append(name)
+        if name == SOURCE_VOLUME:
+            raise prep.PrepareError("synthetic source cleanup failure")
+
+    monkeypatch.setattr(prep, "remove_volume", fail_source_cleanup)
+
+    with pytest.raises(prep.PrepareError, match="synthetic source cleanup failure"):
+        prep.prepare(repo=tmp_path, output=output)
+
+    assert published == []
+    assert removed == [SOURCE_VOLUME, SOURCE_VOLUME, NIX_VOLUME]
     assert not output.exists()
 
 

@@ -3486,6 +3486,82 @@ def test_post_mutation_alarm_codes_are_closed_and_non_secret():
     assert all("secret" not in message.lower() for message in prod.POST_MUTATION_PUBLIC_MESSAGES.values())
 
 
+def test_execute_plan_starts_signal_deferral_before_owned_setup(
+    monkeypatch, tmp_path
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod,
+        "verify_managed_build_binding",
+        lambda *args, **kwargs: compiled["managed_build_receipt"],
+    )
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    handoff = {}
+    gate_events = mock_trusted_build_gate(monkeypatch, compiled)
+
+    real_begin = prod._begin_apply_signal_deferral
+    real_prepare_archive = prod.prepare_verifier_image_archive
+    real_stop_docker = prod.stop_docker_for_apply
+
+    def begin(handoff_state):
+        gate_events.append("signal-deferral")
+        return real_begin(handoff_state)
+
+    def prepare_archive(*args, **kwargs):
+        assert handoff.get("active") is True
+        return real_prepare_archive(*args, **kwargs)
+
+    def stop_docker():
+        assert handoff.get("active") is True
+        return real_stop_docker()
+
+    def fail_archive_validation(*_args, **_kwargs):
+        assert handoff.get("active") is True
+        gate_events.append("archive-verify")
+        raise prod.ProductionInstallError("synthetic setup failure")
+
+    monkeypatch.setattr(prod, "_begin_apply_signal_deferral", begin)
+    monkeypatch.setattr(prod, "prepare_verifier_image_archive", prepare_archive)
+    monkeypatch.setattr(prod, "stop_docker_for_apply", stop_docker)
+    monkeypatch.setattr(prod, "validate_verifier_image_archive", fail_archive_validation)
+
+    try:
+        with pytest.raises(prod.ProductionInstallError, match="synthetic setup failure"):
+            prod.execute_plan(
+                compiled,
+                contract=CONTRACT,
+                confirmation=prod.confirmation_for(compiled),
+                credential_hash_file=tmp_path / "credential.hash",
+                observer=lambda _contract: observation(),
+                completion_signal_handoff=handoff,
+            )
+        assert handoff.get("active") is True
+    finally:
+        deferred = prod._end_apply_signal_deferral(handoff)
+
+    assert deferred == ()
+    assert gate_events == [
+        "nix-root-absent",
+        "signal-deferral",
+        "archive-create",
+        "docker-stop",
+        "docker-quiesced",
+        "archive-verify",
+        "archive-cleanup",
+        "docker-restore",
+    ]
+
+
 def test_execute_plan_interrupt_before_freeze_handoff_thaws_local_owner(
     monkeypatch, tmp_path
 ):
