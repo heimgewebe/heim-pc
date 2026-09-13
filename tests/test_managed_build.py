@@ -1692,6 +1692,88 @@ class ManagedBuildTests(unittest.TestCase):
         killpg.assert_called_once_with(process.pid, signal.SIGTERM)
         wait_for_group.assert_called_once()
 
+    def test_nix_verified_auto_remove_race_does_not_become_orphan_failure(self) -> None:
+        class Process:
+            pid = 4200
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "1" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "1" * 12,
+            "store_root": "/tmp/managed-nix-store-auto-remove-race-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_store_scan",
+                side_effect=[
+                    {"allocated_bytes": 1, "error_count": 0},
+                    {"allocated_bytes": 1, "error_count": 0},
+                ],
+            ),
+            patch.object(managed_build, "_terminate_process_group"),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(telemetry["container_orphan_detected"])
+        self.assertEqual(telemetry["container_count_force_removed"], 0)
+        self.assertTrue(telemetry["container_cleanup_verified"])
+
+    def test_nix_successful_force_remove_remains_orphan_failure(self) -> None:
+        class Process:
+            pid = 4201
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "2" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "2" * 12,
+            "store_root": "/tmp/managed-nix-store-force-remove-orphan-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_store_scan",
+                side_effect=[
+                    {"allocated_bytes": 1, "error_count": 0},
+                    {"allocated_bytes": 1, "error_count": 0},
+                ],
+            ),
+            patch.object(managed_build, "_terminate_process_group"),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(1, True)),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 76)
+        self.assertTrue(telemetry["container_orphan_detected"])
+        self.assertEqual(telemetry["container_count_force_removed"], 1)
+        self.assertTrue(telemetry["container_cleanup_verified"])
+
     def test_nix_running_store_monitor_terminates_before_hard_and_cleans_container(self) -> None:
         class Process:
             pid = 4242

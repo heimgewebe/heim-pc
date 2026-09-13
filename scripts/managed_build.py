@@ -1450,9 +1450,11 @@ def _run_nix_worker_guarded(
         _terminate_process_group(process)
         if process.poll() is None:
             process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
-        orphan_ids = _nix_container_ids(label)
-        orphan_detected = bool(orphan_ids)
         removed, cleanup_verified = _remove_exact_nix_containers(label)
+        # A container may still be visible while Docker completes `--rm` auto-removal.
+        # Only a successful explicit force-removal proves that a managed container
+        # actually survived the worker lifecycle and therefore remains an orphan fault.
+        orphan_detected = removed > 0
         try:
             final_scan = _bounded_store_scan(store_root, timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS)
         except StoreScanTimeout:
