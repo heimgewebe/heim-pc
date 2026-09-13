@@ -1779,10 +1779,10 @@ def _rewrite_finalized_private_receipt(
         if os.fstat(fd).st_size != len(payload) or os.pread(fd, len(payload) + 1, 0) != payload:
             raise ProductionInstallError("rewritten private production receipt payload is invalid")
         os.fsync(reservation["parent_fd"])
-    except (OSError, ProductionInstallError) as exc:
+    except BaseException as exc:
         try:
             _invalidate_private_receipt_reservation(reservation)
-        except (OSError, ProductionInstallError) as invalidate_exc:
+        except BaseException as invalidate_exc:
             raise ProductionInstallError(
                 "private production receipt rewrite failed and invalidation is incomplete"
             ) from invalidate_exc
@@ -3996,9 +3996,76 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except PostMutationInstallError as exc:
                 execution_error = exc
-                receipt = _post_mutation_failure_receipt(
-                    plan=plan, artifact=artifact, error=exc
-                )
+                try:
+                    receipt = _post_mutation_failure_receipt(
+                        plan=plan, artifact=artifact, error=exc
+                    )
+                except BaseException as evidence_exc:
+                    # A post-mutation alarm already proves destructive execution was
+                    # attempted. If failure-receipt construction is interrupted, do
+                    # not fall out through the generic pre-mutation cleanup path: keep
+                    # the protected EFI frozen while attempting one bounded fallback
+                    # failure receipt, then thaw before releasing the apply lock.
+                    emergency_error = PostMutationInstallError(
+                        "private-receipt-finalization-incomplete",
+                        private_evidence=dict(exc.private_evidence),
+                    )
+                    try:
+                        emergency_receipt = _post_mutation_failure_receipt(
+                            plan=plan, artifact=artifact, error=emergency_error
+                        )
+                        finalize_private_receipt(
+                            receipt_reservation, emergency_receipt, keep_open=True
+                        )
+                    except BaseException as fallback_exc:
+                        try:
+                            _recover_private_receipt_after_failed_finalization(
+                                receipt_reservation
+                            )
+                        except BaseException as recovery_exc:
+                            fallback_exc = recovery_exc
+                        release_error = release_handed_off_freeze(required=True)
+                        if release_error is not None:
+                            release_alarm = _protected_efi_release_post_mutation_error(
+                                release_error,
+                                private_evidence=dict(emergency_error.private_evidence),
+                            )
+                            raise release_alarm from fallback_exc
+                        raise emergency_error from fallback_exc
+                    release_error = release_handed_off_freeze(required=True)
+                    if release_error is not None:
+                        release_alarm = _protected_efi_release_post_mutation_error(
+                            release_error,
+                            private_evidence=dict(emergency_error.private_evidence),
+                        )
+                        try:
+                            replacement = _post_mutation_failure_receipt(
+                                plan=plan, artifact=artifact, error=release_alarm
+                            )
+                        except BaseException as replacement_build_exc:
+                            try:
+                                _recover_private_receipt_after_failed_finalization(
+                                    receipt_reservation
+                                )
+                            except BaseException as recovery_exc:
+                                raise release_alarm from recovery_exc
+                            raise release_alarm from replacement_build_exc
+                        try:
+                            _rewrite_finalized_private_receipt(
+                                receipt_reservation, replacement
+                            )
+                        except BaseException as rewrite_exc:
+                            try:
+                                _recover_private_receipt_after_failed_finalization(
+                                    receipt_reservation
+                                )
+                            except BaseException as recovery_exc:
+                                raise release_alarm from recovery_exc
+                            raise release_alarm from rewrite_exc
+                        _close_private_receipt_reservation(receipt_reservation)
+                        raise release_alarm from release_error
+                    _close_private_receipt_reservation(receipt_reservation)
+                    raise emergency_error from evidence_exc
             except BaseException as exc:
                 # Never let receipt cleanup prevent an attempted thaw of the protected
                 # filesystem. A still-frozen fallback is the higher-priority hazard.
@@ -4037,9 +4104,18 @@ def main(argv: list[str] | None = None) -> int:
                     release_alarm = _protected_efi_release_post_mutation_error(
                         release_error, private_evidence=evidence
                     )
-                    replacement = _post_mutation_failure_receipt(
-                        plan=plan, artifact=artifact, error=release_alarm
-                    )
+                    try:
+                        replacement = _post_mutation_failure_receipt(
+                            plan=plan, artifact=artifact, error=release_alarm
+                        )
+                    except BaseException as replacement_build_exc:
+                        try:
+                            _recover_private_receipt_after_failed_finalization(
+                                receipt_reservation
+                            )
+                        except BaseException as recovery_exc:
+                            raise release_alarm from recovery_exc
+                        raise release_alarm from replacement_build_exc
                     if "fd" in receipt_reservation:
                         try:
                             finalize_private_receipt(
@@ -4075,19 +4151,36 @@ def main(argv: list[str] | None = None) -> int:
                 release_alarm = _protected_efi_release_post_mutation_error(
                     release_error, private_evidence=evidence
                 )
-                replacement = _post_mutation_failure_receipt(
-                    plan=plan, artifact=artifact, error=release_alarm
-                )
+                try:
+                    replacement = _post_mutation_failure_receipt(
+                        plan=plan, artifact=artifact, error=release_alarm
+                    )
+                except BaseException as replacement_build_exc:
+                    try:
+                        _recover_private_receipt_after_failed_finalization(
+                            receipt_reservation
+                        )
+                    except BaseException as recovery_exc:
+                        raise release_alarm from recovery_exc
+                    raise release_alarm from replacement_build_exc
                 try:
                     _rewrite_finalized_private_receipt(
                         receipt_reservation, replacement
                     )
-                except BaseException:
-                    if "fd" in receipt_reservation:
-                        _close_private_receipt_reservation(receipt_reservation)
-                    # A failed thaw must remain the visible alarm even when durable
+                except BaseException as rewrite_exc:
+                    # Never close over an unverified payload. If rewrite was
+                    # interrupted before truncation, preservation will reject the
+                    # still-valid success JSON and the held descriptor will invalidate
+                    # that exact inode before the apply lock can be released.
+                    try:
+                        _recover_private_receipt_after_failed_finalization(
+                            receipt_reservation
+                        )
+                    except BaseException as recovery_exc:
+                        raise release_alarm from recovery_exc
+                    # A failed thaw remains the visible alarm even when durable
                     # failure-receipt repair also fails. The apply lock is still held.
-                    raise release_alarm from release_error
+                    raise release_alarm from rewrite_exc
                 _close_private_receipt_reservation(receipt_reservation)
                 raise release_alarm from release_error
 
