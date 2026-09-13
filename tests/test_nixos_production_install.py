@@ -798,13 +798,12 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
     compiled = plan()
     monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
-    monkeypatch.setattr(
-        prod,
-        "execute_plan",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            prod.PostMutationInstallError("protected-fallback-changed")
-        ),
-    )
+    def execute_post_mutation_alarm(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        raise prod.PostMutationInstallError("protected-fallback-changed")
+
+    monkeypatch.setattr(prod, "execute_plan", execute_post_mutation_alarm)
+    monkeypatch.setattr(prod, "release_protected_efi_freeze", lambda _freeze: None)
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
@@ -838,20 +837,32 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     )
     real_finalize = prod.finalize_private_receipt
 
-    def finalize_with_event(reservation, receipt):
+    def finalize_with_event(reservation, receipt, **kwargs):
         events.append("receipt-finalized")
-        return real_finalize(reservation, receipt)
+        return real_finalize(reservation, receipt, **kwargs)
 
     monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
     monkeypatch.setattr(
         prod, "release_production_apply_lock",
         lambda _lock: events.append("lock-released"),
     )
+    def execute_with_freeze(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        events.append("execute")
+        return {"secret": "super-secret-material"}
+
+    monkeypatch.setattr(prod, "execute_plan", execute_with_freeze)
     monkeypatch.setattr(
-        prod,
-        "execute_plan",
-        lambda *args, **kwargs: {"secret": "super-secret-material"},
+        prod, "release_protected_efi_freeze",
+        lambda _freeze: events.append("efi-thaw"),
     )
+    real_close = prod._close_private_receipt_reservation
+
+    def close_with_event(reservation):
+        events.append("receipt-closed")
+        return real_close(reservation)
+
+    monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
@@ -870,7 +881,10 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     receipt_path = tmp_path / "receipt.json"
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(receipt_path.read_text()) == {"secret": "super-secret-material"}
-    assert events == ["lock-acquired", "receipt-finalized", "lock-released"]
+    assert events == [
+        "lock-acquired", "execute", "receipt-finalized",
+        "efi-thaw", "receipt-closed", "lock-released",
+    ]
     with pytest.raises(prod.ProductionInstallError, match="overwrite"):
         prod.write_private_receipt(receipt_path, {"second": True})
 
@@ -1030,28 +1044,37 @@ def test_private_receipt_discard_rejects_parent_replacement(tmp_path):
     assert json.loads((held_parent / target.name).read_text(encoding="utf-8"))["status"] == "reserved"
 
 
-def test_production_apply_lock_is_physical_target_scoped_private_and_exclusive(tmp_path):
+def test_production_apply_lock_combines_physical_and_global_exclusion(tmp_path):
     compiled = plan()
     physical_identity, physical_digest = prod._production_apply_lock_identity(compiled)
     first = prod.acquire_production_apply_lock(compiled)
     try:
         lock_dir = prod.PRODUCTION_APPLY_LOCK_DIR
         assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
-        entries = list(lock_dir.iterdir())
-        assert len(entries) == 1
-        assert stat.S_IMODE(entries[0].stat().st_mode) == 0o600
-        assert SEAGATE not in entries[0].name
-        assert physical_identity["serial"] not in entries[0].name
-        assert physical_identity["wwn"] not in entries[0].name
-        assert physical_digest in entries[0].name
-        with pytest.raises(prod.ProductionInstallError, match="already holds"):
+        entries = sorted(entry.name for entry in lock_dir.iterdir())
+        assert entries == [
+            prod.PRODUCTION_APPLY_GLOBAL_LOCK_NAME,
+            f"target-{physical_digest}.lock",
+        ]
+        for entry in lock_dir.iterdir():
+            assert stat.S_IMODE(entry.stat().st_mode) == 0o600
+            assert SEAGATE not in entry.name
+            assert physical_identity["serial"] not in entry.name
+            assert physical_identity["wwn"] not in entry.name
+
+        with pytest.raises(prod.ProductionInstallError, match="physical target lock"):
             prod.acquire_production_apply_lock(compiled)
 
         same_physical_alias = json.loads(json.dumps(compiled))
         alias = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_ALIAS_0001"
         same_physical_alias["target_authority"] = alias
         same_physical_alias["preflight"]["target"]["requested_path"] = alias
-        with pytest.raises(prod.ProductionInstallError, match="already holds"):
+        same_identity, same_digest = prod._production_apply_lock_identity(
+            same_physical_alias
+        )
+        assert same_identity == physical_identity
+        assert same_digest == physical_digest
+        with pytest.raises(prod.ProductionInstallError, match="physical target lock"):
             prod.acquire_production_apply_lock(same_physical_alias)
 
         different = json.loads(json.dumps(compiled))
@@ -1060,14 +1083,18 @@ def test_production_apply_lock_is_physical_target_scoped_private_and_exclusive(t
         different["preflight"]["target"]["requested_path"] = different_alias
         different["preflight"]["target"]["serial"] = "SYNTH-TARGET-SERIAL-OTHER"
         different["preflight"]["target"]["wwn"] = "eui.synthetic-target-other"
-        second = prod.acquire_production_apply_lock(different)
-        prod.release_production_apply_lock(second)
+        different_identity, different_digest = prod._production_apply_lock_identity(different)
+        assert different_identity != physical_identity
+        assert different_digest != physical_digest
+        with pytest.raises(prod.ProductionInstallError, match="global installer lock"):
+            prod.acquire_production_apply_lock(different)
     finally:
         prod.release_production_apply_lock(first)
 
     reacquired = prod.acquire_production_apply_lock(compiled)
     prod.release_production_apply_lock(reacquired)
-
+    different_after_release = prod.acquire_production_apply_lock(different)
+    prod.release_production_apply_lock(different_after_release)
 
 def test_protected_efi_freeze_uses_one_held_mount_fd_and_thaws(monkeypatch, tmp_path):
     mountpoint = tmp_path / "efi"
@@ -1248,29 +1275,39 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     )
     real_finalize = prod.finalize_private_receipt
 
-    def finalize_with_event(reservation, receipt):
+    def finalize_with_event(reservation, receipt, **kwargs):
         events.append("failure-receipt-finalized")
-        return real_finalize(reservation, receipt)
+        return real_finalize(reservation, receipt, **kwargs)
 
     monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
     monkeypatch.setattr(
         prod, "release_production_apply_lock",
         lambda _lock: events.append("lock-released"),
     )
+    def execute_failure_with_freeze(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        events.append("execute")
+        raise prod.PostMutationInstallError(
+            "protected-fallback-changed",
+            private_evidence={
+                "mutation_attempted": True,
+                "completed_effects": ["partition-table-reset"],
+                "protected_post_fingerprint": "a" * 64,
+            },
+        )
+
+    monkeypatch.setattr(prod, "execute_plan", execute_failure_with_freeze)
     monkeypatch.setattr(
-        prod,
-        "execute_plan",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            prod.PostMutationInstallError(
-                "protected-fallback-changed",
-                private_evidence={
-                    "mutation_attempted": True,
-                    "completed_effects": ["partition-table-reset"],
-                    "protected_post_fingerprint": "a" * 64,
-                },
-            )
-        ),
+        prod, "release_protected_efi_freeze",
+        lambda _freeze: events.append("efi-thaw"),
     )
+    real_close = prod._close_private_receipt_reservation
+
+    def close_with_event(reservation):
+        events.append("receipt-closed")
+        return real_close(reservation)
+
+    monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
     receipt_path = tmp_path / "receipt.json"
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
@@ -1295,7 +1332,10 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     assert failure_receipt["protected_post_fingerprint"] == "a" * 64
     assert failure_receipt["private_target_authority_redacted"] is True
     assert SEAGATE not in receipt_path.read_text(encoding="utf-8")
-    assert events == ["lock-acquired", "failure-receipt-finalized", "lock-released"]
+    assert events == [
+        "lock-acquired", "execute", "failure-receipt-finalized",
+        "efi-thaw", "receipt-closed", "lock-released",
+    ]
 
 
 def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, tmp_path, capsys):
@@ -1309,7 +1349,12 @@ def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, t
     monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
     compiled = plan()
     monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
-    monkeypatch.setattr(prod, "execute_plan", lambda *args, **kwargs: {"secret": "super-secret-material"})
+    def execute_success_with_freeze(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        return {"secret": "super-secret-material"}
+
+    monkeypatch.setattr(prod, "execute_plan", execute_success_with_freeze)
+    monkeypatch.setattr(prod, "release_protected_efi_freeze", lambda _freeze: None)
     monkeypatch.setattr(prod, "finalize_private_receipt", lambda *_args, **_kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("secret-finalize-detail")))
     receipt_path = tmp_path / "receipt.json"
     assert prod.main([
@@ -1330,6 +1375,289 @@ def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, t
         "kind": "heim_pc.nixos_production_install_receipt_reservation",
         "status": "reserved",
     }
+
+
+def test_main_release_identity_failure_rewrites_success_as_failure(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {"test": True})
+    monkeypatch.setattr(prod, "release_production_apply_lock", lambda _lock: None)
+
+    success_receipt = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt",
+        "plan_sha256": compiled["plan_sha256"],
+        "install_artifact_sha256": compiled["install_artifact_sha256"],
+        "source_revision": ARTIFACT["source_revision"],
+        "system_path": ARTIFACT["system_path"],
+        "protected_post_fingerprint": "a" * 64,
+        "completed_effects": ["partition-table-reset", "private-storage-identity-staged"],
+        "credential_staged": True,
+        "efi_nvram_sha256_before": "b" * 64,
+        "efi_nvram_sha256_after": "b" * 64,
+    }
+
+    def execute_success(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        return success_receipt
+
+    monkeypatch.setattr(prod, "execute_plan", execute_success)
+    monkeypatch.setattr(
+        prod, "release_protected_efi_freeze",
+        lambda _freeze: (_ for _ in ()).throw(
+            prod.ProductionInstallError("synthetic frozen identity failure")
+        ),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == (
+        prod.POST_MUTATION_PUBLIC_MESSAGES["protected-fallback-unverifiable"] + "\n"
+    )
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failure"
+    assert persisted["alarm_code"] == "protected-fallback-unverifiable"
+    assert persisted["protected_post_fingerprint"] == "a" * 64
+    assert persisted["completed_effects"] == [
+        "partition-table-reset", "private-storage-identity-staged"
+    ]
+
+
+def test_release_failure_classification_distinguishes_thaw_from_identity():
+    thaw = prod._protected_efi_release_post_mutation_error(
+        prod.ProtectedEfiThawError("still frozen")
+    )
+    identity = prod._protected_efi_release_post_mutation_error(
+        prod.ProductionInstallError("identity unstable")
+    )
+    assert thaw.code == "protected-efi-thaw-incomplete"
+    assert identity.code == "protected-fallback-unverifiable"
+
+
+def test_main_thaw_failure_rewrites_persisted_success_as_failure(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {"test": True})
+    monkeypatch.setattr(prod, "release_production_apply_lock", lambda _lock: None)
+
+    success_receipt = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt",
+        "plan_sha256": compiled["plan_sha256"],
+        "install_artifact_sha256": compiled["install_artifact_sha256"],
+        "source_revision": ARTIFACT["source_revision"],
+        "system_path": ARTIFACT["system_path"],
+        "protected_post_fingerprint": "a" * 64,
+        "completed_effects": ["partition-table-reset", "private-storage-identity-staged"],
+        "credential_staged": True,
+        "efi_nvram_sha256_before": "b" * 64,
+        "efi_nvram_sha256_after": "b" * 64,
+    }
+
+    def execute_success(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"fd": 1234}
+        return success_receipt
+
+    monkeypatch.setattr(prod, "execute_plan", execute_success)
+
+    def fail_thaw(freeze):
+        raise prod.ProtectedEfiThawError(
+            "synthetic thaw failure", freeze=freeze
+        )
+
+    monkeypatch.setattr(prod, "release_protected_efi_freeze", fail_thaw)
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == (
+        prod.POST_MUTATION_PUBLIC_MESSAGES["protected-efi-thaw-incomplete"] + "\n"
+    )
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failure"
+    assert persisted["alarm_code"] == "protected-efi-thaw-incomplete"
+    assert persisted["protected_post_fingerprint"] == "a" * 64
+
+
+def test_main_receipt_failure_cannot_mask_thaw_failure(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {"test": True})
+    monkeypatch.setattr(prod, "release_production_apply_lock", lambda _lock: None)
+
+    success_receipt = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt",
+        "plan_sha256": compiled["plan_sha256"],
+        "install_artifact_sha256": compiled["install_artifact_sha256"],
+        "source_revision": ARTIFACT["source_revision"],
+        "system_path": ARTIFACT["system_path"],
+        "protected_post_fingerprint": "a" * 64,
+        "completed_effects": ["partition-table-reset"],
+        "credential_staged": True,
+        "efi_nvram_sha256_before": "b" * 64,
+        "efi_nvram_sha256_after": "b" * 64,
+    }
+
+    def execute_success(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"fd": 1234}
+        return success_receipt
+
+    monkeypatch.setattr(prod, "execute_plan", execute_success)
+    real_finalize = prod.finalize_private_receipt
+    finalization_calls = 0
+
+    def fail_first_finalize(reservation, receipt, **kwargs):
+        nonlocal finalization_calls
+        finalization_calls += 1
+        if finalization_calls == 1:
+            raise prod.ProductionInstallError("synthetic receipt finalization failure")
+        return real_finalize(reservation, receipt, **kwargs)
+
+    monkeypatch.setattr(prod, "finalize_private_receipt", fail_first_finalize)
+
+    def fail_thaw(freeze):
+        raise prod.ProtectedEfiThawError(
+            "synthetic thaw failure", freeze=freeze
+        )
+
+    monkeypatch.setattr(prod, "release_protected_efi_freeze", fail_thaw)
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == (
+        prod.POST_MUTATION_PUBLIC_MESSAGES["protected-efi-thaw-incomplete"] + "\n"
+    )
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failure"
+    assert persisted["alarm_code"] == "protected-efi-thaw-incomplete"
+    assert finalization_calls == 2
+
+
+def test_main_missing_success_freeze_handoff_fails_closed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {"test": True})
+    monkeypatch.setattr(prod, "release_production_apply_lock", lambda _lock: None)
+    success_receipt = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt",
+        "plan_sha256": compiled["plan_sha256"],
+        "install_artifact_sha256": compiled["install_artifact_sha256"],
+        "source_revision": ARTIFACT["source_revision"],
+        "system_path": ARTIFACT["system_path"],
+        "protected_post_fingerprint": "a" * 64,
+        "completed_effects": ["partition-table-reset"],
+        "credential_staged": True,
+        "efi_nvram_sha256_before": "b" * 64,
+        "efi_nvram_sha256_after": "b" * 64,
+    }
+    monkeypatch.setattr(prod, "execute_plan", lambda *args, **kwargs: success_receipt)
+    receipt_path = tmp_path / "receipt.json"
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(receipt_path),
+    ]) == 3
+    captured = capsys.readouterr()
+    assert captured.err == (
+        prod.POST_MUTATION_PUBLIC_MESSAGES["protected-fallback-unverifiable"] + "\n"
+    )
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failure"
+    assert persisted["alarm_code"] == "protected-fallback-unverifiable"
+
+
+def test_main_pre_mutation_cleanup_attempts_thaw_before_receipt_discard(monkeypatch, tmp_path):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(prod, "load_managed_build_receipt", lambda *args, **kwargs: managed_receipt(ARTIFACT))
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {"test": True})
+    monkeypatch.setattr(prod, "release_production_apply_lock", lambda _lock: None)
+    events = []
+
+    def execute_pre_mutation_failure(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        raise prod.ProductionInstallError("synthetic pre-mutation guard failure")
+
+    monkeypatch.setattr(prod, "execute_plan", execute_pre_mutation_failure)
+    monkeypatch.setattr(
+        prod, "release_protected_efi_freeze",
+        lambda _freeze: events.append("efi-thaw"),
+    )
+    real_discard = prod.discard_private_receipt_reservation
+
+    def discard_with_event(reservation):
+        events.append("receipt-discard")
+        return real_discard(reservation)
+
+    monkeypatch.setattr(prod, "discard_private_receipt_reservation", discard_with_event)
+    assert prod.main([
+        "--install-artifact", str(tmp_path / "unused.json"),
+        "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--apply",
+        "--credential-hash-file", str(tmp_path / "credential.hash"),
+        "--write-receipt", str(tmp_path / "receipt.json"),
+    ]) == 2
+    assert events == ["efi-thaw", "receipt-discard"]
 
 
 def test_managed_build_receipt_rejects_noncanonical_store_root():

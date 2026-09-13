@@ -94,6 +94,7 @@ HOST_NIX_ROOT = Path("/nix")
 PRODUCTION_APPLY_LOCK_DIR = Path("/run/heim-pc-nixos-production-locks")
 PRODUCTION_APPLY_LOCK_OWNER_UID = 0
 PRODUCTION_APPLY_LOCK_OWNER_GID = 0
+PRODUCTION_APPLY_GLOBAL_LOCK_NAME = "global.lock"
 PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
@@ -738,6 +739,92 @@ def _production_apply_lock_identity(plan: dict[str, Any]) -> tuple[dict[str, Any
     return physical_identity, sha256_json(physical_identity)
 
 
+def _acquire_production_apply_lock_file(
+    directory_fd: int, lock_name: str, *, busy_message: str
+) -> int:
+    lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        lock_flags |= os.O_NOFOLLOW
+    lock_fd: int | None = None
+    locked = False
+    try:
+        lock_fd = os.open(lock_name, lock_flags, 0o600, dir_fd=directory_fd)
+        opened = os.fstat(lock_fd)
+        linked = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+            or opened.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or linked.st_dev != opened.st_dev
+            or linked.st_ino != opened.st_ino
+            or linked.st_mode != opened.st_mode
+            or linked.st_uid != opened.st_uid
+            or linked.st_gid != opened.st_gid
+            or linked.st_nlink != opened.st_nlink
+        ):
+            raise ProductionInstallError("production apply lock file identity is unsafe")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ProductionInstallError(busy_message) from exc
+        locked = True
+        linked_after_lock = os.stat(
+            lock_name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        opened_after_lock = os.fstat(lock_fd)
+        if (
+            linked_after_lock.st_dev != opened_after_lock.st_dev
+            or linked_after_lock.st_ino != opened_after_lock.st_ino
+            or linked_after_lock.st_mode != opened_after_lock.st_mode
+            or linked_after_lock.st_uid != opened_after_lock.st_uid
+            or linked_after_lock.st_gid != opened_after_lock.st_gid
+            or linked_after_lock.st_nlink != 1
+        ):
+            raise ProductionInstallError(
+                "production apply lock identity changed after acquisition"
+            )
+        return lock_fd
+    except ProductionInstallError:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        if lock_fd is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        raise ProductionInstallError("cannot acquire production apply lock file") from exc
+
+
+def _release_production_apply_lock_fd(lock_fd: Any) -> None:
+    if type(lock_fd) is not int:
+        return
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(lock_fd)
+    except OSError:
+        pass
+
+
 def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
     _physical_identity, target_sha256 = _production_apply_lock_identity(plan)
     if (
@@ -769,8 +856,8 @@ def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
     directory_fd: int | None = None
-    lock_fd: int | None = None
-    locked = False
+    target_lock_fd: int | None = None
+    global_lock_fd: int | None = None
     try:
         directory_fd = os.open(directory, directory_flags)
         opened_directory = os.fstat(directory_fd)
@@ -784,63 +871,33 @@ def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
             or not stat.S_ISDIR(opened_directory.st_mode)
             or stat.S_IMODE(opened_directory.st_mode) != 0o700
         ):
-            raise ProductionInstallError("production apply lock directory identity changed")
-
-        lock_name = f"target-{target_sha256}.lock"
-        lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            lock_flags |= os.O_NOFOLLOW
-        lock_fd = os.open(lock_name, lock_flags, 0o600, dir_fd=directory_fd)
-        opened = os.fstat(lock_fd)
-        linked = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or opened.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
-            or opened.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or linked.st_dev != opened.st_dev
-            or linked.st_ino != opened.st_ino
-            or linked.st_mode != opened.st_mode
-            or linked.st_uid != opened.st_uid
-            or linked.st_gid != opened.st_gid
-            or linked.st_nlink != opened.st_nlink
-        ):
-            raise ProductionInstallError("production apply lock file identity is unsafe")
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
             raise ProductionInstallError(
-                "another production apply already holds the selected target lock"
-            ) from exc
-        locked = True
-        linked_after_lock = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
-        opened_after_lock = os.fstat(lock_fd)
-        if (
-            linked_after_lock.st_dev != opened_after_lock.st_dev
-            or linked_after_lock.st_ino != opened_after_lock.st_ino
-            or linked_after_lock.st_mode != opened_after_lock.st_mode
-            or linked_after_lock.st_uid != opened_after_lock.st_uid
-            or linked_after_lock.st_gid != opened_after_lock.st_gid
-            or linked_after_lock.st_nlink != 1
-        ):
-            raise ProductionInstallError("production apply lock identity changed after acquisition")
+                "production apply lock directory identity changed"
+            )
+
+        target_lock_fd = _acquire_production_apply_lock_file(
+            directory_fd,
+            f"target-{target_sha256}.lock",
+            busy_message=(
+                "another production apply already holds the selected physical target lock"
+            ),
+        )
+        global_lock_fd = _acquire_production_apply_lock_file(
+            directory_fd,
+            PRODUCTION_APPLY_GLOBAL_LOCK_NAME,
+            busy_message=(
+                "another production apply already holds the global installer lock"
+            ),
+        )
         return {
-            "fd": lock_fd,
+            "fd": target_lock_fd,
+            "global_fd": global_lock_fd,
             "directory_fd": directory_fd,
             "target_physical_identity_sha256": target_sha256,
         }
     except ProductionInstallError:
-        if lock_fd is not None:
-            try:
-                if locked:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(lock_fd)
-            except OSError:
-                pass
+        _release_production_apply_lock_fd(global_lock_fd)
+        _release_production_apply_lock_fd(target_lock_fd)
         if directory_fd is not None:
             try:
                 os.close(directory_fd)
@@ -848,42 +905,29 @@ def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
                 pass
         raise
     except OSError as exc:
-        if lock_fd is not None:
-            try:
-                if locked:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(lock_fd)
-            except OSError:
-                pass
+        _release_production_apply_lock_fd(global_lock_fd)
+        _release_production_apply_lock_fd(target_lock_fd)
         if directory_fd is not None:
             try:
                 os.close(directory_fd)
             except OSError:
                 pass
-        raise ProductionInstallError("cannot acquire production apply target lock") from exc
+        raise ProductionInstallError("cannot acquire production apply lock") from exc
 
 
 def release_production_apply_lock(lock: dict[str, Any]) -> None:
-    lock_fd = lock.pop("fd", None)
+    target_lock_fd = lock.pop("fd", None)
+    global_lock_fd = lock.pop("global_fd", None)
     directory_fd = lock.pop("directory_fd", None)
-    if type(lock_fd) is int:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+    # Keep the global shared-state lock until the target-specific lease has been
+    # released; this prevents another target from entering while lock cleanup runs.
+    _release_production_apply_lock_fd(target_lock_fd)
+    _release_production_apply_lock_fd(global_lock_fd)
     if type(directory_fd) is int:
         try:
             os.close(directory_fd)
         except OSError:
             pass
-
 
 def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
     if not isinstance(expected_source, str) or KERNEL_NVME_RE.fullmatch(expected_source) is None:
@@ -1653,7 +1697,9 @@ def _invalidate_private_receipt_reservation(reservation: dict[str, Any]) -> None
         _close_private_receipt_reservation(reservation)
 
 
-def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any]) -> None:
+def finalize_private_receipt(
+    reservation: dict[str, Any], receipt: dict[str, Any], *, keep_open: bool = False
+) -> None:
     _private_receipt_reservation_valid(reservation)
     _private_receipt_reservation_marker_valid(reservation)
     payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -1682,7 +1728,36 @@ def finalize_private_receipt(reservation: dict[str, Any], receipt: dict[str, Any
             ) from restore_exc
         raise ProductionInstallError("cannot finalize private production receipt") from exc
     else:
-        _close_private_receipt_reservation(reservation)
+        if not keep_open:
+            _close_private_receipt_reservation(reservation)
+
+
+def _rewrite_finalized_private_receipt(
+    reservation: dict[str, Any], receipt: dict[str, Any]
+) -> None:
+    payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        _private_receipt_reservation_valid(reservation)
+        fd = reservation["fd"]
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+        _private_receipt_reservation_valid(reservation)
+        if os.fstat(fd).st_size != len(payload) or os.pread(fd, len(payload) + 1, 0) != payload:
+            raise ProductionInstallError("rewritten private production receipt payload is invalid")
+        os.fsync(reservation["parent_fd"])
+    except (OSError, ProductionInstallError) as exc:
+        try:
+            _invalidate_private_receipt_reservation(reservation)
+        except (OSError, ProductionInstallError) as invalidate_exc:
+            raise ProductionInstallError(
+                "private production receipt rewrite failed and invalidation is incomplete"
+            ) from invalidate_exc
+        raise ProductionInstallError(
+            "private production receipt rewrite failed; reservation was invalidated"
+        ) from exc
+
 
 def write_private_receipt(path: Path, receipt: dict[str, Any]) -> None:
     reservation = reserve_private_receipt(path)
@@ -3473,11 +3548,41 @@ def _post_mutation_failure_receipt(
     }
 
 
+def _protected_efi_release_post_mutation_error(
+    error: BaseException, *, private_evidence: dict[str, Any] | None = None
+) -> PostMutationInstallError:
+    code = (
+        "protected-efi-thaw-incomplete"
+        if isinstance(error, ProtectedEfiThawError)
+        else "protected-fallback-unverifiable"
+    )
+    return PostMutationInstallError(code, private_evidence=dict(private_evidence or {}))
+
+
+def _post_mutation_evidence_from_success_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    completed = receipt.get("completed_effects")
+    completed_effects = list(completed) if isinstance(completed, list) else []
+    return {
+        "completed_effects": completed_effects,
+        "mutation_attempted": True,
+        "credential_staging_attempted": True,
+        "credential_staged": receipt.get("credential_staged") is True,
+        "private_storage_identity_staged": "private-storage-identity-staged" in completed_effects,
+        "teardown_failures": [],
+        "protected_post_fingerprint": receipt.get("protected_post_fingerprint"),
+        "efi_nvram_sha256_before": receipt.get("efi_nvram_sha256_before"),
+        "efi_nvram_sha256_after": receipt.get("efi_nvram_sha256_after"),
+    }
+
+
 def execute_plan(
     plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
     credential_hash_file: Path, observer=observe_live,
+    protected_efi_freeze_handoff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validate_confirmation(plan, confirmation)
+    if protected_efi_freeze_handoff is not None and protected_efi_freeze_handoff:
+        raise ProductionInstallError("protected EFI freeze handoff must start empty")
     if os.geteuid() != 0:
         raise ProductionInstallError("production apply requires root")
     if sha256_json(contract) != plan.get("contract_sha256"):
@@ -3580,9 +3685,18 @@ def execute_plan(
         cleanup_verifier_image_archive(verifier_archive)
         verifier_archive = None
 
-        protected_efi_freeze = acquire_protected_efi_freeze(
-            pre_now["protected"]["efi_source"]
-        )
+        try:
+            protected_efi_freeze = acquire_protected_efi_freeze(
+                pre_now["protected"]["efi_source"]
+            )
+        except ProtectedEfiThawError as exc:
+            if isinstance(exc.freeze, dict):
+                protected_efi_freeze = exc.freeze
+                if protected_efi_freeze_handoff is not None:
+                    protected_efi_freeze_handoff["freeze"] = exc.freeze
+            raise
+        if protected_efi_freeze_handoff is not None:
+            protected_efi_freeze_handoff["freeze"] = protected_efi_freeze
         final_pre = validate_preflight(observer(contract), contract)
         verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         verify_partuuid_namespace_clear(contract)
@@ -3702,18 +3816,36 @@ def execute_plan(
                 restore_docker_after_apply(docker_state)
             except BaseException as exc:
                 docker_failure = exc
-        if protected_efi_freeze is not None:
+        if (
+            protected_efi_freeze is not None
+            and protected_efi_freeze_handoff is None
+        ):
             try:
                 release_protected_efi_freeze(protected_efi_freeze)
             except BaseException as exc:
                 protected_efi_thaw_failure = exc
         if protected_efi_thaw_failure is not None:
             if mutation_attempted:
-                raise post_mutation_alarm("protected-efi-thaw-incomplete") from protected_efi_thaw_failure
+                raise _protected_efi_release_post_mutation_error(
+                    protected_efi_thaw_failure,
+                    private_evidence={
+                        "completed_effects": list(completed_effects),
+                        "mutation_attempted": mutation_attempted,
+                        "credential_staging_attempted": credential_staging_attempted,
+                        "credential_staged": credential_staged,
+                        "private_storage_identity_staged": private_storage_identity_staged,
+                        "teardown_failures": list(teardown_failures),
+                        "protected_post_fingerprint": (
+                            protected_fingerprint(post) if post is not None else None
+                        ),
+                        "efi_nvram_sha256_before": nvram_before,
+                        "efi_nvram_sha256_after": nvram_after,
+                    },
+                ) from protected_efi_thaw_failure
             if isinstance(protected_efi_thaw_failure, ProtectedEfiThawError):
                 raise protected_efi_thaw_failure
-            raise ProtectedEfiThawError(
-                "protected EFI filesystem thaw failed before storage mutation"
+            raise ProductionInstallError(
+                "protected EFI frozen filesystem release failed before storage mutation"
             ) from protected_efi_thaw_failure
         if archive_failure is not None:
             if mutation_attempted:
@@ -3795,37 +3927,134 @@ def main(argv: list[str] | None = None) -> int:
         apply_lock = acquire_production_apply_lock(plan)
         try:
             receipt_reservation = reserve_private_receipt(args.write_receipt)
+            freeze_handoff: dict[str, Any] = {}
+
+            def release_handed_off_freeze(
+                *, required: bool = False
+            ) -> BaseException | None:
+                freeze = freeze_handoff.get("freeze")
+                if not isinstance(freeze, dict):
+                    if required:
+                        return ProductionInstallError(
+                            "protected EFI freeze handoff is missing"
+                        )
+                    return None
+                try:
+                    release_protected_efi_freeze(freeze)
+                except BaseException as exc:
+                    return exc
+                freeze_handoff.pop("freeze", None)
+                return None
+
+            execution_error: PostMutationInstallError | None = None
             try:
                 receipt = execute_plan(
                     plan, contract=contract, confirmation=args.confirm,
                     credential_hash_file=args.credential_hash_file,
+                    protected_efi_freeze_handoff=freeze_handoff,
                 )
             except PostMutationInstallError as exc:
+                execution_error = exc
+                receipt = _post_mutation_failure_receipt(
+                    plan=plan, artifact=artifact, error=exc
+                )
+            except BaseException as exc:
+                # Never let receipt cleanup prevent an attempted thaw of the protected
+                # filesystem. A still-frozen fallback is the higher-priority hazard.
+                release_error = release_handed_off_freeze()
+                discard_error: BaseException | None = None
                 try:
-                    failure_receipt = _post_mutation_failure_receipt(
-                        plan=plan, artifact=artifact, error=exc
+                    discard_private_receipt_reservation(receipt_reservation)
+                except BaseException as cleanup_exc:
+                    discard_error = cleanup_exc
+                if release_error is not None:
+                    if isinstance(release_error, ProtectedEfiThawError):
+                        raise release_error
+                    raise ProductionInstallError(
+                        "protected EFI frozen filesystem release failed before storage mutation"
+                    ) from release_error
+                if discard_error is not None:
+                    raise discard_error from exc
+                if isinstance(exc, ProtectedEfiThawError):
+                    raise ProductionInstallError(
+                        "protected EFI freeze acquisition was not safe"
+                    ) from exc
+                raise
+
+            try:
+                finalize_private_receipt(
+                    receipt_reservation, receipt, keep_open=True
+                )
+            except BaseException as evidence_exc:
+                release_error = release_handed_off_freeze(required=True)
+                if release_error is not None:
+                    evidence = (
+                        dict(execution_error.private_evidence)
+                        if execution_error is not None
+                        else _post_mutation_evidence_from_success_receipt(receipt)
                     )
-                    finalize_private_receipt(receipt_reservation, failure_receipt)
-                except BaseException as evidence_exc:
+                    release_alarm = _protected_efi_release_post_mutation_error(
+                        release_error, private_evidence=evidence
+                    )
+                    replacement = _post_mutation_failure_receipt(
+                        plan=plan, artifact=artifact, error=release_alarm
+                    )
                     if "fd" in receipt_reservation:
                         try:
-                            preserve_private_receipt_reservation(receipt_reservation)
+                            finalize_private_receipt(
+                                receipt_reservation, replacement
+                            )
                         except BaseException:
                             if "fd" in receipt_reservation:
-                                _close_private_receipt_reservation(receipt_reservation)
-                    raise PostMutationInstallError(
-                        "private-receipt-finalization-incomplete"
-                    ) from evidence_exc
-                raise
-            except BaseException:
-                discard_private_receipt_reservation(receipt_reservation)
-                raise
-            try:
-                finalize_private_receipt(receipt_reservation, receipt)
-            except BaseException as exc:
+                                try:
+                                    preserve_private_receipt_reservation(
+                                        receipt_reservation
+                                    )
+                                except BaseException:
+                                    if "fd" in receipt_reservation:
+                                        _close_private_receipt_reservation(
+                                            receipt_reservation
+                                        )
+                    raise release_alarm from release_error
                 if "fd" in receipt_reservation:
-                    _close_private_receipt_reservation(receipt_reservation)
-                raise PostMutationInstallError("private-receipt-finalization-incomplete") from exc
+                    try:
+                        preserve_private_receipt_reservation(receipt_reservation)
+                    except BaseException:
+                        if "fd" in receipt_reservation:
+                            _close_private_receipt_reservation(receipt_reservation)
+                raise PostMutationInstallError(
+                    "private-receipt-finalization-incomplete"
+                ) from evidence_exc
+
+            release_error = release_handed_off_freeze(required=True)
+            if release_error is not None:
+                evidence = (
+                    dict(execution_error.private_evidence)
+                    if execution_error is not None
+                    else _post_mutation_evidence_from_success_receipt(receipt)
+                )
+                release_alarm = _protected_efi_release_post_mutation_error(
+                    release_error, private_evidence=evidence
+                )
+                replacement = _post_mutation_failure_receipt(
+                    plan=plan, artifact=artifact, error=release_alarm
+                )
+                try:
+                    _rewrite_finalized_private_receipt(
+                        receipt_reservation, replacement
+                    )
+                except BaseException:
+                    if "fd" in receipt_reservation:
+                        _close_private_receipt_reservation(receipt_reservation)
+                    # A failed thaw must remain the visible alarm even when durable
+                    # failure-receipt repair also fails. The apply lock is still held.
+                    raise release_alarm from release_error
+                _close_private_receipt_reservation(receipt_reservation)
+                raise release_alarm from release_error
+
+            _close_private_receipt_reservation(receipt_reservation)
+            if execution_error is not None:
+                raise execution_error
             print(json.dumps({
                 "schema_version": 1,
                 "kind": "heim_pc.nixos_production_install_completed",
