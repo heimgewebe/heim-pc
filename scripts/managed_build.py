@@ -1305,25 +1305,25 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
             if not _nix_container_ids(label):
                 return removed, True
             continue
-        try:
-            result = subprocess.run(
-                [_docker_executable(), "rm", "--force", *ids],
-                env=_docker_client_environment(),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                timeout=VERSION_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            # `docker run --rm` may concurrently finish destroying the exact
-            # container after our inventory read.  Resolve that ambiguous rm
-            # outcome from fresh exact-label state instead of the client exit.
-            time.sleep(0.1)
-            continue
-        if result.returncode == 0:
-            removed += len(ids)
-        # A non-zero rm can still race an already successful --rm destroy.
-        # Loop back through the exact-label inventory and only authorize
-        # cleanup once absence is observed twice; a surviving container still
-        # fails closed after the bounded attempts.
+        for container_id in ids:
+            try:
+                result = subprocess.run(
+                    [_docker_executable(), "rm", "--force", container_id],
+                    env=_docker_client_environment(),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    timeout=VERSION_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                # `docker run --rm` may concurrently finish destroying this exact
+                # container after our inventory read.  Resolve the ambiguous rm
+                # outcome from fresh exact-label state instead of the client exit.
+                continue
+            if result.returncode == 0:
+                removed += 1
+        # Removing one exact container at a time preserves successful removals
+        # even when a sibling concurrently auto-removes and returns non-zero.
+        # Fresh inventory remains the cleanup authority; surviving containers
+        # still fail closed after the bounded attempts.
         time.sleep(0.1)
     ids = _nix_container_ids(label)
     if ids:

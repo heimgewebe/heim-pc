@@ -202,6 +202,36 @@ class ManagedBuildTests(unittest.TestCase):
         run.assert_called_once()
         self.assertGreaterEqual(inventory.call_count, 3)
 
+    def test_nix_container_cleanup_counts_partial_individual_success(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        first = "c" * 64
+        second = "d" * 64
+        outcomes = [
+            subprocess.CompletedProcess(
+                ["/usr/bin/docker", "rm", "--force", first], 0, b"", b""
+            ),
+            subprocess.CompletedProcess(
+                ["/usr/bin/docker", "rm", "--force", second], 1, b"", b"No such container"
+            ),
+        ]
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[first, second], [], []],
+            ),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", side_effect=outcomes) as run,
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (1, True))
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/usr/bin/docker", "rm", "--force", first],
+                ["/usr/bin/docker", "rm", "--force", second],
+            ],
+        )
+
     def test_nix_container_cleanup_fails_closed_when_rm_fails_and_container_survives(self) -> None:
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
         container = "c" * 64
