@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -100,6 +101,7 @@ PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
+APPLY_DEFERRED_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM})
 # The canonical managed cache suffix stays bound exactly; only the HOME prefix is
 # host-relative, because the independent GitHub-hosted rebuild that authenticates a
 # merged-main candidate emits the same receipt shape under the runner account.
@@ -3740,6 +3742,82 @@ def _post_mutation_evidence_from_success_receipt(receipt: dict[str, Any]) -> dic
     }
 
 
+
+def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
+    """Defer operator termination signals while freeze/completion resources are owned."""
+    if handoff:
+        raise ProductionInstallError("apply signal deferral handoff must start empty")
+    if not all(
+        callable(getattr(signal, name, None))
+        for name in ("pthread_sigmask", "sigpending", "sigwait")
+    ):
+        raise ProductionInstallError(
+            "production apply requires POSIX signal deferral support"
+        )
+
+    managed = set(APPLY_DEFERRED_SIGNALS)
+    try:
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, managed)
+    except (OSError, ValueError) as exc:
+        raise ProductionInstallError(
+            "production apply signal deferral could not be established"
+        ) from exc
+
+    try:
+        previous_set = frozenset(previous)
+        handoff.update(
+            {
+                "active": True,
+                "previous_mask": previous_set,
+                "owned_signals": frozenset(managed - set(previous_set)),
+            }
+        )
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        handoff.clear()
+        raise
+
+
+def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
+    """Consume signals newly deferred by us, then restore the caller's mask."""
+    if handoff.get("active") is not True:
+        return ()
+    previous = handoff.get("previous_mask")
+    owned = handoff.get("owned_signals")
+    if not isinstance(previous, frozenset) or not isinstance(owned, frozenset):
+        raise ProductionInstallError("apply signal deferral ownership is invalid")
+
+    deferred: list[int] = []
+    try:
+        pending = set(signal.sigpending())
+        for signum in sorted(owned, key=int):
+            if signum not in pending:
+                continue
+            waited = signal.sigwait({signum})
+            if waited != signum:
+                raise ProductionInstallError(
+                    "apply signal deferral consumed an unexpected signal"
+                )
+            deferred.append(int(signum))
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, set(previous))
+        finally:
+            handoff.clear()
+    return tuple(deferred)
+
+
+def _raise_deferred_apply_signal(deferred: tuple[int, ...]) -> None:
+    """Deliver a deferred operator interruption only after terminal cleanup."""
+    values = set(deferred)
+    if int(signal.SIGTERM) in values:
+        raise SystemExit(128 + int(signal.SIGTERM))
+    if int(signal.SIGINT) in values:
+        raise KeyboardInterrupt(
+            "SIGINT deferred until production apply resources were terminal"
+        )
+
+
 def _release_handed_off_protected_efi(
     freeze_handoff: dict[str, Any], *, required: bool = False
 ) -> BaseException | None:
@@ -4000,10 +4078,13 @@ def execute_plan(
     plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
     credential_hash_file: Path, observer=observe_live,
     protected_efi_freeze_handoff: dict[str, Any] | None = None,
+    completion_signal_handoff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validate_confirmation(plan, confirmation)
     if protected_efi_freeze_handoff is not None and protected_efi_freeze_handoff:
         raise ProductionInstallError("protected EFI freeze handoff must start empty")
+    if completion_signal_handoff is not None and completion_signal_handoff:
+        raise ProductionInstallError("apply signal deferral handoff must start empty")
     if os.geteuid() != 0:
         raise ProductionInstallError("production apply requires root")
     if sha256_json(contract) != plan.get("contract_sha256"):
@@ -4106,6 +4187,8 @@ def execute_plan(
         cleanup_verifier_image_archive(verifier_archive)
         verifier_archive = None
 
+        if completion_signal_handoff is not None:
+            _begin_apply_signal_deferral(completion_signal_handoff)
         try:
             protected_efi_freeze = acquire_protected_efi_freeze(
                 pre_now["protected"]["efi_source"]
@@ -4357,6 +4440,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.write_receipt is None:
             raise ProductionInstallError("--apply requires --write-receipt")
         apply_lock = acquire_production_apply_lock(plan)
+        completion_signal_handoff: dict[str, Any] = {}
+        deferred_apply_signals: tuple[int, ...] = ()
         try:
             receipt_reservation = reserve_private_receipt(args.write_receipt)
             freeze_handoff: dict[str, Any] = {}
@@ -4374,6 +4459,7 @@ def main(argv: list[str] | None = None) -> int:
                     plan, contract=contract, confirmation=args.confirm,
                     credential_hash_file=args.credential_hash_file,
                     protected_efi_freeze_handoff=freeze_handoff,
+                    completion_signal_handoff=completion_signal_handoff,
                 )
             except PostMutationInstallError as exc:
                 execution_error = exc
@@ -4496,14 +4582,21 @@ def main(argv: list[str] | None = None) -> int:
                     execution_error=execution_error,
                     phase_exc=completion_exc,
                 )
-            print(json.dumps({
-                "schema_version": 1,
-                "kind": "heim_pc.nixos_production_install_completed",
-                "private_receipt_redacted": True,
-            }, indent=2, sort_keys=True))
-            return 0
         finally:
-            release_production_apply_lock(apply_lock)
+            try:
+                release_production_apply_lock(apply_lock)
+            finally:
+                deferred_apply_signals = _end_apply_signal_deferral(
+                    completion_signal_handoff
+                )
+        if deferred_apply_signals:
+            _raise_deferred_apply_signal(deferred_apply_signals)
+        print(json.dumps({
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_production_install_completed",
+            "private_receipt_redacted": True,
+        }, indent=2, sort_keys=True))
+        return 0
     except PostMutationInstallError as exc:
         print(POST_MUTATION_PUBLIC_MESSAGES[exc.code], file=sys.stderr)
         return 3

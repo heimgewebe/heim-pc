@@ -1195,6 +1195,240 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
     ]
 
 
+def test_apply_signal_deferral_tracks_owned_sigint_and_sigterm(monkeypatch):
+    calls = []
+    pending = {prod.signal.SIGINT, prod.signal.SIGTERM}
+
+    def fake_mask(how, values):
+        calls.append((how, set(values)))
+        if how == prod.signal.SIG_BLOCK:
+            return {prod.signal.SIGUSR1}
+        assert how == prod.signal.SIG_SETMASK
+        return set()
+
+    def fake_sigwait(values):
+        signum = next(iter(values))
+        pending.remove(signum)
+        return signum
+
+    monkeypatch.setattr(prod.signal, "pthread_sigmask", fake_mask)
+    monkeypatch.setattr(prod.signal, "sigpending", lambda: set(pending))
+    monkeypatch.setattr(prod.signal, "sigwait", fake_sigwait)
+    handoff = {}
+    prod._begin_apply_signal_deferral(handoff)
+    assert handoff["active"] is True
+    assert handoff["previous_mask"] == frozenset({prod.signal.SIGUSR1})
+    deferred = prod._end_apply_signal_deferral(handoff)
+    assert set(deferred) == {int(prod.signal.SIGINT), int(prod.signal.SIGTERM)}
+    assert handoff == {}
+    assert calls == [
+        (prod.signal.SIG_BLOCK, set(prod.APPLY_DEFERRED_SIGNALS)),
+        (prod.signal.SIG_SETMASK, {prod.signal.SIGUSR1}),
+    ]
+    with pytest.raises(KeyboardInterrupt, match="deferred"):
+        prod._raise_deferred_apply_signal((int(prod.signal.SIGINT),))
+    with pytest.raises(SystemExit) as exc:
+        prod._raise_deferred_apply_signal((int(prod.signal.SIGTERM),))
+    assert exc.value.code == 128 + int(prod.signal.SIGTERM)
+
+
+def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal(
+    monkeypatch, tmp_path, capsys
+):
+    original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    try:
+        monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+        monkeypatch.setattr(
+            prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+        )
+        monkeypatch.setattr(
+            prod, "load_managed_build_receipt",
+            lambda *args, **kwargs: managed_receipt(ARTIFACT),
+        )
+        monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+        monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+        monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+        monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+        monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+        compiled = plan()
+        monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+
+        events = []
+        monkeypatch.setattr(
+            prod, "acquire_production_apply_lock",
+            lambda _plan: events.append("lock-acquired") or {"test": True},
+        )
+        monkeypatch.setattr(
+            prod, "release_production_apply_lock",
+            lambda _lock: events.append("lock-released"),
+        )
+
+        def execute_with_freeze(*args, **kwargs):
+            prod._begin_apply_signal_deferral(kwargs["completion_signal_handoff"])
+            kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+            events.append("execute")
+            raise prod.PostMutationInstallError(
+                "protected-fallback-changed",
+                private_evidence={"mutation_attempted": True},
+            )
+
+        monkeypatch.setattr(prod, "execute_plan", execute_with_freeze)
+        real_failure_receipt = prod._post_mutation_failure_receipt
+        failure_calls = {"count": 0}
+
+        def interrupted_failure_receipt(*args, **kwargs):
+            failure_calls["count"] += 1
+            if failure_calls["count"] == 1:
+                raise KeyboardInterrupt("synthetic first recovery interrupt")
+            events.append("second-sigint-sent")
+            prod.os.kill(prod.os.getpid(), prod.signal.SIGINT)
+            return real_failure_receipt(*args, **kwargs)
+
+        monkeypatch.setattr(
+            prod, "_post_mutation_failure_receipt", interrupted_failure_receipt
+        )
+        real_finalize = prod.finalize_private_receipt
+
+        def finalize_with_event(reservation, receipt, **kwargs):
+            events.append("receipt-finalized")
+            return real_finalize(reservation, receipt, **kwargs)
+
+        monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
+        monkeypatch.setattr(
+            prod, "release_protected_efi_freeze",
+            lambda _freeze: events.append("efi-thaw"),
+        )
+        real_close = prod._close_private_receipt_reservation
+
+        def close_with_event(reservation):
+            events.append("receipt-closed")
+            return real_close(reservation)
+
+        monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
+
+        result = prod.main([
+            "--install-artifact", str(tmp_path / "unused.json"),
+            "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--apply",
+            "--credential-hash-file", str(tmp_path / "credential.hash"),
+            "--write-receipt", str(tmp_path / "receipt.json"),
+        ])
+        assert result == 3
+        captured = capsys.readouterr()
+        assert captured.err == (
+            prod.POST_MUTATION_PUBLIC_MESSAGES[
+                "private-receipt-finalization-incomplete"
+            ]
+            + "\n"
+        )
+        failure = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+        assert failure["status"] == "failure"
+        assert failure["alarm_code"] == "private-receipt-finalization-incomplete"
+        assert events == [
+            "lock-acquired",
+            "execute",
+            "second-sigint-sent",
+            "receipt-finalized",
+            "efi-thaw",
+            "receipt-closed",
+            "lock-released",
+        ]
+        current_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+        assert current_mask == original_mask
+        assert prod.signal.SIGINT not in prod.signal.sigpending()
+    finally:
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
+
+
+def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
+    monkeypatch, tmp_path, capsys
+):
+    original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    try:
+        monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+        monkeypatch.setattr(
+            prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+        )
+        monkeypatch.setattr(
+            prod, "load_managed_build_receipt",
+            lambda *args, **kwargs: managed_receipt(ARTIFACT),
+        )
+        monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+        monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+        monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+        monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+        monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+        compiled = plan()
+        monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+
+        events = []
+        monkeypatch.setattr(
+            prod, "acquire_production_apply_lock",
+            lambda _plan: events.append("lock-acquired") or {"test": True},
+        )
+        monkeypatch.setattr(
+            prod, "release_production_apply_lock",
+            lambda _lock: events.append("lock-released"),
+        )
+
+        def execute_with_deferred_sigint(*args, **kwargs):
+            prod._begin_apply_signal_deferral(kwargs["completion_signal_handoff"])
+            kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+            events.append("execute")
+            prod.os.kill(prod.os.getpid(), prod.signal.SIGINT)
+            events.append("sigint-sent")
+            return {"secret": "super-secret-material"}
+
+        monkeypatch.setattr(prod, "execute_plan", execute_with_deferred_sigint)
+        real_finalize = prod.finalize_private_receipt
+
+        def finalize_with_event(reservation, receipt, **kwargs):
+            events.append("receipt-finalized")
+            return real_finalize(reservation, receipt, **kwargs)
+
+        monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
+        monkeypatch.setattr(
+            prod, "release_protected_efi_freeze",
+            lambda _freeze: events.append("efi-thaw"),
+        )
+        real_close = prod._close_private_receipt_reservation
+
+        def close_with_event(reservation):
+            events.append("receipt-closed")
+            return real_close(reservation)
+
+        monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
+
+        with pytest.raises(KeyboardInterrupt, match="deferred"):
+            prod.main([
+                "--install-artifact", str(tmp_path / "unused.json"),
+                "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--apply",
+                "--credential-hash-file", str(tmp_path / "credential.hash"),
+                "--write-receipt", str(tmp_path / "receipt.json"),
+            ])
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+        assert json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8")) == {
+            "secret": "super-secret-material"
+        }
+        assert events == [
+            "lock-acquired",
+            "execute",
+            "sigint-sent",
+            "receipt-finalized",
+            "efi-thaw",
+            "receipt-closed",
+            "lock-released",
+        ]
+        current_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+        assert current_mask == original_mask
+        assert prod.signal.SIGINT not in prod.signal.sigpending()
+    finally:
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
+
+
 def test_private_receipt_close_interrupt_retains_exact_fd_until_retry(
     monkeypatch, tmp_path
 ):
