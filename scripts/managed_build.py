@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -32,11 +33,15 @@ MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 NIX_STORE_MONITOR_INTERVAL_SECONDS = 0.5
 NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 30.0
+# Volume deletion gets the same bounded I/O window as the final store scan.
+NIX_VOLUME_REMOVE_TIMEOUT_SECONDS = 30.0
 INTERNAL_NIX_STORE_SCAN_OPERATION = "--internal-nix-store-scan"
 NIX_CANCEL_GRACE_SECONDS = 5
 NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
 NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"
+DOCKER_SEARCH_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class PolicyError(ValueError):
@@ -49,6 +54,15 @@ class ManagedBuildError(RuntimeError):
 
 class StoreScanTimeout(ManagedBuildError):
     """Raised when a managed Nix store scan exceeds its bounded observation window."""
+
+
+@lru_cache(maxsize=1)
+def _docker_executable() -> str:
+    """Bind all Docker observations and cleanup to one system executable."""
+    executable = shutil.which("docker", path=DOCKER_SEARCH_PATH)
+    if executable is None or not Path(executable).is_absolute():
+        raise ManagedBuildError("Docker is unavailable in the trusted system search path")
+    return str(Path(executable).resolve(strict=True))
 
 
 def _utc_now() -> str:
@@ -451,7 +465,7 @@ def _toolchain_digest(
             observations[basename] = _run_readonly([command[0], "--version"], cwd=repo)
     elif tool == "nix":
         observations["python_runtime"] = sys.version
-        observations["docker"] = _run_readonly(["docker", "--version"], cwd=repo)
+        observations["docker"] = _run_readonly([_docker_executable(), "--version"], cwd=repo)
         observations["nix_contract_files"] = _files_digest(
             repo, [
                 "flake.lock",
@@ -935,6 +949,14 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _fsync_directory_ancestors(directory: Path) -> None:
+    # A synced leaf directory does not establish the durability of its own name
+    # in a newly created parent. Do not assume the state/output ancestry existed
+    # before this run (or was synced by the worker that created the output).
+    for parent in directory.parents:
+        _fsync_directory(parent)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temp_name = tempfile.mkstemp(
@@ -1096,12 +1118,151 @@ def _managed_nix_success_receipt_path(command: Sequence[str]) -> Path:
     return Path(_command_option_value(command, "--output") + NIX_RECEIPT_SUFFIX)
 
 
+def _nix_volume_exists(volume: str) -> bool:
+    """Only a successful, exact inventory can establish volume absence."""
+    if DOCKER_VOLUME_NAME_RE.fullmatch(volume) is None:
+        raise ManagedBuildError("managed Nix volume name is invalid")
+    try:
+        result = subprocess.run(
+            [_docker_executable(), "volume", "ls", "--format", "{{.Name}}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedBuildError("cannot inventory managed Nix volumes") from exc
+    if result.returncode != 0:
+        raise ManagedBuildError("cannot inventory managed Nix volumes")
+    try:
+        names = result.stdout.decode("ascii", "strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ManagedBuildError("managed Nix volume inventory is not ASCII") from exc
+    if any(DOCKER_VOLUME_NAME_RE.fullmatch(name) is None for name in names):
+        raise ManagedBuildError("managed Nix volume inventory returned an invalid name")
+    return volume in names
+
+
+def _nix_recovery_fence_path(path: Path) -> Path:
+    return path.with_name(path.name + ".recovery")
+
+
+def _nix_pending_completion_path(path: Path) -> Path:
+    return path.with_name(path.name + ".pending-completion")
+
+
+def _clear_nix_lifecycle_fence(path: Path) -> None:
+    # Keep the durable original inode recoverable even if removal's fsync AND
+    # restoration fail. Both names block reuse until completion/reconciliation.
+    os.link(path, _nix_recovery_fence_path(path), follow_symlinks=False)
+    _fsync_directory(path.parent)
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _publish_nix_success(path: Path, fence: Path, success: dict[str, Any]) -> None:
+    """Commit success across potentially different receipt/state filesystems.
+
+    Durable states (P=primary, R=recovery, J=completion journal, S=success):
+      P -> P,J -> P,R,J -> R,J -> J -> J,S -> S
+    Every arrow includes the affected directory's fsync before the next step.
+    J is non-authorizing and blocks identity reuse, even with a different output.
+    P and R mean nonterminal lifecycle and MUST be durably absent before S is
+    even written: the installer's existing lifecycle_fence_cleared check then
+    remains truthful at every write/fsync/crash boundary, including partial S.
+    J without valid S requires reconciliation; valid S supersedes J (its later
+    removal is housekeeping, never a prerequisite for consumer authorization).
+    Neither P nor R may coexist with S. No exception handler establishes this
+    ordering. After J is durable, it also protects failed receipt invalidation.
+
+    Staging only beside the output would not fence a different output for this
+    identity. Consumer-side fence checks would need an authoritative host-local
+    locator and a durability barrier for observed absence, changing the portable
+    receipt contract. J gives the producer an explicit commit point instead.
+    """
+    _atomic_create_json(_nix_pending_completion_path(fence), {
+        "schema_version": 1,
+        "kind": "heim_pc.managed_nix_pending_completion",
+        "source_revision": success["source_revision"],
+        "success_receipt_path": str(path),
+        "success_receipt_sha256": _sha256_json(success),
+    })
+    _clear_nix_lifecycle_fence(fence)
+    _nix_recovery_fence_path(fence).unlink()
+    _fsync_directory(fence.parent)
+    _atomic_create_json(path, success)
+    # J stays durable until S is reachable through durable directory ancestry.
+    _fsync_directory_ancestors(path.parent)
+
+
+def _invalidate_nix_success_receipts(paths: Sequence[Path]) -> None:
+    errors: list[BaseException] = []
+    for path in paths:
+        try:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                info = None
+            if info is not None:
+                if (
+                    not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.getuid() or info.st_mode & 0o077
+                ):
+                    raise ManagedBuildError("refusing unsafe managed Nix receipt invalidation")
+                descriptor = os.open(
+                    path, os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    if (
+                        opened.st_mode != info.st_mode or opened.st_nlink != 1
+                        or opened.st_uid != os.getuid()
+                        or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                    ):
+                        raise ManagedBuildError("refusing unsafe managed Nix receipt invalidation")
+                    # Invalidate the inode BEFORE removing its name. If the
+                    # directory fsync fails, crash recovery may resurrect that
+                    # name, but must never resurrect success-authorizing JSON.
+                    os.ftruncate(descriptor, 0)
+                    truncated = os.fstat(descriptor)
+                    os.fsync(descriptor)
+                    # A replacement or rewrite during invalidation is not the
+                    # inode/content whose durability we just established.
+                    for current in (os.fstat(descriptor), path.lstat()):
+                        if (
+                            (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+                            or current.st_mode != opened.st_mode
+                            or current.st_uid != opened.st_uid or current.st_nlink != 1
+                            or current.st_size != 0
+                            or current.st_mtime_ns != truncated.st_mtime_ns
+                            or current.st_ctime_ns != truncated.st_ctime_ns
+                        ):
+                            raise ManagedBuildError("managed Nix receipt changed during invalidation")
+                    path.unlink()
+                    if os.fstat(descriptor).st_nlink != 0:
+                        raise ManagedBuildError("managed Nix receipt identity changed before unlink")
+                finally:
+                    os.close(descriptor)
+            _fsync_directory(path.parent)
+            # Do not unlink an entry that appeared after an absence observation:
+            # its content has never been invalidated, even if unlink would work.
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ManagedBuildError("managed Nix receipt appeared during invalidation")
+        except BaseException as exc:
+            # Failure on one path must not leave the other success record intact.
+            errors.append(exc)
+    if errors:
+        raise ManagedBuildError("managed Nix success invalidation was not durable; reconcile retained fence") from errors[0]
+
+
 def _nix_container_ids(label: str) -> list[str]:
     if NIX_CONTAINER_LABEL_RE.fullmatch(label) is None:
         raise ManagedBuildError("managed Nix container label is invalid")
     try:
         result = subprocess.run(
-            ["docker", "ps", "--no-trunc", "-aq", "--filter", f"label={label}"],
+            [_docker_executable(), "ps", "--no-trunc", "-aq", "--filter", f"label={label}"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             timeout=VERSION_TIMEOUT_SECONDS,
         )
@@ -1129,7 +1290,7 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
             continue
         try:
             result = subprocess.run(
-                ["docker", "rm", "--force", *ids],
+                [_docker_executable(), "rm", "--force", *ids],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                 timeout=VERSION_TIMEOUT_SECONDS,
             )
@@ -1337,22 +1498,18 @@ def _remove_failed_nix_outputs(command: Sequence[str], guard: dict[str, Any]) ->
         path.unlink()
         _fsync_directory(path.parent)
     for volume in (str(guard["source_volume"]), str(guard["docker_volume"])):
-        inspected = subprocess.run(
-            ["docker", "volume", "inspect", volume],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
-        if inspected.returncode == 0:
-            removed = subprocess.run(
-                ["docker", "volume", "rm", "--force", volume],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
+        if _nix_volume_exists(volume):
+            try:
+                removed = subprocess.run(
+                    [_docker_executable(), "volume", "rm", "--force", volume],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    timeout=NIX_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ManagedBuildError("failed to remove rejected managed Nix volume") from exc
             if removed.returncode != 0:
                 raise ManagedBuildError("failed to remove rejected managed Nix volume")
-        verified = subprocess.run(
-            ["docker", "volume", "inspect", volume],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
-        if verified.returncode == 0:
+        if _nix_volume_exists(volume):
             raise ManagedBuildError("rejected managed Nix volume still exists")
 
 
@@ -1383,6 +1540,8 @@ def execute_plan(
     nix_guard = plan.get("nix_guard")
     lock_fd: int | None = None
     fence_path: Path | None = None
+    recovery_fence_path: Path | None = None
+    pending_completion_path: Path | None = None
     fence_created = False
     cleanup_verified = plan["tool"] != "nix"
     before_store = {"allocated_bytes": 0}
@@ -1391,6 +1550,7 @@ def execute_plan(
     if plan["tool"] == "nix":
         if not isinstance(nix_guard, dict):
             raise ManagedBuildError("managed Nix plan lacks its Nix guard")
+        _docker_executable()
         observed_head = _git(root, "rev-parse", "HEAD")
         if observed_head != nix_guard.get("source_revision") or _git(root, "status", "--porcelain"):
             raise ManagedBuildError("managed Nix source changed after planning")
@@ -1409,12 +1569,14 @@ def execute_plan(
         if output.exists() or output.is_symlink() or success_receipt.exists() or success_receipt.is_symlink():
             raise ManagedBuildError("managed Nix output or success receipt already exists")
         for volume in (str(nix_guard["source_volume"]), str(nix_guard["docker_volume"])):
-            if subprocess.run(["docker", "volume", "inspect", volume], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode == 0:
+            if _nix_volume_exists(volume):
                 raise ManagedBuildError("managed Nix volume already exists before execution")
         lock_path = Path(str(nix_guard["lifecycle_lock_path"]))
         fence_path = Path(str(nix_guard["lifecycle_fence_path"]))
+        recovery_fence_path = _nix_recovery_fence_path(fence_path)
+        pending_completion_path = _nix_pending_completion_path(fence_path)
         _ensure_secure_directory(lock_path.parent, home)
-        if fence_path.exists() or fence_path.is_symlink():
+        if any(path.exists() or path.is_symlink() for path in (fence_path, recovery_fence_path, pending_completion_path)):
             raise ManagedBuildError("managed Nix lifecycle fence requires reconciliation")
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
@@ -1422,11 +1584,24 @@ def execute_plan(
         except BlockingIOError as exc:
             os.close(lock_fd)
             raise ManagedBuildError("managed Nix identity already has an active build lease") from exc
-        _atomic_create_json(fence_path, {
+        # A predecessor can leave a recovery/journal entry and release its flock
+        # between our first observation and lock acquisition.
+        if any(path.exists() or path.is_symlink() for path in (fence_path, recovery_fence_path, pending_completion_path)):
+            os.close(lock_fd)
+            lock_fd = None
+            raise ManagedBuildError("managed Nix lifecycle fence requires reconciliation")
+        fence_payload = {
             "schema_version": 1, "kind": "heim_pc.managed_nix_active_fence",
             "source_revision": nix_guard["source_revision"],
             "docker_volume": nix_guard["docker_volume"],
-        })
+        }
+        try:
+            _atomic_create_json(fence_path, fence_payload)
+            _fsync_directory_ancestors(fence_path.parent)
+        except BaseException:
+            os.close(lock_fd)
+            lock_fd = None
+            raise
         fence_created = True
         if pre_run_store_scan_error:
             try:
@@ -1555,10 +1730,6 @@ def execute_plan(
         if plan["tool"] == "nix" and effective_returncode == 0:
             if not cleanup_verified:
                 raise ManagedBuildError("managed Nix success requires verified container cleanup")
-            if fence_created and fence_path is not None:
-                fence_path.unlink()
-                _fsync_directory(fence_path.parent)
-                fence_created = False
             artifact_path = Path(_command_option_value(command, "--output"))
             artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
             success = {
@@ -1588,7 +1759,8 @@ def execute_plan(
                 "container_cleanup_verified": cleanup_verified,
                 "lifecycle_fence_cleared": True,
             }
-            _atomic_create_json(_managed_nix_success_receipt_path(command), success)
+            _publish_nix_success(_managed_nix_success_receipt_path(command), fence_path, success)
+            fence_created = False
         elif plan["tool"] == "nix":
             if not cleanup_verified:
                 raise ManagedBuildError("managed Nix failure cleanup was not verified")
@@ -1596,18 +1768,50 @@ def execute_plan(
                 isinstance(nix_receipt, dict) and nix_receipt.get("store_scan_error_detected") is True
             ):
                 if fence_created and fence_path is not None:
-                    fence_path.unlink()
-                    _fsync_directory(fence_path.parent)
+                    _clear_nix_lifecycle_fence(fence_path)
                     fence_created = False
         return effective_returncode
+    except BaseException:
+        if plan["tool"] == "nix":
+            # Completion ordering is crash-safe without this handler. On a
+            # caught failure, invalidate incomplete receipts while retaining P,
+            # R or J. In particular, never restore a fence alongside success:
+            # R is already durably absent before success publication can start.
+            incomplete_receipts = [_managed_nix_success_receipt_path(command)]
+            if receipt_path is not None and effective_returncode == 0:
+                incomplete_receipts.append(receipt_path)
+            try:
+                if (
+                    fence_path is not None and not fence_path.exists() and not fence_path.is_symlink()
+                    and recovery_fence_path is not None and recovery_fence_path.exists()
+                ):
+                    # If this restoration fails, the durable recovery name still
+                    # fences reuse. Receipt invalidation must run independently.
+                    os.link(recovery_fence_path, fence_path, follow_symlinks=False)
+                    _fsync_directory(fence_path.parent)
+            finally:
+                fence_created = True
+                _invalidate_nix_success_receipts(incomplete_receipts)
+        raise
     finally:
-        # Any exceptional Nix path deliberately leaves the durable fence behind.
-        # The flock is process-scoped; the retained fence blocks reuse until recovery.
+        # Exceptions retain a durable primary/recovery fence or completion journal.
         if lock_fd is not None:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                if not fence_created and recovery_fence_path is not None:
+                    # Success already retired BOTH fences before publication;
+                    # only its superseded journal remains. Failed builds have
+                    # no success to authorize and can retire their recovery link.
+                    retirement_path = pending_completion_path if effective_returncode == 0 else recovery_fence_path
+                    try:
+                        retirement_path.unlink()
+                        _fsync_directory(retirement_path.parent)
+                    except OSError:
+                        pass
             finally:
-                os.close(lock_fd)
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
 
 
 def _parser() -> argparse.ArgumentParser:

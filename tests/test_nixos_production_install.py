@@ -1370,7 +1370,8 @@ def test_apply_signal_deferral_masks_sigint_but_handles_sigterm(monkeypatch):
     }
     assert handoff == {}
     assert calls == [
-        (prod.signal.SIG_BLOCK, set(prod.APPLY_MASKED_SIGNALS)),
+        (prod.signal.SIG_BLOCK, set(prod.APPLY_DEFERRED_SIGNALS)),
+        (prod.signal.SIG_SETMASK, {prod.signal.SIGUSR1, prod.signal.SIGINT}),
         (prod.signal.SIG_SETMASK, {prod.signal.SIGUSR1}),
     ]
     assert handlers[int(prod.signal.SIGINT)] == "original-int"
@@ -1389,6 +1390,240 @@ def test_apply_signal_deferral_masks_sigint_but_handles_sigterm(monkeypatch):
             ((int(prod.signal.SIGTERM), prod.signal.SIG_DFL),)
         )
     assert exc.value.code == 128 + int(prod.signal.SIGTERM)
+
+
+@pytest.mark.parametrize("boundary", ["capture", "install", "unmask"])
+def test_apply_signal_deferral_captures_sigterm_during_establishment(
+    monkeypatch, boundary
+):
+    real_mask = prod.signal.pthread_sigmask
+    real_getsignal = prod.signal.getsignal
+    real_signal = prod.signal.signal
+    original_mask = real_mask(prod.signal.SIG_BLOCK, set())
+    original_handler = real_getsignal(prod.signal.SIGTERM)
+    caller_mask = (set(original_mask) - set(prod.APPLY_DEFERRED_SIGNALS)) | {
+        prod.signal.SIGUSR1
+    }
+    handoff = {}
+    delivered = []
+    fired = False
+
+    def caller_handler(signum, _frame):
+        delivered.append((int(signum), handoff.get("active")))
+
+    def inject(stage):
+        nonlocal fired
+        if stage == boundary and not fired:
+            fired = True
+            assert set(prod.APPLY_DEFERRED_SIGNALS) <= set(
+                real_mask(prod.signal.SIG_BLOCK, set())
+            )
+            prod.os.kill(prod.os.getpid(), prod.signal.SIGTERM)
+            assert delivered == []
+            assert prod.signal.SIGTERM in prod.signal.sigpending()
+
+    def capture(signum):
+        inject("capture")
+        return real_getsignal(signum)
+
+    def install(signum, handler):
+        inject("install")
+        return real_signal(signum, handler)
+
+    def unmask(how, values):
+        if how == prod.signal.SIG_SETMASK:
+            inject("unmask")
+        return real_mask(how, values)
+
+    try:
+        real_mask(prod.signal.SIG_SETMASK, caller_mask)
+        real_signal(prod.signal.SIGTERM, caller_handler)
+        with monkeypatch.context() as patch:
+            patch.setattr(prod.signal, "getsignal", capture)
+            patch.setattr(prod.signal, "signal", install)
+            patch.setattr(prod.signal, "pthread_sigmask", unmask)
+            prod._begin_apply_signal_deferral(handoff)
+        assert fired is True
+        assert delivered == []
+        assert handoff["caught_signals"] == {int(prod.signal.SIGTERM)}
+        assert set(real_mask(prod.signal.SIG_BLOCK, set())) == (
+            caller_mask | {prod.signal.SIGINT}
+        )
+        deferred = prod._end_apply_signal_deferral(handoff)
+        assert deferred == ((int(prod.signal.SIGTERM), caller_handler),)
+        assert set(real_mask(prod.signal.SIG_BLOCK, set())) == caller_mask
+        prod._raise_deferred_apply_signal(deferred)
+        assert delivered == [(int(prod.signal.SIGTERM), None)]
+    finally:
+        if handoff.get("active") is True:
+            prod._end_apply_signal_deferral(handoff)
+        real_signal(prod.signal.SIGTERM, original_handler)
+        real_mask(prod.signal.SIG_SETMASK, original_mask)
+
+
+@pytest.mark.parametrize("boundary", ["capture", "install", "unmask"])
+def test_apply_signal_deferral_establishment_failure_restores_caller_state(
+    monkeypatch, boundary
+):
+    real_mask = prod.signal.pthread_sigmask
+    real_getsignal = prod.signal.getsignal
+    real_signal = prod.signal.signal
+    original_mask = real_mask(prod.signal.SIG_BLOCK, set())
+    original_handlers = {
+        signum: real_getsignal(signum) for signum in prod.APPLY_DEFERRED_SIGNALS
+    }
+    caller_mask = (set(original_mask) - set(prod.APPLY_DEFERRED_SIGNALS)) | {
+        prod.signal.SIGUSR1
+    }
+    handoff = {}
+    fired = False
+
+    def fail(stage):
+        nonlocal fired
+        if stage == boundary and not fired:
+            fired = True
+            assert set(prod.APPLY_DEFERRED_SIGNALS) <= set(
+                real_mask(prod.signal.SIG_BLOCK, set())
+            )
+            raise OSError("synthetic signal establishment failure")
+
+    def capture(signum):
+        fail("capture")
+        return real_getsignal(signum)
+
+    def install(signum, handler):
+        previous = real_signal(signum, handler)
+        fail("install")
+        return previous
+
+    def unmask(how, values):
+        if how == prod.signal.SIG_SETMASK:
+            fail("unmask")
+        return real_mask(how, values)
+
+    try:
+        real_mask(prod.signal.SIG_SETMASK, caller_mask)
+        with monkeypatch.context() as patch:
+            patch.setattr(prod.signal, "getsignal", capture)
+            patch.setattr(prod.signal, "signal", install)
+            patch.setattr(prod.signal, "pthread_sigmask", unmask)
+            with pytest.raises(OSError, match="signal establishment failure"):
+                prod._begin_apply_signal_deferral(handoff)
+        assert fired is True
+        if boundary == "unmask":
+            assert handoff["active"] is True
+            assert set(real_mask(prod.signal.SIG_BLOCK, set())) == (
+                caller_mask | set(prod.APPLY_DEFERRED_SIGNALS)
+            )
+            assert prod._end_apply_signal_deferral(handoff) == ()
+        assert handoff == {}
+        assert set(real_mask(prod.signal.SIG_BLOCK, set())) == caller_mask
+        assert {
+            signum: real_getsignal(signum) for signum in prod.APPLY_DEFERRED_SIGNALS
+        } == original_handlers
+    finally:
+        if handoff.get("active") is True:
+            prod._end_apply_signal_deferral(handoff)
+        for signum, handler in original_handlers.items():
+            real_signal(signum, handler)
+        real_mask(prod.signal.SIG_SETMASK, original_mask)
+
+
+def test_main_post_unmask_establishment_failure_redelivers_sigterm_after_cleanup(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+    )
+    monkeypatch.setattr(
+        prod, "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", lambda _plan: {})
+    real_mask = prod.signal.pthread_sigmask
+    original_mask = real_mask(prod.signal.SIG_BLOCK, set())
+    original_handler = prod.signal.getsignal(prod.signal.SIGTERM)
+    caller_mask = set(original_mask) - set(prod.APPLY_DEFERRED_SIGNALS)
+    real_discard = prod.discard_private_receipt_reservation
+    real_end = prod._end_apply_signal_deferral
+    events = []
+    handoff = {}
+    fired = False
+
+    def caller_handler(signum, _frame):
+        events.append(("caller-signal", handoff.get("active")))
+        assert signum == prod.signal.SIGTERM
+
+    def execute(*args, **kwargs):
+        nonlocal handoff
+        handoff = kwargs["completion_signal_handoff"]
+        prod._begin_apply_signal_deferral(handoff)
+        pytest.fail("installer setup must not run after failed establishment")
+
+    def unmask_then_fail(how, values):
+        nonlocal fired
+        if how == prod.signal.SIG_SETMASK and handoff.get("active") is True and not fired:
+            fired = True
+            prod.os.kill(prod.os.getpid(), prod.signal.SIGTERM)
+            real_mask(how, values)
+            assert handoff["caught_signals"] == {int(prod.signal.SIGTERM)}
+            raise OSError("synthetic post-unmask failure")
+        return real_mask(how, values)
+
+    def discard(reservation):
+        events.append(("receipt-discard", handoff.get("active")))
+        real_discard(reservation)
+
+    def end(value):
+        events.append(("signal-end", value.get("active")))
+        return real_end(value)
+
+    monkeypatch.setattr(prod, "execute_plan", execute)
+    monkeypatch.setattr(prod, "discard_private_receipt_reservation", discard)
+    monkeypatch.setattr(prod, "_end_apply_signal_deferral", end)
+    monkeypatch.setattr(
+        prod, "release_production_apply_lock",
+        lambda _lock: events.append(("lock-release", handoff.get("active"))),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    try:
+        real_mask(prod.signal.SIG_SETMASK, caller_mask)
+        prod.signal.signal(prod.signal.SIGTERM, caller_handler)
+        with monkeypatch.context() as patch:
+            patch.setattr(prod.signal, "pthread_sigmask", unmask_then_fail)
+            assert prod.main([
+                "--install-artifact", str(tmp_path / "unused.json"),
+                "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--apply",
+                "--credential-hash-file", str(tmp_path / "credential.hash"),
+                "--write-receipt", str(receipt_path),
+            ]) == 2
+        assert fired is True
+        assert events == [
+            ("receipt-discard", True),
+            ("lock-release", True),
+            ("signal-end", True),
+            ("caller-signal", None),
+        ]
+        assert handoff == {}
+        assert not receipt_path.exists()
+        assert set(real_mask(prod.signal.SIG_BLOCK, set())) == caller_mask
+        assert prod.signal.getsignal(prod.signal.SIGTERM) is caller_handler
+        assert capsys.readouterr().err == (
+            "nixos production install blocked by a safety check\n"
+        )
+    finally:
+        if handoff.get("active") is True:
+            real_end(handoff)
+        prod.signal.signal(prod.signal.SIGTERM, original_handler)
+        real_mask(prod.signal.SIG_SETMASK, original_mask)
 
 
 def test_deferred_default_sigint_uses_python_default_handler():
@@ -2188,6 +2423,150 @@ def test_protected_efi_thaw_failure_requires_visible_recovery(monkeypatch, tmp_p
     assert "fd" not in freeze
     with pytest.raises(OSError):
         prod.os.fstat(held_fd)
+
+
+@pytest.mark.parametrize("failure_errno", [errno.EBADF, errno.EIO])
+def test_protected_efi_thaw_unverified_fd_preserves_ownership(
+    monkeypatch, tmp_path, failure_errno
+):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    requests = []
+    monkeypatch.setattr(
+        prod.fcntl, "ioctl",
+        lambda _fd, request, _arg=0: requests.append(request) or 0,
+    )
+    freeze = prod.acquire_protected_efi_freeze(expected_source)
+    handoff = {"freeze": freeze}
+    held_fd = freeze["fd"]
+    try:
+        with monkeypatch.context() as patch:
+            def fail_fstat(_fd):
+                raise OSError(failure_errno, "synthetic fstat failure")
+
+            patch.setattr(prod.os, "fstat", fail_fstat)
+            error = prod._release_handed_off_protected_efi(handoff)
+        assert isinstance(error, prod.ProtectedEfiThawError)
+        assert error.freeze is freeze
+        assert handoff["freeze"] is freeze
+        assert freeze["fd"] == held_fd
+        assert "thawed" not in freeze
+        assert requests == [prod.PROTECTED_EFI_FIFREEZE_IOCTL]
+        assert prod._apply_completion_resources_terminal({}, handoff) is False
+        assert prod.os.fstat(held_fd).st_ino == freeze["inode"]
+        prod.release_protected_efi_freeze(freeze)
+    finally:
+        if "fd" in freeze:
+            prod.os.close(held_fd)
+
+
+@pytest.mark.parametrize("replacement_kind", ["directory", "file"])
+def test_main_pre_thaw_fd_reuse_retains_global_apply_lock(
+    monkeypatch, tmp_path, capsys, replacement_kind
+):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+    )
+    monkeypatch.setattr(
+        prod, "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    replacement = tmp_path / "replacement"
+    if replacement_kind == "directory":
+        replacement.mkdir()
+    else:
+        replacement.write_text("unrelated descriptor", encoding="utf-8")
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    # Freeze/thaw are observations only; every descriptor and lock is temporary.
+    requests = []
+    monkeypatch.setattr(
+        prod.fcntl, "ioctl",
+        lambda _fd, request, _arg=0: requests.append(request) or 0,
+    )
+    real_acquire = prod.acquire_production_apply_lock
+    real_release = prod.release_production_apply_lock
+    held_locks = []
+    freeze_handoffs = []
+
+    def acquire(value):
+        lock = real_acquire(value)
+        held_locks.append(lock)
+        return lock
+
+    def execute_with_reused_fd(*args, **kwargs):
+        handoff = kwargs["protected_efi_freeze_handoff"]
+        freeze_handoffs.append(handoff)
+        with monkeypatch.context() as patch:
+            patch.setattr(prod.os, "geteuid", lambda: 0)
+            freeze = prod.acquire_protected_efi_freeze(expected_source)
+        handoff["freeze"] = freeze
+        replacement_fd = prod.os.open(replacement, prod.os.O_RDONLY | prod.os.O_CLOEXEC)
+        try:
+            prod.os.dup2(replacement_fd, freeze["fd"])
+        finally:
+            prod.os.close(replacement_fd)
+        return {"status": "success"}
+
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", acquire)
+    monkeypatch.setattr(prod, "execute_plan", execute_with_reused_fd)
+    receipt_path = tmp_path / "receipt.json"
+    try:
+        assert prod.main([
+            "--install-artifact", str(tmp_path / "unused.json"),
+            "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--apply",
+            "--credential-hash-file", str(tmp_path / "credential.hash"),
+            "--write-receipt", str(receipt_path),
+        ]) == 3
+        assert capsys.readouterr().err == (
+            prod.POST_MUTATION_PUBLIC_MESSAGES["protected-efi-thaw-incomplete"] + "\n"
+        )
+        failure = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert failure["status"] == "failure"
+        assert failure["alarm_code"] == "protected-efi-thaw-incomplete"
+        assert requests == [prod.PROTECTED_EFI_FIFREEZE_IOCTL]
+        handoff = freeze_handoffs[0]
+        freeze = handoff["freeze"]
+        assert "thawed" not in freeze
+        assert prod.os.fstat(freeze["fd"]).st_ino == replacement.stat().st_ino
+        assert prod._apply_completion_resources_terminal({}, handoff) is False
+        # A repeated recovery attempt cannot act on the reused numeric FD either.
+        error = prod._release_handed_off_protected_efi(handoff)
+        assert isinstance(error, prod.ProtectedEfiThawError)
+        assert error.freeze is freeze
+        assert handoff["freeze"] is freeze
+        assert prod.os.fstat(freeze["fd"]).st_ino == replacement.stat().st_ino
+        assert requests == [prod.PROTECTED_EFI_FIFREEZE_IOCTL]
+        second = json.loads(json.dumps(compiled))
+        second_target = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_9999"
+        second["target_authority"] = second_target
+        second["preflight"]["target"]["requested_path"] = second_target
+        second["preflight"]["target"]["serial"] = "SYNTH-OTHER-SERIAL"
+        second["preflight"]["target"]["wwn"] = "eui.synthetic-other"
+        with pytest.raises(prod.ProductionInstallError, match="global installer lock"):
+            real_acquire(second)
+    finally:
+        for handoff in freeze_handoffs:
+            freeze = handoff.get("freeze", {})
+            if "fd" in freeze:
+                prod.os.close(freeze["fd"])
+        for lock in held_locks:
+            real_release(lock)
 
 
 def test_protected_efi_acquisition_thaw_failure_preserves_exact_fd(monkeypatch, tmp_path):

@@ -1096,37 +1096,38 @@ def release_protected_efi_freeze(freeze: dict[str, Any]) -> None:
         _close_thawed_protected_efi_freeze_fd(freeze)
         return
 
-    identity_failure: BaseException | None = None
-    thaw_failure: BaseException | None = None
     try:
         current = os.fstat(fd)
-        if (
-            current.st_dev != freeze.get("device")
-            or current.st_ino != freeze.get("inode")
-            or current.st_mode != freeze.get("mode")
-            or not stat.S_ISDIR(current.st_mode)
-        ):
-            identity_failure = ProductionInstallError(
-                "protected EFI frozen filesystem identity changed"
-            )
     except BaseException as exc:
-        identity_failure = exc
+        raise ProtectedEfiThawError(
+            "protected EFI frozen filesystem identity is unavailable before thaw",
+            freeze=freeze,
+        ) from exc
+    if (
+        current.st_dev != freeze.get("device")
+        or current.st_ino != freeze.get("inode")
+        or current.st_mode != freeze.get("mode")
+        or not stat.S_ISDIR(current.st_mode)
+    ):
+        # The numeric FD no longer proves authority over the frozen filesystem.
+        # Do not thaw or close its replacement, and retain unresolved ownership
+        # so completion cannot release the global Apply lock.
+        raise ProtectedEfiThawError(
+            "protected EFI frozen filesystem identity changed before thaw",
+            freeze=freeze,
+        )
     try:
         fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
     except BaseException as exc:
-        thaw_failure = exc
-    if thaw_failure is not None:
         raise ProtectedEfiThawError(
             "protected EFI filesystem could not be thawed safely",
             freeze=freeze,
-        ) from thaw_failure
+        ) from exc
     # From here onward the filesystem is known thawed. Keep that state in the
     # owner before close so an asynchronous exception after kernel close can be
     # reconciled without ever retrying FITHAW on a stale/reused descriptor.
     freeze["thawed"] = True
     _close_thawed_protected_efi_freeze_fd(freeze)
-    if identity_failure is not None:
-        raise ProductionInstallError("protected EFI frozen filesystem identity was not stable") from identity_failure
 
 
 def _partition_by_role(contract: dict[str, Any], role: str) -> dict[str, Any]:
@@ -3775,7 +3776,11 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
     masked = set(APPLY_MASKED_SIGNALS)
     previous_handlers: dict[int, Any] = {}
     try:
-        previous = signal.pthread_sigmask(signal.SIG_BLOCK, masked)
+        # Block the entire owned set before reading or changing dispositions:
+        # SIGTERM must not run the caller handler during establishment.
+        previous = signal.pthread_sigmask(
+            signal.SIG_BLOCK, set(APPLY_DEFERRED_SIGNALS)
+        )
     except (OSError, ValueError) as exc:
         raise ProductionInstallError(
             "production apply signal deferral could not be established"
@@ -3793,6 +3798,7 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
         recorder = _apply_signal_recorder(handoff)
         for signum in sorted(handled, key=int):
             signal.signal(signum, recorder)
+        handoff.setdefault("caught_signals", set())
         handoff.update(
             {
                 "active": True,
@@ -3802,8 +3808,15 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
                 "previous_handlers": previous_handlers,
             }
         )
-        handoff.setdefault("caught_signals", set())
+        # Publish ownership before unblocking any pending SIGTERM into the
+        # recorder. Children inherit only the caller mask plus our SIGINT.
+        signal.pthread_sigmask(signal.SIG_SETMASK, set(previous_set) | masked)
     except BaseException:
+        if handoff.get("active") is True:
+            # The mask transition may have succeeded and delivered SIGTERM
+            # before raising. Keep the complete owner for caller cleanup and
+            # _end_apply_signal_deferral, including any recorded signal.
+            raise
         for raw_signum, previous_handler in previous_handlers.items():
             try:
                 signal.signal(raw_signum, previous_handler)

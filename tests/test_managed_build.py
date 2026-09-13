@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,11 @@ class ManagedBuildTests(unittest.TestCase):
             / "managed-build.v1.json"
         )
         self.policy = managed_build.load_policy(self.policy_path)
+        self.docker_executable_patch = patch.object(
+            managed_build, "_docker_executable", return_value="/usr/bin/docker"
+        )
+        self.docker_executable_patch.start()
+        self.addCleanup(self.docker_executable_patch.stop)
 
     def make_git_repo(self, root: Path) -> Path:
         repo = root / "repo"
@@ -53,6 +60,832 @@ class ManagedBuildTests(unittest.TestCase):
 
     def fixed_toolchain(self) -> dict[str, object]:
         return {"observations": {"fixture": "1"}, "sha256": "a" * 64}
+
+    def make_nix_execution(self, root: Path):
+        home = root / "home"
+        home.mkdir()
+        repo = self.make_git_repo(root)
+        worker = repo / "scripts/nixos_production_prepare.py"
+        worker.parent.mkdir()
+        worker.write_text("# fixture\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "worker fixture"], check=True)
+        output = root / "artifact.json"
+        command = [sys.executable, str(worker), "--managed-worker", "--repo", str(repo),
+                   "--output", str(output), "--source-authority", "proof-only"]
+        with patch.object(managed_build, "_toolchain_digest", return_value=self.fixed_toolchain()):
+            plan = managed_build.build_plan(
+                self.policy, repo=repo, command=command, home=home,
+                explicit_tool="nix", explicit_profile="nixos-production-prepare",
+            )
+
+        def runner(argv, **kwargs):
+            output.write_text(json.dumps({
+                "source_revision": plan["nix_guard"]["source_revision"],
+                "nix_volume": plan["nix_guard"]["docker_volume"],
+                "system_path": "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-test",
+                "closure_manifest_sha256": "a" * 64,
+                "closure_path_count": 1,
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0)
+
+        return home, plan, command, runner
+
+    def test_docker_resolution_is_fixed_and_shared_by_all_observations_and_cleanup(self) -> None:
+        self.docker_executable_patch.stop()
+        managed_build._docker_executable.cache_clear()
+        self.addCleanup(managed_build._docker_executable.cache_clear)
+        executable = str(Path(sys.executable).resolve())
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        containers = ["c" * 64]
+        volumes = {"fixture-source", "fixture-store"}
+        observed = []
+
+        def docker(argv, **kwargs):
+            self.assertEqual(argv[0], executable)
+            observed.append(argv[1:3])
+            os.environ["PATH"] = "/untrusted/changed-after-first-docker-call"
+            if argv[1] == "--version":
+                self.assertEqual(kwargs["timeout"], 5)
+                output = b"Docker fixture\n"
+            elif argv[1] == "ps":
+                output = "\n".join(containers).encode("ascii")
+            elif argv[1] == "rm":
+                self.assertEqual(argv[2:], ["--force", "c" * 64])
+                containers.clear()
+                output = b""
+            elif argv[1:3] == ["volume", "ls"]:
+                self.assertEqual(kwargs["timeout"], 5)
+                output = "\n".join(sorted(volumes)).encode("ascii")
+            elif argv[1:3] == ["volume", "rm"]:
+                self.assertEqual(kwargs["timeout"], managed_build.NIX_VOLUME_REMOVE_TIMEOUT_SECONDS)
+                self.assertEqual(kwargs["timeout"], 30.0)
+                volumes.remove(argv[-1])
+                output = b""
+            else:
+                self.fail(f"unexpected Docker call: {argv}")
+            return subprocess.CompletedProcess(argv, 0, output, b"")
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"PATH": "/untrusted/inherited-path"}),
+            patch.object(managed_build.shutil, "which", return_value=sys.executable) as which,
+            patch.object(managed_build.subprocess, "run", side_effect=docker),
+            patch.object(managed_build.time, "sleep"),
+        ):
+            root = Path(directory)
+            managed_build._toolchain_digest("nix", [sys.executable], root)
+            self.assertEqual(managed_build._nix_container_ids(label), ["c" * 64])
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (1, True))
+            managed_build._remove_failed_nix_outputs(
+                ["--output", str(root / "artifact.json")],
+                {"source_volume": "fixture-source", "docker_volume": "fixture-store"},
+            )
+            which.assert_called_once_with("docker", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertFalse(volumes)
+        self.assertIn(["volume", "rm"], observed)
+
+    def test_docker_resolution_fails_closed_without_trusted_executable(self) -> None:
+        self.docker_executable_patch.stop()
+        managed_build._docker_executable.cache_clear()
+        self.addCleanup(managed_build._docker_executable.cache_clear)
+        with (
+            patch.object(managed_build.shutil, "which", return_value=None),
+            patch.object(managed_build.subprocess, "run") as run,
+            self.assertRaises(managed_build.ManagedBuildError),
+        ):
+            managed_build._nix_volume_exists("fixture")
+        run.assert_not_called()
+
+    def test_nix_volume_absence_requires_successful_exact_inventory(self) -> None:
+        cases = [
+            (0, b"", False),
+            (0, b"fixture-extra\nother-fixture\n", False),
+            (0, b"fixture\n", True),
+            (1, b"", None),
+            (125, b"", None),
+            (0, b"\xff\n", None),
+            (0, b"not a volume\n", None),
+            (0, b"\n", None),
+        ]
+        for returncode, output, expected in cases:
+            with self.subTest(returncode=returncode, output=output):
+                def docker(argv, **kwargs):
+                    self.assertEqual(argv[0], "/usr/bin/docker")
+                    # Even an inspect error saying 'not found' is no absence proof.
+                    if argv[1:3] == ["volume", "inspect"]:
+                        return subprocess.CompletedProcess(argv, 1, b"", b"not found")
+                    self.assertEqual(argv[1:], ["volume", "ls", "--format", "{{.Name}}"])
+                    return subprocess.CompletedProcess(argv, returncode, output, b"daemon error")
+                with patch.object(managed_build.subprocess, "run", side_effect=docker) as run:
+                    if expected is None:
+                        with self.assertRaises(managed_build.ManagedBuildError):
+                            managed_build._nix_volume_exists("fixture")
+                    else:
+                        self.assertIs(managed_build._nix_volume_exists("fixture"), expected)
+                    self.assertTrue(any(item.args[0][1:3] == ["volume", "ls"] for item in run.call_args_list))
+
+    def test_nix_volume_cleanup_requires_successful_post_removal_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def docker(argv, **kwargs):
+                if argv[1:3] == ["volume", "rm"]:
+                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                if argv[1:3] == ["volume", "inspect"]:
+                    return subprocess.CompletedProcess(argv, 1, b"", b"permission denied")
+                output = b"fixture-source\n" if run.call_count == 1 else b""
+                return subprocess.CompletedProcess(argv, 0 if output else 1, output, b"")
+            with patch.object(managed_build.subprocess, "run", side_effect=docker) as run:
+                with self.assertRaisesRegex(managed_build.ManagedBuildError, "inventory"):
+                    managed_build._remove_failed_nix_outputs(
+                        ["--output", str(Path(directory) / "artifact.json")],
+                        {"source_volume": "fixture-source", "docker_volume": "fixture-store"},
+                    )
+            self.assertEqual([item.args[0][1:3] for item in run.call_args_list],
+                             [["volume", "ls"], ["volume", "rm"], ["volume", "ls"]])
+
+    def test_nix_inventory_failure_blocks_worker_or_retains_failure_fence(self) -> None:
+        for boundary in ("preflight", "cleanup"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                home, plan, command, _runner = self.make_nix_execution(Path(directory))
+                worker = Mock(return_value=subprocess.CompletedProcess(command, 1))
+                real_run = subprocess.run
+                inventory_calls = 0
+
+                def docker(argv, **kwargs):
+                    nonlocal inventory_calls
+                    if argv[0] != "/usr/bin/docker":
+                        return real_run(argv, **kwargs)
+                    self.assertEqual(argv[1:3], ["volume", "ls"])
+                    inventory_calls += 1
+                    failed = boundary == "preflight" or inventory_calls > 2
+                    return subprocess.CompletedProcess(argv, 1 if failed else 0, b"", b"daemon unavailable")
+
+                with patch.object(managed_build.subprocess, "run", side_effect=docker):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, "inventory"):
+                        managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+                self.assertEqual(worker.call_count, 0 if boundary == "preflight" else 1)
+                self.assertEqual(Path(plan["nix_guard"]["lifecycle_fence_path"]).exists(), boundary == "cleanup")
+                self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
+
+    def test_nix_volume_removal_errors_preserve_cause_and_stop_cleanup(self) -> None:
+        for error in (subprocess.TimeoutExpired("docker", 30), OSError("removal unavailable")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                with patch.object(managed_build.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 0, b"fixture-source\n", b""), error,
+                ]) as run:
+                    with self.assertRaisesRegex(
+                        managed_build.ManagedBuildError, "^failed to remove rejected managed Nix volume$"
+                    ) as caught:
+                        managed_build._remove_failed_nix_outputs(
+                            ["--output", str(Path(directory) / "artifact.json")],
+                            {"source_volume": "fixture-source", "docker_volume": "fixture-store"},
+                        )
+                self.assertIs(caught.exception.__cause__, error)
+                self.assertEqual(run.call_args_list, [
+                    call(["/usr/bin/docker", "volume", "ls", "--format", "{{.Name}}"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5),
+                    call(["/usr/bin/docker", "volume", "rm", "--force", "fixture-source"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                         timeout=managed_build.NIX_VOLUME_REMOVE_TIMEOUT_SECONDS),
+                ])
+
+    def test_main_reports_volume_removal_errors_and_retains_lifecycle_fence(self) -> None:
+        for error in (subprocess.TimeoutExpired("docker", 30), OSError("removal unavailable")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                home, plan, command, _runner = self.make_nix_execution(Path(directory))
+                guard = plan["nix_guard"]
+                fence = Path(guard["lifecycle_fence_path"])
+                worker = Mock(return_value=subprocess.CompletedProcess(command, 1))
+                real_run, real_execute = subprocess.run, managed_build.execute_plan
+                docker_calls = []
+
+                def docker(argv, **kwargs):
+                    if argv[0] != "/usr/bin/docker":
+                        return real_run(argv, **kwargs)
+                    docker_calls.append(argv[1:])
+                    if argv[1:3] == ["volume", "rm"]:
+                        self.assertEqual(argv[3:], ["--force", guard["source_volume"]])
+                        self.assertEqual(kwargs["timeout"], managed_build.NIX_VOLUME_REMOVE_TIMEOUT_SECONDS)
+                        raise error
+                    self.assertEqual(argv[1:], ["volume", "ls", "--format", "{{.Name}}"])
+                    self.assertEqual(kwargs["timeout"], 5)
+                    output = (guard["source_volume"] + "\n").encode("ascii") if worker.called else b""
+                    return subprocess.CompletedProcess(argv, 0, output, b"")
+
+                def execute(policy, planned, argv, **kwargs):
+                    return real_execute(policy, planned, argv, runner=worker, **kwargs)
+
+                with (
+                    patch.dict(os.environ, {"HOME": str(home)}),
+                    patch.object(managed_build, "build_plan", return_value=plan),
+                    patch.object(managed_build, "execute_plan", side_effect=execute),
+                    patch.object(managed_build.subprocess, "run", side_effect=docker),
+                    patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+                ):
+                    result = managed_build.main([
+                        "--policy", str(self.policy_path), "run", "--repo", plan["repository_root"],
+                        "--tool", "nix", "--profile", plan["profile"], "--", *command,
+                    ])
+                self.assertEqual(result, 2)
+                self.assertEqual(json.loads(stderr.getvalue()), {
+                    "schema_version": 1, "kind": "heim_pc.managed_build_error",
+                    "error": "failed to remove rejected managed Nix volume",
+                })
+                worker.assert_called_once()
+                self.assertEqual(docker_calls, [
+                    ["volume", "ls", "--format", "{{.Name}}"],
+                    ["volume", "ls", "--format", "{{.Name}}"],
+                    ["volume", "ls", "--format", "{{.Name}}"],
+                    ["volume", "rm", "--force", guard["source_volume"]],
+                ])
+                self.assertEqual(json.loads(fence.read_text())["source_revision"], guard["source_revision"])
+                self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
+                self.assertFalse(list((Path(plan["state_root"]) / "receipts").glob("*.json")))
+                retry_worker = Mock()
+                # Even a later empty volume inventory cannot authorize reuse.
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, "fence requires reconciliation"):
+                        real_execute(self.policy, plan, command, home=home, runner=retry_worker)
+                retry_worker.assert_not_called()
+
+    def test_nix_success_publication_and_fence_clear_failure_windows_are_recoverable(self) -> None:
+        windows = (
+            "managed-file-fsync", "managed-directory-fsync", "pending-create",
+            "pending-file-fsync", "pending-directory-fsync", "success-create",
+            "success-file-fsync", "success-directory-fsync", "fence-unlink",
+            "recovery-link", "recovery-directory-fsync", "recovery-unlink",
+            "recovery-retirement-fsync", "fence-directory-fsync",
+            "persistent-success-directory-fsync", "persistent-fence-directory-fsync",
+        )
+        for window in windows:
+            with self.subTest(window=window), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home, plan, command, runner = self.make_nix_execution(root)
+                fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                recovery = managed_build._nix_recovery_fence_path(fence)
+                pending = managed_build._nix_pending_completion_path(fence)
+                success = managed_build._managed_nix_success_receipt_path(command)
+                receipts = Path(plan["state_root"]) / "receipts"
+                real_fsync, real_create = os.fsync, managed_build._atomic_create_json
+                real_unlink, real_link = Path.unlink, os.link
+                triggered = False
+                pending_durable = False
+                lifecycle_terminal = False
+
+                def fail():
+                    nonlocal triggered
+                    triggered = True
+                    raise OSError("injected durability failure")
+
+                def fsync(fd):
+                    nonlocal pending_durable, lifecycle_terminal
+                    target = Path(os.readlink(f"/proc/self/fd/{fd}"))
+                    is_directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    if not triggered or window.startswith("persistent-"):
+                        if window == "managed-file-fsync" and not is_directory and target.parent == receipts:
+                            fail()
+                        if window == "managed-directory-fsync" and target == receipts:
+                            fail()
+                        if window == "pending-file-fsync" and target == pending:
+                            fail()
+                        if window == "pending-directory-fsync" and target == fence.parent and pending.exists():
+                            fail()
+                        if window == "success-file-fsync" and target == success:
+                            self.assertTrue(lifecycle_terminal)
+                            fail()
+                        if window in {"success-directory-fsync", "persistent-success-directory-fsync"} and target == root and (success.exists() or triggered):
+                            self.assertTrue(lifecycle_terminal)
+                            fail()
+                        if window == "recovery-directory-fsync" and target == fence.parent and recovery.exists():
+                            self.assertTrue(fence.exists())
+                            fail()
+                        if window in {"fence-directory-fsync", "persistent-fence-directory-fsync"} and target == fence.parent and (not fence.exists() or triggered):
+                            self.assertTrue(pending_durable)
+                            fail()
+                        if window == "recovery-retirement-fsync" and target == fence.parent and not fence.exists() and not recovery.exists():
+                            self.assertTrue(pending_durable)
+                            fail()
+                    real_fsync(fd)
+                    if target == fence.parent:
+                        pending_durable |= pending.exists()
+                        lifecycle_terminal = not fence.exists() and not recovery.exists()
+
+                def create(path, payload):
+                    if path == pending and window == "pending-create":
+                        fail()
+                    if path == success:
+                        self.assertTrue(lifecycle_terminal)
+                        self.assertTrue(pending_durable)
+                        if window == "success-create":
+                            fail()
+                    return real_create(path, payload)
+
+                def unlink(path, *args, **kwargs):
+                    if path in (fence, recovery):
+                        self.assertTrue(pending_durable)
+                        self.assertFalse(success.exists())
+                        if window == ("fence-unlink" if path == fence else "recovery-unlink") and not triggered:
+                            fail()
+                    return real_unlink(path, *args, **kwargs)
+
+                def link(source, destination, **kwargs):
+                    if window == "recovery-link" and Path(source) == fence:
+                        fail()
+                    return real_link(source, destination, **kwargs)
+
+                with (
+                    patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                    patch.object(managed_build.os, "fsync", side_effect=fsync),
+                    patch.object(managed_build, "_atomic_create_json", side_effect=create),
+                    patch.object(Path, "unlink", new=unlink),
+                    patch.object(managed_build.os, "link", side_effect=link),
+                ):
+                    with self.assertRaises((OSError, managed_build.ManagedBuildError)):
+                        managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+                self.assertTrue(triggered)
+                self.assertFalse(success.exists())
+                self.assertFalse(list(receipts.glob("*.json")))
+                anchor = next(path for path in (fence, recovery, pending) if path.exists())
+                self.assertEqual(json.loads(anchor.read_text())["source_revision"], plan["nix_guard"]["source_revision"])
+                Path(managed_build._command_option_value(command, "--output")).unlink()
+                worker = Mock()
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False), self.assertRaisesRegex(managed_build.ManagedBuildError, "fence requires reconciliation"):
+                    managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+                worker.assert_not_called()
+
+    def test_nix_recovery_fence_survives_failed_primary_restoration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, runner = self.make_nix_execution(Path(directory))
+            fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            recovery = managed_build._nix_recovery_fence_path(fence)
+            real_fsync, real_link = managed_build._fsync_directory, os.link
+
+            def fsync(path):
+                if path == fence.parent and not fence.exists():
+                    raise OSError("primary removal fsync failed")
+                return real_fsync(path)
+
+            def link(source, destination, **kwargs):
+                if Path(destination) == fence:
+                    raise OSError("primary restoration failed")
+                return real_link(source, destination, **kwargs)
+
+            with (
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(managed_build, "_fsync_directory", side_effect=fsync),
+                patch.object(managed_build.os, "link", side_effect=link),
+                self.assertRaisesRegex(OSError, "primary restoration failed"),
+            ):
+                managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+            self.assertFalse(fence.exists())
+            self.assertEqual(json.loads(recovery.read_text())["source_revision"], plan["nix_guard"]["source_revision"])
+            self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
+            self.assertFalse(list((Path(plan["state_root"]) / "receipts").glob("*.json")))
+            Path(managed_build._command_option_value(command, "--output")).unlink()
+            worker = Mock()
+            with patch.object(managed_build, "_nix_volume_exists", return_value=False), self.assertRaisesRegex(managed_build.ManagedBuildError, "fence requires reconciliation"):
+                managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+            worker.assert_not_called()
+
+    def test_nix_publication_failure_invalidates_receipts_even_when_unlink_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, runner = self.make_nix_execution(Path(directory))
+            success = managed_build._managed_nix_success_receipt_path(command)
+            receipts = Path(plan["state_root"]) / "receipts"
+            fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            real_fsync, real_unlink = managed_build._fsync_directory, Path.unlink
+            triggered = False
+
+            def fsync(path):
+                nonlocal triggered
+                if path == success.parent and success.exists() and not triggered:
+                    triggered = True
+                    raise OSError("success directory fsync failed")
+                return real_fsync(path)
+
+            def unlink(path, *args, **kwargs):
+                if path == success or path.parent == receipts:
+                    raise OSError("receipt unlink failed")
+                return real_unlink(path, *args, **kwargs)
+
+            with (
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(managed_build, "_fsync_directory", side_effect=fsync),
+                patch.object(Path, "unlink", new=unlink),
+                self.assertRaisesRegex(managed_build.ManagedBuildError, "invalidation was not durable"),
+            ):
+                managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+            self.assertTrue(triggered)
+            self.assertEqual(success.read_bytes(), b"")
+            self.assertEqual([path.read_bytes() for path in receipts.glob("*.json")], [b""])
+            self.assertTrue(managed_build._nix_pending_completion_path(fence).exists())
+            self.assertFalse(fence.exists())
+
+    def test_nix_resurrected_receipts_are_invalid_after_persistent_directory_fsync_failure(self) -> None:
+        from scripts import nixos_production_install as installer
+
+        for boundary in ("publication", "fence-removal-and-restoration"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                home, plan, command, runner = self.make_nix_execution(Path(directory))
+                success = managed_build._managed_nix_success_receipt_path(command)
+                receipts = Path(plan["state_root"]) / "receipts"
+                fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                recovery = managed_build._nix_recovery_fence_path(fence)
+                pending = managed_build._nix_pending_completion_path(fence)
+                expected_receipt_count = 2 if boundary == "publication" else 1
+                real_directory_fsync = managed_build._fsync_directory
+                real_fsync, real_unlink, real_link = os.fsync, Path.unlink, os.link
+                held = {}
+                durable_payloads = {}
+                events = {}
+
+                def directory_fsync(path):
+                    trigger = (
+                        boundary == "publication" and path == success.parent and success.exists()
+                    ) or (
+                        boundary == "fence-removal-and-restoration"
+                        and path == fence.parent and not fence.exists()
+                    )
+                    if not held and trigger:
+                        selected = [*receipts.glob("*.json")]
+                        if boundary == "publication":
+                            selected.insert(0, success)
+                        else:
+                            # The new state machine has not published any
+                            # canonical success at this nonterminal boundary.
+                            self.assertFalse(success.exists())
+                        for receipt in selected:
+                            held[receipt] = os.open(receipt, os.O_RDONLY | os.O_CLOEXEC)
+                            valid = json.loads(os.pread(held[receipt], 65536, 0))
+                            self.assertEqual(valid["returncode"], 0)
+                            if receipt == success:
+                                self.assertIs(valid["lifecycle_fence_cleared"], True)
+                            events[receipt] = ["valid"]
+                        self.assertEqual(len(held), expected_receipt_count)
+                        raise OSError("publication completion failed")
+                    if held and path in {success.parent, receipts}:
+                        self.assertTrue(fence.exists() or recovery.exists() or pending.exists())
+                        for receipt in held:
+                            if receipt.parent == path:
+                                events[receipt].append("directory-fsync-failed")
+                        raise OSError("persistent receipt directory fsync failure")
+                    return real_directory_fsync(path)
+
+                def fsync(fd):
+                    real_fsync(fd)
+                    for receipt, retained_fd in held.items():
+                        info, retained = os.fstat(fd), os.fstat(retained_fd)
+                        if (info.st_dev, info.st_ino) == (retained.st_dev, retained.st_ino):
+                            durable_payloads[receipt] = os.pread(retained_fd, 65536, 0)
+                            self.assertEqual(durable_payloads[receipt], b"")
+                            events[receipt].append("content-fsync")
+
+                def unlink(path, *args, **kwargs):
+                    if path in held:
+                        self.assertEqual(events[path], ["valid", "content-fsync"])
+                        self.assertEqual(path.stat().st_ino, os.fstat(held[path]).st_ino)
+                        real_unlink(path, *args, **kwargs)
+                        events[path].append("unlink")
+                        return
+                    return real_unlink(path, *args, **kwargs)
+
+                def link(source, destination, **kwargs):
+                    if boundary == "fence-removal-and-restoration" and Path(destination) == fence:
+                        raise OSError("primary fence restoration failed")
+                    return real_link(source, destination, **kwargs)
+
+                try:
+                    with (
+                        patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                        patch.object(managed_build, "_fsync_directory", side_effect=directory_fsync),
+                        patch.object(managed_build.os, "fsync", side_effect=fsync),
+                        patch.object(Path, "unlink", new=unlink),
+                        patch.object(managed_build.os, "link", side_effect=link),
+                        self.assertRaisesRegex(managed_build.ManagedBuildError, "invalidation was not durable"),
+                    ):
+                        managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+                    self.assertEqual(len(held), expected_receipt_count)
+                    anchor = pending if boundary == "publication" else recovery
+                    self.assertEqual(json.loads(anchor.read_text())["source_revision"], plan["nix_guard"]["source_revision"])
+                    for receipt, fd in held.items():
+                        self.assertEqual(events[receipt], ["valid", "content-fsync", "unlink", "directory-fsync-failed"])
+                        self.assertFalse(receipt.exists())
+                        self.assertEqual(os.fstat(fd).st_nlink, 0)
+                        # Model crash resurrection from the last successfully
+                        # fsynced content; also inspect the actual unlinked inode.
+                        self.assertEqual(os.pread(fd, 65536, 0), durable_payloads[receipt])
+                        receipt.write_bytes(durable_payloads[receipt])
+                        receipt.chmod(0o600)
+                        with self.assertRaises(json.JSONDecodeError):
+                            json.loads(receipt.read_bytes())
+                    with self.assertRaisesRegex(installer.ProductionInstallError, "cannot load"):
+                        installer.load_managed_build_receipt(
+                            success, {}, expected_policy_sha256=plan["policy_sha256"],
+                            artifact_path=Path(managed_build._command_option_value(command, "--output")),
+                        )
+                    self.assertTrue(anchor.exists())
+                finally:
+                    for fd in held.values():
+                        os.close(fd)
+
+    def test_nix_receipt_invalidation_failures_do_not_skip_other_receipt(self) -> None:
+        for operation in ("open", "fstat", "ftruncate", "fsync", "unlink", "truncate-no-effect", "unlink-no-effect"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as directory:
+                paths = [Path(directory) / name for name in ("public.json", "state.json")]
+                for path in paths:
+                    managed_build._atomic_create_json(path, {"returncode": 0, "lifecycle_fence_cleared": True})
+                name = {"truncate-no-effect": "ftruncate", "unlink-no-effect": "unlink"}.get(operation, operation)
+                owner = Path if name == "unlink" else managed_build.os
+                real_operation = getattr(owner, name)
+                fired = False
+
+                def fail_once(*args, **kwargs):
+                    nonlocal fired
+                    if not fired:
+                        fired = True
+                        if operation.endswith("-no-effect"):
+                            return None
+                        raise OSError("unverifiable receipt invalidation")
+                    return real_operation(*args, **kwargs)
+
+                with (
+                    patch.object(owner, name, new=fail_once),
+                    self.assertRaisesRegex(managed_build.ManagedBuildError, "invalidation was not durable"),
+                ):
+                    managed_build._invalidate_nix_success_receipts(paths)
+                self.assertTrue(fired)
+                self.assertTrue(paths[0].exists())
+                self.assertFalse(paths[1].exists())
+
+    def test_nix_receipt_invalidation_rejects_unsafe_inodes_without_mutation(self) -> None:
+        for kind in ("symlink", "hardlink", "directory", "fifo", "public-mode", "foreign-owner"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                receipt, other = root / "receipt.json", root / "other.json"
+                managed_build._atomic_create_json(other, {"unrelated": True})
+                if kind == "symlink":
+                    receipt.symlink_to(other)
+                elif kind == "hardlink":
+                    os.link(other, receipt)
+                elif kind == "directory":
+                    receipt.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(receipt)
+                else:
+                    managed_build._atomic_create_json(receipt, {"returncode": 0})
+                    if kind == "public-mode":
+                        receipt.chmod(0o666)
+                uid = os.getuid() + (1 if kind == "foreign-owner" else 0)
+                with (
+                    patch.object(managed_build.os, "getuid", return_value=uid),
+                    patch.object(managed_build.os, "ftruncate") as truncate,
+                    patch.object(Path, "unlink") as unlink,
+                    self.assertRaisesRegex(managed_build.ManagedBuildError, "invalidation was not durable"),
+                ):
+                    managed_build._invalidate_nix_success_receipts([receipt])
+                truncate.assert_not_called()
+                unlink.assert_not_called()
+                self.assertEqual(json.loads(other.read_text()), {"unrelated": True})
+
+    def test_nix_receipt_invalidation_rechecks_identity_and_absence_before_unlink(self) -> None:
+        for boundary in ("open", "fsync", "absent", "rewrite"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                receipt, replacement = root / "receipt.json", root / "replacement.json"
+                payload = {"returncode": 0, "lifecycle_fence_cleared": True}
+                if boundary != "absent":
+                    managed_build._atomic_create_json(receipt, payload)
+                managed_build._atomic_create_json(replacement, payload)
+                real_open, real_fsync = os.open, os.fsync
+                real_directory_fsync = managed_build._fsync_directory
+                fired = False
+
+                def replace():
+                    nonlocal fired
+                    fired = True
+                    if boundary == "rewrite":
+                        receipt.write_text(json.dumps(payload), encoding="utf-8")
+                    else:
+                        os.replace(replacement, receipt)
+
+                def open_file(path, *args, **kwargs):
+                    if boundary == "open" and Path(path) == receipt and not fired:
+                        replace()
+                    return real_open(path, *args, **kwargs)
+
+                def fsync(fd):
+                    real_fsync(fd)
+                    if boundary in {"fsync", "rewrite"} and not fired:
+                        replace()
+
+                def directory_fsync(path):
+                    if boundary == "absent" and not fired:
+                        replace()
+                    return real_directory_fsync(path)
+
+                with (
+                    patch.object(managed_build.os, "open", side_effect=open_file),
+                    patch.object(managed_build.os, "fsync", side_effect=fsync),
+                    patch.object(managed_build, "_fsync_directory", side_effect=directory_fsync),
+                    patch.object(Path, "unlink") as unlink,
+                    self.assertRaisesRegex(managed_build.ManagedBuildError, "invalidation was not durable"),
+                ):
+                    managed_build._invalidate_nix_success_receipts([receipt])
+                self.assertTrue(fired)
+                unlink.assert_not_called()
+                self.assertEqual(json.loads(receipt.read_text()), payload)
+
+    def test_nix_superseded_pending_journal_retirement_is_only_housekeeping(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        for boundary in ("unlink-before", "unlink-after", "fsync-before", "fsync-after"):
+            for error in (PowerLoss, OSError):
+                with self.subTest(boundary=boundary, error=error.__name__), tempfile.TemporaryDirectory() as directory:
+                    home, plan, command, runner = self.make_nix_execution(Path(directory))
+                    fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                    pending = managed_build._nix_pending_completion_path(fence)
+                    recovery = managed_build._nix_recovery_fence_path(fence)
+                    success_path = managed_build._managed_nix_success_receipt_path(command)
+                    real_unlink, real_sync = Path.unlink, managed_build._fsync_directory
+                    retired = False
+                    durable_success = False
+                    triggered = False
+
+                    def fail():
+                        nonlocal triggered
+                        triggered = True
+                        raise error("journal retirement interrupted")
+
+                    def unlink(path, *args, **kwargs):
+                        nonlocal retired
+                        if path == pending:
+                            self.assertTrue(durable_success)
+                            self.assertFalse(fence.exists() or recovery.exists())
+                            if boundary == "unlink-before":
+                                fail()
+                            real_unlink(path, *args, **kwargs)
+                            retired = True
+                            if boundary == "unlink-after":
+                                fail()
+                            return
+                        return real_unlink(path, *args, **kwargs)
+
+                    def sync(path):
+                        nonlocal durable_success
+                        if retired and path == pending.parent and boundary == "fsync-before":
+                            fail()
+                        real_sync(path)
+                        if path == success_path.parent and success_path.exists():
+                            durable_success = True
+                        if retired and path == pending.parent and boundary == "fsync-after":
+                            fail()
+
+                    with (
+                        patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                        patch.object(Path, "unlink", new=unlink),
+                        patch.object(managed_build, "_fsync_directory", side_effect=sync),
+                        patch.object(managed_build, "_invalidate_nix_success_receipts") as invalidate,
+                    ):
+                        if error is PowerLoss:
+                            with self.assertRaises(PowerLoss):
+                                managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+                        else:
+                            self.assertEqual(managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner), 0)
+                        invalidate.assert_not_called()
+                    self.assertTrue(triggered)
+                    success = json.loads(success_path.read_bytes())
+                    self.assertTrue(success["lifecycle_fence_cleared"])
+                    self.assertEqual(success["status"], "success")
+                    self.assertFalse(fence.exists() or recovery.exists())
+                    if pending.exists():
+                        self.assertEqual(json.loads(pending.read_bytes())["success_receipt_sha256"], managed_build._sha256_json(success))
+
+    def test_nix_fencing_is_rechecked_after_flock_acquisition(self) -> None:
+        for kind in ("recovery", "pending"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                home, plan, command, _runner = self.make_nix_execution(Path(directory))
+                fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                marker = (managed_build._nix_recovery_fence_path(fence) if kind == "recovery"
+                          else managed_build._nix_pending_completion_path(fence))
+                real_flock = managed_build.fcntl.flock
+                captured = []
+
+                def flock(fd, operation):
+                    real_flock(fd, operation)
+                    if operation & managed_build.fcntl.LOCK_EX:
+                        captured.append(fd)
+                        managed_build._atomic_create_json(marker, {"predecessor": "incomplete"})
+
+                worker = Mock()
+                with (
+                    patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                    patch.object(managed_build.fcntl, "flock", side_effect=flock),
+                    self.assertRaisesRegex(managed_build.ManagedBuildError, "fence requires reconciliation"),
+                ):
+                    managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+                worker.assert_not_called()
+                self.assertFalse(fence.exists())
+                self.assertTrue(marker.exists())
+                with self.assertRaises(OSError):
+                    os.fstat(captured[0])
+
+    def test_nix_directory_ancestry_is_durable_before_worker_and_journal_retirement(self) -> None:
+        for stage in ("initial-fence", "success"):
+            # Fail successive ancestor barriers, including an ancestor whose
+            # mkdir was performed earlier by another part of this same run.
+            for index in range(2 if stage == "success" else 3):
+                with self.subTest(stage=stage, index=index), tempfile.TemporaryDirectory() as directory:
+                    home, plan, command, runner = self.make_nix_execution(Path(directory))
+                    fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                    pending = managed_build._nix_pending_completion_path(fence)
+                    success = managed_build._managed_nix_success_receipt_path(command)
+                    watched = fence.parent if stage == "initial-fence" else success.parent
+                    real_ancestors, real_sync = managed_build._fsync_directory_ancestors, managed_build._fsync_directory
+                    active = False
+                    synced = []
+                    worker = Mock(side_effect=runner)
+
+                    def ancestors(path):
+                        nonlocal active
+                        active = path == watched
+                        try:
+                            return real_ancestors(path)
+                        finally:
+                            active = False
+
+                    def sync(path):
+                        if active:
+                            synced.append(path)
+                            if len(synced) == index + 1:
+                                raise OSError("ancestor durability failure")
+                        return real_sync(path)
+
+                    with (
+                        patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                        patch.object(managed_build, "_fsync_directory_ancestors", side_effect=ancestors),
+                        patch.object(managed_build, "_fsync_directory", side_effect=sync),
+                        self.assertRaisesRegex(OSError, "ancestor durability failure"),
+                    ):
+                        managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+                    self.assertEqual(synced, list(watched.parents)[:index + 1])
+                    self.assertFalse(success.exists())
+                    if stage == "initial-fence":
+                        worker.assert_not_called()
+                    else:
+                        worker.assert_called_once()
+                        self.assertTrue(pending.exists())
+                        self.assertFalse(fence.exists() or managed_build._nix_recovery_fence_path(fence).exists())
+
+    def test_nix_recovery_retirement_failure_prevents_success_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, runner = self.make_nix_execution(Path(directory))
+            fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            recovery = managed_build._nix_recovery_fence_path(fence)
+            real_unlink = Path.unlink
+
+            def unlink(path, *args, **kwargs):
+                if path == recovery:
+                    self.assertFalse(fence.exists())
+                    raise OSError("recovery anchor retirement failed")
+                return real_unlink(path, *args, **kwargs)
+
+            with (
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(Path, "unlink", new=unlink),
+                self.assertRaisesRegex(OSError, "recovery anchor retirement failed"),
+            ):
+                managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+            self.assertTrue(recovery.exists())
+            self.assertTrue(managed_build._nix_pending_completion_path(fence).exists())
+            self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
+
+    def test_nix_failed_build_restores_fence_if_clear_directory_fsync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, _runner = self.make_nix_execution(Path(directory))
+            fence = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            real_fsync = managed_build._fsync_directory
+            triggered = False
+
+            def fsync(path):
+                nonlocal triggered
+                if path == fence.parent and not fence.exists() and not triggered:
+                    triggered = True
+                    raise OSError("fence clear fsync failed")
+                return real_fsync(path)
+
+            with (
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(managed_build, "_fsync_directory", side_effect=fsync),
+                self.assertRaises(OSError),
+            ):
+                managed_build.execute_plan(
+                    self.policy, plan, command, home=home,
+                    runner=Mock(return_value=subprocess.CompletedProcess(command, 1)),
+                )
+            self.assertTrue(triggered)
+            self.assertEqual(json.loads(fence.read_text())["kind"], "heim_pc.managed_nix_active_fence")
+            self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
 
     def test_repository_policy_loads(self) -> None:
         self.assertEqual(self.policy["schema_version"], 1)
@@ -430,7 +1263,8 @@ class ManagedBuildTests(unittest.TestCase):
                     "closure_path_count": 1,
                 }) + "\n", encoding="utf-8")
                 return subprocess.CompletedProcess(argv, 0)
-            rc = managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
+            with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                rc = managed_build.execute_plan(self.policy, plan, command, home=home, runner=runner)
             self.assertEqual(rc, 0)
             receipts = list((home / ".local/state/heim-pc/managed-builds/receipts").glob("*.json"))
             self.assertEqual(len(receipts), 1)
@@ -523,6 +1357,7 @@ class ManagedBuildTests(unittest.TestCase):
             with (
                 patch.object(managed_build, "scan_worktree_payloads", side_effect=scan),
                 patch.object(managed_build, "_run_nix_worker_guarded", side_effect=guarded),
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
             ):
                 rc = managed_build.execute_plan(self.policy, plan, command, home=home)
 
@@ -1284,6 +2119,239 @@ class ManagedBuildTests(unittest.TestCase):
                 sorted(path.name for path in root.glob("*.json")),
                 ["2.json", "3.json"],
             )
+
+
+class NixCompletionCrashTests(unittest.TestCase):
+    def test_every_completion_syscall_prefix_preserves_the_consumer_invariant(self) -> None:
+        """Model unsynced names/content surviving OR reverting, without recovery handlers."""
+        from itertools import product
+        from scripts import nixos_production_install as installer
+
+        class PowerLoss(BaseException):
+            pass
+
+        # Unlike an exception injected into execute_plan, a stop in this helper
+        # cannot invoke its receipt-invalidation/primary-restoration handler.
+        boundaries = (
+            "pending-open", "pending-write", "pending-file-fsync", "pending-close",
+            "pending-directory-fsync", "recovery-link", "recovery-directory-fsync",
+            "primary-unlink", "primary-directory-fsync", "recovery-unlink",
+            "recovery-retirement-fsync", "success-open", "success-partial-write",
+            "success-write", "success-file-fsync", "success-close", "success-directory-fsync",
+        )
+        scenarios = [(None, "after", PowerLoss)] + [
+            (boundary, when, error)
+            for boundary in boundaries for when in ("before", "after")
+            for error in (PowerLoss, OSError)
+        ]
+        for stop, when, error in scenarios:
+            with self.subTest(stop=stop, when=when, error=error.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fence = root / "state" / "identity.active.json"
+                pending = managed_build._nix_pending_completion_path(fence)
+                recovery = managed_build._nix_recovery_fence_path(fence)
+                artifact_path = root / "output" / "artifact.json"
+                artifact_path.parent.mkdir()
+                success_path = installer.managed_build_receipt_path(artifact_path)
+                revision = "a" * 40
+                artifact = {
+                    "schema_version": 1, "kind": "heim_pc.nixos_production_install_artifact",
+                    "source_revision": revision,
+                    "system_path": "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-test",
+                    "nix_volume": "heim-pc-nixos-production-" + revision[:12],
+                    "nix_image": installer.PINNED_NIX_IMAGE,
+                    "profile": "heim-pc-storage-target", "source_authority": "proof-only",
+                    "source_bundle_sha256": "b" * 64,
+                    "closure_manifest_sha256": "c" * 64, "closure_path_count": 1,
+                }
+                artifact_path.write_text(json.dumps(artifact))
+                success = {
+                    "schema_version": 1, "kind": installer.MANAGED_BUILD_RECEIPT_KIND,
+                    "status": "success", "returncode": 0, "tool": "nix",
+                    "profile": "nixos-production-prepare", "source_revision": revision,
+                    "docker_volume": artifact["nix_volume"],
+                    "store_root": "/home/fixture/.cache/heim-pc/managed-builds/nix/" + "1" * 64 + "/nix-store",
+                    "system_closure": artifact["system_path"],
+                    "closure_manifest_sha256": artifact["closure_manifest_sha256"], "closure_path_count": 1,
+                    "managed_plan_sha256": "2" * 64, "managed_policy_sha256": "3" * 64,
+                    "managed_receipt_sha256": "4" * 64,
+                    "artifact_file_sha256": managed_build._sha256_file(artifact_path),
+                    "artifact_json_sha256": managed_build._sha256_json(artifact),
+                    "store_stop_threshold_bytes": 100, "store_hard_limit_bytes": 200,
+                    "store_max_observed_bytes": 1, "store_budget_stop_triggered": False,
+                    "store_scan_error_detected": False, "runtime_timeout_triggered": False,
+                    "container_cleanup_verified": True, "lifecycle_fence_cleared": True,
+                }
+                managed_build._atomic_create_json(fence, {"source_revision": revision})
+                paths = (fence, recovery, pending, success_path)
+                real_open, real_write, real_close = os.open, os.write, os.close
+                real_fsync, real_link, real_unlink = os.fsync, os.link, Path.unlink
+                durable_names = {fence: fence.stat().st_ino}
+                durable_content = {fence.stat().st_ino: fence.read_bytes()}
+                opened = set()
+                visited = []
+                stopped = False
+                partial_written = False
+
+                def accepted(data):
+                    if data is None:
+                        return False
+                    try:
+                        installer.validate_managed_build_receipt(
+                            json.loads(data), artifact, expected_policy_sha256=success["managed_policy_sha256"],
+                            artifact_file_sha256=success["artifact_file_sha256"],
+                        )
+                    except (ValueError, installer.ProductionInstallError):
+                        return False
+                    return True
+
+                self.assertTrue(accepted(json.dumps(success).encode()))
+
+                def check_invariant():
+                    # Enumerate independent persistence of unsynced directory
+                    # entries and inode bytes, including partial canonical JSON.
+                    # Never assume state and output share a filesystem or that
+                    # close / unlink / write supplies a durability barrier.
+                    options = []
+                    for path in paths:
+                        inodes = {durable_names.get(path)}
+                        if path.exists():
+                            inodes.add(path.stat().st_ino)
+                        else:
+                            inodes.add(None)
+                        variants = set()
+                        for inode in inodes:
+                            if inode is None:
+                                variants.add(None)
+                            else:
+                                variants.add(durable_content.get(inode, b""))
+                                if path.exists() and path.stat().st_ino == inode:
+                                    variants.add(path.read_bytes())
+                        options.append(variants)
+                    for primary, anchor, journal, canonical in product(*options):
+                        if accepted(canonical):
+                            self.assertIsNone(primary, "consumer-valid success precedes durable primary retirement")
+                            self.assertIsNone(anchor, "consumer-valid success precedes durable recovery retirement")
+                        else:
+                            self.assertTrue(any(x is not None for x in (primary, anchor, journal)),
+                                            "crash loses every fence/journal before authoritative success")
+                    if success_path.exists() and accepted(success_path.read_bytes()):
+                        loaded = installer.load_managed_build_receipt(
+                            success_path, artifact, expected_policy_sha256=success["managed_policy_sha256"],
+                            artifact_path=artifact_path,
+                        )
+                        self.assertEqual(loaded, success)
+
+                def event(label, operation, durable=None):
+                    nonlocal stopped
+                    if stopped:
+                        return operation()
+                    check_invariant()
+                    if stop == label and when == "before":
+                        stopped = True
+                        raise error("injected stop before " + label)
+                    result = operation()
+                    if durable is not None:
+                        durable()
+                    visited.append(label)
+                    check_invariant()
+                    if stop == label and when == "after":
+                        stopped = True
+                        raise error("injected stop after " + label)
+                    return result
+
+                def name(path):
+                    return "pending" if path == pending else "success"
+
+                def open_file(path, flags, *args, **kwargs):
+                    def operation():
+                        fd = real_open(path, flags, *args, **kwargs)
+                        opened.add(fd)
+                        return fd
+                    if Path(path) in (pending, success_path):
+                        return event(name(Path(path)) + "-open", operation)
+                    return operation()
+
+                def write(fd, data):
+                    nonlocal partial_written
+                    path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+                    label = name(path) + "-write"
+                    if path == success_path and not partial_written:
+                        partial_written = True
+                        data = data[:len(data) // 2]
+                        label = "success-partial-write"
+                    return event(label, lambda: real_write(fd, data))
+
+                def fsync(fd):
+                    path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+                    if stat.S_ISDIR(os.fstat(fd).st_mode):
+                        if path not in (fence.parent, success_path.parent):
+                            # Ancestry failures are exercised separately; J must
+                            # still exist throughout these publication barriers.
+                            self.assertTrue(pending.exists())
+                            return real_fsync(fd)
+                        if path == success_path.parent:
+                            label = "success-directory-fsync"
+                        elif fence.exists():
+                            label = "recovery-directory-fsync" if recovery.exists() else "pending-directory-fsync"
+                        else:
+                            label = "primary-directory-fsync" if recovery.exists() else "recovery-retirement-fsync"
+                        def durable():
+                            for entry in paths:
+                                if entry.parent == path:
+                                    durable_names.pop(entry, None)
+                                    if entry.exists():
+                                        durable_names[entry] = entry.stat().st_ino
+                    else:
+                        label = name(path) + "-file-fsync"
+                        def durable():
+                            durable_content[os.fstat(fd).st_ino] = path.read_bytes()
+                    return event(label, lambda: real_fsync(fd), durable)
+
+                def close(fd):
+                    path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+                    def operation():
+                        real_close(fd)
+                        opened.discard(fd)
+                    if path in (pending, success_path):
+                        return event(name(path) + "-close", operation)
+                    return operation()
+
+                def link(source, destination, **kwargs):
+                    return event("recovery-link", lambda: real_link(source, destination, **kwargs))
+
+                def unlink(path, *args, **kwargs):
+                    return event("primary-unlink" if path == fence else "recovery-unlink",
+                                 lambda: real_unlink(path, *args, **kwargs))
+
+                try:
+                    with (
+                        patch.object(managed_build.os, "open", side_effect=open_file),
+                        patch.object(managed_build.os, "write", side_effect=write),
+                        patch.object(managed_build.os, "fsync", side_effect=fsync),
+                        patch.object(managed_build.os, "close", side_effect=close),
+                        patch.object(managed_build.os, "link", side_effect=link),
+                        patch.object(Path, "unlink", new=unlink),
+                        patch.object(managed_build, "_invalidate_nix_success_receipts") as invalidate,
+                    ):
+                        if stop is None:
+                            managed_build._publish_nix_success(success_path, fence, success)
+                        else:
+                            with self.assertRaises(error):
+                                managed_build._publish_nix_success(success_path, fence, success)
+                            self.assertTrue(stopped)
+                        invalidate.assert_not_called()
+                    check_invariant()
+                    if stop is None:
+                        self.assertEqual(tuple(visited), boundaries)
+                        self.assertTrue(pending.exists())
+                        # Consumer acceptance with a superseded journal is
+                        # intentional; neither active nor recovery may remain.
+                        self.assertTrue(accepted(success_path.read_bytes()))
+                        self.assertFalse(fence.exists() or recovery.exists())
+                finally:
+                    for fd in opened:
+                        real_close(fd)
 
 
 if __name__ == "__main__":
