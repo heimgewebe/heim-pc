@@ -94,6 +94,10 @@ HOST_NIX_ROOT = Path("/nix")
 PRODUCTION_APPLY_LOCK_DIR = Path("/run/heim-pc-nixos-production-locks")
 PRODUCTION_APPLY_LOCK_OWNER_UID = 0
 PRODUCTION_APPLY_LOCK_OWNER_GID = 0
+PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
+# Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
+PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
+PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
 # The canonical managed cache suffix stays bound exactly; only the HOME prefix is
 # host-relative, because the independent GitHub-hosted rebuild that authenticates a
 # merged-main candidate emits the same receipt shape under the runner account.
@@ -119,6 +123,16 @@ class ProductionInstallError(RuntimeError):
     pass
 
 
+class ProtectedEfiThawError(ProductionInstallError):
+    pass
+
+
+PROTECTED_EFI_RECOVERY_MESSAGE = (
+    "nixos production install RECOVERY ALARM: the protected fallback EFI filesystem "
+    "could not be thawed safely; inspect /boot/efi before any retry"
+)
+
+
 POST_MUTATION_PUBLIC_MESSAGES = {
     "apply-failed-after-mutation-attempt": "nixos production install POST-MUTATION ALARM: destructive execution was attempted and the apply did not complete; inspect target and fallback before any retry",
     "credential-staging-incomplete": "nixos production install POST-MUTATION ALARM: credential staging did not complete; inspect installed target before any retry",
@@ -131,6 +145,7 @@ POST_MUTATION_PUBLIC_MESSAGES = {
     "trusted-build-seal-teardown-incomplete": "nixos production install POST-MUTATION ALARM: the root-protected build seal could not be fully torn down; inspect /nix and the seal before any retry",
     "docker-quiesce-restore-incomplete": "nixos production install POST-MUTATION ALARM: the pre-apply Docker service state could not be restored safely; inspect Docker before any retry",
     "private-receipt-finalization-incomplete": "nixos production install POST-MUTATION ALARM: the reserved private success receipt could not be finalized safely; inspect target and receipt path before any retry",
+    "protected-efi-thaw-incomplete": "nixos production install POST-MUTATION ALARM: the protected fallback EFI filesystem could not be thawed safely; inspect /boot/efi before any retry",
 }
 
 
@@ -684,14 +699,43 @@ def _require_by_id(value: Any, label: str) -> str:
     return value
 
 
-def _production_apply_lock_identity(plan: dict[str, Any]) -> tuple[str, str]:
-    target = _require_by_id(plan.get("target_authority"), "production apply lock target")
-    digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
-    return target, digest
+def _production_apply_lock_identity(plan: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    target_authority = _require_by_id(
+        plan.get("target_authority"), "production apply lock target"
+    )
+    preflight = plan.get("preflight")
+    if not isinstance(preflight, dict):
+        raise ProductionInstallError("production apply lock lacks preflight identity")
+    target = preflight.get("target")
+    if not isinstance(target, dict) or target.get("requested_path") != target_authority:
+        raise ProductionInstallError("production apply lock target/preflight binding mismatch")
+    model = target.get("model")
+    serial = target.get("serial")
+    wwn = target.get("wwn")
+    transport = target.get("transport")
+    size_bytes = target.get("size_bytes")
+    if (
+        not isinstance(model, str) or not model
+        or not isinstance(serial, str) or not serial
+        or not isinstance(wwn, str) or not wwn
+        or not isinstance(transport, str) or not transport
+        or isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0
+    ):
+        raise ProductionInstallError("production apply lock physical target identity is incomplete")
+    physical_identity = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_target_physical_identity",
+        "model": model,
+        "serial": serial,
+        "wwn": wwn,
+        "size_bytes": size_bytes,
+        "transport": transport,
+    }
+    return physical_identity, sha256_json(physical_identity)
 
 
 def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
-    _target, target_sha256 = _production_apply_lock_identity(plan)
+    _physical_identity, target_sha256 = _production_apply_lock_identity(plan)
     if (
         os.geteuid() != PRODUCTION_APPLY_LOCK_OWNER_UID
         or os.getegid() != PRODUCTION_APPLY_LOCK_OWNER_GID
@@ -780,7 +824,7 @@ def acquire_production_apply_lock(plan: dict[str, Any]) -> dict[str, Any]:
         return {
             "fd": lock_fd,
             "directory_fd": directory_fd,
-            "target_authority_sha256": target_sha256,
+            "target_physical_identity_sha256": target_sha256,
         }
     except ProductionInstallError:
         if lock_fd is not None:
@@ -835,6 +879,112 @@ def release_production_apply_lock(lock: dict[str, Any]) -> None:
             os.close(directory_fd)
         except OSError:
             pass
+
+
+def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
+    if not isinstance(expected_source, str) or KERNEL_NVME_RE.fullmatch(expected_source) is None:
+        raise ProductionInstallError("protected EFI freeze source is invalid")
+    if os.geteuid() != 0:
+        raise ProductionInstallError("protected EFI freeze requires root authority")
+    mountpoint = PROTECTED_EFI_MOUNTPOINT
+    if _findmnt(str(mountpoint)) != expected_source:
+        raise ProductionInstallError("protected EFI mount changed before freeze")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(mountpoint, flags)
+    except OSError as exc:
+        raise ProductionInstallError("protected EFI mount cannot be opened for freeze") from exc
+    frozen = False
+    try:
+        opened = os.fstat(fd)
+        linked = os.stat(mountpoint, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(linked.st_mode)
+            or opened.st_dev != linked.st_dev
+            or opened.st_ino != linked.st_ino
+            or opened.st_mode != linked.st_mode
+        ):
+            raise ProductionInstallError("protected EFI mount identity changed before freeze")
+        if _findmnt(str(mountpoint)) != expected_source:
+            raise ProductionInstallError("protected EFI mount source changed before freeze")
+        try:
+            fcntl.ioctl(fd, PROTECTED_EFI_FIFREEZE_IOCTL, 0)
+        except OSError as exc:
+            raise ProductionInstallError("protected EFI filesystem cannot be frozen safely") from exc
+        frozen = True
+        opened_after = os.fstat(fd)
+        linked_after = os.stat(mountpoint, follow_symlinks=False)
+        if (
+            opened_after.st_dev != opened.st_dev
+            or opened_after.st_ino != opened.st_ino
+            or opened_after.st_mode != opened.st_mode
+            or linked_after.st_dev != opened.st_dev
+            or linked_after.st_ino != opened.st_ino
+            or linked_after.st_mode != opened.st_mode
+            or _findmnt(str(mountpoint)) != expected_source
+        ):
+            raise ProductionInstallError("protected EFI mount identity changed during freeze")
+        return {
+            "fd": fd,
+            "device": opened.st_dev,
+            "inode": opened.st_ino,
+            "mode": opened.st_mode,
+            "source": expected_source,
+        }
+    except BaseException as exc:
+        thaw_failure: BaseException | None = None
+        if frozen:
+            try:
+                fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
+            except BaseException as thaw_exc:
+                thaw_failure = thaw_exc
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if thaw_failure is not None:
+            raise ProtectedEfiThawError(
+                "protected EFI freeze acquisition failed and thaw is incomplete"
+            ) from thaw_failure
+        raise exc
+
+
+def release_protected_efi_freeze(freeze: dict[str, Any]) -> None:
+    fd = freeze.pop("fd", None)
+    if type(fd) is not int:
+        raise ProductionInstallError("protected EFI freeze handle is invalid")
+    identity_failure: BaseException | None = None
+    thaw_failure: BaseException | None = None
+    try:
+        try:
+            current = os.fstat(fd)
+            if (
+                current.st_dev != freeze.get("device")
+                or current.st_ino != freeze.get("inode")
+                or current.st_mode != freeze.get("mode")
+                or not stat.S_ISDIR(current.st_mode)
+            ):
+                identity_failure = ProductionInstallError(
+                    "protected EFI frozen filesystem identity changed"
+                )
+        except BaseException as exc:
+            identity_failure = exc
+        try:
+            fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
+        except BaseException as exc:
+            thaw_failure = exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if thaw_failure is not None:
+        raise ProtectedEfiThawError("protected EFI filesystem could not be thawed safely") from thaw_failure
+    if identity_failure is not None:
+        raise ProductionInstallError("protected EFI frozen filesystem identity was not stable") from identity_failure
 
 
 def _partition_by_role(contract: dict[str, Any], role: str) -> dict[str, Any]:
@@ -3364,6 +3514,7 @@ def execute_plan(
     post: dict[str, Any] | None = None
     nvram_before: str | None = None
     nvram_after: str | None = None
+    protected_efi_freeze: dict[str, Any] | None = None
 
     def post_mutation_alarm(code: str) -> ProductionInstallError:
         # An in-loop guard can fail before the first destructive command runs. The
@@ -3415,6 +3566,9 @@ def execute_plan(
         cleanup_verifier_image_archive(verifier_archive)
         verifier_archive = None
 
+        protected_efi_freeze = acquire_protected_efi_freeze(
+            pre_now["protected"]["efi_source"]
+        )
         final_pre = validate_preflight(observer(contract), contract)
         verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         verify_partuuid_namespace_clear(contract)
@@ -3518,6 +3672,7 @@ def execute_plan(
         archive_failure: BaseException | None = None
         seal_failure: BaseException | None = None
         docker_failure: BaseException | None = None
+        protected_efi_thaw_failure: BaseException | None = None
         if verifier_archive is not None:
             try:
                 cleanup_verifier_image_archive(verifier_archive)
@@ -3533,6 +3688,19 @@ def execute_plan(
                 restore_docker_after_apply(docker_state)
             except BaseException as exc:
                 docker_failure = exc
+        if protected_efi_freeze is not None:
+            try:
+                release_protected_efi_freeze(protected_efi_freeze)
+            except BaseException as exc:
+                protected_efi_thaw_failure = exc
+        if protected_efi_thaw_failure is not None:
+            if mutation_attempted:
+                raise post_mutation_alarm("protected-efi-thaw-incomplete") from protected_efi_thaw_failure
+            if isinstance(protected_efi_thaw_failure, ProtectedEfiThawError):
+                raise protected_efi_thaw_failure
+            raise ProtectedEfiThawError(
+                "protected EFI filesystem thaw failed before storage mutation"
+            ) from protected_efi_thaw_failure
         if archive_failure is not None:
             if mutation_attempted:
                 raise post_mutation_alarm("trusted-build-seal-teardown-incomplete") from archive_failure
@@ -3654,6 +3822,9 @@ def main(argv: list[str] | None = None) -> int:
             release_production_apply_lock(apply_lock)
     except PostMutationInstallError as exc:
         print(POST_MUTATION_PUBLIC_MESSAGES[exc.code], file=sys.stderr)
+        return 3
+    except ProtectedEfiThawError:
+        print(PROTECTED_EFI_RECOVERY_MESSAGE, file=sys.stderr)
         return 3
     except (ProductionInstallError, OSError, json.JSONDecodeError):
         print("nixos production install blocked by a safety check", file=sys.stderr)

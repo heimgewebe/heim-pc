@@ -258,6 +258,14 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
     monkeypatch.setattr(prod, "cleanup_verifier_image_archive", lambda _metadata: log.append("archive-cleanup"))
     monkeypatch.setattr(prod, "cleanup_sealed_nix_store", lambda _seal: log.append("seal-cleanup"))
     monkeypatch.setattr(prod, "restore_docker_after_apply", lambda _state: log.append("docker-restore"))
+    monkeypatch.setattr(
+        prod, "acquire_protected_efi_freeze",
+        lambda _source: log.append("efi-freeze") or {"test": True},
+    )
+    monkeypatch.setattr(
+        prod, "release_protected_efi_freeze",
+        lambda _freeze: log.append("efi-thaw"),
+    )
     monkeypatch.setattr(prod, "stage_private_storage_identity", lambda **kwargs: log.append("private-identity-stage") or {"staged": True})
     monkeypatch.setattr(prod, "verify_private_luks_uuid", lambda _contract: log.append("private-luks-verify"))
     monkeypatch.setattr(prod, "bind_private_boot_entries", lambda **kwargs: log.append("private-loader-bind"))
@@ -1022,8 +1030,9 @@ def test_private_receipt_discard_rejects_parent_replacement(tmp_path):
     assert json.loads((held_parent / target.name).read_text(encoding="utf-8"))["status"] == "reserved"
 
 
-def test_production_apply_lock_is_target_scoped_private_and_exclusive(tmp_path):
+def test_production_apply_lock_is_physical_target_scoped_private_and_exclusive(tmp_path):
     compiled = plan()
+    physical_identity, physical_digest = prod._production_apply_lock_identity(compiled)
     first = prod.acquire_production_apply_lock(compiled)
     try:
         lock_dir = prod.PRODUCTION_APPLY_LOCK_DIR
@@ -1032,19 +1041,96 @@ def test_production_apply_lock_is_target_scoped_private_and_exclusive(tmp_path):
         assert len(entries) == 1
         assert stat.S_IMODE(entries[0].stat().st_mode) == 0o600
         assert SEAGATE not in entries[0].name
-        assert hashlib.sha256(SEAGATE.encode("utf-8")).hexdigest() in entries[0].name
+        assert physical_identity["serial"] not in entries[0].name
+        assert physical_identity["wwn"] not in entries[0].name
+        assert physical_digest in entries[0].name
         with pytest.raises(prod.ProductionInstallError, match="already holds"):
             prod.acquire_production_apply_lock(compiled)
 
-        other = dict(compiled)
-        other["target_authority"] = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_0003"
-        second = prod.acquire_production_apply_lock(other)
+        same_physical_alias = json.loads(json.dumps(compiled))
+        alias = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_ALIAS_0001"
+        same_physical_alias["target_authority"] = alias
+        same_physical_alias["preflight"]["target"]["requested_path"] = alias
+        with pytest.raises(prod.ProductionInstallError, match="already holds"):
+            prod.acquire_production_apply_lock(same_physical_alias)
+
+        different = json.loads(json.dumps(compiled))
+        different_alias = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_0003"
+        different["target_authority"] = different_alias
+        different["preflight"]["target"]["requested_path"] = different_alias
+        different["preflight"]["target"]["serial"] = "SYNTH-TARGET-SERIAL-OTHER"
+        different["preflight"]["target"]["wwn"] = "eui.synthetic-target-other"
+        second = prod.acquire_production_apply_lock(different)
         prod.release_production_apply_lock(second)
     finally:
         prod.release_production_apply_lock(first)
 
     reacquired = prod.acquire_production_apply_lock(compiled)
     prod.release_production_apply_lock(reacquired)
+
+
+def test_protected_efi_freeze_uses_one_held_mount_fd_and_thaws(monkeypatch, tmp_path):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    ioctls = []
+
+    def fake_ioctl(fd, request, arg=0):
+        ioctls.append((prod.os.fstat(fd).st_ino, request, arg))
+        return 0
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", fake_ioctl)
+    freeze = prod.acquire_protected_efi_freeze(expected_source)
+    held_inode = freeze["inode"]
+    assert freeze["source"] == expected_source
+    prod.release_protected_efi_freeze(freeze)
+    assert ioctls == [
+        (held_inode, prod.PROTECTED_EFI_FIFREEZE_IOCTL, 0),
+        (held_inode, prod.PROTECTED_EFI_FITHAW_IOCTL, 0),
+    ]
+
+
+def test_protected_efi_freeze_thaws_held_filesystem_on_source_drift(monkeypatch, tmp_path):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    sources = iter([expected_source, expected_source, "/dev/nvme9n1p1"])
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: next(sources))
+    requests = []
+    monkeypatch.setattr(
+        prod.fcntl, "ioctl",
+        lambda _fd, request, _arg=0: requests.append(request) or 0,
+    )
+    with pytest.raises(prod.ProductionInstallError, match="identity changed during freeze"):
+        prod.acquire_protected_efi_freeze(expected_source)
+    assert requests == [
+        prod.PROTECTED_EFI_FIFREEZE_IOCTL,
+        prod.PROTECTED_EFI_FITHAW_IOCTL,
+    ]
+
+
+def test_protected_efi_thaw_failure_requires_visible_recovery(monkeypatch, tmp_path):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+
+    def fake_ioctl(_fd, request, _arg=0):
+        if request == prod.PROTECTED_EFI_FITHAW_IOCTL:
+            raise OSError("synthetic thaw failure")
+        return 0
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", fake_ioctl)
+    freeze = prod.acquire_protected_efi_freeze(expected_source)
+    with pytest.raises(prod.ProtectedEfiThawError, match="could not be thawed"):
+        prod.release_protected_efi_freeze(freeze)
 
 
 def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_path, capsys):
@@ -1689,7 +1775,9 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
         "seal-structure",
         "containerd-verify",
     ]
-    assert gate_events[-2:] == ["seal-cleanup", "docker-restore"]
+    assert "efi-freeze" in gate_events
+    assert gate_events.index("efi-freeze") > gate_events.index("archive-cleanup")
+    assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
 def test_run_uses_fixed_trusted_environment(monkeypatch):
