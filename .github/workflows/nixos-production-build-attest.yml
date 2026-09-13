@@ -1,0 +1,104 @@
+name: nixos-production-build-attest
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_b64:
+        description: Base64 of the exact local merged-main install artifact to independently reproduce and attest
+        required: true
+        type: string
+      managed_receipt_b64:
+        description: Base64 of the exact local managed-build success receipt bound to the candidate artifact
+        required: true
+        type: string
+
+concurrency:
+  group: nixos-production-build-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build-attest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Materialize exact local candidate
+        env:
+          CANDIDATE_ARTIFACT_B64: ${{ inputs.artifact_b64 }}
+          CANDIDATE_MANAGED_RECEIPT_B64: ${{ inputs.managed_receipt_b64 }}
+          CANDIDATE: ${{ runner.temp }}/candidate-install-artifact.json
+          CANDIDATE_RECEIPT: ${{ runner.temp }}/candidate-install-artifact.json.managed-build-receipt.json
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "heimgewebe/heim-pc"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf '%s' "$CANDIDATE_ARTIFACT_B64" | base64 --decode > "$CANDIDATE"
+          printf '%s' "$CANDIDATE_MANAGED_RECEIPT_B64" | base64 --decode > "$CANDIDATE_RECEIPT"
+          chmod 0600 "$CANDIDATE" "$CANDIDATE_RECEIPT"
+          CANDIDATE="$CANDIDATE" CANDIDATE_RECEIPT="$CANDIDATE_RECEIPT" python3 -c 'import os; from pathlib import Path; from scripts import nixos_production_install as prod; candidate=Path(os.environ["CANDIDATE"]); receipt=Path(os.environ["CANDIDATE_RECEIPT"]); value=prod.load_install_artifact(candidate); assert value["source_authority"] == "merged-main"; assert value["source_revision"] == os.environ["GITHUB_SHA"]; policy=prod.managed_policy_sha256_for_source(os.environ["GITHUB_WORKSPACE"]); prod.load_managed_build_receipt(receipt, value, expected_policy_sha256=policy, artifact_path=candidate)'
+
+      - name: Independently rebuild exact merged main through managed Nix
+        env:
+          REMOTE_OUT: ${{ runner.temp }}/remote-install-artifact.json
+          NIX_IMAGE_REF: nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+          NIX_IMAGE_ID: sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
+        run: |
+          set -euo pipefail
+          docker pull "$NIX_IMAGE_REF"
+          test "$(docker image inspect --format '{{.Id}}' "$NIX_IMAGE_REF")" = "$NIX_IMAGE_ID"
+          python3 scripts/nixos_production_prepare.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --output "$REMOTE_OUT" \
+            --source-authority merged-main
+          test -s "$REMOTE_OUT"
+          test -s "$REMOTE_OUT.managed-build-receipt.json"
+
+      - name: Match candidate to independent managed rebuild
+        env:
+          CANDIDATE: ${{ runner.temp }}/candidate-install-artifact.json
+          CANDIDATE_RECEIPT: ${{ runner.temp }}/candidate-install-artifact.json.managed-build-receipt.json
+          REMOTE_OUT: ${{ runner.temp }}/remote-install-artifact.json
+          PREDICATE: ${{ runner.temp }}/independent-managed-rebuild-predicate.json
+        run: |
+          set -euo pipefail
+          CANDIDATE="$CANDIDATE" CANDIDATE_RECEIPT="$CANDIDATE_RECEIPT" REMOTE_OUT="$REMOTE_OUT" PREDICATE="$PREDICATE" python3 -c 'import json, os; from pathlib import Path; from scripts import nixos_production_install as prod; result=prod.verify_independent_rebuild_candidate(Path(os.environ["CANDIDATE"]), Path(os.environ["REMOTE_OUT"]), candidate_receipt_path=Path(os.environ["CANDIDATE_RECEIPT"]), flake_source=os.environ["GITHUB_WORKSPACE"]); Path(os.environ["PREDICATE"]).write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")'
+          test -s "$PREDICATE"
+
+      - name: Attest exact local candidate after independent rebuild
+        id: attest
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/candidate-install-artifact.json
+          predicate-type: https://heimgewebe.local/attestations/nixos-independent-managed-build/v1
+          predicate-path: ${{ runner.temp }}/independent-managed-rebuild-predicate.json
+
+      - name: Collect exact Sigstore bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          DEST: ${{ runner.temp }}/candidate-install-artifact.json.managed-build-attestation.json
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE"
+          test -s "$BUNDLE"
+          cp -- "$BUNDLE" "$DEST"
+          test -s "$DEST"
+
+      - name: Upload compact attested evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: heim-pc-nixos-production-attestation-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            ${{ runner.temp }}/candidate-install-artifact.json
+            ${{ runner.temp }}/candidate-install-artifact.json.managed-build-attestation.json
