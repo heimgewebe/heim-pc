@@ -317,7 +317,7 @@
             live = map (name: configs.${name}.config) [
               "heim-pc-live-gate-proprietary" "heim-pc-live-gate-open"
             ];
-            contract = builtins.fromJSON (builtins.readFile ../rehearsal/contract-v1.json);
+            contract = builtins.fromJSON (builtins.readFile ../production/contract-v1.json);
             topology = contract.topology;
             byRole = role: builtins.head (builtins.filter (p: p.role == role) topology.partitions);
             mapperName = topology.luks.mapper_name;
@@ -335,16 +335,26 @@
               && target.fileSystems.${subvolume.mountpoint}.fsType == "btrfs"
               && builtins.elem "subvol=${subvolume.name}" target.fileSystems.${subvolume.mountpoint}.options
             ) topology.btrfs.subvolumes;
-            surfaceMatches = builtins.all (role:
-              let p = byRole role; fs = target.fileSystems.${p.mountpoint};
-              in fs.device == "/dev/disk/by-partlabel/${p.label}" && fs.fsType == p.filesystem
+            surfaceAbsent = builtins.all (role:
+              let p = byRole role;
+              in !(builtins.hasAttr p.mountpoint target.fileSystems)
             ) [ "efi-system-partition" "recovery-surface" ];
           in
-          assert fsMatches && surfaceMatches;
-          assert target.boot.initrd.luks.devices.${mapperName}.device
-            == "/dev/disk/by-partlabel/${(byRole "encrypted-system").label}";
+          assert fsMatches && surfaceAbsent;
+          assert target.boot.initrd.luks.devices == {};
+          assert target.boot.initrd.luks.forceLuksSupportInInitrd;
+          assert builtins.hasAttr "heim-pc-private-storage-mounts" target.systemd.services;
+          assert target.systemd.services.heim-pc-private-storage-mounts.serviceConfig.Type == "oneshot";
+          assert nixpkgs.lib.hasInfix "heim-pc-private-storage patch-loader-entries"
+            target.boot.loader.systemd-boot.extraInstallCommands;
           assert target.boot.loader.systemd-boot.enable;
+          # The private-storage hook selects NixOS entries by this exact sort key.
+          assert target.boot.loader.systemd-boot.sortKey == "nixos";
           assert !target.boot.loader.efi.canTouchEfiVariables;
+          assert target.services.xserver.xkb.layout == "de";
+          assert target.console.useXkbConfig;
+          assert target.i18n.defaultLocale == "de_DE.UTF-8";
+          assert target.time.timeZone == "Europe/Berlin";
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;

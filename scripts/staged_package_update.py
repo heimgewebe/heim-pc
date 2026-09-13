@@ -26,6 +26,11 @@ PLAN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[[^]]*\])? \((\S+).* \[([^]]+)\]\)(?: .*)?$")
 APT_SUMMARY_RE = re.compile(r"^(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded\.$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9.+-]")
+NVME_PARTITION_RE = re.compile(r"^/dev/nvme\d+n\d+p\d+\Z")
+STABLE_NVME_PARTITION_ALIAS_RE = re.compile(
+    r"^/dev/disk/by-id/nvme-[^/\x00]+-part[1-9][0-9]*\Z"
+)
+BY_ID_ROOT = Path("/dev/disk/by-id")
 BROKER_OUTPUT_EVIDENCE_ROOT = Path("/run/grabowski/privileged-broker-evidence")
 BROKER_OUTPUT_EVIDENCE_KIND = "grabowski_privileged_output_evidence"
 BROKER_POWER_ACTION = "operator_power_argv"
@@ -127,6 +132,89 @@ def _host_readback_env(*, user: bool = False) -> dict[str, str]:
 
 def _host_dpkg_env() -> dict[str, str]:
     return _host_readback_env()
+
+
+def _mounted_nvme_partition(mountpoint: str) -> str:
+    result = _run(
+        [
+            "/usr/bin/findmnt", "--first-only", "--nofsroot", "-rn",
+            "-o", "SOURCE", "--mountpoint", mountpoint,
+        ],
+        env=_host_readback_env(),
+    )
+    source = result["stdout"].strip()
+    if not source or "\n" in source:
+        raise PlanError(f"{mountpoint} did not resolve to one mount source")
+    resolved = os.path.realpath(source)
+    if NVME_PARTITION_RE.fullmatch(resolved) is None:
+        raise PlanError(f"{mountpoint} is not backed by one direct NVMe partition")
+    return resolved
+
+
+def _stable_by_id_partition_alias(source: str) -> str:
+    if NVME_PARTITION_RE.fullmatch(source) is None:
+        raise PlanError("stable by-id resolution requires one direct NVMe partition")
+    resolved = os.path.realpath(source)
+    try:
+        entries = list(BY_ID_ROOT.iterdir())
+    except OSError as exc:
+        raise PlanError("stable block-device identity directory is unavailable") from exc
+    candidates: list[Path] = []
+    for entry in entries:
+        if not entry.is_symlink() or "-part" not in entry.name:
+            continue
+        try:
+            if os.path.realpath(entry) == resolved:
+                candidates.append(entry)
+        except OSError:
+            continue
+    if not candidates:
+        raise PlanError("mounted NVMe partition has no stable by-id alias")
+    candidates.sort(key=lambda entry: (
+        0 if entry.name.startswith("nvme-eui.") else 1,
+        1 if "_1-part" in entry.name else 0,
+        len(entry.name),
+        entry.name,
+    ))
+    return str(candidates[0])
+
+
+def _validate_device_allow_paths(root_device: str, efi_device: str) -> tuple[str, str]:
+    for value in (root_device, efi_device):
+        if (
+            not isinstance(value, str)
+            or not os.path.isabs(value)
+            or os.path.normpath(value) != value
+            or ".." in Path(value).parts
+            or STABLE_NVME_PARTITION_ALIAS_RE.fullmatch(value) is None
+        ):
+            raise PlanError(
+                "APT apply device bindings must use canonical stable NVMe by-id partition aliases"
+            )
+    root_stem = re.sub(r"-part[0-9]+$", "", Path(root_device).name)
+    efi_stem = re.sub(r"-part[0-9]+$", "", Path(efi_device).name)
+    if root_device == efi_device or not root_stem or root_stem != efi_stem:
+        raise PlanError("APT apply root and EFI bindings must be distinct partitions on one NVMe identity")
+    return root_device, efi_device
+
+
+def _live_device_allow_paths() -> tuple[str, str]:
+    return _validate_device_allow_paths(
+        _stable_by_id_partition_alias(_mounted_nvme_partition("/")),
+        _stable_by_id_partition_alias(_mounted_nvme_partition("/boot/efi")),
+    )
+
+
+def _verify_live_device_allow_binding(plan: dict[str, Any]) -> None:
+    baseline = plan.get("baseline")
+    if not isinstance(baseline, dict):
+        raise PlanError("plan baseline is missing")
+    planned = _validate_device_allow_paths(
+        str(baseline.get("root_device", "")), str(baseline.get("efi_device", ""))
+    )
+    live = _live_device_allow_paths()
+    if live != planned:
+        raise PlanError("live root/EFI device bindings differ from the package plan")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1273,10 +1361,12 @@ def _root_apt_deb_paths(plan: dict[str, Any]) -> list[Path]:
 
 
 def _apt_apply_systemd_argv(
-    plan_id: str, root_deb_paths: list[Path], runtime_capture: Path
+    plan_id: str, root_deb_paths: list[Path], runtime_capture: Path,
+    root_device: str, efi_device: str,
 ) -> list[str]:
     if not root_deb_paths:
         raise PlanError("APT apply requires at least one explicit root-owned DEB path")
+    root_device, efi_device = _validate_device_allow_paths(root_device, efi_device)
     unit_name = f"heim-pc-package-update-{SAFE_NAME_RE.sub('_', plan_id)}.service"
     argv = [
         "/usr/bin/systemd-run",
@@ -1304,8 +1394,8 @@ def _apt_apply_systemd_argv(
         # keep devices closed and permit read-only access only to the audited
         # root and ESP devices.
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=/dev/nvme0n1p3 r",
-        "--property=DeviceAllow=/dev/nvme0n1p1 r",
+        f"--property=DeviceAllow={root_device} r",
+        f"--property=DeviceAllow={efi_device} r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
@@ -1395,7 +1485,8 @@ def _apply_commands(plan: dict[str, Any], policy: dict[str, Any]) -> dict[str, A
     apt_apply = None
     if root_deb_paths:
         apt_apply = _apt_apply_systemd_argv(
-            plan["plan_id"], root_deb_paths, Path(commands["runtime_capture_path"])
+            plan["plan_id"], root_deb_paths, Path(commands["runtime_capture_path"]),
+            str(plan["baseline"]["root_device"]), str(plan["baseline"]["efi_device"]),
         )
     snap_apply: list[list[str]] = []
     for item in plan["snap"].get("packages", []):
@@ -1446,6 +1537,8 @@ def create_plan(policy_path: Path) -> dict[str, Any]:
         "dpkg_status_sha256": _dpkg_status_sha256(),
         "apt_source_config": _source_config_records(),
         "created_at_unix": int(time.time()),
+        "root_device": _stable_by_id_partition_alias(_mounted_nvme_partition("/")),
+        "efi_device": _stable_by_id_partition_alias(_mounted_nvme_partition("/boot/efi")),
     }
     apt = _stage_apt(stage, policy, uid)
     snap = _stage_snap(stage, policy, uid)
@@ -1615,6 +1708,7 @@ def _verify_plan_loaded(
     _validate_source_config(plan["baseline"]["apt_source_config"])
     if uid != plan["baseline"]["uid"]:
         raise PlanError("verification uid differs from plan uid")
+    _verify_live_device_allow_binding(plan)
     _require_broker_handoff_binding(policy)
     _validate_stage_artifacts(plan, uid, policy)
     _revalidate_apt_provenance(stage, plan, policy, uid)
@@ -1820,7 +1914,19 @@ def root_readback_authorize(
     authorization["receipt_sha256"] = _sha256_json(authorization)
     receipt_path = Path(plan["stage_path"]) / "root-readback.json"
     _atomic_json(receipt_path, authorization)
-    return {**authorization, "receipt_path": str(receipt_path), "verify_age_seconds": verified["age_seconds"]}
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_root_readback_summary",
+        "status": "root-readback-authorized",
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "root_readback_sha256": authorization["root_readback_sha256"],
+        "apply_commands_sha256": _sha256_json(apply_commands),
+        "receipt_sha256": authorization["receipt_sha256"],
+        "receipt_path": str(receipt_path),
+        "verify_age_seconds": verified["age_seconds"],
+        "private_apply_commands_redacted": True,
+    }
 
 
 def _validate_root_readback_receipt(plan: dict[str, Any], policy: dict[str, Any], uid: int) -> dict[str, Any]:
@@ -2245,7 +2351,25 @@ def postflight(
         raise PlanError(f"postflight service health mismatch; receipt={receipt_path}")
     if not receipt["nvidia_smi_ok"]:
         raise PlanError(f"postflight NVIDIA health mismatch; receipt={receipt_path}")
-    return {**receipt, "receipt_path": str(receipt_path)}
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.staged_package_update_postflight_summary",
+        "status": "postflight-verified",
+        "plan_id": receipt["plan_id"],
+        "plan_sha256": receipt["plan_sha256"],
+        "receipt_sha256": receipt["receipt_sha256"],
+        "receipt_path": str(receipt_path),
+        "all_apt_matched": receipt["all_apt_matched"],
+        "all_snap_matched": receipt["all_snap_matched"],
+        "dpkg_audit_ok": receipt["dpkg_audit_ok"],
+        "all_system_services_active": receipt["all_system_services_active"],
+        "all_user_services_active": receipt["all_user_services_active"],
+        "nvidia_smi_ok": receipt["nvidia_smi_ok"],
+        "reboot_required": receipt["reboot_required"],
+        "reboot_required_sources": receipt["reboot_required_sources"],
+        "reboot_marker_capable_packages": receipt["reboot_marker_capable_packages"],
+        "private_apply_authorization_redacted": True,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:

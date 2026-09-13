@@ -17,6 +17,18 @@ spu = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(spu)
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_live_device_allow_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        spu,
+        "_live_device_allow_paths",
+        lambda: (
+            "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3",
+            "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1",
+        ),
+    )
+
+
 def _write_broker_evidence(
     root: Path,
     *,
@@ -763,7 +775,7 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         assert withheld not in commands
     assert commands["capacity_readback_required"] is True
     assert commands["apply_readback_required"] is True
-    plan = {"plan_id": plan_id, "stage_path": str(stage), "root_commands": commands, "apt": apt, "snap": snap}
+    plan = {"plan_id": plan_id, "stage_path": str(stage), "root_commands": commands, "apt": apt, "snap": snap, "baseline": {"root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"}}
     copy_commands = spu._copy_commands(plan, policy)
     apt_preflight = spu._apt_apply_preflight_argv(plan)
     assert "apt_apply_preflight_argv" not in copy_commands
@@ -793,8 +805,8 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
         "--property=ProtectKernelTunables=yes",
         "--property=ProtectControlGroups=yes",
         "--property=DevicePolicy=closed",
-        "--property=DeviceAllow=/dev/nvme0n1p3 r",
-        "--property=DeviceAllow=/dev/nvme0n1p1 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3 r",
+        "--property=DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1 r",
         "--property=RestrictNamespaces=yes",
         "--property=ProtectKernelLogs=yes",
         "--property=ProtectClock=yes",
@@ -825,15 +837,15 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert "--property=PrivateDevices=yes" not in apt_apply
     assert "--property=DevicePolicy=closed" in apt_apply
     assert "--property=DeviceAllow=block-* r" not in apt_apply
-    assert "--property=DeviceAllow=/dev/nvme0n1p3 r" in apt_apply
-    assert "--property=DeviceAllow=/dev/nvme0n1p1 r" in apt_apply
+    assert "--property=DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3 r" in apt_apply
+    assert "--property=DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1 r" in apt_apply
     assert "--property=ProtectKernelModules=yes" not in apt_apply
     assert "--property=BindPaths=/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503:/run" in apt_apply
     assert "--property=TemporaryFileSystem=/run" not in apt_apply
     assert "--property=BindReadOnlyPaths=/dev/null:/run/systemd/private /dev/null:/run/dbus/system_bus_socket" in apt_apply
     for prop in (
         "ProtectKernelTunables=yes", "ProtectControlGroups=yes",
-        "DevicePolicy=closed", "DeviceAllow=/dev/nvme0n1p3 r", "DeviceAllow=/dev/nvme0n1p1 r",
+        "DevicePolicy=closed", "DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3 r", "DeviceAllow=/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1 r",
         "RestrictNamespaces=yes", "ProtectKernelLogs=yes",
         "ProtectClock=yes", "LockPersonality=yes",
     ):
@@ -856,18 +868,37 @@ def test_root_commands_are_networkless_and_never_execute_user_code(tmp_path: Pat
     assert commands["root_copy_required_bytes"] == 153
     assert commands["root_stage_safety_margin_bytes"] == 1000
     assert commands["root_capacity_required_bytes"] == 1153
-    assert commands["root_capacity_prepare_argv"] == [
-        "/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0711",
-        "/var/lib/heim-pc/package-update-stages",
-    ]
-    assert commands["root_capacity_argv"] == [
-        "/usr/bin/stat", "-f", "-c", "%a:%S", "/var/lib/heim-pc/package-update-stages"
-    ]
     assert commands["cleanup_runtime_capture_argv"] == [
-        "/usr/bin/rm", "-rf", "--", "/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503"
+        "/usr/bin/rm",
+        "-rf",
+        "--",
+        "/run/heim-pc-package-update-captures/20260826T194332Z-1dedf2da5503",
+    ]
+    assert commands["cleanup_argv"] == [
+        "/usr/bin/rm",
+        "-rf",
+        "--",
+        "/var/lib/heim-pc/package-update-stages/20260826T194332Z-1dedf2da5503",
     ]
 
 
+def test_package_apply_rejects_kernel_device_authority():
+    with pytest.raises(spu.PlanError, match="stable NVMe by-id"):
+        spu._validate_device_allow_paths("/dev/nvme1n1p3", "/dev/nvme1n1p1")
+
+
+def test_stable_by_id_partition_alias_prefers_eui(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    by_id = tmp_path / "by-id"
+    by_id.mkdir()
+    device = tmp_path / "nvme1n1p3"
+    device.write_text("")
+    model_alias = by_id / "nvme-SYNTH_MODEL-part3"
+    eui_alias = by_id / "nvme-eui.synthetic-part3"
+    model_alias.symlink_to(device)
+    eui_alias.symlink_to(device)
+    monkeypatch.setattr(spu, "BY_ID_ROOT", by_id)
+    monkeypatch.setattr(spu.os.path, "realpath", lambda value: str(device) if str(value) in {"/dev/nvme1n1p3", str(model_alias), str(eui_alias)} else str(value))
+    assert spu._stable_by_id_partition_alias("/dev/nvme1n1p3") == str(eui_alias)
 def test_root_staging_capacity_probe_and_readback_are_fail_closed(tmp_path: Path) -> None:
     policy = {
         "staging": {
@@ -940,7 +971,7 @@ def test_verify_withholds_root_copy_commands_until_capacity_readback(tmp_path: P
     plan = {
         "plan_id": "20260827T010203Z-123456abcdef", "plan_sha256": "f" * 64,
         "created_at_unix": 1, "stage_path": str(stage),
-        "baseline": {"uid": os.geteuid(), "dpkg_status_sha256": "status", "apt_source_config": []},
+        "baseline": {"uid": os.geteuid(), "dpkg_status_sha256": "status", "apt_source_config": [], "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "apt": apt, "snap": snap, "root_commands": commands, "root_artifact_sha256": {},
     }
     monkeypatch.setattr(spu, "_validate_plan_identity", lambda path, confirmation: (plan, policy, stage, os.geteuid()))
@@ -974,7 +1005,7 @@ def test_capacity_authorization_blocks_before_copy_when_root_stage_space_is_insu
         "plan_id": "20260827T010203Z-123456abcdef",
         "plan_sha256": "f" * 64,
         "created_at_unix": now - 1,
-        "baseline": {"uid": os.geteuid()},
+        "baseline": {"uid": os.geteuid(), "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "stage_path": str(stage),
         "root_commands": spu._root_commands("20260827T010203Z-123456abcdef", stage, policy, apt, snap),
         "apt": apt,
@@ -1037,7 +1068,7 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
         "schema_version": 1, "kind": spu.PLAN_KIND, "plan_id": plan_id,
         "plan_sha256": "f" * 64, "policy_path": str((ROOT / "config" / "package-update-policy.v1.json").resolve()),
         "created_at_unix": now - 1,
-        "baseline": {"uid": os.geteuid()},
+        "baseline": {"uid": os.geteuid(), "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "stage_path": str(stage), "root_commands": commands, "root_artifact_sha256": {root_path: "a" * 64},
         "apt": apt, "snap": snap,
     }
@@ -1075,8 +1106,13 @@ def test_root_hash_readback_is_exact_and_only_then_emits_apply(tmp_path: Path, m
         plan_path, "f" * 64, hash_output, hash_evidence
     )
     assert result["status"] == "root-readback-authorized"
-    assert result["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
-    assert result["broker_output_evidence"]["request_id"] == "3" * 32
+    assert result["private_apply_commands_redacted"] is True
+    assert "apply_commands" not in result
+    private_receipt = json.loads(Path(result["receipt_path"]).read_text())
+    assert private_receipt["apply_commands"]["apt_apply_argv"][0] == "/usr/bin/systemd-run"
+    assert result["apply_commands_sha256"] == spu._sha256_json(private_receipt["apply_commands"])
+    assert "broker_output_evidence" not in result
+    assert private_receipt["broker_output_evidence"]["request_id"] == "3" * 32
 
     bad_output = f"{'b' * 64}  {root_path}\n"
     bad_evidence = _write_broker_evidence(
@@ -1272,7 +1308,7 @@ def test_postflight_rejects_noncanonical_plan_identity(tmp_path: Path) -> None:
         "schema_version": 1, "kind": spu.PLAN_KIND,
         "plan_id": "20260827T010203Z-123456abcdef",
         "policy_path": str(alternate_policy), "policy_sha256": spu._sha256_file(alternate_policy),
-        "stage_path": str(stage), "baseline": {"uid": os.geteuid()},
+        "stage_path": str(stage), "baseline": {"uid": os.geteuid(), "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "apt": {"packages": []}, "snap": {"packages": []},
         "root_commands": {"root_stage": "/var/lib/heim-pc/package-update-stages/x"},
         "root_artifact_sha256": {},
@@ -1341,7 +1377,7 @@ def test_broker_apply_evidence_requires_authenticated_preflight_chain(
     now = int(spu.time.time())
     plan = {
         "plan_id": plan_id,
-        "baseline": {"uid": os.geteuid()},
+        "baseline": {"uid": os.geteuid(), "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "root_commands": {"root_stage": root_stage},
     }
 
@@ -1413,7 +1449,7 @@ def test_postflight_authorization_requires_apt_preflight_evidence(
     apt_preflight = ["/usr/bin/dpkg", "--simulate", "--install", deb]
     plan = {
         "plan_id": plan_id, "created_at_unix": now - 1,
-        "baseline": {"uid": os.geteuid()},
+        "baseline": {"uid": os.geteuid(), "root_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part3", "efi_device": "/dev/disk/by-id/nvme-SYNTHETIC_FALLBACK-part1"},
         "root_commands": {"root_stage": root_stage},
     }
     policy = {"staging": {"max_plan_age_seconds": 60}}
@@ -1692,3 +1728,65 @@ def test_root_artifact_expectations_bind_destinations() -> None:
         "/var/lib/heim-pc/package-update-stages/p/snaps/a.assert": "2" * 64,
         "/var/lib/heim-pc/package-update-stages/p/snaps/a.snap": "3" * 64,
     }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/dev/disk/by-id/nvme-SYNTH/../nvme-SYNTH-part3",
+        "/dev/disk/by-id//nvme-SYNTH-part3",
+        "/dev/disk/by-id/nvme-SYNTH-part0",
+        "/dev/disk/by-id/nvme-SYNTH-partx",
+        "/dev/nvme1n1p3",
+    ],
+)
+def test_device_allow_rejects_noncanonical_or_kernel_aliases(bad):
+    with pytest.raises(spu.PlanError, match="canonical stable NVMe by-id"):
+        spu._validate_device_allow_paths(
+            bad, "/dev/disk/by-id/nvme-SYNTH-part1"
+        )
+
+
+def test_device_allow_live_rebinding_accepts_exact_plan_and_rejects_drift(monkeypatch):
+    plan = {
+        "baseline": {
+            "root_device": "/dev/disk/by-id/nvme-SYNTH-part3",
+            "efi_device": "/dev/disk/by-id/nvme-SYNTH-part1",
+        }
+    }
+    monkeypatch.setattr(
+        spu,
+        "_live_device_allow_paths",
+        lambda: (
+            "/dev/disk/by-id/nvme-SYNTH-part3",
+            "/dev/disk/by-id/nvme-SYNTH-part1",
+        ),
+    )
+    spu._verify_live_device_allow_binding(plan)
+    monkeypatch.setattr(
+        spu,
+        "_live_device_allow_paths",
+        lambda: (
+            "/dev/disk/by-id/nvme-OTHER-part3",
+            "/dev/disk/by-id/nvme-OTHER-part1",
+        ),
+    )
+    with pytest.raises(spu.PlanError, match="differ from the package plan"):
+        spu._verify_live_device_allow_binding(plan)
+
+
+def test_mounted_nvme_partition_uses_first_only_and_resolves_alias(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        spu,
+        "_run",
+        lambda argv, **kwargs: calls.append(argv) or {
+            "stdout": "/dev/disk/by-uuid/SYNTH\n", "stderr": "", "returncode": 0, "argv": argv
+        },
+    )
+    monkeypatch.setattr(spu.os.path, "realpath", lambda _value: "/dev/nvme1n1p3")
+    assert spu._mounted_nvme_partition("/") == "/dev/nvme1n1p3"
+    assert calls[0] == [
+        "/usr/bin/findmnt", "--first-only", "--nofsroot", "-rn",
+        "-o", "SOURCE", "--mountpoint", "/",
+    ]
