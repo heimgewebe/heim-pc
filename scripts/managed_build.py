@@ -65,6 +65,17 @@ def _docker_executable() -> str:
     return str(Path(executable).resolve(strict=True))
 
 
+def _docker_client_environment() -> dict[str, str]:
+    """Match nixos_production_prepare.run() without caller endpoint/config state."""
+    return {
+        "PATH": DOCKER_SEARCH_PATH,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "HOME": "/",
+        "SYSTEMD_COLORS": "0",
+    }
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -247,11 +258,13 @@ def _run_readonly(
     *,
     cwd: Path,
     timeout_seconds: int = VERSION_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
 ) -> str:
     try:
         result = subprocess.run(
             list(argv),
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -465,7 +478,9 @@ def _toolchain_digest(
             observations[basename] = _run_readonly([command[0], "--version"], cwd=repo)
     elif tool == "nix":
         observations["python_runtime"] = sys.version
-        observations["docker"] = _run_readonly([_docker_executable(), "--version"], cwd=repo)
+        observations["docker"] = _run_readonly(
+            [_docker_executable(), "--version"], cwd=repo, env=_docker_client_environment()
+        )
         observations["nix_contract_files"] = _files_digest(
             repo, [
                 "flake.lock",
@@ -1125,6 +1140,7 @@ def _nix_volume_exists(volume: str) -> bool:
     try:
         result = subprocess.run(
             [_docker_executable(), "volume", "ls", "--format", "{{.Name}}"],
+            env=_docker_client_environment(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             timeout=VERSION_TIMEOUT_SECONDS,
         )
@@ -1263,6 +1279,7 @@ def _nix_container_ids(label: str) -> list[str]:
     try:
         result = subprocess.run(
             [_docker_executable(), "ps", "--no-trunc", "-aq", "--filter", f"label={label}"],
+            env=_docker_client_environment(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             timeout=VERSION_TIMEOUT_SECONDS,
         )
@@ -1291,6 +1308,7 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
         try:
             result = subprocess.run(
                 [_docker_executable(), "rm", "--force", *ids],
+                env=_docker_client_environment(),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                 timeout=VERSION_TIMEOUT_SECONDS,
             )
@@ -1502,6 +1520,7 @@ def _remove_failed_nix_outputs(command: Sequence[str], guard: dict[str, Any]) ->
             try:
                 removed = subprocess.run(
                     [_docker_executable(), "volume", "rm", "--force", volume],
+                    env=_docker_client_environment(),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                     timeout=NIX_VOLUME_REMOVE_TIMEOUT_SECONDS,
                 )

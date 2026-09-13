@@ -15,6 +15,34 @@ from unittest.mock import Mock, call, patch
 from scripts import managed_build
 
 
+DOCKER_CLIENT_ENVIRONMENT = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "LANG": "C",
+    "HOME": "/",
+    "SYSTEMD_COLORS": "0",
+}
+INHERITED_DOCKER_ENVIRONMENT = {
+    "PATH": "/untrusted/inherited-path",
+    "HOME": "/untrusted/home",
+    "DOCKER_HOST": "tcp://docker.invalid:2376",
+    "DOCKER_CONTEXT": "untrusted-context",
+    "DOCKER_CONFIG": "/untrusted/docker-config",
+    "DOCKER_TLS": "1",
+    "DOCKER_TLS_VERIFY": "1",
+    "DOCKER_CERT_PATH": "/untrusted/docker-certs",
+    "DOCKER_API_VERSION": "1.99",
+    "DOCKER_CUSTOM_HEADERS": "X-Fixture=untrusted",
+    "XDG_CONFIG_HOME": "/untrusted/config",
+    "XDG_RUNTIME_DIR": "/untrusted/runtime",
+    "SSH_AUTH_SOCK": "/untrusted/agent",
+    "SSL_CERT_FILE": "/untrusted/ca.pem",
+    "SSL_CERT_DIR": "/untrusted/certs",
+    "HTTP_PROXY": "http://proxy.invalid:8080",
+    "HTTPS_PROXY": "http://proxy.invalid:8080",
+}
+
+
 class ManagedBuildTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy_path = (
@@ -91,7 +119,7 @@ class ManagedBuildTests(unittest.TestCase):
 
         return home, plan, command, runner
 
-    def test_docker_resolution_is_fixed_and_shared_by_all_observations_and_cleanup(self) -> None:
+    def test_docker_binary_and_environment_are_fixed_for_all_observations_and_cleanup(self) -> None:
         self.docker_executable_patch.stop()
         managed_build._docker_executable.cache_clear()
         self.addCleanup(managed_build._docker_executable.cache_clear)
@@ -103,14 +131,20 @@ class ManagedBuildTests(unittest.TestCase):
 
         def docker(argv, **kwargs):
             self.assertEqual(argv[0], executable)
+            self.assertEqual(kwargs["env"], DOCKER_CLIENT_ENVIRONMENT)
             observed.append(argv[1:3])
             os.environ["PATH"] = "/untrusted/changed-after-first-docker-call"
+            os.environ["DOCKER_HOST"] = "tcp://changed.invalid:2376"
+            os.environ["DOCKER_CONTEXT"] = "changed-context"
+            os.environ["DOCKER_CONFIG"] = "/untrusted/changed-config"
             if argv[1] == "--version":
                 self.assertEqual(kwargs["timeout"], 5)
-                output = b"Docker fixture\n"
+                output = "Docker fixture\n"
             elif argv[1] == "ps":
+                self.assertEqual(kwargs["timeout"], 5)
                 output = "\n".join(containers).encode("ascii")
             elif argv[1] == "rm":
+                self.assertEqual(kwargs["timeout"], 5)
                 self.assertEqual(argv[2:], ["--force", "c" * 64])
                 containers.clear()
                 output = b""
@@ -128,13 +162,14 @@ class ManagedBuildTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"PATH": "/untrusted/inherited-path"}),
+            patch.dict(os.environ, INHERITED_DOCKER_ENVIRONMENT),
             patch.object(managed_build.shutil, "which", return_value=sys.executable) as which,
             patch.object(managed_build.subprocess, "run", side_effect=docker),
             patch.object(managed_build.time, "sleep"),
         ):
             root = Path(directory)
-            managed_build._toolchain_digest("nix", [sys.executable], root)
+            toolchain = managed_build._toolchain_digest("nix", [sys.executable], root)
+            self.assertEqual(toolchain["observations"]["docker"], "rc=0\nDocker fixture")
             self.assertEqual(managed_build._nix_container_ids(label), ["c" * 64])
             self.assertEqual(managed_build._remove_exact_nix_containers(label), (1, True))
             managed_build._remove_failed_nix_outputs(
@@ -143,7 +178,120 @@ class ManagedBuildTests(unittest.TestCase):
             )
             which.assert_called_once_with("docker", path="/usr/sbin:/usr/bin:/sbin:/bin")
         self.assertFalse(volumes)
-        self.assertIn(["volume", "rm"], observed)
+        self.assertEqual({tuple(item) for item in observed}, {
+            ("--version",), ("ps", "--no-trunc"), ("rm", "--force"),
+            ("volume", "ls"), ("volume", "rm"),
+        })
+
+    def test_nix_worker_monitor_and_timeout_cleanup_share_docker_environment(self) -> None:
+        with patch.object(sys, "path", [str(managed_build.ROOT / "scripts"), *sys.path]):
+            from scripts import nixos_production_prepare as prepare
+
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, _runner = self.make_nix_execution(Path(directory))
+            guard = plan["nix_guard"]
+            output = Path(managed_build._command_option_value(command, "--output"))
+            process = Mock(pid=4343, returncode=None)
+            process.poll.side_effect = lambda: process.returncode
+            containers = []
+            volumes = set()
+            events = []
+            worker_environments = []
+            manager_environments = []
+            real_run, real_popen = subprocess.run, subprocess.Popen
+
+            def docker(argv, **kwargs):
+                if argv[0] not in {"docker", "/usr/bin/docker"}:
+                    return real_run(argv, **kwargs)
+                self.assertEqual(kwargs["env"], DOCKER_CLIENT_ENVIRONMENT)
+                if argv[0] == "docker":
+                    worker_environments.append(kwargs["env"])
+                else:
+                    manager_environments.append(kwargs["env"])
+                stdout = b""
+                if argv[1:3] == ["volume", "create"]:
+                    volumes.add(argv[-1])
+                elif argv[1] == "run":
+                    self.assertEqual(argv[2], "--label")
+                    containers.append(("c" * 64, argv[3]))
+                    events.append("worker-container")
+                elif argv[1] == "ps":
+                    self.assertEqual(kwargs["timeout"], 5)
+                    label = argv[-1].removeprefix("label=")
+                    stdout = "\n".join(cid for cid, tag in containers if tag == label).encode("ascii")
+                elif argv[1] == "rm":
+                    self.assertEqual(kwargs["timeout"], 5)
+                    self.assertEqual(argv[2:], ["--force", "c" * 64])
+                    containers.clear()
+                    events.append("container-removal")
+                elif argv[1:3] == ["volume", "ls"]:
+                    self.assertEqual(kwargs["timeout"], 5)
+                    stdout = "\n".join(sorted(volumes)).encode("ascii")
+                elif argv[1:3] == ["volume", "rm"]:
+                    self.assertEqual(kwargs["timeout"], managed_build.NIX_VOLUME_REMOVE_TIMEOUT_SECONDS)
+                    self.assertFalse(containers)
+                    volumes.remove(argv[-1])
+                    events.append("volume-removal")
+                else:
+                    self.fail(f"unexpected Docker call: {argv}")
+                return subprocess.CompletedProcess(argv, 0, stdout, b"")
+
+            def start_worker(argv, **kwargs):
+                if argv != command:
+                    return real_popen(argv, **kwargs)
+                self.assertEqual(kwargs["env"]["DOCKER_HOST"], INHERITED_DOCKER_ENVIRONMENT["DOCKER_HOST"])
+                self.assertEqual(kwargs["env"][prepare.MANAGED_WORKER_ENV], "1")
+                # Exercise the real worker's Docker boundary without launching Docker.
+                with patch.dict(os.environ, kwargs["env"], clear=True):
+                    prepare.run(["docker", "volume", "create", guard["source_volume"]])
+                    prepare.run(["docker", "volume", "create", guard["docker_volume"]])
+                    prepare.run(["docker", "run", "--rm", "fixture-image"])
+                output.write_text("rejected partial output\n", encoding="utf-8")
+                return process
+
+            def terminate(item):
+                self.assertIs(item, process)
+                process.returncode = -15
+                events.append("terminate-worker")
+
+            with (
+                patch.dict(os.environ, {
+                    **INHERITED_DOCKER_ENVIRONMENT, "PATH": os.environ.get("PATH", ""),
+                }),
+                patch.object(managed_build.subprocess, "run", side_effect=docker),
+                patch.object(managed_build.subprocess, "Popen", side_effect=start_worker),
+                patch.object(managed_build.time, "monotonic", side_effect=[
+                    0.0, float(guard["runtime_budget_seconds"]["hard"]) + 1,
+                ]),
+                patch.object(managed_build.time, "sleep"),
+                patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+                patch.object(managed_build, "_bounded_store_scan", side_effect=lambda *_args, **_kwargs:
+                    managed_build.scan_worktree_payloads(Path(guard["store_root"]), ["."])),
+            ):
+                returncode = managed_build.execute_plan(
+                    self.policy, plan, command, home=home, runner=managed_build.subprocess.run,
+                )
+
+            self.assertEqual(returncode, 124)
+            receipts = list((Path(plan["state_root"]) / "receipts").glob("*.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+            self.assertEqual(receipt["returncode"], 124)
+            self.assertTrue(receipt["nix_build"]["runtime_timeout_triggered"])
+            self.assertTrue(receipt["nix_build"]["container_cleanup_verified"])
+            self.assertEqual(receipt["nix_build"]["container_count_force_removed"], 1)
+            self.assertEqual(events, [
+                "worker-container", "terminate-worker", "container-removal",
+                "volume-removal", "volume-removal",
+            ])
+            self.assertEqual(len(worker_environments), 3)
+            self.assertTrue(manager_environments)
+            self.assertTrue(all(env == worker_environments[0] for env in manager_environments))
+            self.assertFalse(containers)
+            self.assertFalse(volumes)
+            self.assertFalse(output.exists())
+            self.assertFalse(managed_build._managed_nix_success_receipt_path(command).exists())
+            self.assertFalse(Path(guard["lifecycle_fence_path"]).exists())
 
     def test_docker_resolution_fails_closed_without_trusted_executable(self) -> None:
         self.docker_executable_patch.stop()
@@ -243,8 +391,10 @@ class ManagedBuildTests(unittest.TestCase):
                 self.assertIs(caught.exception.__cause__, error)
                 self.assertEqual(run.call_args_list, [
                     call(["/usr/bin/docker", "volume", "ls", "--format", "{{.Name}}"],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=5),
+                         env=DOCKER_CLIENT_ENVIRONMENT, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, check=False, timeout=5),
                     call(["/usr/bin/docker", "volume", "rm", "--force", "fixture-source"],
+                         env=DOCKER_CLIENT_ENVIRONMENT,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                          timeout=managed_build.NIX_VOLUME_REMOVE_TIMEOUT_SECONDS),
                 ])
@@ -262,6 +412,7 @@ class ManagedBuildTests(unittest.TestCase):
                 def docker(argv, **kwargs):
                     if argv[0] != "/usr/bin/docker":
                         return real_run(argv, **kwargs)
+                    self.assertEqual(kwargs["env"], DOCKER_CLIENT_ENVIRONMENT)
                     docker_calls.append(argv[1:])
                     if argv[1:3] == ["volume", "rm"]:
                         self.assertEqual(argv[3:], ["--force", guard["source_volume"]])
@@ -276,7 +427,10 @@ class ManagedBuildTests(unittest.TestCase):
                     return real_execute(policy, planned, argv, runner=worker, **kwargs)
 
                 with (
-                    patch.dict(os.environ, {"HOME": str(home)}),
+                    patch.dict(os.environ, {
+                        **INHERITED_DOCKER_ENVIRONMENT,
+                        "HOME": str(home), "PATH": os.environ.get("PATH", ""),
+                    }),
                     patch.object(managed_build, "build_plan", return_value=plan),
                     patch.object(managed_build, "execute_plan", side_effect=execute),
                     patch.object(managed_build.subprocess, "run", side_effect=docker),
