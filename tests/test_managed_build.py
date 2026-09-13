@@ -187,7 +187,10 @@ class ManagedBuildTests(unittest.TestCase):
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
         container = "c" * 64
         failed_rm = subprocess.CompletedProcess(
-            ["/usr/bin/docker", "rm", "--force", container], 1, b"", b"No such container"
+            ["/usr/bin/docker", "rm", "--force", container],
+            1,
+            b"",
+            f"Error response from daemon: No such container: {container}".encode("ascii"),
         )
         with (
             patch.object(
@@ -231,7 +234,10 @@ class ManagedBuildTests(unittest.TestCase):
                 ["/usr/bin/docker", "rm", "--force", first], 0, b"", b""
             ),
             subprocess.CompletedProcess(
-                ["/usr/bin/docker", "rm", "--force", second], 1, b"", b"No such container"
+                ["/usr/bin/docker", "rm", "--force", second],
+                1,
+                b"",
+                f"Error response from daemon: No such container: {second}".encode("ascii"),
             ),
         ]
         with (
@@ -252,6 +258,30 @@ class ManagedBuildTests(unittest.TestCase):
             ],
         )
 
+    def test_nix_container_cleanup_ambiguous_nonzero_is_fail_closed_even_if_absent(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container = "c" * 64
+        failed_rm = subprocess.CompletedProcess(
+            ["/usr/bin/docker", "rm", "--force", container],
+            1,
+            b"",
+            b"error during connect: unexpected EOF",
+        )
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container], [], []],
+            ) as inventory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=failed_rm),
+        ):
+            with self.assertRaisesRegex(
+                managed_build.ManagedBuildError,
+                "container removal outcome is ambiguous after nonzero exit",
+            ):
+                managed_build._remove_exact_nix_containers(label)
+        self.assertEqual(inventory.call_count, 1)
+
     def test_nix_container_cleanup_fails_closed_when_rm_fails_and_container_survives(self) -> None:
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
         container = "c" * 64
@@ -264,8 +294,12 @@ class ManagedBuildTests(unittest.TestCase):
             patch.object(managed_build.subprocess, "run", return_value=failed_rm) as run,
             patch.object(managed_build.time, "sleep"),
         ):
-            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, False))
-        self.assertEqual(run.call_count, 3)
+            with self.assertRaisesRegex(
+                managed_build.ManagedBuildError,
+                "container removal outcome is ambiguous after nonzero exit",
+            ):
+                managed_build._remove_exact_nix_containers(label)
+        self.assertEqual(run.call_count, 1)
 
     def test_nix_worker_monitor_and_timeout_cleanup_share_docker_environment(self) -> None:
         with patch.object(sys, "path", [str(managed_build.ROOT / "scripts"), *sys.path]):

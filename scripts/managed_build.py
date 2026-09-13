@@ -1327,6 +1327,14 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
                 continue
             if result.returncode == 0:
                 removed += 1
+            else:
+                expected_missing = (
+                    f"Error response from daemon: No such container: {container_id}"
+                ).encode("ascii")
+                if result.stdout != b"" or result.stderr.strip() != expected_missing:
+                    raise ManagedBuildError(
+                        "managed Nix container removal outcome is ambiguous after nonzero exit"
+                    )
         # Removing one exact container at a time preserves successful removals
         # even when a sibling concurrently auto-removes and returns non-zero.
         # Fresh inventory remains the cleanup authority; surviving containers
