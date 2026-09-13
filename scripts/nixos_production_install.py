@@ -102,6 +102,8 @@ PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
 APPLY_DEFERRED_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM})
+APPLY_MASKED_SIGNALS = frozenset({signal.SIGINT})
+APPLY_HANDLER_DEFERRED_SIGNALS = frozenset({signal.SIGTERM})
 # The canonical managed cache suffix stays bound exactly; only the HOME prefix is
 # host-relative, because the independent GitHub-hosted rebuild that authenticates a
 # merged-main candidate emits the same receipt shape under the runner account.
@@ -3743,68 +3745,142 @@ def _post_mutation_evidence_from_success_receipt(receipt: dict[str, Any]) -> dic
 
 
 
+def _apply_signal_recorder(handoff: dict[str, Any]):
+    """Return a non-raising handler that records one deferred operator signal."""
+    def record(signum: int, _frame: Any) -> None:
+        caught = handoff.get("caught_signals")
+        if not isinstance(caught, set):
+            caught = set()
+            handoff["caught_signals"] = caught
+        caught.add(int(signum))
+
+    return record
+
+
 def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
-    """Defer operator termination signals while freeze/completion resources are owned."""
+    """Defer operator termination without imposing our SIGTERM mask on children."""
     if handoff:
         raise ProductionInstallError("apply signal deferral handoff must start empty")
     if not all(
         callable(getattr(signal, name, None))
-        for name in ("pthread_sigmask", "sigpending", "sigwait")
+        for name in ("pthread_sigmask", "sigpending", "sigwait", "getsignal", "signal")
     ):
         raise ProductionInstallError(
             "production apply requires POSIX signal deferral support"
         )
 
-    managed = set(APPLY_DEFERRED_SIGNALS)
+    masked = set(APPLY_MASKED_SIGNALS)
+    previous_handlers: dict[int, Any] = {}
     try:
-        previous = signal.pthread_sigmask(signal.SIG_BLOCK, managed)
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, masked)
     except (OSError, ValueError) as exc:
         raise ProductionInstallError(
             "production apply signal deferral could not be established"
         ) from exc
 
+    previous_set = frozenset(previous)
+    handled = set(APPLY_HANDLER_DEFERRED_SIGNALS) - set(previous_set)
+    recorder = _apply_signal_recorder(handoff)
     try:
-        previous_set = frozenset(previous)
+        for signum in sorted(handled, key=int):
+            previous_handlers[int(signum)] = signal.getsignal(signum)
+            signal.signal(signum, recorder)
         handoff.update(
             {
                 "active": True,
                 "previous_mask": previous_set,
-                "owned_signals": frozenset(managed - set(previous_set)),
+                "owned_masked_signals": frozenset(masked - set(previous_set)),
+                "handler_signals": frozenset(handled),
+                "previous_handlers": previous_handlers,
             }
         )
+        handoff.setdefault("caught_signals", set())
     except BaseException:
+        for raw_signum, previous_handler in previous_handlers.items():
+            try:
+                signal.signal(raw_signum, previous_handler)
+            except BaseException:
+                pass
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
         handoff.clear()
         raise
 
 
 def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
-    """Consume signals newly deferred by us, then restore the caller's mask."""
+    """Restore caller signal state while capturing the unblock-boundary race."""
     if handoff.get("active") is not True:
         return ()
     previous = handoff.get("previous_mask")
-    owned = handoff.get("owned_signals")
-    if not isinstance(previous, frozenset) or not isinstance(owned, frozenset):
+    owned = handoff.get("owned_masked_signals")
+    handler_signals = handoff.get("handler_signals")
+    previous_handlers = handoff.get("previous_handlers")
+    caught = handoff.get("caught_signals")
+    if (
+        not isinstance(previous, frozenset)
+        or not isinstance(owned, frozenset)
+        or not isinstance(handler_signals, frozenset)
+        or not isinstance(previous_handlers, dict)
+        or not isinstance(caught, set)
+    ):
         raise ProductionInstallError("apply signal deferral ownership is invalid")
 
-    deferred: list[int] = []
+    deferred = {int(signum) for signum in caught}
+    temporary_handlers: dict[int, Any] = {}
+    mask_restored = False
+    recorder = _apply_signal_recorder(handoff)
     try:
-        pending = set(signal.sigpending())
+        # Install a non-raising handler while our SIGINT is still blocked. A
+        # SIGINT arriving after the last pending snapshot but before SIG_SETMASK
+        # is then recorded at unmask instead of replacing a terminal alarm.
         for signum in sorted(owned, key=int):
-            if signum not in pending:
-                continue
-            waited = signal.sigwait({signum})
-            if waited != signum:
-                raise ProductionInstallError(
-                    "apply signal deferral consumed an unexpected signal"
-                )
-            deferred.append(int(signum))
+            temporary_handlers[int(signum)] = signal.getsignal(signum)
+            signal.signal(signum, recorder)
+
+        while True:
+            pending = set(signal.sigpending()) & set(owned)
+            if not pending:
+                break
+            for signum in sorted(pending, key=int):
+                waited = signal.sigwait({signum})
+                if waited != signum:
+                    raise ProductionInstallError(
+                        "apply signal deferral consumed an unexpected signal"
+                    )
+                deferred.add(int(signum))
+
+        signal.pthread_sigmask(signal.SIG_SETMASK, set(previous))
+        mask_restored = True
+        # Keep the non-raising handler through the first post-unmask Python
+        # boundary so a signal delivered by SIG_SETMASK is recorded first.
+        handoff.get("caught_signals")
     finally:
-        try:
-            signal.pthread_sigmask(signal.SIG_SETMASK, set(previous))
-        finally:
-            handoff.clear()
-    return tuple(deferred)
+        if not mask_restored:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, set(previous))
+            except BaseException:
+                pass
+
+        restore_error: BaseException | None = None
+        for raw_signum, previous_handler in {
+            **previous_handlers,
+            **temporary_handlers,
+        }.items():
+            try:
+                signal.signal(raw_signum, previous_handler)
+            except BaseException as exc:
+                if restore_error is None:
+                    restore_error = exc
+
+        final_caught = handoff.get("caught_signals")
+        if isinstance(final_caught, set):
+            deferred.update(int(signum) for signum in final_caught)
+        handoff.clear()
+        if restore_error is not None:
+            raise ProductionInstallError(
+                "apply signal handlers could not be restored"
+            ) from restore_error
+
+    return tuple(sorted(deferred))
 
 
 def _raise_deferred_apply_signal(deferred: tuple[int, ...]) -> None:
@@ -4442,6 +4518,7 @@ def main(argv: list[str] | None = None) -> int:
         apply_lock = acquire_production_apply_lock(plan)
         completion_signal_handoff: dict[str, Any] = {}
         deferred_apply_signals: tuple[int, ...] = ()
+        apply_error: BaseException | None = None
         try:
             receipt_reservation = reserve_private_receipt(args.write_receipt)
             freeze_handoff: dict[str, Any] = {}
@@ -4582,15 +4659,37 @@ def main(argv: list[str] | None = None) -> int:
                     execution_error=execution_error,
                     phase_exc=completion_exc,
                 )
+        except BaseException as exc:
+            apply_error = exc
         finally:
             try:
                 release_production_apply_lock(apply_lock)
-            finally:
-                deferred_apply_signals = _end_apply_signal_deferral(
-                    completion_signal_handoff
-                )
+            except BaseException as lock_exc:
+                # Preserve the historical finally semantics: a lock-release
+                # failure supersedes an earlier apply exception, but signal
+                # deferral remains active until the outcome is reported.
+                apply_error = lock_exc
+
+        apply_result: int | None = None
+        if isinstance(apply_error, PostMutationInstallError):
+            print(POST_MUTATION_PUBLIC_MESSAGES[apply_error.code], file=sys.stderr)
+            apply_result = 3
+        elif isinstance(apply_error, ProtectedEfiThawError):
+            print(PROTECTED_EFI_RECOVERY_MESSAGE, file=sys.stderr)
+            apply_result = 3
+        elif isinstance(apply_error, (ProductionInstallError, OSError, json.JSONDecodeError)):
+            print("nixos production install blocked by a safety check", file=sys.stderr)
+            apply_result = 2
+
+        deferred_apply_signals = _end_apply_signal_deferral(
+            completion_signal_handoff
+        )
         if deferred_apply_signals:
             _raise_deferred_apply_signal(deferred_apply_signals)
+        if apply_error is not None:
+            if apply_result is not None:
+                return apply_result
+            raise apply_error
         print(json.dumps({
             "schema_version": 1,
             "kind": "heim_pc.nixos_production_install_completed",
