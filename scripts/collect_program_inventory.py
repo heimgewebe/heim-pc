@@ -15,6 +15,7 @@ import socket
 import stat
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +193,7 @@ def collect_rootfs_executables(out: Path) -> dict[str, Any]:
 
 
 def main() -> None:
+    observed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = OUT_ROOT / stamp
     out.mkdir(parents=True, exist_ok=True)
@@ -206,6 +208,7 @@ def main() -> None:
     result = {
         "out": str(out),
         "host": socket.gethostname(),
+        "observed_at": observed_at,
         "duration_sec": round(time.time() - start, 2),
         "process_rows": process_count,
         "desktop_apps": desktop_count,
@@ -214,7 +217,7 @@ def main() -> None:
         "note": "raw local inventory; keep outside Git",
     }
     (out / "run-result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    summary = ["# Heim-PC raw program inventory", "", f"Generated: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}", f"Output: `{out}`", "", "## Counts", "", f"- running_process_rows: {process_count}", f"- desktop_apps: {desktop_count}", f"- curated_executables: {executable_count}", f"- rootfs_executables_non_sudo: {rootfs.get('count', 0)}", "", "Run `scripts/program_inventory_sudo_scan.sh` for the optional sudo rootfs metadata scan."]
+    summary = ["# Heim-PC raw program inventory", "", f"Generated: {observed_at}", f"Output: `{out}`", "", "## Counts", "", f"- running_process_rows: {process_count}", f"- desktop_apps: {desktop_count}", f"- curated_executables: {executable_count}", f"- rootfs_executables_non_sudo: {rootfs.get('count', 0)}", "", "Run `scripts/program_inventory_sudo_scan.sh` for the optional sudo rootfs metadata scan."]
     (out / "SUMMARY.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     latest = OUT_ROOT / "latest"
     latest.unlink(missing_ok=True)

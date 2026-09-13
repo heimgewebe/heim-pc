@@ -103,6 +103,31 @@ def read_lines(path: Path) -> list[str]:
     return [line.rstrip("\n") for line in path.read_text(encoding="utf-8", errors="replace").splitlines()]
 
 
+def normalize_observed_at(value: str) -> str:
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S%z")
+    if parsed.tzinfo is None:
+        raise ValueError("collection timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def collection_observed_at(raw_dir: Path, run_result: dict[str, Any]) -> str:
+    raw_value = run_result.get("observed_at")
+    if isinstance(raw_value, str) and raw_value.strip():
+        return normalize_observed_at(raw_value)
+
+    for line in read_lines(raw_dir / "SUMMARY.md"):
+        if line.startswith("Generated: "):
+            return normalize_observed_at(line.removeprefix("Generated: ").strip())
+
+    raise ValueError(
+        f"raw inventory at {display_path(raw_dir)} is missing a trustworthy collection timestamp"
+    )
+
+
 def command_output(argv: list[str], timeout: int = 10) -> tuple[int, str]:
     try:
         completed = subprocess.run(
@@ -224,6 +249,7 @@ def operator_tools(executable_rows: list[dict[str, str]]) -> dict[str, list[str]
 def build_snapshot(raw_dir: Path, *, generated_at: str | None = None) -> dict[str, Any]:
     generated_at = generated_at or utc_now()
     run_result = read_json(raw_dir / "run-result.json", {})
+    observed_at = collection_observed_at(raw_dir, run_result)
     sudo_result = read_json(raw_dir / "full-rootfs-sudo-scan-result.json", {})
     non_sudo_result = read_json(raw_dir / "full-rootfs-scan-result.json", {})
     sudo_delta = read_json(raw_dir / "sudo-delta-summary.json", {})
@@ -255,6 +281,16 @@ def build_snapshot(raw_dir: Path, *, generated_at: str | None = None) -> dict[st
     snapshot: dict[str, Any] = {
         "schema": "program-inventory.v1",
         "generated_at": generated_at,
+        "observation_scope": {
+            "kind": "point_in_time_runtime_observation",
+            "observed_at": observed_at,
+            "does_not_establish": [
+                "current_state_after_observed_at",
+                "service_necessity",
+                "system_architecture",
+                "preferred_access_path",
+            ],
+        },
         "source_inventory_path": display_path(raw_dir),
         "counts": counts,
         "scan_boundaries": {
@@ -290,7 +326,10 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         "id: program-inventory-summary",
         "role: reality",
         "status: canonical",
-        "last_reviewed: 2026-07-09",
+        "canonicality: observation",
+        "temporal_scope: point_in_time",
+        f'observed_at: "{snapshot["observation_scope"]["observed_at"]}"',
+        f"last_reviewed: {snapshot['generated_at'][:10]}",
         "depends_on:",
         "  - software-inventory",
         "verifies_with:",
@@ -301,11 +340,14 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         "# Program Inventory Summary",
         "",
         f"Generated at: `{snapshot['generated_at']}`",
+        f"Observed at: `{snapshot['observation_scope']['observed_at']}`",
         f"Raw inventory source: `{snapshot['source_inventory_path']}`",
         "",
         "## Boundary",
         "",
-        "This document is a compact, reviewable summary of the current heim-pc program surface. Large raw inventories stay outside Git under `~/.local/share/heim-utilities/program-inventory/`.",
+        "This document is a compact, reviewable point-in-time observation of the heim-pc program surface. Large raw inventories stay outside Git under `~/.local/share/heim-utilities/program-inventory/`.",
+        "",
+        "It is authoritative only for what was observed at the observed timestamp. It does not establish current state after that timestamp, service necessity, system architecture, or a preferred access path. Re-read live runtime before making present-tense claims.",
         "",
         "The summary may include program names, executable metadata counts, package managers, service/container names and safe paths to local inventory artifacts. It must not contain secrets, browser profiles, private file contents, keyrings or raw history.",
         "",

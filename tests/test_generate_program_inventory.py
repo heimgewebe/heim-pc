@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 repo_root = Path(__file__).resolve().parents[1]
 scripts_path = repo_root / "scripts"
 if str(scripts_path) not in sys.path:
@@ -21,7 +23,7 @@ def write_csv(path: Path, rows: list[dict[str, str]], fields: list[str]) -> None
 def test_build_snapshot_compacts_raw_inventory(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
-    (raw / "run-result.json").write_text(json.dumps({"process_rows": 3, "executables": 7, "desktop_apps": 2}), encoding="utf-8")
+    (raw / "run-result.json").write_text(json.dumps({"process_rows": 3, "executables": 7, "desktop_apps": 2, "observed_at": "2026-07-09T18:15:00Z"}), encoding="utf-8")
     (raw / "full-rootfs-scan-result.json").write_text(json.dumps({"count": 10}), encoding="utf-8")
     (raw / "full-rootfs-sudo-scan-result.json").write_text(json.dumps({"count": 12, "note": "metadata only", "stderr_tail": ["find: one denied"]}), encoding="utf-8")
     (raw / "sudo-delta-summary.json").write_text(json.dumps({"added_by_sudo": 2, "top_added_prefixes": [["/var/lib", 2]], "top_added_names": [["run", 2]]}), encoding="utf-8")
@@ -45,9 +47,20 @@ def test_build_snapshot_compacts_raw_inventory(tmp_path):
     (raw / "snap_list.txt").write_text("# rc=0\nName Version Rev Tracking Publisher Notes\nhelm 4.2.2 531 latest/stable canonical** classic\n", encoding="utf-8")
     (raw / "docker_ps.tsv").write_text("# rc=0\nheim-util-beszel\thenrygd/beszel:latest\tUp 10 hours\t127.0.0.1:8090->8090/tcp\n", encoding="utf-8")
 
-    snapshot = build_snapshot(raw, generated_at="2026-07-09T18:15:00Z")
+    snapshot = build_snapshot(raw, generated_at="2026-09-12T13:00:00Z")
 
     assert snapshot["schema"] == "program-inventory.v1"
+    assert snapshot["generated_at"] == "2026-09-12T13:00:00Z"
+    assert snapshot["observation_scope"] == {
+        "kind": "point_in_time_runtime_observation",
+        "observed_at": "2026-07-09T18:15:00Z",
+        "does_not_establish": [
+            "current_state_after_observed_at",
+            "service_necessity",
+            "system_architecture",
+            "preferred_access_path",
+        ],
+    }
     assert snapshot["counts"]["running_process_rows"] == 3
     assert snapshot["counts"]["rootfs_executables_sudo"] == 12
     assert snapshot["counts"]["executables_added_by_sudo"] == 2
@@ -59,11 +72,17 @@ def test_build_snapshot_compacts_raw_inventory(tmp_path):
 def test_render_and_write_outputs(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
-    (raw / "run-result.json").write_text(json.dumps({"process_rows": 0, "executables": 0, "desktop_apps": 0}), encoding="utf-8")
-    snapshot = build_snapshot(raw, generated_at="2026-07-09T18:15:00Z")
+    (raw / "run-result.json").write_text(json.dumps({"process_rows": 0, "executables": 0, "desktop_apps": 0, "observed_at": "2026-07-09T18:15:00Z"}), encoding="utf-8")
+    snapshot = build_snapshot(raw, generated_at="2026-09-12T13:00:00Z")
     summary = render_markdown(snapshot)
 
     assert "id: program-inventory-summary" in summary
+    assert "canonicality: observation" in summary
+    assert "temporal_scope: point_in_time" in summary
+    assert 'observed_at: "2026-07-09T18:15:00Z"' in summary
+    assert "Generated at: `2026-09-12T13:00:00Z`" in summary
+    assert "Observed at: `2026-07-09T18:15:00Z`" in summary
+    assert "does not establish current state after that timestamp" in summary
     assert "Raw artifact policy" in summary
     assert "Large raw inventories stay outside Git" in summary
 
@@ -72,3 +91,24 @@ def test_render_and_write_outputs(tmp_path):
     write_outputs(snapshot, summary_out, json_out)
     assert summary_out.exists()
     assert json.loads(json_out.read_text())["schema"] == "program-inventory.v1"
+
+
+def test_build_snapshot_uses_legacy_summary_collection_timestamp(tmp_path):
+    raw = tmp_path / "legacy"
+    raw.mkdir()
+    (raw / "run-result.json").write_text(json.dumps({"process_rows": 0}), encoding="utf-8")
+    (raw / "SUMMARY.md").write_text("# Raw inventory\n\nGenerated: 2026-07-09T20:15:00+0200\n", encoding="utf-8")
+
+    snapshot = build_snapshot(raw, generated_at="2026-09-12T13:00:00Z")
+
+    assert snapshot["generated_at"] == "2026-09-12T13:00:00Z"
+    assert snapshot["observation_scope"]["observed_at"] == "2026-07-09T18:15:00Z"
+
+
+def test_build_snapshot_rejects_raw_inventory_without_collection_timestamp(tmp_path):
+    raw = tmp_path / "untimestamped"
+    raw.mkdir()
+    (raw / "run-result.json").write_text(json.dumps({"process_rows": 0}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing a trustworthy collection timestamp"):
+        build_snapshot(raw, generated_at="2026-09-12T13:00:00Z")

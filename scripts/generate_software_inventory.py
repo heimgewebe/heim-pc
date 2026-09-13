@@ -240,14 +240,16 @@ def apt_rows(packages: Iterable[str]) -> list[str]:
     return rows
 
 
-def main() -> None:
-    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    lines: list[str] = [
+def inventory_header(generated_at: str) -> list[str]:
+    return [
         "---",
         "id: software-inventory",
         "role: reality",
         "status: canonical",
-        "last_reviewed: 2026-07-09",
+        "canonicality: observation",
+        "temporal_scope: point_in_time",
+        f'observed_at: "{generated_at}"',
+        f"last_reviewed: {generated_at[:10]}",
         "depends_on:",
         "  - home-entry",
         "  - security",
@@ -261,7 +263,9 @@ def main() -> None:
         "",
         "## Boundary",
         "",
-        "This is a small, reviewable inventory of operator-relevant software surfaces on heim-pc. It is not a full `/usr/bin`, dpkg, Home directory or private-content dump.",
+        "This is a small, reviewable point-in-time observation of operator-relevant software surfaces on heim-pc. It is not a full `/usr/bin`, dpkg, Home directory or private-content dump.",
+        "",
+        "It is authoritative only for what was observed at the generated timestamp. It does not establish current state after that timestamp, service necessity, system architecture, or a preferred access path. Re-read live runtime before making present-tense claims.",
         "",
         "The inventory may record executable names, versions, package managers, local service URLs and safe configuration paths. It must not record secrets, browser profiles, keyrings, private documents or raw command histories.",
         "",
@@ -270,6 +274,11 @@ def main() -> None:
         "| Command | Status | Path | Version / observation |",
         "|---|---:|---|---|",
     ]
+
+
+def main() -> None:
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    lines: list[str] = inventory_header(generated_at)
     for command, status, path, version in command_rows():
         lines.append(f"| `{command}` | {status} | `{path}` | {version or '-'} |")
 
