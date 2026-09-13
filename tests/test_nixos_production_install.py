@@ -1078,6 +1078,131 @@ def test_completion_recovery_releases_efi_before_receipt_fstat_error(
         real_close(parent_fd)
 
 
+def test_main_persistent_receipt_fstat_error_retains_apply_lock(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(
+        prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+    )
+    monkeypatch.setattr(
+        prod,
+        "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+
+    real_acquire = prod.acquire_production_apply_lock
+    real_release = prod.release_production_apply_lock
+    held_locks = []
+
+    def acquire_and_capture(value):
+        lock = real_acquire(value)
+        held_locks.append(lock)
+        return lock
+
+    released = []
+
+    def release_and_record(lock):
+        released.append(True)
+        return real_release(lock)
+
+    monkeypatch.setattr(prod, "acquire_production_apply_lock", acquire_and_capture)
+    monkeypatch.setattr(prod, "release_production_apply_lock", release_and_record)
+
+    reservations = []
+    real_reserve = prod.reserve_private_receipt
+
+    def reserve_and_capture(path):
+        reservation = real_reserve(path)
+        reservations.append(reservation)
+        return reservation
+
+    monkeypatch.setattr(prod, "reserve_private_receipt", reserve_and_capture)
+
+    events = []
+    freeze_handoffs = []
+
+    def execute_with_freeze(*args, **kwargs):
+        freeze_handoff = kwargs["protected_efi_freeze_handoff"]
+        freeze_handoffs.append(freeze_handoff)
+        freeze_handoff["freeze"] = {"test": True}
+        events.append("execute")
+        return {"secret": "super-secret-material"}
+
+    monkeypatch.setattr(prod, "execute_plan", execute_with_freeze)
+    fstat_failure_enabled = {"value": False}
+
+    def release_freeze(_freeze):
+        events.append("efi-release")
+        fstat_failure_enabled["value"] = True
+
+    monkeypatch.setattr(prod, "release_protected_efi_freeze", release_freeze)
+    real_fstat = prod.os.fstat
+
+    def fail_receipt_fstat(fd):
+        if (
+            fstat_failure_enabled["value"]
+            and reservations
+            and fd == reservations[0].get("fd")
+        ):
+            events.append("receipt-fstat-eio")
+            raise OSError(errno.EIO, "synthetic persistent receipt fstat failure")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(prod.os, "fstat", fail_receipt_fstat)
+
+    try:
+        result = prod.main([
+            "--install-artifact", str(tmp_path / "unused.json"),
+            "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--apply",
+            "--credential-hash-file", str(tmp_path / "credential.hash"),
+            "--write-receipt", str(tmp_path / "receipt.json"),
+        ])
+        assert result == 3
+        captured = capsys.readouterr()
+        assert captured.err == (
+            prod.POST_MUTATION_PUBLIC_MESSAGES[
+                "private-receipt-finalization-incomplete"
+            ]
+            + "\n"
+        )
+        assert released == []
+        assert events[0:2] == ["execute", "efi-release"]
+        assert events.count("receipt-fstat-eio") >= 1
+        assert freeze_handoffs and "freeze" not in freeze_handoffs[0]
+        assert "fd" in reservations[0]
+        assert "parent_fd" in reservations[0]
+        assert prod._apply_completion_resources_terminal(reservations[0], {}) is False
+
+        # A different physical target bypasses the target-specific lock but must
+        # still be rejected by the retained global installer lock in this process.
+        second = json.loads(json.dumps(compiled))
+        second_target = "/dev/disk/by-id/nvme-SYNTHETIC_TARGET_9999"
+        second["target_authority"] = second_target
+        second["preflight"]["target"]["requested_path"] = second_target
+        second["preflight"]["target"]["serial"] = "SYNTH-OTHER-SERIAL"
+        second["preflight"]["target"]["wwn"] = "eui.synthetic-other"
+        with pytest.raises(prod.ProductionInstallError, match="global installer lock"):
+            real_acquire(second)
+    finally:
+        fstat_failure_enabled["value"] = False
+        for reservation in reservations:
+            if "fd" in reservation or "parent_fd" in reservation:
+                prod._close_private_receipt_reservation(reservation)
+        for lock in held_locks:
+            if "fd" in lock or "global_fd" in lock or "directory_fd" in lock:
+                real_release(lock)
+
+
+
 def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
     monkeypatch, tmp_path, capsys
 ):
@@ -1191,8 +1316,10 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
         "receipt-finalized",
         "efi-thaw-failed",
         "receipt-closed",
-        "lock-released",
     ]
+    # The exact freeze remains unresolved, so the Apply lock must stay held
+    # until process exit rather than admitting another production apply.
+    assert "lock-released" not in events
 
 
 def test_apply_signal_deferral_masks_sigint_but_handles_sigterm(monkeypatch):
@@ -1237,7 +1364,10 @@ def test_apply_signal_deferral_masks_sigint_but_handles_sigterm(monkeypatch):
     handlers[int(prod.signal.SIGTERM)](int(prod.signal.SIGTERM), None)
 
     deferred = prod._end_apply_signal_deferral(handoff)
-    assert set(deferred) == {int(prod.signal.SIGINT), int(prod.signal.SIGTERM)}
+    assert dict(deferred) == {
+        int(prod.signal.SIGINT): "original-int",
+        int(prod.signal.SIGTERM): "original-term",
+    }
     assert handoff == {}
     assert calls == [
         (prod.signal.SIG_BLOCK, set(prod.APPLY_MASKED_SIGNALS)),
@@ -1246,11 +1376,128 @@ def test_apply_signal_deferral_masks_sigint_but_handles_sigterm(monkeypatch):
     assert handlers[int(prod.signal.SIGINT)] == "original-int"
     assert handlers[int(prod.signal.SIGTERM)] == "original-term"
 
-    with pytest.raises(KeyboardInterrupt, match="deferred"):
-        prod._raise_deferred_apply_signal((int(prod.signal.SIGINT),))
+    redelivered = []
+    monkeypatch.setattr(
+        prod.signal, "raise_signal", lambda signum: redelivered.append(int(signum))
+    )
+    prod._raise_deferred_apply_signal(
+        ((int(prod.signal.SIGINT), "original-int"),)
+    )
+    assert redelivered == [int(prod.signal.SIGINT)]
     with pytest.raises(SystemExit) as exc:
-        prod._raise_deferred_apply_signal((int(prod.signal.SIGTERM),))
+        prod._raise_deferred_apply_signal(
+            ((int(prod.signal.SIGTERM), prod.signal.SIG_DFL),)
+        )
     assert exc.value.code == 128 + int(prod.signal.SIGTERM)
+
+
+def test_deferred_default_sigint_uses_python_default_handler():
+    previous = prod.signal.getsignal(prod.signal.SIGINT)
+    try:
+        prod.signal.signal(prod.signal.SIGINT, prod.signal.default_int_handler)
+        with pytest.raises(KeyboardInterrupt):
+            prod._raise_deferred_apply_signal(
+                ((int(prod.signal.SIGINT), prod.signal.default_int_handler),)
+            )
+    finally:
+        prod.signal.signal(prod.signal.SIGINT, previous)
+
+
+def test_deferred_true_sigint_default_uses_signal_redelivery(monkeypatch):
+    redelivered = []
+    monkeypatch.setattr(
+        prod.signal, "raise_signal", lambda signum: redelivered.append(int(signum))
+    )
+    prod._raise_deferred_apply_signal(
+        ((int(prod.signal.SIGINT), prod.signal.SIG_DFL),)
+    )
+    assert redelivered == [int(prod.signal.SIGINT)]
+
+
+@pytest.mark.parametrize("signum", [prod.signal.SIGINT, prod.signal.SIGTERM])
+def test_apply_signal_deferral_preserves_ignored_disposition(signum):
+    original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    original_handler = prod.signal.getsignal(signum)
+    handoff = {}
+    try:
+        baseline_mask = set(original_mask) - set(prod.APPLY_DEFERRED_SIGNALS)
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, baseline_mask)
+        prod.signal.signal(signum, prod.signal.SIG_IGN)
+        prod._begin_apply_signal_deferral(handoff)
+        prod.os.kill(prod.os.getpid(), signum)
+        deferred = prod._end_apply_signal_deferral(handoff)
+        assert dict(deferred)[int(signum)] == prod.signal.SIG_IGN
+        assert prod.signal.getsignal(signum) == prod.signal.SIG_IGN
+        prod._raise_deferred_apply_signal(deferred)
+        assert prod.signal.getsignal(signum) == prod.signal.SIG_IGN
+    finally:
+        if handoff.get("active") is True:
+            prod._end_apply_signal_deferral(handoff)
+        prod.signal.signal(signum, original_handler)
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
+
+
+@pytest.mark.parametrize("signum", [prod.signal.SIGINT, prod.signal.SIGTERM])
+def test_apply_signal_deferral_redelivers_custom_handler_after_cleanup(signum):
+    original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    original_handler = prod.signal.getsignal(signum)
+    handoff = {}
+    events = []
+
+    def custom_handler(received, _frame):
+        events.append(("handler", int(received), handoff.get("active")))
+
+    try:
+        baseline_mask = set(original_mask) - set(prod.APPLY_DEFERRED_SIGNALS)
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, baseline_mask)
+        prod.signal.signal(signum, custom_handler)
+        prod._begin_apply_signal_deferral(handoff)
+        prod.os.kill(prod.os.getpid(), signum)
+        assert events == []
+        deferred = prod._end_apply_signal_deferral(handoff)
+        assert dict(deferred)[int(signum)] is custom_handler
+        assert prod.signal.getsignal(signum) is custom_handler
+        events.append(("cleanup-terminal", int(signum), handoff.get("active")))
+        prod._raise_deferred_apply_signal(deferred)
+        assert events == [
+            ("cleanup-terminal", int(signum), None),
+            ("handler", int(signum), None),
+        ]
+    finally:
+        if handoff.get("active") is True:
+            prod._end_apply_signal_deferral(handoff)
+        prod.signal.signal(signum, original_handler)
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
+
+
+@pytest.mark.parametrize("signum", [prod.signal.SIGINT, prod.signal.SIGTERM])
+def test_apply_signal_deferral_leaves_caller_blocked_pending_signal_owned_by_caller(
+    signum,
+):
+    original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    handoff = {}
+    consumed = False
+    try:
+        caller_mask = set(original_mask) | {signum}
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, caller_mask)
+        prod.os.kill(prod.os.getpid(), signum)
+        assert signum in prod.signal.sigpending()
+        prod._begin_apply_signal_deferral(handoff)
+        if signum == prod.signal.SIGINT:
+            assert signum not in handoff["owned_masked_signals"]
+        else:
+            assert signum not in handoff["handler_signals"]
+        deferred = prod._end_apply_signal_deferral(handoff)
+        assert int(signum) not in dict(deferred)
+        assert signum in prod.signal.sigpending()
+        assert prod.signal.sigwait({signum}) == signum
+        consumed = True
+    finally:
+        if handoff.get("active") is True:
+            prod._end_apply_signal_deferral(handoff)
+        if not consumed and signum in prod.signal.sigpending():
+            prod.signal.sigwait({signum})
+        prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
 
 
 def test_apply_signal_deferral_does_not_add_sigterm_to_child_mask():
@@ -1299,7 +1546,7 @@ def test_apply_signal_deferral_captures_sigint_at_unmask_boundary(monkeypatch):
         monkeypatch.setattr(prod.signal, "pthread_sigmask", race_mask)
         deferred = prod._end_apply_signal_deferral(handoff)
         assert fired is True
-        assert int(prod.signal.SIGINT) in deferred
+        assert int(prod.signal.SIGINT) in dict(deferred)
     finally:
         monkeypatch.setattr(prod.signal, "pthread_sigmask", real_mask)
         if handoff.get("active") is True:
@@ -1311,7 +1558,9 @@ def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal
     monkeypatch, tmp_path, capsys
 ):
     original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    original_sigint_handler = prod.signal.getsignal(prod.signal.SIGINT)
     try:
+        prod.signal.signal(prod.signal.SIGINT, prod.signal.default_int_handler)
         monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
         monkeypatch.setattr(
             prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
@@ -1381,7 +1630,7 @@ def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal
 
         monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
 
-        with pytest.raises(KeyboardInterrupt, match="deferred"):
+        with pytest.raises(KeyboardInterrupt):
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
@@ -1412,6 +1661,7 @@ def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal
         assert current_mask == original_mask
         assert prod.signal.SIGINT not in prod.signal.sigpending()
     finally:
+        prod.signal.signal(prod.signal.SIGINT, original_sigint_handler)
         prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
 
 
@@ -1419,7 +1669,9 @@ def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
     monkeypatch, tmp_path, capsys
 ):
     original_mask = prod.signal.pthread_sigmask(prod.signal.SIG_BLOCK, set())
+    original_sigint_handler = prod.signal.getsignal(prod.signal.SIGINT)
     try:
+        prod.signal.signal(prod.signal.SIGINT, prod.signal.default_int_handler)
         monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
         monkeypatch.setattr(
             prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
@@ -1474,7 +1726,7 @@ def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
 
         monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
 
-        with pytest.raises(KeyboardInterrupt, match="deferred"):
+        with pytest.raises(KeyboardInterrupt):
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
@@ -1501,6 +1753,7 @@ def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
         assert current_mask == original_mask
         assert prod.signal.SIGINT not in prod.signal.sigpending()
     finally:
+        prod.signal.signal(prod.signal.SIGINT, original_sigint_handler)
         prod.signal.pthread_sigmask(prod.signal.SIG_SETMASK, original_mask)
 
 

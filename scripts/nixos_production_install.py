@@ -3763,7 +3763,10 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
         raise ProductionInstallError("apply signal deferral handoff must start empty")
     if not all(
         callable(getattr(signal, name, None))
-        for name in ("pthread_sigmask", "sigpending", "sigwait", "getsignal", "signal")
+        for name in (
+            "pthread_sigmask", "sigpending", "sigwait", "getsignal", "signal",
+            "raise_signal",
+        )
     ):
         raise ProductionInstallError(
             "production apply requires POSIX signal deferral support"
@@ -3778,12 +3781,17 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
             "production apply signal deferral could not be established"
         ) from exc
 
-    previous_set = frozenset(previous)
-    handled = set(APPLY_HANDLER_DEFERRED_SIGNALS) - set(previous_set)
-    recorder = _apply_signal_recorder(handoff)
     try:
-        for signum in sorted(handled, key=int):
+        # Bind every installer-owned signal to the caller disposition that was
+        # active on entry. SIGINT is masked rather than handled during the
+        # critical phase, but its original disposition is still needed for
+        # faithful re-delivery after cleanup.
+        for signum in sorted(APPLY_DEFERRED_SIGNALS, key=int):
             previous_handlers[int(signum)] = signal.getsignal(signum)
+        previous_set = frozenset(previous)
+        handled = set(APPLY_HANDLER_DEFERRED_SIGNALS) - set(previous_set)
+        recorder = _apply_signal_recorder(handoff)
+        for signum in sorted(handled, key=int):
             signal.signal(signum, recorder)
         handoff.update(
             {
@@ -3806,8 +3814,10 @@ def _begin_apply_signal_deferral(handoff: dict[str, Any]) -> None:
         raise
 
 
-def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
-    """Restore caller signal state while capturing the unblock-boundary race."""
+def _end_apply_signal_deferral(
+    handoff: dict[str, Any],
+) -> tuple[tuple[int, Any], ...]:
+    """Restore caller signal state and bind deferred signals to their dispositions."""
     if handoff.get("active") is not True:
         return ()
     previous = handoff.get("previous_mask")
@@ -3825,7 +3835,6 @@ def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
         raise ProductionInstallError("apply signal deferral ownership is invalid")
 
     deferred = {int(signum) for signum in caught}
-    temporary_handlers: dict[int, Any] = {}
     mask_restored = False
     recorder = _apply_signal_recorder(handoff)
     try:
@@ -3833,7 +3842,6 @@ def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
         # SIGINT arriving after the last pending snapshot but before SIG_SETMASK
         # is then recorded at unmask instead of replacing a terminal alarm.
         for signum in sorted(owned, key=int):
-            temporary_handlers[int(signum)] = signal.getsignal(signum)
             signal.signal(signum, recorder)
 
         while True:
@@ -3861,10 +3869,7 @@ def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
                 pass
 
         restore_error: BaseException | None = None
-        for raw_signum, previous_handler in {
-            **previous_handlers,
-            **temporary_handlers,
-        }.items():
+        for raw_signum, previous_handler in previous_handlers.items():
             try:
                 signal.signal(raw_signum, previous_handler)
             except BaseException as exc:
@@ -3880,18 +3885,33 @@ def _end_apply_signal_deferral(handoff: dict[str, Any]) -> tuple[int, ...]:
                 "apply signal handlers could not be restored"
             ) from restore_error
 
-    return tuple(sorted(deferred))
+    result: list[tuple[int, Any]] = []
+    for signum in sorted(deferred):
+        if signum not in previous_handlers:
+            raise ProductionInstallError(
+                "deferred apply signal has no caller disposition"
+            )
+        result.append((signum, previous_handlers[signum]))
+    return tuple(result)
 
 
-def _raise_deferred_apply_signal(deferred: tuple[int, ...]) -> None:
-    """Deliver a deferred operator interruption only after terminal cleanup."""
-    values = set(deferred)
-    if int(signal.SIGTERM) in values:
-        raise SystemExit(128 + int(signal.SIGTERM))
-    if int(signal.SIGINT) in values:
-        raise KeyboardInterrupt(
-            "SIGINT deferred until production apply resources were terminal"
-        )
+def _raise_deferred_apply_signal(
+    deferred: tuple[tuple[int, Any], ...],
+) -> None:
+    """Re-deliver deferred signals only after caller state has been restored."""
+    dispositions = {int(signum): handler for signum, handler in deferred}
+    # Preserve the historical termination precedence when both operator signals
+    # coalesce during the critical section. Default SIGTERM remains the CLI's
+    # controlled exit-143 semantic; every other disposition is exercised by the
+    # actual signal machinery after restoration, including SIG_IGN and custom
+    # Python handlers.
+    for signum in (int(signal.SIGTERM), int(signal.SIGINT)):
+        if signum not in dispositions:
+            continue
+        handler = dispositions[signum]
+        if signum == int(signal.SIGTERM) and handler == signal.SIG_DFL:
+            raise SystemExit(128 + int(signal.SIGTERM))
+        signal.raise_signal(signum)
 
 
 def _release_handed_off_protected_efi(
@@ -3982,6 +4002,20 @@ def _apply_completion_evidence(
         if execution_error is not None
         else _post_mutation_evidence_from_success_receipt(receipt)
     )
+
+
+def _apply_completion_resources_terminal(
+    receipt_reservation: dict[str, Any] | None,
+    freeze_handoff: dict[str, Any] | None,
+) -> bool:
+    """Return whether all resources protected by the global Apply lock are terminal."""
+    if isinstance(freeze_handoff, dict) and "freeze" in freeze_handoff:
+        return False
+    if isinstance(receipt_reservation, dict) and (
+        "fd" in receipt_reservation or "parent_fd" in receipt_reservation
+    ):
+        return False
+    return True
 
 
 def _recover_apply_completion_resources(
@@ -4517,11 +4551,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ProductionInstallError("--apply requires --write-receipt")
         apply_lock = acquire_production_apply_lock(plan)
         completion_signal_handoff: dict[str, Any] = {}
-        deferred_apply_signals: tuple[int, ...] = ()
+        deferred_apply_signals: tuple[tuple[int, Any], ...] = ()
         apply_error: BaseException | None = None
+        receipt_reservation: dict[str, Any] | None = None
+        freeze_handoff: dict[str, Any] = {}
         try:
             receipt_reservation = reserve_private_receipt(args.write_receipt)
-            freeze_handoff: dict[str, Any] = {}
 
             def release_handed_off_freeze(
                 *, required: bool = False
@@ -4662,13 +4697,21 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException as exc:
             apply_error = exc
         finally:
-            try:
-                release_production_apply_lock(apply_lock)
-            except BaseException as lock_exc:
-                # Preserve the historical finally semantics: a lock-release
-                # failure supersedes an earlier apply exception, but signal
-                # deferral remains active until the outcome is reported.
-                apply_error = lock_exc
+            # Fail closed if completion could not prove that every resource whose
+            # lifetime is protected by the Apply lock is terminal. In the CLI the
+            # process exit then releases the retained kernel lock/fds together; in
+            # embedded use the process remains deliberately fenced rather than
+            # silently permitting a second Apply over unresolved ownership.
+            if _apply_completion_resources_terminal(
+                receipt_reservation, freeze_handoff
+            ):
+                try:
+                    release_production_apply_lock(apply_lock)
+                except BaseException as lock_exc:
+                    # Preserve the historical finally semantics: a lock-release
+                    # failure supersedes an earlier apply exception, but signal
+                    # deferral remains active until the outcome is reported.
+                    apply_error = lock_exc
 
         apply_result: int | None = None
         if isinstance(apply_error, PostMutationInstallError):
