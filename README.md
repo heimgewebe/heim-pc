@@ -350,9 +350,12 @@ Remediation.
 ## Grok Build: subscription-only Launcher
 
 `~/.local/bin/grok` ist die stabile lokale Schutzschicht vor dem global über npm
-installierten Grok-Build-Entrypoint. Der Wrapper entfernt die API-Key-PAYG-Fläche
-aus der Umgebung und führt danach `~/.npm-global/bin/grok` **direkt** aus. Er
-unterstellt absichtlich keinen Node-Launcher: Der Paket-Entrypoint darf Script,
+installierten Grok-Build-Entrypoint. Der Wrapper entfernt beide bekannten
+API-Key-Environment-Flächen und setzt zusätzlich Groks eigenen
+`disable_api_key_auth`-Schalter. Damit bleibt der grok.com-OAuth-/Device-Auth-Pfad
+verfügbar, während der Grok.com-API-Key-Fallback fail-closed ist. Danach führt er
+`~/.npm-global/bin/grok` **direkt** aus. Er unterstellt absichtlich keinen
+Node-Launcher: Der Paket-Entrypoint darf Script,
 Symlink oder natives ELF-Binary sein. Damit überlebt der lokale Vertrag auch den
 Wechsel von Grok 1.0.30 auf einen nativen Entrypoint.
 

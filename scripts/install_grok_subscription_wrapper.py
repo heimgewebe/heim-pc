@@ -15,9 +15,12 @@ from pathlib import Path
 WRAPPER = b'''#!/usr/bin/env bash
 set -euo pipefail
 
-# Never let Grok Build inherit the xAI API-key PAYG surface. OAuth/Device Auth
-# through grok.com remains available through the official CLI credential store.
+# Fail closed onto the grok.com OAuth/Device-Auth subscription surface. Remove
+# both current and compatibility API-key variables and make Grok itself reject
+# the Grok.com API-key authentication fallback.
 unset XAI_API_KEY
+unset GROK_CODE_XAI_API_KEY
+export GROK_DISABLE_API_KEY_AUTH=1
 
 target="${HOME}/.npm-global/bin/grok"
 if [[ ! -x "$target" ]]; then
@@ -126,6 +129,7 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
         "beforeSha256": _sha256(before) if before is not None else None,
         "afterSha256": _sha256(WRAPPER),
         "paygApiKeyInherited": False,
+        "apiKeyAuthDisabled": True,
         "forcesNodeInterpreter": False,
         "doesNotEstablish": [
             "grok_authentication",

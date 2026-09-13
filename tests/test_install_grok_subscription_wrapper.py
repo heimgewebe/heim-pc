@@ -30,7 +30,10 @@ class GrokSubscriptionWrapperInstallerTests(unittest.TestCase):
         target.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            "printf '%s|%s\\n' \"${XAI_API_KEY-unset}\" \"$*\"\n",
+            "printf '%s|%s|%s|%s\\n' "
+            "\"${XAI_API_KEY-unset}\" "
+            "\"${GROK_CODE_XAI_API_KEY-unset}\" "
+            "\"${GROK_DISABLE_API_KEY_AUTH-unset}\" \"$*\"\n",
             encoding="utf-8",
         )
         target.chmod(0o755)
@@ -60,6 +63,8 @@ class GrokSubscriptionWrapperInstallerTests(unittest.TestCase):
             environment = dict(os.environ)
             environment["HOME"] = str(home)
             environment["XAI_API_KEY"] = "must-not-propagate"
+            environment["GROK_CODE_XAI_API_KEY"] = "legacy-must-not-propagate"
+            environment["GROK_DISABLE_API_KEY_AUTH"] = "0"
             run = subprocess.run(
                 [str(wrapper), "models", "--example"],
                 text=True,
@@ -67,7 +72,7 @@ class GrokSubscriptionWrapperInstallerTests(unittest.TestCase):
                 env=environment,
                 check=True,
             )
-            self.assertEqual(run.stdout.strip(), "unset|models --example")
+            self.assertEqual(run.stdout.strip(), "unset|unset|1|models --example")
 
             again = installer.install(home=home, apply=True)
             self.assertEqual(again["action"], "unchanged")
