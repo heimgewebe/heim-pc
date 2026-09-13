@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "18b850c1bc8d4943c64814aa9784578a232fed51838f524847fb95d1d05b5be6"
+SOURCE_SNAPSHOT_SHA256 = "6b42c0e603b73bfa4d651555345f611997f7bfd4170243064f55669f48d96594"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -197,8 +197,11 @@ class T(unittest.TestCase):
         self.assertIn('--mountpoint "$target"', layout)
         self.assertIn("--mountpoint /boot", layout)
         self.assertIn("        else\n          rc=$?\n        fi\n        (( rc == 1 ))", layout)
+        self.assertIn("findmnt --first-only -rn --mountpoint /persist", layout)
+        self.assertIn('(( persist_rc == 1 )) || fail "/persist mount state could not be inspected"', layout)
         self.assertNotIn('-T "$target"', layout)
         self.assertNotIn("-T /boot", layout)
+        self.assertNotIn("-T /persist", layout)
         self.assertIsNone(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", layout))
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)

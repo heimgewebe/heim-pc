@@ -150,8 +150,12 @@ let
           ;;
         patch-loader-entries)
           if [[ ! -e "$identity" ]]; then
-            persist_target="$(findmnt -rn -o TARGET -T /persist 2>/dev/null || true)"
-            [[ "$persist_target" != /persist ]] || fail "private identity is missing from mounted /persist"
+            if findmnt --first-only -rn --mountpoint /persist >/dev/null 2>&1; then
+              fail "private identity is missing from mounted /persist"
+            else
+              persist_rc=$?
+            fi
+            (( persist_rc == 1 )) || fail "/persist mount state could not be inspected"
             exit 0
           fi
           patch_entries
