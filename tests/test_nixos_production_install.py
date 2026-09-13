@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import io
 import tarfile
@@ -1031,6 +1032,52 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
     assert events == expected_events
 
 
+def test_completion_recovery_releases_efi_before_receipt_fstat_error(
+    monkeypatch, tmp_path
+):
+    reservation = prod.reserve_private_receipt(tmp_path / "receipt.json")
+    fd = reservation["fd"]
+    parent_fd = reservation["parent_fd"]
+    real_fstat = prod.os.fstat
+    real_close = prod.os.close
+    events = []
+    handoff = {"freeze": {"test": True}}
+
+    def release_first(value, *, required=False):
+        assert required is False
+        events.append("efi-release")
+        value.pop("freeze", None)
+        return None
+
+    def fail_receipt_fstat(value):
+        if value == fd:
+            events.append("receipt-fstat")
+            raise OSError(errno.EIO, "synthetic persistent receipt fstat failure")
+        return real_fstat(value)
+
+    monkeypatch.setattr(prod, "_release_handed_off_protected_efi", release_first)
+    monkeypatch.setattr(prod.os, "fstat", fail_receipt_fstat)
+    try:
+        with pytest.raises(prod.PostMutationInstallError) as exc:
+            prod._recover_apply_completion_resources(
+                plan=plan(),
+                artifact=ARTIFACT,
+                receipt_reservation=reservation,
+                freeze_handoff=handoff,
+                evidence={"mutation_attempted": True},
+                execution_error=None,
+                phase_exc=KeyboardInterrupt("synthetic completion boundary"),
+            )
+        assert exc.value.code == "private-receipt-finalization-incomplete"
+        assert events == ["efi-release", "receipt-fstat"]
+        assert "freeze" not in handoff
+        assert reservation["fd"] == fd
+        assert reservation["parent_fd"] == parent_fd
+    finally:
+        real_close(fd)
+        real_close(parent_fd)
+
+
 def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
     monkeypatch, tmp_path, capsys
 ):
@@ -1608,6 +1655,113 @@ def test_protected_efi_acquisition_thaw_failure_preserves_exact_fd(monkeypatch, 
     assert "fd" not in freeze
     with pytest.raises(OSError):
         prod.os.fstat(held_fd)
+
+
+def test_protected_efi_thaw_close_post_kernel_interrupt_reconciles_ebadf(
+    monkeypatch, tmp_path
+):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    requests = []
+    monkeypatch.setattr(
+        prod.fcntl,
+        "ioctl",
+        lambda _fd, request, _arg=0: requests.append(request) or 0,
+    )
+
+    freeze = prod.acquire_protected_efi_freeze(expected_source)
+    held_fd = freeze["fd"]
+    real_close = prod.os.close
+    fired = False
+
+    def close_then_interrupt(value):
+        nonlocal fired
+        if value == held_fd and not fired:
+            fired = True
+            real_close(value)
+            raise KeyboardInterrupt("synthetic close-after-kernel interrupt")
+        return real_close(value)
+
+    monkeypatch.setattr(prod.os, "close", close_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="close-after-kernel"):
+        prod.release_protected_efi_freeze(freeze)
+    assert freeze["fd"] == held_fd
+    assert freeze["thawed"] is True
+    assert requests == [
+        prod.PROTECTED_EFI_FIFREEZE_IOCTL,
+        prod.PROTECTED_EFI_FITHAW_IOCTL,
+    ]
+
+    prod.release_protected_efi_freeze(freeze)
+    assert "fd" not in freeze
+    assert "thawed" not in freeze
+    assert requests == [
+        prod.PROTECTED_EFI_FIFREEZE_IOCTL,
+        prod.PROTECTED_EFI_FITHAW_IOCTL,
+    ]
+
+
+def test_protected_efi_thawed_stale_fd_reuse_never_receives_second_ioctl(
+    monkeypatch, tmp_path
+):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    requests = []
+    monkeypatch.setattr(
+        prod.fcntl,
+        "ioctl",
+        lambda _fd, request, _arg=0: requests.append(request) or 0,
+    )
+
+    freeze = prod.acquire_protected_efi_freeze(expected_source)
+    held_fd = freeze["fd"]
+    real_close = prod.os.close
+    fired = False
+
+    def close_then_interrupt(value):
+        nonlocal fired
+        if value == held_fd and not fired:
+            fired = True
+            real_close(value)
+            raise KeyboardInterrupt("synthetic close-after-kernel interrupt")
+        return real_close(value)
+
+    monkeypatch.setattr(prod.os, "close", close_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="close-after-kernel"):
+        prod.release_protected_efi_freeze(freeze)
+    monkeypatch.setattr(prod.os, "close", real_close)
+
+    replacement_fd = prod.os.open(
+        replacement, prod.os.O_RDONLY | prod.os.O_DIRECTORY | prod.os.O_CLOEXEC
+    )
+    reused_fd = held_fd
+    try:
+        if replacement_fd != reused_fd:
+            prod.os.dup2(replacement_fd, reused_fd)
+        with pytest.raises(
+            prod.ProductionInstallError, match="identity changed before close"
+        ):
+            prod.release_protected_efi_freeze(freeze)
+        assert requests == [
+            prod.PROTECTED_EFI_FIFREEZE_IOCTL,
+            prod.PROTECTED_EFI_FITHAW_IOCTL,
+        ]
+        assert "fd" not in freeze
+        assert "thawed" not in freeze
+    finally:
+        if replacement_fd != reused_fd:
+            real_close(reused_fd)
+        real_close(replacement_fd)
 
 
 def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_path, capsys):

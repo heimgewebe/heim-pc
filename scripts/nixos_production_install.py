@@ -1013,10 +1013,85 @@ def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
         raise exc
 
 
+def _close_thawed_protected_efi_freeze_fd(freeze: dict[str, Any]) -> None:
+    """Close a known-thawed freeze FD without ever issuing FITHAW again."""
+    fd = freeze.get("fd")
+    if type(fd) is not int:
+        freeze.pop("thawed", None)
+        return
+
+    try:
+        current = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            if freeze.get("fd") == fd:
+                freeze.pop("fd", None)
+            freeze.pop("thawed", None)
+            return
+        raise ProductionInstallError(
+            "protected EFI thawed filesystem handle state is unavailable"
+        ) from exc
+
+    if (
+        current.st_dev != freeze.get("device")
+        or current.st_ino != freeze.get("inode")
+        or current.st_mode != freeze.get("mode")
+        or not stat.S_ISDIR(current.st_mode)
+    ):
+        # FITHAW has already succeeded. A reused numeric descriptor must never
+        # receive another ioctl on behalf of the old freeze owner.
+        if freeze.get("fd") == fd:
+            freeze.pop("fd", None)
+        freeze.pop("thawed", None)
+        raise ProductionInstallError(
+            "protected EFI thawed filesystem handle identity changed before close"
+        )
+
+    try:
+        os.close(fd)
+    except OSError as exc:
+        # close(2) may report failure after releasing the descriptor. Reconcile
+        # the exact identity before deciding whether ownership is still live.
+        try:
+            current_after = os.fstat(fd)
+        except OSError as state_exc:
+            if state_exc.errno == errno.EBADF:
+                if freeze.get("fd") == fd:
+                    freeze.pop("fd", None)
+                freeze.pop("thawed", None)
+                return
+            raise ProductionInstallError(
+                "protected EFI thawed filesystem handle state is unavailable"
+            ) from state_exc
+        if (
+            current_after.st_dev != freeze.get("device")
+            or current_after.st_ino != freeze.get("inode")
+            or current_after.st_mode != freeze.get("mode")
+            or not stat.S_ISDIR(current_after.st_mode)
+        ):
+            if freeze.get("fd") == fd:
+                freeze.pop("fd", None)
+            freeze.pop("thawed", None)
+            raise ProductionInstallError(
+                "protected EFI thawed filesystem handle identity changed before close"
+            ) from exc
+        raise ProductionInstallError(
+            "protected EFI thawed filesystem handle could not be closed safely"
+        ) from exc
+
+    if freeze.get("fd") == fd:
+        freeze.pop("fd", None)
+    freeze.pop("thawed", None)
+
+
 def release_protected_efi_freeze(freeze: dict[str, Any]) -> None:
     fd = freeze.get("fd")
     if type(fd) is not int:
         raise ProductionInstallError("protected EFI freeze handle is invalid")
+    if freeze.get("thawed") is True:
+        _close_thawed_protected_efi_freeze_fd(freeze)
+        return
+
     identity_failure: BaseException | None = None
     thaw_failure: BaseException | None = None
     try:
@@ -1041,14 +1116,11 @@ def release_protected_efi_freeze(freeze: dict[str, Any]) -> None:
             "protected EFI filesystem could not be thawed safely",
             freeze=freeze,
         ) from thaw_failure
-    try:
-        os.close(fd)
-    except OSError as exc:
-        raise ProductionInstallError(
-            "protected EFI thawed filesystem handle could not be closed safely"
-        ) from exc
-    if freeze.get("fd") == fd:
-        del freeze["fd"]
+    # From here onward the filesystem is known thawed. Keep that state in the
+    # owner before close so an asynchronous exception after kernel close can be
+    # reconciled without ever retrying FITHAW on a stale/reused descriptor.
+    freeze["thawed"] = True
+    _close_thawed_protected_efi_freeze_fd(freeze)
     if identity_failure is not None:
         raise ProductionInstallError("protected EFI frozen filesystem identity was not stable") from identity_failure
 
@@ -3782,27 +3854,10 @@ def _recover_apply_completion_resources(
     while True:
         try:
             freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
-            receipt_owned = _private_receipt_descriptor_owned(
-                receipt_reservation,
-                key="fd",
-                device_key="device",
-                inode_key="inode",
-                label="private receipt",
-            )
-            parent_owned = _private_receipt_descriptor_owned(
-                receipt_reservation,
-                key="parent_fd",
-                device_key="parent_device",
-                inode_key="parent_inode",
-                label="private receipt directory",
-            )
 
-            if not freeze_owned and not receipt_owned:
-                if parent_owned:
-                    _close_private_receipt_reservation(receipt_reservation)
-                completion_error = None
-                break
-
+            # EFI release is the higher-priority resource obligation. Do not let
+            # receipt descriptor diagnosis (including persistent fstat errors)
+            # prevent the thaw/release attempt before the Apply lock can fall.
             if effective_release_error is None and freeze_owned:
                 candidate_release_error = _release_handed_off_protected_efi(
                     freeze_handoff
@@ -3820,6 +3875,44 @@ def _recover_apply_completion_resources(
                         continue
                     candidate_release_error = None
                 effective_release_error = candidate_release_error
+
+            try:
+                receipt_owned = _private_receipt_descriptor_owned(
+                    receipt_reservation,
+                    key="fd",
+                    device_key="device",
+                    inode_key="inode",
+                    label="private receipt",
+                )
+                parent_owned = _private_receipt_descriptor_owned(
+                    receipt_reservation,
+                    key="parent_fd",
+                    device_key="parent_device",
+                    inode_key="parent_inode",
+                    label="private receipt directory",
+                )
+            except BaseException as descriptor_exc:
+                if effective_release_error is not None:
+                    completion_error = _protected_efi_release_post_mutation_error(
+                        effective_release_error, private_evidence=evidence
+                    )
+                    raise completion_error from effective_release_error
+                if execution_error is not None:
+                    completion_error = execution_error
+                elif isinstance(phase_exc, PostMutationInstallError):
+                    completion_error = phase_exc
+                else:
+                    completion_error = PostMutationInstallError(
+                        "private-receipt-finalization-incomplete",
+                        private_evidence=evidence,
+                    )
+                raise completion_error from descriptor_exc
+
+            if not isinstance(freeze_handoff.get("freeze"), dict) and not receipt_owned:
+                if parent_owned:
+                    _close_private_receipt_reservation(receipt_reservation)
+                completion_error = None
+                break
 
             if effective_release_error is not None:
                 completion_error = _protected_efi_release_post_mutation_error(
