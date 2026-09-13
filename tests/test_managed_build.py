@@ -183,6 +183,40 @@ class ManagedBuildTests(unittest.TestCase):
             ("volume", "ls"), ("volume", "rm"),
         })
 
+    def test_nix_container_cleanup_accepts_verified_auto_remove_race(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container = "c" * 64
+        failed_rm = subprocess.CompletedProcess(
+            ["/usr/bin/docker", "rm", "--force", container], 1, b"", b"No such container"
+        )
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container], [], [], []],
+            ) as inventory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=failed_rm) as run,
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, True))
+        run.assert_called_once()
+        self.assertGreaterEqual(inventory.call_count, 3)
+
+    def test_nix_container_cleanup_fails_closed_when_rm_fails_and_container_survives(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container = "c" * 64
+        failed_rm = subprocess.CompletedProcess(
+            ["/usr/bin/docker", "rm", "--force", container], 1, b"", b"still running"
+        )
+        with (
+            patch.object(managed_build, "_nix_container_ids", return_value=[container]),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=failed_rm) as run,
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, False))
+        self.assertEqual(run.call_count, 3)
+
     def test_nix_worker_monitor_and_timeout_cleanup_share_docker_environment(self) -> None:
         with patch.object(sys, "path", [str(managed_build.ROOT / "scripts"), *sys.path]):
             from scripts import nixos_production_prepare as prepare

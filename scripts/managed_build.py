@@ -1313,11 +1313,22 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
                 timeout=VERSION_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return removed, False
-        if result.returncode != 0:
-            return removed, False
-        removed += len(ids)
+            # `docker run --rm` may concurrently finish destroying the exact
+            # container after our inventory read.  Resolve that ambiguous rm
+            # outcome from fresh exact-label state instead of the client exit.
+            time.sleep(0.1)
+            continue
+        if result.returncode == 0:
+            removed += len(ids)
+        # A non-zero rm can still race an already successful --rm destroy.
+        # Loop back through the exact-label inventory and only authorize
+        # cleanup once absence is observed twice; a surviving container still
+        # fails closed after the bounded attempts.
         time.sleep(0.1)
+    ids = _nix_container_ids(label)
+    if ids:
+        return removed, False
+    time.sleep(0.1)
     return removed, not _nix_container_ids(label)
 
 
