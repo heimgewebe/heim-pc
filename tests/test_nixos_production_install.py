@@ -965,6 +965,58 @@ def test_private_receipt_parent_fsync_failure_cannot_leave_success_json(monkeypa
     prod.preserve_private_receipt_reservation(reservation)
 
 
+def test_private_receipt_keyboard_interrupt_after_payload_restores_marker(monkeypatch, tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    real_fsync = prod.os.fsync
+    calls = 0
+
+    def interrupt_success_parent_fsync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt("synthetic finalization interrupt")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fsync", interrupt_success_parent_fsync)
+    with pytest.raises(prod.ProductionInstallError, match="cannot finalize"):
+        prod.finalize_private_receipt(
+            reservation,
+            {
+                "schema_version": 1,
+                "kind": "heim_pc.nixos_production_install_receipt",
+                "status": "success",
+            },
+        )
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_production_install_receipt_reservation",
+        "status": "reserved",
+    }
+    prod.preserve_private_receipt_reservation(reservation)
+
+
+def test_failed_receipt_preservation_keeps_fd_for_invalidation(tmp_path):
+    target = tmp_path / "reserved-receipt.json"
+    reservation = prod.reserve_private_receipt(target)
+    fd = reservation["fd"]
+    payload = b'{"status":"success"}\n'
+    prod.os.lseek(fd, 0, prod.os.SEEK_SET)
+    prod.os.ftruncate(fd, 0)
+    prod._write_all_fd(fd, payload)
+    prod.os.fsync(fd)
+
+    with pytest.raises(prod.ProductionInstallError, match="reservation marker"):
+        prod.preserve_private_receipt_reservation(reservation)
+    assert reservation["fd"] == fd
+    prod.os.fstat(fd)
+
+    prod._invalidate_private_receipt_reservation(reservation)
+    assert not target.exists()
+    assert "fd" not in reservation
+    assert "parent_fd" not in reservation
+
+
 def test_private_receipt_failed_marker_restore_invalidates_success_payload(monkeypatch, tmp_path):
     target = tmp_path / "reserved-receipt.json"
     reservation = prod.reserve_private_receipt(target)
@@ -1118,6 +1170,36 @@ def test_protected_efi_freeze_uses_one_held_mount_fd_and_thaws(monkeypatch, tmp_
         (held_inode, prod.PROTECTED_EFI_FIFREEZE_IOCTL, 0),
         (held_inode, prod.PROTECTED_EFI_FITHAW_IOCTL, 0),
     ]
+
+
+def test_protected_efi_freeze_interrupt_conservatively_thaws_same_fd(monkeypatch, tmp_path):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: expected_source)
+    requests = []
+    held_fd = None
+
+    def interrupt_freeze(fd, request, _arg=0):
+        nonlocal held_fd
+        requests.append(request)
+        held_fd = fd
+        if request == prod.PROTECTED_EFI_FIFREEZE_IOCTL:
+            raise KeyboardInterrupt("synthetic freeze-boundary interrupt")
+        return 0
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", interrupt_freeze)
+    with pytest.raises(KeyboardInterrupt, match="freeze-boundary"):
+        prod.acquire_protected_efi_freeze(expected_source)
+    assert requests == [
+        prod.PROTECTED_EFI_FIFREEZE_IOCTL,
+        prod.PROTECTED_EFI_FITHAW_IOCTL,
+    ]
+    assert held_fd is not None
+    with pytest.raises(OSError):
+        prod.os.fstat(held_fd)
 
 
 def test_protected_efi_freeze_thaws_held_filesystem_on_source_drift(monkeypatch, tmp_path):
@@ -2144,6 +2226,58 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     ]
     assert "efi-freeze" in gate_events
     assert gate_events.index("efi-freeze") > gate_events.index("archive-cleanup")
+    assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
+
+
+def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding",
+        lambda *args, **kwargs: compiled["managed_build_receipt"],
+    )
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+    monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_persist_mount", lambda *_args: None)
+    monkeypatch.setattr(prod, "stage_firstboot_credentials", lambda **_kwargs: None)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
+    monkeypatch.setattr(
+        prod, "validate_protected_state",
+        lambda *_args: (_ for _ in ()).throw(
+            KeyboardInterrupt("synthetic post-mutation interrupt")
+        ),
+    )
+    gate_events = mock_trusted_build_gate(monkeypatch, compiled)
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: Result())
+    with pytest.raises(prod.PostMutationInstallError) as exc:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert exc.value.code == "apply-failed-after-mutation-attempt"
+    assert exc.value.private_evidence["mutation_attempted"] is True
+    assert exc.value.private_evidence["completed_effects"]
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 

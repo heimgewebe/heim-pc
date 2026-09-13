@@ -945,6 +945,7 @@ def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
     except OSError as exc:
         raise ProductionInstallError("protected EFI mount cannot be opened for freeze") from exc
     frozen = False
+    freeze_may_be_active = False
     try:
         opened = os.fstat(fd)
         linked = os.stat(mountpoint, follow_symlinks=False)
@@ -958,9 +959,15 @@ def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
             raise ProductionInstallError("protected EFI mount identity changed before freeze")
         if _findmnt(str(mountpoint)) != expected_source:
             raise ProductionInstallError("protected EFI mount source changed before freeze")
+        # From the instant immediately before FIFREEZE until an OSError proves the
+        # ioctl failed, an asynchronous BaseException may arrive after the kernel
+        # has frozen the filesystem but before Python can record success. Treat that
+        # boundary conservatively as potentially frozen and thaw through this exact FD.
+        freeze_may_be_active = True
         try:
             fcntl.ioctl(fd, PROTECTED_EFI_FIFREEZE_IOCTL, 0)
         except OSError as exc:
+            freeze_may_be_active = False
             raise ProductionInstallError("protected EFI filesystem cannot be frozen safely") from exc
         frozen = True
         opened_after = os.fstat(fd)
@@ -983,7 +990,7 @@ def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
             "source": expected_source,
         }
     except BaseException as exc:
-        if frozen:
+        if frozen or freeze_may_be_active:
             freeze = {
                 "fd": fd,
                 "device": opened.st_dev,
@@ -1651,9 +1658,10 @@ def preserve_private_receipt_reservation(reservation: dict[str, Any]) -> None:
         _private_receipt_reservation_valid(reservation)
         _private_receipt_reservation_marker_valid(reservation)
     except OSError as exc:
+        # Keep the exact held descriptors available to the caller so a failed
+        # preservation attempt can still invalidate an untrusted payload.
         raise ProductionInstallError("cannot preserve private production receipt reservation") from exc
-    finally:
-        _close_private_receipt_reservation(reservation)
+    _close_private_receipt_reservation(reservation)
 
 
 def _restore_private_receipt_reservation_marker(reservation: dict[str, Any]) -> None:
@@ -1689,12 +1697,36 @@ def _invalidate_private_receipt_reservation(reservation: dict[str, Any]) -> None
         if _private_receipt_target_matches_reservation(reservation):
             os.unlink(path.name, dir_fd=parent_fd)
             os.fsync(parent_fd)
-    except OSError as exc:
+    except BaseException as exc:
+        # Do not surrender the exact descriptor when invalidation itself is
+        # interrupted. A caller may retry while the same inode is still held.
+        if isinstance(exc, ProductionInstallError):
+            raise
         raise ProductionInstallError(
             "cannot invalidate private production receipt after finalization failure"
         ) from exc
-    finally:
-        _close_private_receipt_reservation(reservation)
+    _close_private_receipt_reservation(reservation)
+
+
+def _recover_private_receipt_after_failed_finalization(
+    reservation: dict[str, Any],
+) -> None:
+    if "fd" not in reservation:
+        return
+    try:
+        preserve_private_receipt_reservation(reservation)
+        return
+    except BaseException as preserve_exc:
+        if "fd" not in reservation:
+            raise ProductionInstallError(
+                "private production receipt recovery lost its held descriptor"
+            ) from preserve_exc
+    try:
+        _invalidate_private_receipt_reservation(reservation)
+    except BaseException as invalidate_exc:
+        raise ProductionInstallError(
+            "private production receipt recovery is incomplete"
+        ) from invalidate_exc
 
 
 def finalize_private_receipt(
@@ -1713,13 +1745,13 @@ def finalize_private_receipt(
         if os.fstat(fd).st_size != len(payload) or os.pread(fd, len(payload) + 1, 0) != payload:
             raise ProductionInstallError("private production receipt final payload is invalid")
         os.fsync(reservation["parent_fd"])
-    except (OSError, ProductionInstallError) as exc:
+    except BaseException as exc:
         try:
             _restore_private_receipt_reservation_marker(reservation)
-        except (OSError, ProductionInstallError) as restore_exc:
+        except BaseException as restore_exc:
             try:
                 _invalidate_private_receipt_reservation(reservation)
-            except (OSError, ProductionInstallError) as invalidate_exc:
+            except BaseException as invalidate_exc:
                 raise ProductionInstallError(
                     "private production receipt finalization failed and reservation recovery is incomplete"
                 ) from invalidate_exc
@@ -3796,6 +3828,15 @@ def execute_plan(
             nvram_before=nvram_before,
             nvram_after=nvram_after,
         )
+    except PostMutationInstallError:
+        raise
+    except BaseException as exc:
+        # Once the first destructive effect has been attempted, every unexpected
+        # exception class (including KeyboardInterrupt) must leave bound durable
+        # post-mutation evidence instead of falling into main()'s pre-mutation path.
+        if mutation_attempted:
+            raise post_mutation_alarm("apply-failed-after-mutation-attempt") from exc
+        raise
     finally:
         archive_failure: BaseException | None = None
         seal_failure: BaseException | None = None
@@ -4004,24 +4045,22 @@ def main(argv: list[str] | None = None) -> int:
                             finalize_private_receipt(
                                 receipt_reservation, replacement
                             )
-                        except BaseException:
-                            if "fd" in receipt_reservation:
-                                try:
-                                    preserve_private_receipt_reservation(
-                                        receipt_reservation
-                                    )
-                                except BaseException:
-                                    if "fd" in receipt_reservation:
-                                        _close_private_receipt_reservation(
-                                            receipt_reservation
-                                        )
+                        except BaseException as replacement_exc:
+                            try:
+                                _recover_private_receipt_after_failed_finalization(
+                                    receipt_reservation
+                                )
+                            except BaseException as recovery_exc:
+                                raise release_alarm from recovery_exc
                     raise release_alarm from release_error
-                if "fd" in receipt_reservation:
-                    try:
-                        preserve_private_receipt_reservation(receipt_reservation)
-                    except BaseException:
-                        if "fd" in receipt_reservation:
-                            _close_private_receipt_reservation(receipt_reservation)
+                try:
+                    _recover_private_receipt_after_failed_finalization(
+                        receipt_reservation
+                    )
+                except BaseException as recovery_exc:
+                    raise PostMutationInstallError(
+                        "private-receipt-finalization-incomplete"
+                    ) from recovery_exc
                 raise PostMutationInstallError(
                     "private-receipt-finalization-incomplete"
                 ) from evidence_exc
