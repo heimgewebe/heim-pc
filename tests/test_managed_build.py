@@ -202,6 +202,26 @@ class ManagedBuildTests(unittest.TestCase):
         run.assert_called_once()
         self.assertGreaterEqual(inventory.call_count, 3)
 
+    def test_nix_container_cleanup_timeout_is_ambiguous_failure(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container_id = "c" * 64
+        with (
+            patch.object(managed_build, "_nix_container_ids", return_value=[container_id]),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(
+                managed_build.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["/usr/bin/docker", "rm", "--force", container_id],
+                    managed_build.VERSION_TIMEOUT_SECONDS,
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                managed_build.ManagedBuildError,
+                "container removal outcome is ambiguous after timeout",
+            ):
+                managed_build._remove_exact_nix_containers(label)
+
     def test_nix_container_cleanup_counts_partial_individual_success(self) -> None:
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
         first = "c" * 64

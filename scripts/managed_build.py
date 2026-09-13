@@ -1313,10 +1313,17 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                     timeout=VERSION_TIMEOUT_SECONDS,
                 )
-            except (OSError, subprocess.TimeoutExpired):
-                # `docker run --rm` may concurrently finish destroying this exact
-                # container after our inventory read.  Resolve the ambiguous rm
-                # outcome from fresh exact-label state instead of the client exit.
+            except subprocess.TimeoutExpired as exc:
+                # The client can time out after the daemon accepted and completed
+                # this exact force-removal.  Absence afterwards therefore cannot
+                # distinguish auto-remove from manager-forced orphan cleanup.
+                raise ManagedBuildError(
+                    "managed Nix container removal outcome is ambiguous after timeout"
+                ) from exc
+            except OSError:
+                # Failure to start the exact docker client does not establish that
+                # a force-removal reached the daemon; fresh label state may still
+                # prove an independent `--rm` auto-remove race.
                 continue
             if result.returncode == 0:
                 removed += 1
