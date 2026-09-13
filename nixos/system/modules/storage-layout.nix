@@ -96,7 +96,7 @@ let
 
       patch_entries() {
         load_identity
-        local boot_source expected_boot entry options_count options expected_token token seen tmp persist_target
+        local boot_source expected_boot entry options_count options expected_token token seen tmp
         expected_boot="$(resolve_partuuid "$efi_partuuid")"
         boot_source="$(findmnt --first-only --nofsroot -rn -o SOURCE --mountpoint /boot 2>/dev/null)" || fail "/boot is not mounted as an exact private EFI mountpoint"
         [[ -n "$boot_source" && "$boot_source" != *$'\n'* && "$(readlink -f -- "$boot_source")" == "$expected_boot" ]] || fail "/boot is not the private EFI partition"

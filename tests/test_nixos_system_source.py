@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "6b42c0e603b73bfa4d651555345f611997f7bfd4170243064f55669f48d96594"
+SOURCE_SNAPSHOT_SHA256 = "bb88a32ccf7c17bf9c15ff364bd1a447e82ede31fd2d6ffab5b1854ce252b7d0"
 ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -202,6 +202,7 @@ class T(unittest.TestCase):
         self.assertNotIn('-T "$target"', layout)
         self.assertNotIn("-T /boot", layout)
         self.assertNotIn("-T /persist", layout)
+        self.assertNotIn("persist_target", layout)
         self.assertIsNone(re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", layout))
         self.assertIn("fileSystems = lib.mkForce", layout)
         self.assertIn('services.xserver.xkb.layout = "de";', host)
