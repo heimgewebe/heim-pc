@@ -72,6 +72,31 @@ class GrokSubscriptionWrapperInstallerTests(unittest.TestCase):
             again = installer.install(home=home, apply=True)
             self.assertEqual(again["action"], "unchanged")
 
+    def test_unchanged_revalidation_rejects_path_replacement_before_chmod(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = self._home(Path(directory))
+            self._fake_official(home)
+            wrapper = home / ".local/bin/grok"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_bytes(installer.WRAPPER)
+            wrapper.chmod(0o700)
+
+            original = installer._chmod_unchanged_regular
+
+            def replace_then_validate(path: Path, expected: bytes, mode: int) -> None:
+                path.unlink()
+                path.write_text("replacement\n", encoding="utf-8")
+                original(path, expected, mode)
+
+            installer._chmod_unchanged_regular = replace_then_validate
+            try:
+                with self.assertRaises(installer.InstallConflict):
+                    installer.install(home=home, apply=True)
+            finally:
+                installer._chmod_unchanged_regular = original
+            self.assertEqual(wrapper.read_text(encoding="utf-8"), "replacement\n")
+            self.assertNotEqual(stat.S_IMODE(wrapper.stat().st_mode), 0o755)
+
     def test_existing_different_launcher_requires_explicit_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = self._home(Path(directory))

@@ -53,6 +53,32 @@ def _read_regular(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
+def _chmod_unchanged_regular(path: Path, expected: bytes, mode: int) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise InstallConflict("platform lacks O_NOFOLLOW; refusing launcher revalidation")
+    try:
+        descriptor = os.open(path, flags | no_follow)
+    except OSError as exc:
+        raise InstallConflict(f"cannot safely reopen unchanged target {path}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InstallConflict(f"unchanged target is not a regular file: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if b"".join(chunks) != expected:
+            raise InstallConflict(f"target changed after preflight: {path}")
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write(path: Path, value: bytes, *, expected_before: bytes | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if _read_regular(path) != expected_before:
@@ -119,7 +145,7 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
     if action == "install":
         _atomic_write(target, WRAPPER, expected_before=before)
     else:
-        os.chmod(target, 0o755)
+        _chmod_unchanged_regular(target, WRAPPER, 0o755)
     return receipt
 
 
