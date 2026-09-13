@@ -124,7 +124,11 @@ class ProductionInstallError(RuntimeError):
 
 
 class ProtectedEfiThawError(ProductionInstallError):
-    pass
+    def __init__(
+        self, message: str, *, freeze: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.freeze = freeze
 
 
 PROTECTED_EFI_RECOVERY_MESSAGE = (
@@ -935,54 +939,64 @@ def acquire_protected_efi_freeze(expected_source: str) -> dict[str, Any]:
             "source": expected_source,
         }
     except BaseException as exc:
-        thaw_failure: BaseException | None = None
         if frozen:
+            freeze = {
+                "fd": fd,
+                "device": opened.st_dev,
+                "inode": opened.st_ino,
+                "mode": opened.st_mode,
+                "source": expected_source,
+            }
             try:
                 fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
             except BaseException as thaw_exc:
-                thaw_failure = thaw_exc
+                raise ProtectedEfiThawError(
+                    "protected EFI freeze acquisition failed and thaw is incomplete",
+                    freeze=freeze,
+                ) from thaw_exc
         try:
             os.close(fd)
         except OSError:
             pass
-        if thaw_failure is not None:
-            raise ProtectedEfiThawError(
-                "protected EFI freeze acquisition failed and thaw is incomplete"
-            ) from thaw_failure
         raise exc
 
 
 def release_protected_efi_freeze(freeze: dict[str, Any]) -> None:
-    fd = freeze.pop("fd", None)
+    fd = freeze.get("fd")
     if type(fd) is not int:
         raise ProductionInstallError("protected EFI freeze handle is invalid")
     identity_failure: BaseException | None = None
     thaw_failure: BaseException | None = None
     try:
-        try:
-            current = os.fstat(fd)
-            if (
-                current.st_dev != freeze.get("device")
-                or current.st_ino != freeze.get("inode")
-                or current.st_mode != freeze.get("mode")
-                or not stat.S_ISDIR(current.st_mode)
-            ):
-                identity_failure = ProductionInstallError(
-                    "protected EFI frozen filesystem identity changed"
-                )
-        except BaseException as exc:
-            identity_failure = exc
-        try:
-            fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
-        except BaseException as exc:
-            thaw_failure = exc
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        current = os.fstat(fd)
+        if (
+            current.st_dev != freeze.get("device")
+            or current.st_ino != freeze.get("inode")
+            or current.st_mode != freeze.get("mode")
+            or not stat.S_ISDIR(current.st_mode)
+        ):
+            identity_failure = ProductionInstallError(
+                "protected EFI frozen filesystem identity changed"
+            )
+    except BaseException as exc:
+        identity_failure = exc
+    try:
+        fcntl.ioctl(fd, PROTECTED_EFI_FITHAW_IOCTL, 0)
+    except BaseException as exc:
+        thaw_failure = exc
     if thaw_failure is not None:
-        raise ProtectedEfiThawError("protected EFI filesystem could not be thawed safely") from thaw_failure
+        raise ProtectedEfiThawError(
+            "protected EFI filesystem could not be thawed safely",
+            freeze=freeze,
+        ) from thaw_failure
+    try:
+        os.close(fd)
+    except OSError as exc:
+        raise ProductionInstallError(
+            "protected EFI thawed filesystem handle could not be closed safely"
+        ) from exc
+    if freeze.get("fd") == fd:
+        del freeze["fd"]
     if identity_failure is not None:
         raise ProductionInstallError("protected EFI frozen filesystem identity was not stable") from identity_failure
 

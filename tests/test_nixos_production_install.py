@@ -1129,8 +1129,47 @@ def test_protected_efi_thaw_failure_requires_visible_recovery(monkeypatch, tmp_p
 
     monkeypatch.setattr(prod.fcntl, "ioctl", fake_ioctl)
     freeze = prod.acquire_protected_efi_freeze(expected_source)
-    with pytest.raises(prod.ProtectedEfiThawError, match="could not be thawed"):
+    held_fd = freeze["fd"]
+    with pytest.raises(prod.ProtectedEfiThawError, match="could not be thawed") as exc:
         prod.release_protected_efi_freeze(freeze)
+    assert exc.value.freeze is freeze
+    assert freeze["fd"] == held_fd
+    prod.os.fstat(held_fd)
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", lambda _fd, _request, _arg=0: 0)
+    prod.release_protected_efi_freeze(freeze)
+    assert "fd" not in freeze
+    with pytest.raises(OSError):
+        prod.os.fstat(held_fd)
+
+
+def test_protected_efi_acquisition_thaw_failure_preserves_exact_fd(monkeypatch, tmp_path):
+    mountpoint = tmp_path / "efi"
+    mountpoint.mkdir()
+    expected_source = "/dev/nvme1n1p1"
+    monkeypatch.setattr(prod, "PROTECTED_EFI_MOUNTPOINT", mountpoint)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    sources = iter([expected_source, expected_source, "/dev/nvme9n1p1"])
+    monkeypatch.setattr(prod, "_findmnt", lambda _target: next(sources))
+
+    def fail_thaw(_fd, request, _arg=0):
+        if request == prod.PROTECTED_EFI_FITHAW_IOCTL:
+            raise OSError("synthetic thaw failure")
+        return 0
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", fail_thaw)
+    with pytest.raises(prod.ProtectedEfiThawError, match="acquisition failed") as exc:
+        prod.acquire_protected_efi_freeze(expected_source)
+    freeze = exc.value.freeze
+    assert freeze is not None
+    held_fd = freeze["fd"]
+    prod.os.fstat(held_fd)
+
+    monkeypatch.setattr(prod.fcntl, "ioctl", lambda _fd, _request, _arg=0: 0)
+    prod.release_protected_efi_freeze(freeze)
+    assert "fd" not in freeze
+    with pytest.raises(OSError):
+        prod.os.fstat(held_fd)
 
 
 def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_path, capsys):
