@@ -3607,6 +3607,152 @@ def _post_mutation_evidence_from_success_receipt(receipt: dict[str, Any]) -> dic
     }
 
 
+def _release_handed_off_protected_efi(
+    freeze_handoff: dict[str, Any], *, required: bool = False
+) -> BaseException | None:
+    freeze = freeze_handoff.get("freeze")
+    if not isinstance(freeze, dict):
+        if required:
+            return ProductionInstallError("protected EFI freeze handoff is missing")
+        return None
+    try:
+        release_protected_efi_freeze(freeze)
+    except BaseException as exc:
+        # release_protected_efi_freeze removes its exact FD after a successful
+        # thaw. If it then reports only an identity/readback failure, the
+        # handoff no longer represents a potentially frozen filesystem.
+        if type(freeze.get("fd")) is not int:
+            freeze_handoff.pop("freeze", None)
+        return exc
+    freeze_handoff.pop("freeze", None)
+    return None
+
+
+def _persist_completion_failure_receipt(
+    *,
+    plan: dict[str, Any],
+    artifact: dict[str, Any],
+    receipt_reservation: dict[str, Any],
+    error: PostMutationInstallError,
+) -> None:
+    """Replace any still-held completion payload with bound failure evidence."""
+    if "fd" not in receipt_reservation:
+        return
+    try:
+        replacement = _post_mutation_failure_receipt(
+            plan=plan, artifact=artifact, error=error
+        )
+    except BaseException as build_exc:
+        try:
+            _recover_private_receipt_after_failed_finalization(receipt_reservation)
+        except BaseException as recovery_exc:
+            raise error from recovery_exc
+        raise error from build_exc
+    try:
+        # This primitive is intentionally marker-agnostic: at a phase boundary
+        # the held exact inode may contain either the reservation marker or an
+        # already-fsynced success/failure payload.
+        _rewrite_finalized_private_receipt(receipt_reservation, replacement)
+    except BaseException as rewrite_exc:
+        try:
+            _recover_private_receipt_after_failed_finalization(receipt_reservation)
+        except BaseException as recovery_exc:
+            raise error from recovery_exc
+        raise error from rewrite_exc
+    try:
+        _close_private_receipt_reservation(receipt_reservation)
+    except BaseException as close_exc:
+        raise error from close_exc
+
+
+def _finalize_apply_completion(
+    *,
+    plan: dict[str, Any],
+    artifact: dict[str, Any],
+    receipt_reservation: dict[str, Any],
+    freeze_handoff: dict[str, Any],
+    receipt: dict[str, Any],
+    execution_error: PostMutationInstallError | None,
+) -> None:
+    """Commit receipt + protected-EFI release as one interrupt-safe phase.
+
+    The success payload is not a terminal outcome while either the exact receipt
+    descriptor or the protected-EFI freeze handoff is still owned. Therefore a
+    BaseException between helper calls enters the same recovery path before the
+    outer apply lock can be released.
+    """
+    evidence = (
+        dict(execution_error.private_evidence)
+        if execution_error is not None
+        else _post_mutation_evidence_from_success_receipt(receipt)
+    )
+    release_error: BaseException | None = None
+    try:
+        finalize_private_receipt(receipt_reservation, receipt, keep_open=True)
+        release_error = _release_handed_off_protected_efi(
+            freeze_handoff, required=True
+        )
+        if release_error is not None:
+            raise _protected_efi_release_post_mutation_error(
+                release_error, private_evidence=evidence
+            )
+        _close_private_receipt_reservation(receipt_reservation)
+    except BaseException as phase_exc:
+        freeze_owned = isinstance(freeze_handoff.get("freeze"), dict)
+        receipt_owned = "fd" in receipt_reservation
+        parent_owned = "parent_fd" in receipt_reservation
+        if not freeze_owned and not receipt_owned:
+            # The protected filesystem is released and the exact receipt FD has
+            # been surrendered. A remaining parent directory FD is cleanup only:
+            # there is no longer safe authority to rewrite the receipt inode.
+            if parent_owned:
+                try:
+                    _close_private_receipt_reservation(receipt_reservation)
+                except BaseException:
+                    pass
+            if execution_error is not None:
+                raise execution_error from phase_exc
+            if isinstance(phase_exc, PostMutationInstallError):
+                raise phase_exc
+            return
+
+        recovery_release_error = release_error
+        if recovery_release_error is None and freeze_owned:
+            recovery_release_error = _release_handed_off_protected_efi(
+                freeze_handoff
+            )
+
+        if recovery_release_error is not None:
+            completion_error = _protected_efi_release_post_mutation_error(
+                recovery_release_error, private_evidence=evidence
+            )
+        elif execution_error is not None:
+            completion_error = execution_error
+        elif isinstance(phase_exc, PostMutationInstallError):
+            completion_error = phase_exc
+        else:
+            completion_error = PostMutationInstallError(
+                "private-receipt-finalization-incomplete",
+                private_evidence=evidence,
+            )
+
+        _persist_completion_failure_receipt(
+            plan=plan,
+            artifact=artifact,
+            receipt_reservation=receipt_reservation,
+            error=completion_error,
+        )
+        if "parent_fd" in receipt_reservation:
+            try:
+                _close_private_receipt_reservation(receipt_reservation)
+            except BaseException as close_exc:
+                raise completion_error from close_exc
+        raise completion_error from phase_exc
+
+    if execution_error is not None:
+        raise execution_error
+
+
 def execute_plan(
     plan: dict[str, Any], *, contract: dict[str, Any], confirmation: str | None,
     credential_hash_file: Path, observer=observe_live,
@@ -3973,19 +4119,9 @@ def main(argv: list[str] | None = None) -> int:
             def release_handed_off_freeze(
                 *, required: bool = False
             ) -> BaseException | None:
-                freeze = freeze_handoff.get("freeze")
-                if not isinstance(freeze, dict):
-                    if required:
-                        return ProductionInstallError(
-                            "protected EFI freeze handoff is missing"
-                        )
-                    return None
-                try:
-                    release_protected_efi_freeze(freeze)
-                except BaseException as exc:
-                    return exc
-                freeze_handoff.pop("freeze", None)
-                return None
+                return _release_handed_off_protected_efi(
+                    freeze_handoff, required=required
+                )
 
             execution_error: PostMutationInstallError | None = None
             try:
@@ -4089,104 +4225,14 @@ def main(argv: list[str] | None = None) -> int:
                     ) from exc
                 raise
 
-            try:
-                finalize_private_receipt(
-                    receipt_reservation, receipt, keep_open=True
-                )
-            except BaseException as evidence_exc:
-                release_error = release_handed_off_freeze(required=True)
-                if release_error is not None:
-                    evidence = (
-                        dict(execution_error.private_evidence)
-                        if execution_error is not None
-                        else _post_mutation_evidence_from_success_receipt(receipt)
-                    )
-                    release_alarm = _protected_efi_release_post_mutation_error(
-                        release_error, private_evidence=evidence
-                    )
-                    try:
-                        replacement = _post_mutation_failure_receipt(
-                            plan=plan, artifact=artifact, error=release_alarm
-                        )
-                    except BaseException as replacement_build_exc:
-                        try:
-                            _recover_private_receipt_after_failed_finalization(
-                                receipt_reservation
-                            )
-                        except BaseException as recovery_exc:
-                            raise release_alarm from recovery_exc
-                        raise release_alarm from replacement_build_exc
-                    if "fd" in receipt_reservation:
-                        try:
-                            finalize_private_receipt(
-                                receipt_reservation, replacement
-                            )
-                        except BaseException as replacement_exc:
-                            try:
-                                _recover_private_receipt_after_failed_finalization(
-                                    receipt_reservation
-                                )
-                            except BaseException as recovery_exc:
-                                raise release_alarm from recovery_exc
-                    raise release_alarm from release_error
-                try:
-                    _recover_private_receipt_after_failed_finalization(
-                        receipt_reservation
-                    )
-                except BaseException as recovery_exc:
-                    raise PostMutationInstallError(
-                        "private-receipt-finalization-incomplete"
-                    ) from recovery_exc
-                raise PostMutationInstallError(
-                    "private-receipt-finalization-incomplete"
-                ) from evidence_exc
-
-            release_error = release_handed_off_freeze(required=True)
-            if release_error is not None:
-                evidence = (
-                    dict(execution_error.private_evidence)
-                    if execution_error is not None
-                    else _post_mutation_evidence_from_success_receipt(receipt)
-                )
-                release_alarm = _protected_efi_release_post_mutation_error(
-                    release_error, private_evidence=evidence
-                )
-                try:
-                    replacement = _post_mutation_failure_receipt(
-                        plan=plan, artifact=artifact, error=release_alarm
-                    )
-                except BaseException as replacement_build_exc:
-                    try:
-                        _recover_private_receipt_after_failed_finalization(
-                            receipt_reservation
-                        )
-                    except BaseException as recovery_exc:
-                        raise release_alarm from recovery_exc
-                    raise release_alarm from replacement_build_exc
-                try:
-                    _rewrite_finalized_private_receipt(
-                        receipt_reservation, replacement
-                    )
-                except BaseException as rewrite_exc:
-                    # Never close over an unverified payload. If rewrite was
-                    # interrupted before truncation, preservation will reject the
-                    # still-valid success JSON and the held descriptor will invalidate
-                    # that exact inode before the apply lock can be released.
-                    try:
-                        _recover_private_receipt_after_failed_finalization(
-                            receipt_reservation
-                        )
-                    except BaseException as recovery_exc:
-                        raise release_alarm from recovery_exc
-                    # A failed thaw remains the visible alarm even when durable
-                    # failure-receipt repair also fails. The apply lock is still held.
-                    raise release_alarm from rewrite_exc
-                _close_private_receipt_reservation(receipt_reservation)
-                raise release_alarm from release_error
-
-            _close_private_receipt_reservation(receipt_reservation)
-            if execution_error is not None:
-                raise execution_error
+            _finalize_apply_completion(
+                plan=plan,
+                artifact=artifact,
+                receipt_reservation=receipt_reservation,
+                freeze_handoff=freeze_handoff,
+                receipt=receipt,
+                execution_error=execution_error,
+            )
             print(json.dumps({
                 "schema_version": 1,
                 "kind": "heim_pc.nixos_production_install_completed",

@@ -4,6 +4,7 @@ import tarfile
 import importlib.util
 import json
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -889,6 +890,127 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
         prod.write_private_receipt(receipt_path, {"second": True})
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "release_error = _release_handed_off_protected_efi(",
+        "_close_private_receipt_reservation(receipt_reservation)",
+    ),
+)
+def test_main_completion_phase_interrupt_recovers_before_lock_release(
+    monkeypatch, tmp_path, capsys, boundary
+):
+    monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
+    monkeypatch.setattr(
+        prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256
+    )
+    monkeypatch.setattr(
+        prod,
+        "load_managed_build_receipt",
+        lambda *args, **kwargs: managed_receipt(ARTIFACT),
+    )
+    monkeypatch.setattr(prod, "load_contract", lambda *args, **kwargs: CONTRACT)
+    monkeypatch.setattr(prod, "observe_live", lambda _contract: observation())
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    compiled = plan()
+    monkeypatch.setattr(prod, "compile_plan", lambda *args, **kwargs: compiled)
+
+    events = []
+    monkeypatch.setattr(
+        prod,
+        "acquire_production_apply_lock",
+        lambda _plan: events.append("lock-acquired") or {"test": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "release_production_apply_lock",
+        lambda _lock: events.append("lock-released"),
+    )
+
+    def execute_with_freeze(*args, **kwargs):
+        kwargs["protected_efi_freeze_handoff"]["freeze"] = {"test": True}
+        events.append("execute")
+        return {"secret": "super-secret-material"}
+
+    monkeypatch.setattr(prod, "execute_plan", execute_with_freeze)
+    real_finalize = prod.finalize_private_receipt
+
+    def finalize_with_event(reservation, receipt, **kwargs):
+        events.append("receipt-finalized")
+        return real_finalize(reservation, receipt, **kwargs)
+
+    monkeypatch.setattr(prod, "finalize_private_receipt", finalize_with_event)
+    monkeypatch.setattr(
+        prod,
+        "release_protected_efi_freeze",
+        lambda _freeze: events.append("efi-thaw"),
+    )
+    real_close = prod._close_private_receipt_reservation
+
+    def close_with_event(reservation):
+        events.append("receipt-closed")
+        return real_close(reservation)
+
+    monkeypatch.setattr(prod, "_close_private_receipt_reservation", close_with_event)
+
+    lines = MODULE_PATH.read_text(encoding="utf-8").splitlines()
+    first = prod._finalize_apply_completion.__code__.co_firstlineno
+    target_line = next(
+        number
+        for number in range(first, len(lines) + 1)
+        if lines[number - 1].strip() == boundary
+    )
+    fired = False
+
+    def interrupt_at_boundary(frame, event, _arg):
+        nonlocal fired
+        if (
+            not fired
+            and event == "line"
+            and frame.f_code is prod._finalize_apply_completion.__code__
+            and frame.f_lineno == target_line
+        ):
+            fired = True
+            raise KeyboardInterrupt("synthetic completion-boundary interrupt")
+        return interrupt_at_boundary
+
+    sys.settrace(interrupt_at_boundary)
+    try:
+        result = prod.main([
+            "--install-artifact", str(tmp_path / "unused.json"),
+            "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--apply",
+            "--credential-hash-file", str(tmp_path / "credential.hash"),
+            "--write-receipt", str(tmp_path / "receipt.json"),
+        ])
+    finally:
+        sys.settrace(None)
+
+    assert fired is True
+    assert result == 3
+    captured = capsys.readouterr()
+    assert captured.err == (
+        prod.POST_MUTATION_PUBLIC_MESSAGES["private-receipt-finalization-incomplete"]
+        + "\n"
+    )
+    assert "super-secret-material" not in captured.out
+    assert "super-secret-material" not in captured.err
+    failure = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert failure["kind"] == "heim_pc.nixos_production_install_failure_receipt"
+    assert failure["status"] == "failure"
+    assert failure["alarm_code"] == "private-receipt-finalization-incomplete"
+    assert events == [
+        "lock-acquired",
+        "execute",
+        "receipt-finalized",
+        "efi-thaw",
+        "receipt-closed",
+        "lock-released",
+    ]
+
+
 def test_private_receipt_reservation_is_create_only_and_finalizes_same_inode(tmp_path):
     target = tmp_path / "reserved-receipt.json"
     reservation = prod.reserve_private_receipt(target)
@@ -1719,11 +1841,11 @@ def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, t
     assert "super-secret-material" not in captured.err
     assert receipt_path.exists()
     assert receipt_path.stat().st_mode & 0o777 == 0o600
-    assert json.loads(receipt_path.read_text(encoding="utf-8")) == {
-        "schema_version": 1,
-        "kind": "heim_pc.nixos_production_install_receipt_reservation",
-        "status": "reserved",
-    }
+    failure = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert failure["schema_version"] == 1
+    assert failure["kind"] == "heim_pc.nixos_production_install_failure_receipt"
+    assert failure["status"] == "failure"
+    assert failure["alarm_code"] == "private-receipt-finalization-incomplete"
 
 
 def test_main_release_identity_failure_rewrites_success_as_failure(monkeypatch, tmp_path, capsys):
@@ -1921,7 +2043,10 @@ def test_main_receipt_failure_cannot_mask_thaw_failure(monkeypatch, tmp_path, ca
     persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert persisted["status"] == "failure"
     assert persisted["alarm_code"] == "protected-efi-thaw-incomplete"
-    assert finalization_calls == 2
+    # The initial success finalization is attempted exactly once. Recovery now
+    # rewrites the exact held receipt inode directly instead of re-entering the
+    # success-finalization primitive.
+    assert finalization_calls == 1
 
 
 def test_main_missing_success_freeze_handoff_fails_closed(monkeypatch, tmp_path, capsys):
