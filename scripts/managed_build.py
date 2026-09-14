@@ -38,6 +38,7 @@ NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS = 5.0
 # Volume deletion gets the same bounded I/O window as the final store scan.
 NIX_VOLUME_REMOVE_TIMEOUT_SECONDS = 30.0
 INTERNAL_NIX_STORE_SCAN_OPERATION = "--internal-nix-store-scan"
+INTERNAL_NIX_STORE_SCAN_TOLERATE_VANISHED = "--tolerate-vanished-entries"
 NIX_CANCEL_GRACE_SECONDS = 5
 NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
@@ -508,6 +509,8 @@ def _status(size_bytes: int, budget: dict[str, int]) -> str:
 def scan_worktree_payloads(
     repo: Path,
     payloads: Sequence[str],
+    *,
+    tolerate_vanished_entries: bool = False,
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     total = 0
@@ -516,7 +519,11 @@ def scan_worktree_payloads(
         path = repo if relative == "." else repo / relative
         if not path.exists() and not path.is_symlink():
             continue
-        result: ScanResult = scan_path(path, cross_filesystems=False)
+        result: ScanResult = scan_path(
+            path,
+            cross_filesystems=False,
+            tolerate_vanished_entries=tolerate_vanished_entries,
+        )
         entry = {
             "relative_path": relative,
             "allocated_bytes": result.size_bytes,
@@ -541,15 +548,28 @@ def _validate_store_scan_observation(value: Any) -> dict[str, Any]:
     return value
 
 
-def _bounded_store_scan(store_root: Path, *, timeout_seconds: float) -> dict[str, Any]:
+def _bounded_store_scan(
+    store_root: Path,
+    *,
+    timeout_seconds: float,
+    tolerate_vanished_entries: bool = False,
+) -> dict[str, Any]:
     if timeout_seconds <= 0:
         raise StoreScanTimeout("managed Nix store scan deadline elapsed")
     root_text = str(store_root)
     if not store_root.is_absolute() or os.path.normpath(root_text) != root_text:
         raise ManagedBuildError("managed Nix store scan root must be canonical and absolute")
+    helper_argv = [
+        _trusted_nix_worker_python(),
+        str(Path(__file__).resolve()),
+        INTERNAL_NIX_STORE_SCAN_OPERATION,
+        root_text,
+    ]
+    if tolerate_vanished_entries:
+        helper_argv.append(INTERNAL_NIX_STORE_SCAN_TOLERATE_VANISHED)
     try:
         result = subprocess.run(
-            [_trusted_nix_worker_python(), str(Path(__file__).resolve()), INTERNAL_NIX_STORE_SCAN_OPERATION, root_text],
+            helper_argv,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout_seconds, start_new_session=True,
         )
     except subprocess.TimeoutExpired as exc:
@@ -564,13 +584,22 @@ def _bounded_store_scan(store_root: Path, *, timeout_seconds: float) -> dict[str
 
 
 def _internal_nix_store_scan_main(argv: Sequence[str]) -> int:
-    if len(argv) != 2 or argv[0] != INTERNAL_NIX_STORE_SCAN_OPERATION:
+    if len(argv) not in (2, 3) or argv[0] != INTERNAL_NIX_STORE_SCAN_OPERATION:
+        return 2
+    tolerate_vanished_entries = len(argv) == 3
+    if tolerate_vanished_entries and argv[2] != INTERNAL_NIX_STORE_SCAN_TOLERATE_VANISHED:
         return 2
     root = Path(argv[1]); root_text = str(root)
     if not root.is_absolute() or os.path.normpath(root_text) != root_text:
         return 2
     try:
-        observation = _validate_store_scan_observation(scan_worktree_payloads(root, ["."]))
+        observation = _validate_store_scan_observation(
+            scan_worktree_payloads(
+                root,
+                ["."],
+                tolerate_vanished_entries=tolerate_vanished_entries,
+            )
+        )
     except (ManagedBuildError, OSError):
         return 2
     print(json.dumps({"allocated_bytes": observation["allocated_bytes"], "error_count": observation["error_count"], "entries": []}, sort_keys=True, separators=(",", ":")))
@@ -1438,7 +1467,11 @@ def _run_nix_worker_guarded(
                 trigger = "runtime-timeout"
                 break
             try:
-                scan = _bounded_store_scan(store_root, timeout_seconds=min(NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, remaining))
+                scan = _bounded_store_scan(
+                    store_root,
+                    timeout_seconds=min(NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, remaining),
+                    tolerate_vanished_entries=True,
+                )
             except StoreScanTimeout:
                 if time.monotonic() >= deadline:
                     trigger = "runtime-timeout"
@@ -1474,7 +1507,11 @@ def _run_nix_worker_guarded(
         # telemetry; an unverified final state is rejected below before returning.
         orphan_detected = not cleanup_verified
         try:
-            final_scan = _bounded_store_scan(store_root, timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS)
+            final_scan = _bounded_store_scan(
+                store_root,
+                timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS,
+                tolerate_vanished_entries=False,
+            )
         except StoreScanTimeout:
             store_scan_error_detected = True
             store_scan_timeout_detected = True

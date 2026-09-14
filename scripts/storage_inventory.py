@@ -254,7 +254,12 @@ def _merge_mtime(current: float | None, candidate: float, *, oldest: bool) -> fl
     return min(current, candidate) if oldest else max(current, candidate)
 
 
-def scan_path(path: Path, *, cross_filesystems: bool = False) -> ScanResult:
+def scan_path(
+    path: Path,
+    *,
+    cross_filesystems: bool = False,
+    tolerate_vanished_entries: bool = False,
+) -> ScanResult:
     """Measure one path without following symlinks."""
     try:
         root_stat = path.lstat()
@@ -287,6 +292,10 @@ def scan_path(path: Path, *, cross_filesystems: bool = False) -> ScanResult:
                 for entry in entries:
                     try:
                         stat_result = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        if not tolerate_vanished_entries:
+                            errors += 1
+                        continue
                     except OSError:
                         errors += 1
                         continue
@@ -306,6 +315,9 @@ def scan_path(path: Path, *, cross_filesystems: bool = False) -> ScanResult:
                             stack.append(Path(entry.path))
                     else:
                         files += 1
+        except FileNotFoundError:
+            if not tolerate_vanished_entries:
+                errors += 1
         except OSError:
             errors += 1
 
