@@ -347,6 +347,29 @@ noch portabel einschalten. Automatisches Flashen oder ein behaupteter
 und physische Bestätigungsgrenze umgehen und ist nicht Bestandteil dieser
 Remediation.
 
+## Grok Build: subscription-only Launcher
+
+`~/.local/bin/grok` ist die stabile lokale Schutzschicht vor dem global über npm
+installierten Grok-Build-Entrypoint. Der Wrapper entfernt beide bekannten
+API-Key-Environment-Flächen und setzt zusätzlich Groks eigenen
+`disable_api_key_auth`-Schalter. Damit bleibt der grok.com-OAuth-/Device-Auth-Pfad
+verfügbar, während der Grok.com-API-Key-Fallback fail-closed ist. Danach führt er
+`~/.npm-global/bin/grok` **direkt** aus. Er unterstellt absichtlich keinen
+Node-Launcher: Der Paket-Entrypoint darf Script,
+Symlink oder natives ELF-Binary sein. Damit überlebt der lokale Vertrag auch den
+Wechsel von Grok 1.0.30 auf einen nativen Entrypoint.
+
+```bash
+python3 scripts/install_grok_subscription_wrapper.py                         # Plan
+python3 scripts/install_grok_subscription_wrapper.py --apply                 # nur bei neu/identisch
+python3 scripts/install_grok_subscription_wrapper.py --apply --replace-existing
+```
+
+Der Installer verweigert Symlink-Ziele, ersetzt abweichende bestehende Launcher
+nur explizit und installiert nichts, wenn der offizielle npm-Entrypoint nicht
+ausführbar ist. Das schützt vor einem unbeabsichtigten API-PAYG-Fallback, belegt
+aber weder Login, Restquote noch den Billing-Zustand des SuperGrok-Kontos.
+
 ## Direkter Systemkatalog-Pointer
 
 Die systemweite stabile Semantik liegt nicht in diesem Repository, sondern im Systemkatalog:
