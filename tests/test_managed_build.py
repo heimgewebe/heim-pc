@@ -1815,11 +1815,12 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+            ),
+            patch.object(
                 managed_build, "_bounded_store_scan",
-                side_effect=[
-                    {"allocated_bytes": 1, "error_count": 0},
-                    {"allocated_bytes": 1, "error_count": 0},
-                ],
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
             ),
             patch.object(managed_build, "_process_group_exists", return_value=True),
             patch.object(managed_build, "_wait_for_process_group_exit", return_value=True) as wait_for_group,
@@ -1836,7 +1837,7 @@ class ManagedBuildTests(unittest.TestCase):
         killpg.assert_called_once_with(process.pid, signal.SIGTERM)
         wait_for_group.assert_called_once()
 
-    def test_nix_live_store_scan_tolerates_vanished_entries_but_final_scan_is_strict(self) -> None:
+    def test_nix_live_store_scan_uses_root_observer_but_final_scan_is_strict(self) -> None:
         class Process:
             pid = 4198
             returncode = 0
@@ -1856,15 +1857,19 @@ class ManagedBuildTests(unittest.TestCase):
             "store_budget_bytes": {"warning": 64, "hard": 96},
             "runtime_budget_seconds": {"warning": 10, "hard": 20},
         }
-        scan_modes = []
+        final_scan_modes = []
 
-        def scan(_store_root, *, timeout_seconds, tolerate_vanished_entries=False):
-            scan_modes.append(tolerate_vanished_entries)
+        def final_scan(_store_root, *, timeout_seconds, tolerate_vanished_entries=False):
+            final_scan_modes.append(tolerate_vanished_entries)
             return {"allocated_bytes": 1, "error_count": 0, "entries": []}
 
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
-            patch.object(managed_build, "_bounded_store_scan", side_effect=scan),
+            patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+            ) as live_scan,
+            patch.object(managed_build, "_bounded_store_scan", side_effect=final_scan),
             patch.object(managed_build, "_terminate_process_group"),
             patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
         ):
@@ -1873,8 +1878,96 @@ class ManagedBuildTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(scan_modes, [True, False])
+        live_scan.assert_called_once()
+        self.assertEqual(live_scan.call_args.args, (Path(guard["store_root"]),))
+        self.assertGreater(live_scan.call_args.kwargs["timeout_seconds"], 0)
+        self.assertLessEqual(
+            live_scan.call_args.kwargs["timeout_seconds"],
+            managed_build.NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(final_scan_modes, [False])
         self.assertFalse(telemetry["store_scan_error_detected"])
+
+    def test_bounded_live_store_scan_uses_pinned_read_only_root_find_and_deduplicates_hardlinks(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["scan"], 0, stdout=b"1 10 2\n1 11 3\n1 10 2\n", stderr=b""
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=completed) as run,
+        ):
+            observation = managed_build._bounded_live_store_scan(
+                Path(directory), timeout_seconds=3
+            )
+
+        self.assertEqual(observation, {"allocated_bytes": 5 * 512, "error_count": 0, "entries": []})
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:8], [
+            "/usr/bin/docker", "run", "--rm", "--network", "none",
+            "--read-only", "--security-opt", "no-new-privileges",
+        ])
+        self.assertEqual(argv[argv.index("--user") + 1], "0:0")
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(argv[argv.index("--cap-add") + 1], "DAC_READ_SEARCH")
+        self.assertIn("--label", argv)
+        self.assertIn(managed_build.PINNED_NIX_IMAGE, argv)
+        self.assertIn(f"{directory}:/subject:ro", argv)
+        self.assertEqual(argv[-6:], [
+            managed_build.PINNED_NIX_IMAGE,
+            "/subject", "-xdev", "-ignore_readdir_race", "-printf", "%D %i %b\n",
+        ])
+        self.assertEqual(run.call_args.kwargs["env"], managed_build._docker_client_environment())
+        self.assertTrue(run.call_args.kwargs["start_new_session"])
+
+    def test_bounded_live_store_scan_fails_closed_on_scanner_error_or_malformed_output(self) -> None:
+        cases = [
+            subprocess.CompletedProcess(["scan"], 1, stdout=b"", stderr=b"find: Input/output error\n"),
+            subprocess.CompletedProcess(["scan"], 0, stdout=b"not three fields\n", stderr=b""),
+            subprocess.CompletedProcess(["scan"], 0, stdout=b"", stderr=b""),
+        ]
+        for completed in cases:
+            with self.subTest(returncode=completed.returncode, stdout=completed.stdout):
+                with (
+                    tempfile.TemporaryDirectory() as directory,
+                    patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+                    patch.object(managed_build.subprocess, "run", return_value=completed),
+                ):
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build._bounded_live_store_scan(Path(directory), timeout_seconds=3)
+
+    def test_live_store_scan_cleanup_requires_repeated_absence(self) -> None:
+        with (
+            patch.object(
+                managed_build, "_live_store_scan_container_ids", side_effect=[[], []]
+            ) as inventory,
+            patch.object(managed_build.time, "sleep") as sleep,
+        ):
+            self.assertTrue(
+                managed_build._cleanup_live_store_scan_container(
+                    "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+                )
+            )
+        self.assertEqual(inventory.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
+    def test_bounded_live_store_scan_timeout_requires_verified_observer_cleanup(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(
+                managed_build.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired(["docker", "run"], 0.01),
+            ),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True) as cleanup,
+        ):
+            with self.assertRaises(managed_build.StoreScanTimeout):
+                managed_build._bounded_live_store_scan(Path(directory), timeout_seconds=0.01)
+        cleanup.assert_called_once()
+
+    def test_bounded_live_store_scan_rejects_bind_unsafe_root(self) -> None:
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "bind-safe"):
+            managed_build._bounded_live_store_scan(Path("/tmp/store:unsafe"), timeout_seconds=1)
 
     def test_bounded_store_scan_toleration_is_an_explicit_internal_helper_flag(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -1925,11 +2018,12 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+            ),
+            patch.object(
                 managed_build, "_bounded_store_scan",
-                side_effect=[
-                    {"allocated_bytes": 1, "error_count": 0},
-                    {"allocated_bytes": 1, "error_count": 0},
-                ],
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
             ),
             patch.object(managed_build, "_terminate_process_group"),
             patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
@@ -1966,11 +2060,12 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+            ),
+            patch.object(
                 managed_build, "_bounded_store_scan",
-                side_effect=[
-                    {"allocated_bytes": 1, "error_count": 0},
-                    {"allocated_bytes": 1, "error_count": 0},
-                ],
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
             ),
             patch.object(managed_build, "_terminate_process_group"),
             patch.object(managed_build, "_remove_exact_nix_containers", return_value=(1, True)),
@@ -2019,8 +2114,12 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 70, "error_count": 0, "entries": []},
+            ),
+            patch.object(
                 managed_build, "_bounded_store_scan",
-                side_effect=[{"allocated_bytes": 70, "error_count": 0}, {"allocated_bytes": 70, "error_count": 0}],
+                return_value={"allocated_bytes": 70, "error_count": 0, "entries": []},
             ),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
             patch.object(managed_build, "_nix_container_ids", return_value=["a" * 64]),
@@ -2174,11 +2273,12 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
+                managed_build, "_bounded_live_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 1, "entries": []},
+            ),
+            patch.object(
                 managed_build, "_bounded_store_scan",
-                side_effect=[
-                    {"allocated_bytes": 1, "error_count": 1},
-                    {"allocated_bytes": 1, "error_count": 1},
-                ],
+                return_value={"allocated_bytes": 1, "error_count": 1, "entries": []},
             ),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
             patch.object(managed_build, "_nix_container_ids", return_value=[]),
@@ -2228,7 +2328,7 @@ class ManagedBuildTests(unittest.TestCase):
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
-                managed_build, "_bounded_store_scan",
+                managed_build, "_bounded_live_store_scan",
                 side_effect=RuntimeError("synthetic monitor failure"),
             ),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
@@ -2259,7 +2359,8 @@ class ManagedBuildTests(unittest.TestCase):
         def remove(label): events.append("remove-exact-container"); return 0, True
         with (
             patch.object(managed_build.subprocess, "Popen", return_value=process),
-            patch.object(managed_build, "_bounded_store_scan", side_effect=[managed_build.StoreScanTimeout("synthetic slow scan"), {"allocated_bytes": 1, "error_count": 0, "entries": []}]),
+            patch.object(managed_build, "_bounded_live_store_scan", side_effect=managed_build.StoreScanTimeout("synthetic slow scan")),
+            patch.object(managed_build, "_bounded_store_scan", return_value={"allocated_bytes": 1, "error_count": 0, "entries": []}),
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
             patch.object(managed_build, "_nix_container_ids", return_value=[]),
             patch.object(managed_build, "_remove_exact_nix_containers", side_effect=remove),

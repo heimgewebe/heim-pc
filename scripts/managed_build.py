@@ -24,8 +24,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 try:
     from scripts.storage_inventory import ScanResult, scan_path
+    from scripts.nixos_production_install import PINNED_NIX_IMAGE
 except ModuleNotFoundError:  # Direct execution from scripts/.
     from storage_inventory import ScanResult, scan_path
+    from nixos_production_install import PINNED_NIX_IMAGE
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
@@ -42,6 +44,9 @@ INTERNAL_NIX_STORE_SCAN_TOLERATE_VANISHED = "--tolerate-vanished-entries"
 NIX_CANCEL_GRACE_SECONDS = 5
 NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
+NIX_LIVE_SCAN_LABEL_RE = re.compile(r"^heim-pc\.managed-nix-scan=[0-9a-f]{64}-[0-9a-f]{12}$")
+NIX_LIVE_SCAN_FIND = "/root/.nix-profile/bin/find"
+NIX_LIVE_SCAN_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"
 DOCKER_SEARCH_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -581,6 +586,167 @@ def _bounded_store_scan(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ManagedBuildError("managed Nix store scan helper returned invalid JSON") from exc
     return _validate_store_scan_observation(observation)
+
+
+def _live_store_scan_container_ids(label: str) -> list[str]:
+    if NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None:
+        raise ManagedBuildError("managed Nix live-scan container label is invalid")
+    try:
+        result = subprocess.run(
+            [_docker_executable(), "ps", "--no-trunc", "-aq", "--filter", f"label={label}"],
+            env=_docker_client_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedBuildError("cannot inspect managed Nix live-scan containers") from exc
+    if result.returncode != 0:
+        raise ManagedBuildError("cannot inspect managed Nix live-scan containers")
+    try:
+        values = [line.strip() for line in result.stdout.decode("ascii", "strict").splitlines() if line.strip()]
+    except UnicodeDecodeError as exc:
+        raise ManagedBuildError("managed Nix live-scan container inventory is not ASCII") from exc
+    if any(NIX_CONTAINER_ID_RE.fullmatch(value) is None for value in values):
+        raise ManagedBuildError("managed Nix live-scan container inventory returned an invalid id")
+    return values
+
+
+def _cleanup_live_store_scan_container(label: str) -> bool:
+    for _attempt in range(3):
+        ids = _live_store_scan_container_ids(label)
+        if not ids:
+            time.sleep(0.1)
+            if not _live_store_scan_container_ids(label):
+                return True
+            continue
+        for container_id in ids:
+            try:
+                subprocess.run(
+                    [_docker_executable(), "rm", "--force", container_id],
+                    env=_docker_client_environment(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        time.sleep(0.1)
+    return not _live_store_scan_container_ids(label)
+
+
+def _parse_live_store_find_output(stdout: bytes) -> dict[str, Any]:
+    if len(stdout) > NIX_LIVE_SCAN_MAX_OUTPUT_BYTES:
+        raise ManagedBuildError("managed Nix live store scan exceeded its output bound")
+    try:
+        text = stdout.decode("ascii", "strict")
+    except UnicodeDecodeError as exc:
+        raise ManagedBuildError("managed Nix live store scan output is not ASCII") from exc
+    seen: set[tuple[int, int]] = set()
+    allocated_bytes = 0
+    row_count = 0
+    for line in text.splitlines():
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 3 or any(not part.isdecimal() for part in parts):
+            raise ManagedBuildError("managed Nix live store scan returned malformed output")
+        device, inode, blocks = (int(part) for part in parts)
+        row_count += 1
+        key = (device, inode)
+        if key in seen:
+            continue
+        seen.add(key)
+        allocated_bytes += blocks * 512
+    if row_count == 0:
+        raise ManagedBuildError("managed Nix live store scan returned no filesystem rows")
+    return {"allocated_bytes": allocated_bytes, "error_count": 0, "entries": []}
+
+
+def _bounded_live_store_scan(store_root: Path, *, timeout_seconds: float) -> dict[str, Any]:
+    """Measure the mutating Nix store from a root-visible, read-only observer.
+
+    Nix build sandboxes are deliberately private to dynamic build UIDs, so the
+    host user cannot account their allocated bytes while a build is active.
+    GNU find runs in the pinned image with a read-only bind and only suppresses
+    readdir disappearance races; any other traversal failure remains fail-closed.
+    Pre-run and final evidence continue to use the strict host-side scanner.
+    """
+    if timeout_seconds <= 0:
+        raise StoreScanTimeout("managed Nix live store scan deadline elapsed")
+    root_text = str(store_root)
+    if (
+        not store_root.is_absolute()
+        or os.path.normpath(root_text) != root_text
+        or ":" in root_text
+        or "\n" in root_text
+        or "\r" in root_text
+    ):
+        raise ManagedBuildError("managed Nix live store scan root must be a bind-safe canonical absolute path")
+    try:
+        root_stat = store_root.lstat()
+    except OSError as exc:
+        raise ManagedBuildError("managed Nix live store scan root is unavailable") from exc
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        raise ManagedBuildError("managed Nix live store scan root must be a real directory")
+    identity = hashlib.sha256(root_text.encode("utf-8")).hexdigest()
+    nonce = hashlib.sha256(f"{os.getpid()}:{time.time_ns()}".encode("ascii")).hexdigest()[:12]
+    label = f"heim-pc.managed-nix-scan={identity}-{nonce}"
+    if NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None:
+        raise ManagedBuildError("managed Nix live-scan label construction failed")
+    argv = [
+        _docker_executable(),
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        "0:0",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "DAC_READ_SEARCH",
+        "--label",
+        label,
+        "-v",
+        f"{root_text}:/subject:ro",
+        "--entrypoint",
+        NIX_LIVE_SCAN_FIND,
+        PINNED_NIX_IMAGE,
+        "/subject",
+        "-xdev",
+        "-ignore_readdir_race",
+        "-printf",
+        "%D %i %b\n",
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            env=_docker_client_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout_seconds,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        try:
+            cleaned = _cleanup_live_store_scan_container(label)
+        except ManagedBuildError as cleanup_exc:
+            raise ManagedBuildError("managed Nix live store scan timed out and cleanup could not be verified") from cleanup_exc
+        if not cleaned:
+            raise ManagedBuildError("managed Nix live store scan timed out and its observer container survived") from exc
+        raise StoreScanTimeout("managed Nix live store scan exceeded its bounded observation window") from exc
+    except OSError as exc:
+        raise ManagedBuildError("managed Nix live store scan could not start") from exc
+    if result.returncode != 0 or result.stderr != b"":
+        raise ManagedBuildError("managed Nix live store scan failed")
+    return _parse_live_store_find_output(result.stdout)
 
 
 def _internal_nix_store_scan_main(argv: Sequence[str]) -> int:
@@ -1467,10 +1633,9 @@ def _run_nix_worker_guarded(
                 trigger = "runtime-timeout"
                 break
             try:
-                scan = _bounded_store_scan(
+                scan = _bounded_live_store_scan(
                     store_root,
                     timeout_seconds=min(NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, remaining),
-                    tolerate_vanished_entries=True,
                 )
             except StoreScanTimeout:
                 if time.monotonic() >= deadline:
