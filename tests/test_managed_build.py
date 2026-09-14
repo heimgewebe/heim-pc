@@ -1836,6 +1836,72 @@ class ManagedBuildTests(unittest.TestCase):
         killpg.assert_called_once_with(process.pid, signal.SIGTERM)
         wait_for_group.assert_called_once()
 
+    def test_nix_live_store_scan_tolerates_vanished_entries_but_final_scan_is_strict(self) -> None:
+        class Process:
+            pid = 4198
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "9" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "9" * 12,
+            "store_root": "/tmp/managed-nix-store-live-scan-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        scan_modes = []
+
+        def scan(_store_root, *, timeout_seconds, tolerate_vanished_entries=False):
+            scan_modes.append(tolerate_vanished_entries)
+            return {"allocated_bytes": 1, "error_count": 0, "entries": []}
+
+        with (
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(managed_build, "_bounded_store_scan", side_effect=scan),
+            patch.object(managed_build, "_terminate_process_group"),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(scan_modes, [True, False])
+        self.assertFalse(telemetry["store_scan_error_detected"])
+
+    def test_bounded_store_scan_toleration_is_an_explicit_internal_helper_flag(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["scan"],
+            0,
+            stdout=b'{"allocated_bytes":1,"entries":[],"error_count":0}',
+            stderr=b"",
+        )
+        with patch.object(managed_build.subprocess, "run", return_value=completed) as run:
+            observation = managed_build._bounded_store_scan(
+                Path("/tmp/store"),
+                timeout_seconds=1,
+                tolerate_vanished_entries=True,
+            )
+
+        self.assertEqual(observation["error_count"], 0)
+        self.assertEqual(
+            run.call_args.args[0][-1],
+            managed_build.INTERNAL_NIX_STORE_SCAN_TOLERATE_VANISHED,
+        )
+        self.assertEqual(
+            managed_build._internal_nix_store_scan_main(
+                [managed_build.INTERNAL_NIX_STORE_SCAN_OPERATION, "/tmp/store", "--unexpected"]
+            ),
+            2,
+        )
+
     def test_nix_verified_auto_remove_race_does_not_become_orphan_failure(self) -> None:
         class Process:
             pid = 4200

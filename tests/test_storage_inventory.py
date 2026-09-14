@@ -48,6 +48,52 @@ def make_policy(path: Path, producer_path: Path, *, warning: int = 10, hard: int
 
 
 class StorageInventoryTests(unittest.TestCase):
+    def test_scan_tolerates_only_vanished_entries_when_explicitly_requested(self) -> None:
+        class Entry:
+            def __init__(self, exc: OSError) -> None:
+                self.exc = exc
+
+            def stat(self, *, follow_symlinks: bool):
+                self.assert_no_follow(follow_symlinks)
+                raise self.exc
+
+            @staticmethod
+            def assert_no_follow(follow_symlinks: bool) -> None:
+                if follow_symlinks:
+                    raise AssertionError("scan unexpectedly followed a symlink")
+
+        class Entries:
+            def __init__(self, entry: Entry) -> None:
+                self.entry = entry
+
+            def __enter__(self):
+                return iter([self.entry])
+
+            def __exit__(self, exc_type, exc, traceback) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
+                return_value=Entries(Entry(FileNotFoundError())),
+            ):
+                strict = scan_path(root)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
+                return_value=Entries(Entry(FileNotFoundError())),
+            ):
+                tolerant = scan_path(root, tolerate_vanished_entries=True)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
+                return_value=Entries(Entry(PermissionError())),
+            ):
+                denied = scan_path(root, tolerate_vanished_entries=True)
+
+        self.assertEqual(strict.error_count, 1)
+        self.assertEqual(tolerant.error_count, 0)
+        self.assertEqual(denied.error_count, 1)
+
     def test_scan_does_not_follow_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
