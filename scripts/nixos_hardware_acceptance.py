@@ -72,11 +72,13 @@ ANCHORS = {
         "label": "MOTU M2",
     },
     "midi": {
-        # A user-space ALSA client can choose its own name. Require the FP-30X
-        # identity and the kernel/card markers on the same client header line.
+        # ALSA exposes the FP-30X as either its model name or the kernel's
+        # generic Roland Digital Piano identity. A user-space client can choose
+        # either name, so require the accepted identity plus kernel/card markers
+        # on the same client header line.
         "observation_keys": ("midi",),
-        "needles": ("fp-30x",),
-        "same_line_needles": ("fp-30x", "type=kernel", "card="),
+        "identity_needles": ("fp-30x", "roland digital piano"),
+        "same_line_needles": ("type=kernel", "card="),
         "label": "Roland FP-30X MIDI path",
     },
 }
@@ -182,6 +184,13 @@ def _matches_anchor(haystack: str, spec: Mapping[str, Any]) -> bool:
     if not all(needle in haystack for needle in needles):
         return False
     same_line_needles = tuple(spec.get("same_line_needles", ()))
+    identity_needles = tuple(spec.get("identity_needles", ()))
+    if identity_needles:
+        return any(
+            any(identity in line for identity in identity_needles)
+            and all(needle in line for needle in same_line_needles)
+            for line in haystack.splitlines()
+        )
     if not same_line_needles:
         return True
     return any(

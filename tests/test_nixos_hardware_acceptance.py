@@ -73,11 +73,50 @@ def test_missing_anchor_fails_without_turning_history_into_current_truth() -> No
     assert result["historicalEvidenceIsCurrent"] is False
 
 
-def test_midi_anchor_requires_fp30x_kernel_client_on_same_line() -> None:
+def test_midi_anchor_requires_accepted_roland_kernel_client_on_same_line() -> None:
     facts = current_hardware_facts()
     midi = (
         "client 24: 'FP-30X' [type=user,pid=1234]\n"
         "client 32: 'Other Hardware' [type=kernel,card=2]"
+    )
+    import hashlib
+
+    facts["observations"]["midi"]["value"] = midi
+    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
+    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+
+    result = evaluate_hardware_acceptance(
+        facts,
+        expected_revision=REVISION,
+        now="2026-09-04T07:05:00Z",
+    )
+    assert result["status"] == "fail"
+    assert result["checks"]["midi"]["status"] == "fail"
+
+
+def test_midi_anchor_accepts_kernel_roland_digital_piano_alias() -> None:
+    facts = current_hardware_facts()
+    midi = "client 28: 'Roland Digital Piano' [type=kernel,card=3]"
+    import hashlib
+
+    facts["observations"]["midi"]["value"] = midi
+    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
+    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+
+    result = evaluate_hardware_acceptance(
+        facts,
+        expected_revision=REVISION,
+        now="2026-09-04T07:05:00Z",
+    )
+    assert result["status"] == "pass"
+    assert result["checks"]["midi"]["status"] == "pass"
+
+
+def test_midi_anchor_rejects_user_roland_alias_with_unrelated_kernel_markers() -> None:
+    facts = current_hardware_facts()
+    midi = (
+        "client 28: 'Roland Digital Piano' [type=user,pid=1234]\n"
+        "client 32: 'Other Hardware' [type=kernel,card=3]"
     )
     import hashlib
 
