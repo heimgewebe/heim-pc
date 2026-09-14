@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -28,8 +29,15 @@ def current_hardware_facts():
             "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER, 0x270510DE, 595.84",
             "audio": " 2 [M2             ]: USB-Audio - MOTU M2",
             "midi": "client 24: 'FP-30X' [type=kernel,card=2]",
+            "midi_usb": "card=2 usb=0582:01b1",
         },
     )
+
+
+def set_observation(facts, key: str, value: str) -> None:
+    facts["observations"][key]["value"] = value
+    facts["observations"][key]["sha256"] = hashlib.sha256(value.encode()).hexdigest()
+    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
 
 
 def test_acceptance_requires_fresh_exact_reviewed_revision_and_all_anchors() -> None:
@@ -54,13 +62,7 @@ def test_acceptance_requires_fresh_exact_reviewed_revision_and_all_anchors() -> 
 
 def test_missing_anchor_fails_without_turning_history_into_current_truth() -> None:
     facts = current_hardware_facts()
-    facts["observations"]["midi"]["value"] = "no MIDI device"
-    import hashlib
-
-    facts["observations"]["midi"]["sha256"] = hashlib.sha256(
-        b"no MIDI device"
-    ).hexdigest()
-    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+    set_observation(facts, "midi", "no MIDI device")
 
     result = evaluate_hardware_acceptance(
         facts,
@@ -75,15 +77,12 @@ def test_missing_anchor_fails_without_turning_history_into_current_truth() -> No
 
 def test_midi_anchor_requires_accepted_roland_kernel_client_on_same_line() -> None:
     facts = current_hardware_facts()
-    midi = (
+    set_observation(
+        facts,
+        "midi",
         "client 24: 'FP-30X' [type=user,pid=1234]\n"
-        "client 32: 'Other Hardware' [type=kernel,card=2]"
+        "client 32: 'Other Hardware' [type=kernel,card=2]",
     )
-    import hashlib
-
-    facts["observations"]["midi"]["value"] = midi
-    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
-    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
 
     result = evaluate_hardware_acceptance(
         facts,
@@ -94,14 +93,10 @@ def test_midi_anchor_requires_accepted_roland_kernel_client_on_same_line() -> No
     assert result["checks"]["midi"]["status"] == "fail"
 
 
-def test_midi_anchor_accepts_kernel_roland_digital_piano_alias() -> None:
+def test_midi_anchor_accepts_kernel_roland_digital_piano_alias_with_fp30x_usb_id() -> None:
     facts = current_hardware_facts()
-    midi = "client 28: 'Roland Digital Piano' [type=kernel,card=3]"
-    import hashlib
-
-    facts["observations"]["midi"]["value"] = midi
-    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
-    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+    set_observation(facts, "midi", "client 28: 'Roland Digital Piano' [type=kernel,card=3]")
+    set_observation(facts, "midi_usb", "card=3 usb=0582:01b1")
 
     result = evaluate_hardware_acceptance(
         facts,
@@ -112,17 +107,43 @@ def test_midi_anchor_accepts_kernel_roland_digital_piano_alias() -> None:
     assert result["checks"]["midi"]["status"] == "pass"
 
 
+def test_midi_anchor_rejects_generic_roland_alias_with_other_usb_product() -> None:
+    facts = current_hardware_facts()
+    set_observation(facts, "midi", "client 28: 'Roland Digital Piano' [type=kernel,card=3]")
+    set_observation(facts, "midi_usb", "card=3 usb=0582:ffff")
+
+    result = evaluate_hardware_acceptance(
+        facts,
+        expected_revision=REVISION,
+        now="2026-09-04T07:05:00Z",
+    )
+    assert result["status"] == "fail"
+    assert result["checks"]["midi"]["status"] == "fail"
+
+
+def test_midi_anchor_rejects_fp30x_usb_id_on_different_card() -> None:
+    facts = current_hardware_facts()
+    set_observation(facts, "midi", "client 28: 'Roland Digital Piano' [type=kernel,card=3]")
+    set_observation(facts, "midi_usb", "card=2 usb=0582:01b1")
+
+    result = evaluate_hardware_acceptance(
+        facts,
+        expected_revision=REVISION,
+        now="2026-09-04T07:05:00Z",
+    )
+    assert result["status"] == "fail"
+    assert result["checks"]["midi"]["status"] == "fail"
+
+
 def test_midi_anchor_rejects_user_roland_alias_with_unrelated_kernel_markers() -> None:
     facts = current_hardware_facts()
-    midi = (
+    set_observation(
+        facts,
+        "midi",
         "client 28: 'Roland Digital Piano' [type=user,pid=1234]\n"
-        "client 32: 'Other Hardware' [type=kernel,card=3]"
+        "client 32: 'Other Hardware' [type=kernel,card=3]",
     )
-    import hashlib
-
-    facts["observations"]["midi"]["value"] = midi
-    facts["observations"]["midi"]["sha256"] = hashlib.sha256(midi.encode()).hexdigest()
-    facts["binding"]["observationsSha256"] = sha256_json(facts["observations"])
+    set_observation(facts, "midi_usb", "card=3 usb=0582:01b1")
 
     result = evaluate_hardware_acceptance(
         facts,
@@ -183,6 +204,9 @@ def test_live_probe_owns_commands_source_and_clock(monkeypatch) -> None:
     monkeypatch.setattr(
         hardware, "_read_probe_file", lambda path: " 2 [M2]: USB-Audio - MOTU M2"
     )
+    monkeypatch.setattr(
+        hardware, "_probe_midi_usb_identities", lambda midi: "card=2 usb=0582:01b1"
+    )
     monkeypatch.setattr(hardware, "_utc_now", lambda: "2026-09-04T07:00:00Z")
 
     facts = probe_current_hardware(REVISION)
@@ -193,6 +217,23 @@ def test_live_probe_owns_commands_source_and_clock(monkeypatch) -> None:
         tuple(PROBE_DEFINITION["midi"]),
     ]
     assert facts["observations"]["audio"]["value"].endswith("MOTU M2")
+    assert facts["observations"]["midi_usb"]["value"] == "card=2 usb=0582:01b1"
+
+
+def test_midi_usb_probe_resolves_only_kernel_card_headers(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def fake_identity(card: str) -> str:
+        seen.append(card)
+        return f"card={card} usb=0582:01b1"
+
+    monkeypatch.setattr(hardware, "_sound_card_usb_identity", fake_identity)
+    result = hardware._probe_midi_usb_identities(
+        "client 4: 'User Alias' [type=user,pid=12]\n"
+        "client 28: 'Roland Digital Piano' [type=kernel,card=3]"
+    )
+    assert result == "card=3 usb=0582:01b1"
+    assert seen == ["3"]
 
 
 def test_probe_command_ignores_caller_path_and_loader_environment(monkeypatch) -> None:
