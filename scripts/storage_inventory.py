@@ -292,7 +292,7 @@ def scan_path(
                 for entry in entries:
                     try:
                         stat_result = entry.stat(follow_symlinks=False)
-                    except FileNotFoundError:
+                    except (FileNotFoundError, NotADirectoryError):
                         if not tolerate_vanished_entries:
                             errors += 1
                         continue
@@ -315,7 +315,7 @@ def scan_path(
                             stack.append(Path(entry.path))
                     else:
                         files += 1
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             if not tolerate_vanished_entries:
                 errors += 1
         except OSError:
