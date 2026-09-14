@@ -1894,20 +1894,22 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(managed_build.PINNED_NIX_IMAGE, installer.PINNED_NIX_IMAGE)
 
     def test_bounded_live_store_scan_uses_pinned_read_only_root_find_and_deduplicates_hardlinks(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["scan"], 0, stdout=b"1 10 2\n1 11 3\n1 10 2\n", stderr=b""
-        )
+        process = Mock()
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
-            patch.object(managed_build.subprocess, "run", return_value=completed) as run,
+            patch.object(managed_build.subprocess, "Popen", return_value=process) as popen,
+            patch.object(
+                managed_build, "_capture_live_store_scan_output",
+                return_value=b"1 10 2\n1 11 3\n1 10 2\n",
+            ) as capture,
         ):
             observation = managed_build._bounded_live_store_scan(
                 Path(directory), timeout_seconds=3
             )
 
         self.assertEqual(observation, {"allocated_bytes": 5 * 512, "error_count": 0, "entries": []})
-        argv = run.call_args.args[0]
+        argv = popen.call_args.args[0]
         self.assertEqual(argv[:8], [
             "/usr/bin/docker", "run", "--rm", "--network", "none",
             "--read-only", "--security-opt", "no-new-privileges",
@@ -1922,24 +1924,105 @@ class ManagedBuildTests(unittest.TestCase):
             managed_build.PINNED_NIX_IMAGE,
             "/subject", "-xdev", "-ignore_readdir_race", "-printf", "%D %i %b\n",
         ])
-        self.assertEqual(run.call_args.kwargs["env"], managed_build._docker_client_environment())
-        self.assertTrue(run.call_args.kwargs["start_new_session"])
+        self.assertEqual(popen.call_args.kwargs["env"], managed_build._docker_client_environment())
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.PIPE)
+        capture.assert_called_once()
+        self.assertIs(capture.call_args.args[0], process)
+        self.assertEqual(capture.call_args.kwargs["timeout_seconds"], 3)
 
     def test_bounded_live_store_scan_fails_closed_on_scanner_error_or_malformed_output(self) -> None:
-        cases = [
-            subprocess.CompletedProcess(["scan"], 1, stdout=b"", stderr=b"find: Input/output error\n"),
-            subprocess.CompletedProcess(["scan"], 0, stdout=b"not three fields\n", stderr=b""),
-            subprocess.CompletedProcess(["scan"], 0, stdout=b"", stderr=b""),
-        ]
-        for completed in cases:
-            with self.subTest(returncode=completed.returncode, stdout=completed.stdout):
-                with (
-                    tempfile.TemporaryDirectory() as directory,
-                    patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
-                    patch.object(managed_build.subprocess, "run", return_value=completed),
-                ):
-                    with self.assertRaises(managed_build.ManagedBuildError):
-                        managed_build._bounded_live_store_scan(Path(directory), timeout_seconds=3)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = Mock()
+            with (
+                patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+                patch.object(managed_build.subprocess, "Popen", return_value=process),
+                patch.object(
+                    managed_build, "_capture_live_store_scan_output",
+                    side_effect=managed_build.ManagedBuildError("scanner failed"),
+                ),
+            ):
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build._bounded_live_store_scan(root, timeout_seconds=3)
+            for stdout in (b"not three fields\n", b""):
+                with self.subTest(stdout=stdout):
+                    with (
+                        patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+                        patch.object(managed_build.subprocess, "Popen", return_value=process),
+                        patch.object(
+                            managed_build, "_capture_live_store_scan_output",
+                            return_value=stdout,
+                        ),
+                    ):
+                        with self.assertRaises(managed_build.ManagedBuildError):
+                            managed_build._bounded_live_store_scan(root, timeout_seconds=3)
+
+    def test_live_store_scan_capture_enforces_stdout_cap_during_execution(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; sys.stdout.buffer.write(b'x'*4096); sys.stdout.flush(); time.sleep(10)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        with (
+            patch.object(managed_build, "NIX_LIVE_SCAN_MAX_OUTPUT_BYTES", 32),
+            patch.object(
+                managed_build, "_cleanup_live_store_scan_container", return_value=True
+            ) as cleanup,
+        ):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "output bound"):
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        cleanup.assert_called_once_with(label)
+        self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_capture_stderr_fails_without_buffering_and_cleans_up(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; sys.stderr.write('scanner error\n'); sys.stderr.flush(); time.sleep(10)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=True
+        ) as cleanup:
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "scan failed"):
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        cleanup.assert_called_once_with(label)
+        self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_capture_timeout_requires_verified_cleanup(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "c" * 64 + "-" + "d" * 12
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=True
+        ) as cleanup:
+            with self.assertRaises(managed_build.StoreScanTimeout):
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=0.02
+                )
+        cleanup.assert_called_once_with(label)
+        self.assertIsNotNone(process.poll())
 
     def test_live_store_scan_cleanup_requires_repeated_absence(self) -> None:
         with (
@@ -1956,19 +2039,18 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(inventory.call_count, 2)
         sleep.assert_called_once_with(0.1)
 
-    def test_bounded_live_store_scan_timeout_requires_verified_observer_cleanup(self) -> None:
+    def test_bounded_live_store_scan_propagates_capture_timeout(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "Popen", return_value=Mock()),
             patch.object(
-                managed_build.subprocess, "run",
-                side_effect=subprocess.TimeoutExpired(["docker", "run"], 0.01),
+                managed_build, "_capture_live_store_scan_output",
+                side_effect=managed_build.StoreScanTimeout("synthetic timeout"),
             ),
-            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True) as cleanup,
         ):
             with self.assertRaises(managed_build.StoreScanTimeout):
                 managed_build._bounded_live_store_scan(Path(directory), timeout_seconds=0.01)
-        cleanup.assert_called_once()
 
     def test_bounded_live_store_scan_rejects_bind_unsafe_root(self) -> None:
         with self.assertRaisesRegex(managed_build.ManagedBuildError, "bind-safe"):
