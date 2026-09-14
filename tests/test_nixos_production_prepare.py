@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -175,6 +176,62 @@ def test_build_exact_closure_runs_check_then_build(monkeypatch):
     assert "#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel" in " ".join(calls[1])
 
 
+def test_managed_nix_db_snapshot_materializes_wal_without_mutating_source(tmp_path):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = (source.read_bytes(), wal.read_bytes())
+
+        destination = tmp_path / "snapshot.sqlite"
+        assert prep._managed_nix_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        assert (source.read_bytes(), wal.read_bytes()) == before
+        assert destination.stat().st_mode & 0o777 == 0o400
+        snapshot = sqlite3.connect(f"file:{destination}?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?", (SYSTEM_PATH,)
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_readonly_nix_argv_overlays_private_db_snapshot(tmp_path):
+    snapshot = tmp_path / "db.sqlite"
+    snapshot.write_bytes(b"snapshot")
+    snapshot.chmod(0o400)
+    argv = prep.readonly_nix_argv(
+        nix_volume=NIX_VOLUME,
+        db_snapshot=snapshot,
+        args=["path-info", SYSTEM_PATH],
+    )
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
+    assert f"{snapshot}:/subject/nix/var/nix/db/db.sqlite:ro" in argv
+    assert argv.index(f"{NIX_VOLUME}:/subject/nix:ro") < argv.index(
+        f"{snapshot}:/subject/nix/var/nix/db/db.sqlite:ro"
+    )
+    assert argv[argv.index("--store") + 1] == prep.installer.READONLY_NIX_STORE
+
+
 def test_capture_closure_manifest_uses_canonical_path_info(monkeypatch):
     path_info = {SYSTEM_PATH: {"narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "narSize": 123, "references": []}}
     calls = []
@@ -203,6 +260,60 @@ def test_verify_closure_checks_store_and_exact_closure_in_offline_container(monk
         assert f"{NIX_VOLUME}:/nix:ro" in argv
         assert prep.installer.PINNED_NIX_IMAGE in argv
         assert argv[argv.index("--entrypoint") + 1].startswith(SYSTEM_PATH + "/sw/bin/")
+
+
+def test_prepare_reuses_one_managed_db_snapshot_for_verify_and_manifest(
+    monkeypatch, tmp_path
+):
+    output = tmp_path / "artifact.json"
+    managed_root = tmp_path / "managed-store"
+    managed_root.mkdir()
+    snapshot = tmp_path / "snapshot.sqlite"
+    observed = {"snapshot_calls": 0, "verify": None, "manifest": None}
+    monkeypatch.setattr(prep, "exact_source_revision", lambda repo: REVISION)
+    monkeypatch.setattr(prep, "image_gate", lambda: None)
+    monkeypatch.setattr(prep, "ensure_volume_absent", lambda name: None)
+    monkeypatch.setattr(prep, "create_volume", lambda name, **kwargs: None)
+    monkeypatch.setattr(prep, "remove_volume", lambda name: None)
+
+    def fake_run(argv, check=True):
+        if len(argv) >= 6 and argv[0] == "git" and "bundle" in argv and "create" in argv:
+            Path(argv[-2]).write_bytes(b"fake-bundle")
+        return Result()
+
+    monkeypatch.setattr(prep, "run", fake_run)
+    monkeypatch.setattr(prep, "clone_bundle_to_volume", lambda **kwargs: None)
+    monkeypatch.setattr(prep, "build_exact_closure", lambda **kwargs: SYSTEM_PATH)
+
+    def snapshot_db(**kwargs):
+        observed["snapshot_calls"] += 1
+        assert kwargs["managed_nix_store_root"] == managed_root
+        assert kwargs["system_path"] == SYSTEM_PATH
+        return snapshot
+
+    monkeypatch.setattr(prep, "_managed_nix_db_snapshot", snapshot_db)
+    monkeypatch.setattr(
+        prep, "verify_closure",
+        lambda **kwargs: observed.__setitem__("verify", kwargs["db_snapshot"]),
+    )
+    monkeypatch.setattr(
+        prep, "capture_closure_manifest",
+        lambda **kwargs: (
+            observed.__setitem__("manifest", kwargs["db_snapshot"])
+            or {"closure_manifest_sha256": CLOSURE_SHA, "closure_path_count": CLOSURE_COUNT}
+        ),
+    )
+
+    prep.prepare(
+        repo=tmp_path,
+        output=output,
+        managed_nix_store_root=managed_root,
+    )
+    assert observed == {
+        "snapshot_calls": 1,
+        "verify": snapshot,
+        "manifest": snapshot,
+    }
 
 
 def test_prepare_source_contains_no_block_mutation_surface():
