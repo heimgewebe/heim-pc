@@ -1463,6 +1463,284 @@ def _clear_nix_lifecycle_fence(path: Path) -> None:
     _fsync_directory(path.parent)
 
 
+def _reconciliation_file_identity(info: os.stat_result) -> dict[str, int]:
+    return {name: getattr(info, name) for name in (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+        "st_size", "st_mtime_ns", "st_ctime_ns",
+    )}
+
+
+def _reconciliation_parents(path: Path) -> list[tuple[Any, ...]]:
+    """Read-only ancestry checks; retain directory identities across evidence checks."""
+    if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
+        raise ManagedBuildError("reconciliation requires canonical absolute paths")
+    identities = []
+    for parent in reversed(path.parents):
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            identities.append((str(parent), None))
+            break
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)
+        ):
+            raise ManagedBuildError("unsafe reconciliation path ancestry")
+        identities.append((str(parent), info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid))
+    return identities
+
+
+def _reconciliation_require_absent(path: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    raise ManagedBuildError("reconciliation requires absent output, success receipt and other lifecycle markers")
+
+
+def _read_reconciliation_file(
+    path: Path, *, links: int = 1, fence: bool = False, durable: bool = False,
+) -> dict[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+            or before.st_nlink != links
+            or stat.S_IMODE(before.st_mode) not in ((0o600,) if fence else (0o400, 0o600))
+            or before.st_size > 1024 * 1024
+        ):
+            raise ManagedBuildError("unsafe reconciliation evidence file")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            data = handle.read(1024 * 1024 + 1)
+        if durable:
+            os.fsync(fd)
+        identity = _reconciliation_file_identity(before)
+        if (
+            len(data) != before.st_size
+            or _reconciliation_file_identity(os.fstat(fd)) != identity
+            or _reconciliation_file_identity(path.lstat()) != identity
+        ):
+            raise ManagedBuildError("reconciliation evidence changed while reading")
+        try:
+            payload = json.loads(data, object_pairs_hook=unique_object)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ManagedBuildError("malformed reconciliation evidence") from exc
+        if not isinstance(payload, dict):
+            raise ManagedBuildError("reconciliation evidence must be a JSON object")
+        return {"payload": payload, "sha256": hashlib.sha256(data).hexdigest(), "file_identity": identity}
+    finally:
+        os.close(fd)
+
+
+def reconcile_nix_fence(
+    policy: dict[str, Any], *, repo: Path, home: Path, expected_cache_key: str,
+    expected_source_revision: str, expected_docker_volume: str,
+    prior_receipt: Path, expected_receipt_sha256: str, command: Sequence[str],
+) -> dict[str, Any]:
+    """Explicit authority for one terminal scan-error failure; never called by execute_plan.
+
+    Old receipts record only an argv digest. The supplied argv is its preimage,
+    not independent output-path authority, and is never executed here.
+    Retry is allowed only with the unchanged singleton ACTIVE and exact authority.
+    Missing primaries and recovery/completion states require separate investigation.
+    """
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", expected_cache_key) is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{40}", expected_source_revision) is None
+        or expected_docker_volume != f"heim-pc-nixos-production-{expected_source_revision[:12]}"
+    ):
+        raise ManagedBuildError("invalid expected Nix fence binding")
+    state_root = _expand_home(policy["state_root"], home)
+    lock = state_root / "cache-locks" / "nix" / f"{expected_cache_key}.lock"
+    primary = lock.with_name(f"{expected_cache_key}.active.json")
+    recovery = _nix_recovery_fence_path(primary)
+    pending = _nix_pending_completion_path(primary)
+    source_volume = f"heim-pc-nixos-source-{expected_source_revision[:12]}"
+    expected_fence = {
+        "schema_version": 1, "kind": "heim_pc.managed_nix_active_fence",
+        "source_revision": expected_source_revision, "docker_volume": expected_docker_volume,
+    }
+    lock_fd: int | None = None
+    try:
+        # Do not create paths or inspect authoritative lifecycle evidence before flock.
+        lock_parents = _reconciliation_parents(lock)
+        lock_fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ManagedBuildError("managed Nix identity already has an active build lease") from exc
+        lock_info = os.fstat(lock_fd)
+        if (
+            not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid()
+            or lock_info.st_nlink != 1 or stat.S_IMODE(lock_info.st_mode) != 0o600
+        ):
+            raise ManagedBuildError("unsafe reconciliation lifecycle lock")
+        lock_identity = _reconciliation_file_identity(lock_info)
+        if _reconciliation_file_identity(lock.lstat()) != lock_identity:
+            raise ManagedBuildError("reconciliation lifecycle lock changed")
+        _reconciliation_require_absent(recovery)
+        _reconciliation_require_absent(pending)
+        original = _read_reconciliation_file(primary, fence=True)
+        if _canonical_json(original["payload"]) != _canonical_json(expected_fence):
+            raise ManagedBuildError("active fence does not match expected Nix binding")
+        if prior_receipt.parent != state_root / "receipts":
+            raise ManagedBuildError("prior receipt must be in the managed receipt directory")
+        receipt_parents = _reconciliation_parents(prior_receipt)
+        receipt_file = _read_reconciliation_file(prior_receipt)
+        if receipt_file["sha256"] != expected_receipt_sha256:
+            raise ManagedBuildError("prior receipt SHA256 mismatch")
+        receipt = receipt_file["payload"]
+        facts = repository_facts(repo)
+        expected_receipt = {
+            "schema_version": 1, "kind": "heim_pc.managed_build_receipt", "tool": "nix",
+            "profile": "nixos-production-prepare", "cache_key": expected_cache_key,
+            "repository_identity_sha256": facts["repository_identity_sha256"],
+        }
+        nix = receipt.get("nix_build")
+        if (
+            any(_canonical_json(receipt.get(k)) != _canonical_json(v) for k, v in expected_receipt.items())
+            or not isinstance(nix, dict)
+            or nix.get("source_revision") != expected_source_revision
+            or nix.get("docker_volume") != expected_docker_volume
+            or nix.get("source_volume") != source_volume
+            or nix.get("lifecycle_lock_path") != str(lock)
+            or nix.get("lock_mode") != "flock-exclusive-nonblocking"
+            or type(receipt.get("returncode")) is not int or receipt["returncode"] == 0
+            or nix.get("store_scan_error_detected") is not True
+            or nix.get("container_cleanup_verified") is not True
+            or receipt.get("status") == "success" or "system_closure" in nix
+        ):
+            raise ManagedBuildError("prior receipt does not prove the exact terminal scan-error failure and cleanup")
+        if not command or any(not isinstance(arg, str) or "\x00" in arg for arg in command):
+            raise ManagedBuildError("prior worker argv preimage is required")
+        if receipt.get("command") != {
+            "executable": _command_basename(command), "argv_sha256": _sha256_json(list(command)),
+        }:
+            raise ManagedBuildError("prior worker argv does not match the receipt command digest")
+        prior_repo = Path(_command_option_value(command, "--repo"))
+        _require_nix_prepare_worker_binding(command, prior_repo, "nixos-production-prepare")
+        if repository_facts(prior_repo)["repository_identity_sha256"] != facts["repository_identity_sha256"]:
+            raise ManagedBuildError("prior worker repository identity mismatch")
+        output = Path(_command_option_value(command, "--output"))
+        success = _managed_nix_success_receipt_path(command)
+        output_parents = _reconciliation_parents(output)
+        authority_file: dict[str, Any] | None = None
+        fence_identity = original["file_identity"]
+        fence_phase = "active"
+
+        def check_local(phase: str) -> None:
+            nonlocal fence_identity, fence_phase
+            if (
+                _reconciliation_parents(lock) != lock_parents
+                or _reconciliation_parents(prior_receipt) != receipt_parents
+                or _reconciliation_parents(output) != output_parents
+                or _reconciliation_file_identity(os.fstat(lock_fd)) != lock_identity
+                or _reconciliation_file_identity(lock.lstat()) != lock_identity
+                or _read_reconciliation_file(prior_receipt) != receipt_file
+            ):
+                raise ManagedBuildError("reconciliation evidence or lock changed")
+            _reconciliation_require_absent(pending)
+            _reconciliation_require_absent(output)
+            _reconciliation_require_absent(success)
+            for path in (primary, recovery):
+                present = phase == "linked" or (phase == "active" and path == primary) or (phase == "recovery" and path == recovery)
+                if not present:
+                    _reconciliation_require_absent(path)
+                    continue
+                current = _read_reconciliation_file(path, links=2 if phase == "linked" else 1, fence=True)
+                # Our link/unlink changes ctime and nlink, but never content, inode or mtime.
+                ignored = {"st_ctime_ns", "st_nlink"} if phase != fence_phase else set()
+                if current["sha256"] != original["sha256"] or any(
+                    current["file_identity"][key] != value
+                    for key, value in fence_identity.items() if key not in ignored
+                ):
+                    raise ManagedBuildError("active fence changed during reconciliation")
+                fence_identity, fence_phase = current["file_identity"], phase
+            if authority_file is not None and _read_reconciliation_file(authority) != authority_file:
+                raise ManagedBuildError("reconciliation authority changed")
+
+        def recheck(phase: str) -> None:
+            check_local(phase)
+            for volume in (expected_docker_volume, source_volume):
+                if _nix_volume_exists(volume):
+                    raise ManagedBuildError("prior managed Nix volume still exists")
+                # Observe mutations during each external inventory call before proceeding.
+                check_local(phase)
+
+        recheck("active")
+        evidence = {
+            "schema_version": 1, "kind": "heim_pc.managed_nix_reconciliation_authority",
+            "operation": "reconcile-nix", "status": "authorized",
+            "cache_key": expected_cache_key, "repository_identity_sha256": facts["repository_identity_sha256"],
+            "fence_path": str(primary), "fence_payload": expected_fence,
+            "fence_file_sha256": original["sha256"], "fence_file_identity": original["file_identity"],
+            "prior_receipt_path": str(prior_receipt), "prior_receipt_sha256": expected_receipt_sha256,
+            "prior_receipt_file_identity": receipt_file["file_identity"],
+            "command_argv_sha256": receipt["command"]["argv_sha256"],
+            "evidence_checked": {
+                "returncode": receipt["returncode"], "store_scan_error_detected": True,
+                "container_cleanup_verified": True, "docker_volumes_absent": [expected_docker_volume, source_volume],
+                "output_absent": str(output), "success_receipt_absent": str(success),
+                "recovery_absent": str(recovery), "pending_completion_absent": str(pending),
+                "lifecycle_lock": str(lock), "lock_mode": "flock-exclusive-nonblocking",
+            },
+        }
+        # Outside trimmed build receipts; content and inode binding prevent stale authority reuse.
+        authority = primary.with_name(f"{expected_cache_key}.reconcile-{_sha256_json(evidence)}.json")
+        try:
+            _atomic_create_json(authority, evidence)
+        except FileExistsError:
+            pass
+        authority_file = _read_reconciliation_file(authority, durable=True)
+        if _canonical_json(authority_file["payload"]) != _canonical_json(evidence):
+            raise ManagedBuildError("conflicting reconciliation authority; primary retained")
+        _fsync_directory(authority.parent)
+        _fsync_directory_ancestors(authority.parent)
+        recheck("active")
+        # Same primary -> recovery hardlink protocol as _clear_nix_lifecycle_fence,
+        # with evidence validation at each destructive boundary. No cleanup on error.
+        os.link(primary, recovery, follow_symlinks=False)
+        recheck("linked")
+        _fsync_directory(primary.parent)
+        recheck("linked")
+        primary.unlink()
+        _fsync_directory(primary.parent)
+        recheck("recovery")
+        try:
+            recovery.unlink()
+            _fsync_directory(primary.parent)
+            check_local("retired")
+        except BaseException:
+            # Caught final-retirement failures restore a blocking name when absent.
+            # A hard crash here can expose only terminal absence backed by the
+            # already durable authority, or a surviving recovery name (fail closed).
+            if not os.path.lexists(primary) and not os.path.lexists(recovery):
+                _atomic_create_json(primary, expected_fence)
+            raise
+        return {
+            "schema_version": 1, "kind": "heim_pc.managed_nix_reconciliation_result",
+            "status": "reconciled", "cache_key": expected_cache_key,
+            "fence_file_sha256": original["sha256"], "prior_receipt_sha256": expected_receipt_sha256,
+            "authority_path": str(authority), "authority_sha256": authority_file["sha256"],
+            "lifecycle_markers_absent": [str(primary), str(recovery), str(pending)],
+        }
+    except OSError as exc:
+        raise ManagedBuildError("Nix reconciliation I/O failed; inspect retained markers and authority") from exc
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
 def _publish_nix_success(path: Path, fence: Path, success: dict[str, Any]) -> None:
     """Commit success across potentially different receipt/state filesystems.
 
@@ -2196,6 +2474,17 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("command", nargs=argparse.REMAINDER)
 
+    reconcile = subparsers.add_parser(
+        "reconcile-nix", help="explicitly retire one evidence-bound terminal scan-error ACTIVE fence",
+    )
+    reconcile.add_argument("--repo", type=Path, required=True)
+    reconcile.add_argument("--expected-cache-key", required=True)
+    reconcile.add_argument("--expected-source-revision", required=True)
+    reconcile.add_argument("--expected-docker-volume", required=True)
+    reconcile.add_argument("--prior-receipt", type=Path, required=True)
+    reconcile.add_argument("--expected-receipt-sha256", required=True)
+    reconcile.add_argument("command", nargs=argparse.REMAINDER, help="exact prior worker argv after --; verified against receipt hash")
+
     pin = subparsers.add_parser("pin", help="create one explicit expiring hard-budget pin")
     pin.add_argument("--repo", type=Path, required=True)
     pin.add_argument("--tool", choices=["cargo", "node", "python", "nix", "playwright"], required=True)
@@ -2246,6 +2535,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         policy = load_policy(args.policy)
         home = Path(os.environ.get("HOME", "~")).expanduser().resolve()
+        if args.operation == "reconcile-nix":
+            command = list(args.command)
+            if command and command[0] == "--":
+                command = command[1:]
+            result = reconcile_nix_fence(
+                policy, repo=args.repo, home=home, expected_cache_key=args.expected_cache_key,
+                expected_source_revision=args.expected_source_revision,
+                expected_docker_volume=args.expected_docker_volume, prior_receipt=args.prior_receipt,
+                expected_receipt_sha256=args.expected_receipt_sha256, command=command,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
         if args.operation == "pin":
             result = create_pin(
                 policy,
