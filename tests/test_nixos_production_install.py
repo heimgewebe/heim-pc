@@ -4471,7 +4471,7 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "predicate-type: https://heimgewebe.local/attestations/nixos-independent-managed-build/v1" in workflow
     assert "predicate-path: ${{ runner.temp }}/independent-managed-rebuild-predicate.json" in workflow
     assert "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c" in workflow
-    assert "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d" in workflow
+    assert "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6" in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "self-hosted" not in workflow
     assert "remote-install-artifact.json" in workflow
