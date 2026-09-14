@@ -205,25 +205,85 @@ class ManagedBuildTests(unittest.TestCase):
         run.assert_called_once()
         self.assertGreaterEqual(inventory.call_count, 3)
 
-    def test_nix_container_cleanup_timeout_is_ambiguous_failure(self) -> None:
+    def test_nix_container_cleanup_timeout_can_be_resolved_by_verified_absence(self) -> None:
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
         container_id = "c" * 64
         with (
-            patch.object(managed_build, "_nix_container_ids", return_value=[container_id]),
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container_id], [], []],
+            ) as inventory,
             patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
             patch.object(
                 managed_build.subprocess, "run",
                 side_effect=subprocess.TimeoutExpired(
                     ["/usr/bin/docker", "rm", "--force", container_id],
-                    managed_build.VERSION_TIMEOUT_SECONDS,
+                    managed_build.NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS,
                 ),
-            ),
+            ) as run,
+            patch.object(managed_build.time, "sleep"),
         ):
-            with self.assertRaisesRegex(
-                managed_build.ManagedBuildError,
-                "container removal outcome is ambiguous after timeout",
-            ):
-                managed_build._remove_exact_nix_containers(label)
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, True))
+        run.assert_called_once()
+        self.assertGreaterEqual(inventory.call_count, 3)
+
+    def test_nix_container_cleanup_timeout_fails_closed_if_container_survives(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container_id = "c" * 64
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container_id], [container_id], [container_id], [container_id]],
+            ),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(
+                managed_build.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["/usr/bin/docker", "rm", "--force", container_id],
+                    managed_build.NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS,
+                ),
+            ) as run,
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, False))
+        self.assertEqual(run.call_count, 3)
+
+    def test_nix_container_cleanup_oserror_can_be_resolved_by_verified_absence(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container_id = "c" * 64
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container_id], [], []],
+            ),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", side_effect=OSError("exec failed")),
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, True))
+
+    def test_nix_container_cleanup_accepts_exact_removal_in_progress_race(self) -> None:
+        label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
+        container_id = "c" * 64
+        failed_rm = subprocess.CompletedProcess(
+            ["/usr/bin/docker", "rm", "--force", container_id],
+            1,
+            b"",
+            (
+                f"Error response from daemon: removal of container {container_id} "
+                "is already in progress"
+            ).encode("ascii"),
+        )
+        with (
+            patch.object(
+                managed_build, "_nix_container_ids",
+                side_effect=[[container_id], [], []],
+            ),
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=failed_rm),
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertEqual(managed_build._remove_exact_nix_containers(label), (0, True))
 
     def test_nix_container_cleanup_counts_partial_individual_success(self) -> None:
         label = "heim-pc.managed-nix=" + "a" * 64 + "-" + "b" * 12
@@ -1817,7 +1877,7 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(telemetry["container_count_force_removed"], 0)
         self.assertTrue(telemetry["container_cleanup_verified"])
 
-    def test_nix_successful_force_remove_remains_orphan_failure(self) -> None:
+    def test_nix_successful_force_remove_is_telemetry_not_orphan_failure(self) -> None:
         class Process:
             pid = 4201
             returncode = 0
@@ -1832,7 +1892,7 @@ class ManagedBuildTests(unittest.TestCase):
         guard = {
             "source_revision": "2" * 40,
             "docker_volume": "heim-pc-nixos-production-" + "2" * 12,
-            "store_root": "/tmp/managed-nix-store-force-remove-orphan-test",
+            "store_root": "/tmp/managed-nix-store-force-remove-race-test",
             "store_stop_threshold_bytes": 64,
             "store_budget_bytes": {"warning": 64, "hard": 96},
             "runtime_budget_seconds": {"warning": 10, "hard": 20},
@@ -1853,8 +1913,8 @@ class ManagedBuildTests(unittest.TestCase):
                 ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
             )
 
-        self.assertEqual(result.returncode, 76)
-        self.assertTrue(telemetry["container_orphan_detected"])
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(telemetry["container_orphan_detected"])
         self.assertEqual(telemetry["container_count_force_removed"], 1)
         self.assertTrue(telemetry["container_cleanup_verified"])
 

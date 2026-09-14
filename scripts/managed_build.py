@@ -33,6 +33,8 @@ MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 NIX_STORE_MONITOR_INTERVAL_SECONDS = 0.5
 NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 30.0
+# Container cleanup has its own bounded Docker-client window; exact label readback is authoritative.
+NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS = 5.0
 # Volume deletion gets the same bounded I/O window as the final store scan.
 NIX_VOLUME_REMOVE_TIMEOUT_SECONDS = 30.0
 INTERNAL_NIX_STORE_SCAN_OPERATION = "--internal-nix-store-scan"
@@ -1311,34 +1313,35 @@ def _remove_exact_nix_containers(label: str) -> tuple[int, bool]:
                     [_docker_executable(), "rm", "--force", container_id],
                     env=_docker_client_environment(),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                    timeout=VERSION_TIMEOUT_SECONDS,
+                    timeout=NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS,
                 )
-            except subprocess.TimeoutExpired as exc:
-                # The client can time out after the daemon accepted and completed
-                # this exact force-removal.  Absence afterwards therefore cannot
-                # distinguish auto-remove from manager-forced orphan cleanup.
-                raise ManagedBuildError(
-                    "managed Nix container removal outcome is ambiguous after timeout"
-                ) from exc
-            except OSError:
-                # Failure to start the exact docker client does not establish that
-                # a force-removal reached the daemon; fresh label state may still
-                # prove an independent `--rm` auto-remove race.
+            except (OSError, subprocess.TimeoutExpired):
+                # The command outcome is not cleanup authority. Docker may still
+                # finish the container's own `--rm` lifecycle independently; only
+                # fresh exact-label inventory below can prove that final state.
                 continue
             if result.returncode == 0:
+                # Telemetry only: this proves the manager won this removal call,
+                # not that the container was a lifecycle orphan.
                 removed += 1
-            else:
-                expected_missing = (
-                    f"Error response from daemon: No such container: {container_id}"
-                ).encode("ascii")
-                if result.stdout != b"" or result.stderr.strip() != expected_missing:
-                    raise ManagedBuildError(
-                        "managed Nix container removal outcome is ambiguous after nonzero exit"
-                    )
-        # Removing one exact container at a time preserves successful removals
-        # even when a sibling concurrently auto-removes and returns non-zero.
-        # Fresh inventory remains the cleanup authority; surviving containers
-        # still fail closed after the bounded attempts.
+                continue
+            expected_missing = (
+                f"Error response from daemon: No such container: {container_id}"
+            ).encode("ascii")
+            expected_in_progress = (
+                f"Error response from daemon: removal of container {container_id} "
+                "is already in progress"
+            ).encode("ascii")
+            if (
+                result.stdout != b""
+                or result.stderr.strip() not in {expected_missing, expected_in_progress}
+            ):
+                raise ManagedBuildError(
+                    "managed Nix container removal outcome is ambiguous after nonzero exit"
+                )
+        # Removing one exact container at a time preserves per-ID attribution.
+        # The authoritative result is the bounded, repeated label readback; any
+        # surviving exact-label container still fails closed.
         time.sleep(0.1)
     ids = _nix_container_ids(label)
     if ids:
@@ -1466,10 +1469,10 @@ def _run_nix_worker_guarded(
         if process.poll() is None:
             process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
         removed, cleanup_verified = _remove_exact_nix_containers(label)
-        # A container may still be visible while Docker completes `--rm` auto-removal.
-        # Only a successful explicit force-removal proves that a managed container
-        # actually survived the worker lifecycle and therefore remains an orphan fault.
-        orphan_detected = removed > 0
+        # Final exact-label state is the lifecycle authority. A successful explicit
+        # force-removal only means the manager won that cleanup race and remains
+        # telemetry; an unverified final state is rejected below before returning.
+        orphan_detected = not cleanup_verified
         try:
             final_scan = _bounded_store_scan(store_root, timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS)
         except StoreScanTimeout:
@@ -1511,8 +1514,6 @@ def _run_nix_worker_guarded(
         effective = 77
     elif trigger == "store-budget" or final_bytes >= stop_threshold:
         effective = 75
-    elif orphan_detected:
-        effective = 76
     else:
         effective = int(process.returncode or 0)
     return subprocess.CompletedProcess(list(command), effective), {
