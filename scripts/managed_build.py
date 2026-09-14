@@ -24,10 +24,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 try:
     from scripts.storage_inventory import ScanResult, scan_path
-    from scripts.nixos_production_install import PINNED_NIX_IMAGE
 except ModuleNotFoundError:  # Direct execution from scripts/.
     from storage_inventory import ScanResult, scan_path
-    from nixos_production_install import PINNED_NIX_IMAGE
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
@@ -45,6 +43,9 @@ NIX_CANCEL_GRACE_SECONDS = 5
 NIX_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 NIX_CONTAINER_LABEL_RE = re.compile(r"^heim-pc\.managed-nix=[0-9a-f]{64}-[0-9a-f]{12}$")
 NIX_LIVE_SCAN_LABEL_RE = re.compile(r"^heim-pc\.managed-nix-scan=[0-9a-f]{64}-[0-9a-f]{12}$")
+# Keep this standalone: managed_build.py is also shipped in the isolated Cargo-maintenance release.
+# A unit test binds this immutable image ID to nixos_production_install.PINNED_NIX_IMAGE.
+PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
 NIX_LIVE_SCAN_FIND = "/root/.nix-profile/bin/find"
 NIX_LIVE_SCAN_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"

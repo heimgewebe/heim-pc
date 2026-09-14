@@ -1888,6 +1888,11 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(final_scan_modes, [False])
         self.assertFalse(telemetry["store_scan_error_detected"])
 
+    def test_live_store_scanner_image_pin_matches_production_installer(self) -> None:
+        from scripts import nixos_production_install as installer
+
+        self.assertEqual(managed_build.PINNED_NIX_IMAGE, installer.PINNED_NIX_IMAGE)
+
     def test_bounded_live_store_scan_uses_pinned_read_only_root_find_and_deduplicates_hardlinks(self) -> None:
         completed = subprocess.CompletedProcess(
             ["scan"], 0, stdout=b"1 10 2\n1 11 3\n1 10 2\n", stderr=b""
