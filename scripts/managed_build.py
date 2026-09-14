@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
-NIX_STORE_MONITOR_INTERVAL_SECONDS = 0.5
+NIX_STORE_MONITOR_INTERVAL_SECONDS = 2.0
 NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 30.0
 # Container cleanup has its own bounded Docker-client window; exact label readback is authoritative.
 NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS = 5.0
@@ -48,7 +48,13 @@ NIX_LIVE_SCAN_LABEL_RE = re.compile(r"^heim-pc\.managed-nix-scan=[0-9a-f]{64}-[0
 # A unit test binds this immutable image ID to nixos_production_install.PINNED_NIX_IMAGE.
 PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
 NIX_LIVE_SCAN_FIND = "/root/.nix-profile/bin/find"
+NIX_LIVE_SCAN_SLEEP = "/root/.nix-profile/bin/sleep"
+# Cover startup/readback, client cancellation, both container cleanups and final scanning.
+NIX_LIVE_SCAN_OBSERVER_MARGIN_SECONDS = 300
 NIX_LIVE_SCAN_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+NIX_LIVE_SCAN_MAX_STDERR_BYTES = 64 * 1024
+NIX_LIVE_SCAN_MAX_ROW_BYTES = 128
+NIX_LIVE_SCAN_ROW_RE = re.compile(rb"[0-9]+ [0-9]+ [0-9]+\n")
 NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"
 DOCKER_SEARCH_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -625,7 +631,7 @@ def _cleanup_live_store_scan_container(label: str) -> bool:
             continue
         for container_id in ids:
             try:
-                subprocess.run(
+                result = subprocess.run(
                     [_docker_executable(), "rm", "--force", container_id],
                     env=_docker_client_environment(),
                     stdout=subprocess.PIPE,
@@ -635,21 +641,39 @@ def _cleanup_live_store_scan_container(label: str) -> bool:
                 )
             except (OSError, subprocess.TimeoutExpired):
                 continue
+            if result.returncode != 0:
+                expected_missing = (
+                    f"Error response from daemon: No such container: {container_id}"
+                ).encode("ascii")
+                expected_in_progress = (
+                    f"Error response from daemon: removal of container {container_id} "
+                    "is already in progress"
+                ).encode("ascii")
+                if (
+                    result.stdout != b""
+                    or result.stderr.strip() not in {expected_missing, expected_in_progress}
+                ):
+                    raise ManagedBuildError(
+                        "managed Nix live-scan container removal outcome is ambiguous after nonzero exit"
+                    )
         time.sleep(0.1)
+    if _live_store_scan_container_ids(label):
+        return False
+    time.sleep(0.1)
     return not _live_store_scan_container_ids(label)
 
 
 def _quiesce_live_store_scan_observer(process: subprocess.Popen[Any], label: str) -> None:
-    process_error: Exception | None = None
+    process_error: BaseException | None = None
     try:
         _terminate_process_group(process)
-    except Exception as exc:
+    except BaseException as exc:
         process_error = exc
-    cleanup_error: Exception | None = None
+    cleanup_error: BaseException | None = None
     cleaned = False
     try:
         cleaned = _cleanup_live_store_scan_container(label)
-    except Exception as exc:
+    except BaseException as exc:
         cleanup_error = exc
     if process_error is not None or cleanup_error is not None or not cleaned:
         cause = cleanup_error if cleanup_error is not None else process_error
@@ -658,125 +682,134 @@ def _quiesce_live_store_scan_observer(process: subprocess.Popen[Any], label: str
         ) from cause
 
 
+class _LiveStoreFindParser:
+    """Account rows incrementally, retaining only one bounded line and inode keys."""
+
+    def __init__(self) -> None:
+        self.output_bytes = 0
+        self.pending = bytearray()
+        self.seen: set[tuple[int, int]] = set()
+        self.allocated_bytes = 0
+        self.row_count = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self.output_bytes += len(chunk)
+        if self.output_bytes > NIX_LIVE_SCAN_MAX_OUTPUT_BYTES:
+            raise ManagedBuildError("managed Nix live store scan exceeded its output bound")
+        offset = 0
+        while offset < len(chunk):
+            newline = chunk.find(b"\n", offset)
+            end = len(chunk) if newline < 0 else newline + 1
+            if len(self.pending) + end - offset > NIX_LIVE_SCAN_MAX_ROW_BYTES:
+                raise ManagedBuildError("managed Nix live store scan exceeded its row bound")
+            self.pending.extend(chunk[offset:end])
+            offset = end
+            if newline < 0:
+                break
+            if NIX_LIVE_SCAN_ROW_RE.fullmatch(self.pending) is None:
+                raise ManagedBuildError("managed Nix live store scan returned malformed or non-ASCII output")
+            device, inode, blocks = (int(part) for part in self.pending.split())
+            self.pending.clear()
+            self.row_count += 1
+            key = (device, inode)
+            if key not in self.seen:
+                self.seen.add(key)
+                self.allocated_bytes += blocks * 512
+
+    def finish(self) -> dict[str, Any]:
+        if self.pending:
+            raise ManagedBuildError("managed Nix live store scan returned a partial terminal row")
+        if self.row_count == 0:
+            raise ManagedBuildError("managed Nix live store scan returned no filesystem rows")
+        return {"allocated_bytes": self.allocated_bytes, "error_count": 0, "entries": []}
+
+
+def _parse_live_store_find_output(chunks: Iterable[bytes] | bytes) -> dict[str, Any]:
+    parser = _LiveStoreFindParser()
+    if isinstance(chunks, bytes):
+        chunks = (chunks,)
+    for chunk in chunks:
+        parser.feed(chunk)
+    return parser.finish()
+
+
 def _capture_live_store_scan_output(
     process: subprocess.Popen[Any], *, label: str, timeout_seconds: float
-) -> bytes:
-    if process.stdout is None or process.stderr is None:
-        raise ManagedBuildError("managed Nix live store scan capture pipes are unavailable")
-    deadline = time.monotonic() + timeout_seconds
-    output = bytearray()
-    trigger: str | None = None
-    capture_error: OSError | None = None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+) -> dict[str, Any]:
+    selector = None
+    pipes = []
+    failure: BaseException | None = None
     try:
+        pipes = [pipe for pipe in (process.stdout, process.stderr) if pipe is not None]
+        if process.stdout is None or process.stderr is None:
+            raise ManagedBuildError("managed Nix live store scan capture pipes are unavailable")
+        deadline = time.monotonic() + timeout_seconds
+        parser = _LiveStoreFindParser()
+        stderr_bytes = 0
+        selector = selectors.DefaultSelector()
+        for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+            os.set_blocking(pipe.fileno(), False)
+            selector.register(pipe, selectors.EVENT_READ, name)
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                trigger = "timeout"
-                break
+                raise StoreScanTimeout("managed Nix live store scan exceeded its bounded observation window")
             events = selector.select(timeout=min(0.05, remaining))
-            if not events:
-                continue
             for key, _mask in events:
                 try:
                     chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-                except OSError as exc:
-                    capture_error = exc
-                    trigger = "capture-error"
-                    break
+                except BlockingIOError:
+                    continue
                 if not chunk:
                     selector.unregister(key.fileobj)
                     continue
                 if key.data == "stderr":
-                    # Any scanner/docker stderr is already a fail-closed result.
-                    # Drain no bytes into memory; terminate the observer instead.
-                    trigger = "stderr"
-                    break
-                remaining_output = NIX_LIVE_SCAN_MAX_OUTPUT_BYTES - len(output)
-                if len(chunk) > remaining_output:
-                    if remaining_output > 0:
-                        output.extend(chunk[:remaining_output])
-                    trigger = "output-bound"
-                    break
-                output.extend(chunk)
-            if trigger is not None:
-                break
-        if trigger is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                trigger = "timeout"
-            else:
-                try:
-                    process.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    trigger = "timeout"
+                    stderr_bytes += len(chunk)
+                    if stderr_bytes > NIX_LIVE_SCAN_MAX_STDERR_BYTES:
+                        raise ManagedBuildError("managed Nix live store scan exceeded its stderr bound")
+                else:
+                    parser.feed(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StoreScanTimeout("managed Nix live store scan exceeded its bounded observation window")
+        process.wait(timeout=remaining)
+        if process.returncode != 0:
+            raise ManagedBuildError("managed Nix live store scan failed")
+        observation = parser.finish()
+        # Reaping the leader alone does not prove that its process group is gone.
+        _terminate_process_group(process)
+        observation["stderr_bytes"] = stderr_bytes
+    except BaseException as exc:
+        failure = exc
     finally:
-        selector.close()
+        # A selector/pipe close failure must not skip the remaining closes or
+        # leave an exec client (and its remote find) outside cleanup authority.
+        for resource in (selector, *pipes):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
 
-    if trigger is not None:
-        try:
-            _quiesce_live_store_scan_observer(process, label)
-        finally:
-            process.stdout.close()
-            process.stderr.close()
-        if trigger == "timeout":
+    if failure is not None:
+        _quiesce_live_store_scan_observer(process, label)
+        if isinstance(failure, subprocess.TimeoutExpired):
             raise StoreScanTimeout(
                 "managed Nix live store scan exceeded its bounded observation window"
-            )
-        if trigger == "output-bound":
-            raise ManagedBuildError("managed Nix live store scan exceeded its output bound")
-        if trigger == "stderr":
-            raise ManagedBuildError("managed Nix live store scan failed")
-        raise ManagedBuildError("managed Nix live store scan output capture failed") from capture_error
-
-    process.stdout.close()
-    process.stderr.close()
-    if process.returncode != 0:
-        raise ManagedBuildError("managed Nix live store scan failed")
-    return bytes(output)
+            ) from failure
+        if isinstance(failure, ManagedBuildError) or not isinstance(failure, Exception):
+            raise failure
+        raise ManagedBuildError("managed Nix live store scan output capture failed") from failure
+    return observation
 
 
-def _parse_live_store_find_output(stdout: bytes) -> dict[str, Any]:
-    if len(stdout) > NIX_LIVE_SCAN_MAX_OUTPUT_BYTES:
-        raise ManagedBuildError("managed Nix live store scan exceeded its output bound")
-    try:
-        text = stdout.decode("ascii", "strict")
-    except UnicodeDecodeError as exc:
-        raise ManagedBuildError("managed Nix live store scan output is not ASCII") from exc
-    seen: set[tuple[int, int]] = set()
-    allocated_bytes = 0
-    row_count = 0
-    for line in text.splitlines():
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) != 3 or any(not part.isdecimal() for part in parts):
-            raise ManagedBuildError("managed Nix live store scan returned malformed output")
-        device, inode, blocks = (int(part) for part in parts)
-        row_count += 1
-        key = (device, inode)
-        if key in seen:
-            continue
-        seen.add(key)
-        allocated_bytes += blocks * 512
-    if row_count == 0:
-        raise ManagedBuildError("managed Nix live store scan returned no filesystem rows")
-    return {"allocated_bytes": allocated_bytes, "error_count": 0, "entries": []}
-
-
-def _bounded_live_store_scan(store_root: Path, *, timeout_seconds: float) -> dict[str, Any]:
-    """Measure the mutating Nix store from a root-visible, read-only observer.
-
-    Nix build sandboxes are deliberately private to dynamic build UIDs, so the
-    host user cannot account their allocated bytes while a build is active.
-    GNU find runs in the pinned image with a read-only bind and only suppresses
-    readdir disappearance races; any other traversal failure remains fail-closed.
-    Pre-run and final evidence continue to use the strict host-side scanner.
-    """
-    if timeout_seconds <= 0:
-        raise StoreScanTimeout("managed Nix live store scan deadline elapsed")
+def _start_live_store_scan_observer(
+    store_root: Path, *, label: str, worker_timeout_seconds: int
+) -> str:
+    """Create the guard-owned observer; the guard cleans even failed startup."""
+    if NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None or worker_timeout_seconds <= 0:
+        raise ManagedBuildError("managed Nix live-scan observer guard is invalid")
     root_text = str(store_root)
     if (
         not store_root.is_absolute()
@@ -792,14 +825,12 @@ def _bounded_live_store_scan(store_root: Path, *, timeout_seconds: float) -> dic
         raise ManagedBuildError("managed Nix live store scan root is unavailable") from exc
     if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
         raise ManagedBuildError("managed Nix live store scan root must be a real directory")
-    identity = hashlib.sha256(root_text.encode("utf-8")).hexdigest()
-    nonce = hashlib.sha256(f"{os.getpid()}:{time.time_ns()}".encode("ascii")).hexdigest()[:12]
-    label = f"heim-pc.managed-nix-scan={identity}-{nonce}"
-    if NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None:
-        raise ManagedBuildError("managed Nix live-scan label construction failed")
+    # Allow both bounded startup calls plus strictly more than the cleanup margin.
+    lifetime = worker_timeout_seconds + NIX_LIVE_SCAN_OBSERVER_MARGIN_SECONDS + 2 * VERSION_TIMEOUT_SECONDS + 1
     argv = [
         _docker_executable(),
         "run",
+        "-d",
         "--rm",
         "--network",
         "none",
@@ -817,8 +848,38 @@ def _bounded_live_store_scan(store_root: Path, *, timeout_seconds: float) -> dic
         "-v",
         f"{root_text}:/subject:ro",
         "--entrypoint",
-        NIX_LIVE_SCAN_FIND,
+        NIX_LIVE_SCAN_SLEEP,
         PINNED_NIX_IMAGE,
+        str(lifetime),
+    ]
+    try:
+        result = subprocess.run(
+            argv, env=_docker_client_environment(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedBuildError("managed Nix live-scan observer could not start") from exc
+    if result.returncode != 0 or re.fullmatch(rb"[0-9a-f]{64}\n?", result.stdout) is None:
+        raise ManagedBuildError("managed Nix live-scan observer startup returned an invalid container id")
+    container_id = result.stdout.rstrip(b"\n").decode("ascii")
+    if _live_store_scan_container_ids(label) != [container_id]:
+        raise ManagedBuildError("managed Nix live-scan observer startup inventory does not match its container id")
+    return container_id
+
+
+def _bounded_live_store_scan(
+    observer_id: str, *, label: str, timeout_seconds: float
+) -> dict[str, Any]:
+    """Measure via the guard's root-visible, read-only observer, tolerating only
+    readdir disappearance races. Pre-run and final scans remain strict on host.
+    """
+    if timeout_seconds <= 0:
+        raise StoreScanTimeout("managed Nix live store scan deadline elapsed")
+    if NIX_CONTAINER_ID_RE.fullmatch(observer_id) is None or NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None:
+        raise ManagedBuildError("managed Nix live-scan observer identity is invalid")
+    argv = [
+        _docker_executable(), "exec", observer_id, NIX_LIVE_SCAN_FIND,
         "/subject",
         "-xdev",
         "-ignore_readdir_race",
@@ -835,10 +896,9 @@ def _bounded_live_store_scan(store_root: Path, *, timeout_seconds: float) -> dic
         )
     except OSError as exc:
         raise ManagedBuildError("managed Nix live store scan could not start") from exc
-    stdout = _capture_live_store_scan_output(
+    return _capture_live_store_scan_output(
         process, label=label, timeout_seconds=timeout_seconds
     )
-    return _parse_live_store_find_output(stdout)
 
 
 def _internal_nix_store_scan_main(argv: Sequence[str]) -> int:
@@ -1709,16 +1769,22 @@ def _run_nix_worker_guarded(
     child_env = dict(environment)
     child_env["HEIM_PC_MANAGED_NIX_CONTAINER_LABEL"] = label
     store_root = Path(str(guard["store_root"]))
-    process = subprocess.Popen(
-        list(command), cwd=root, env=child_env, start_new_session=True,
-    )
-    deadline = time.monotonic() + timeout_seconds
+    observer_label = f"heim-pc.managed-nix-scan={plan_digest}-{nonce}"
+    process = None
     trigger: str | None = None
     max_observed = 0
+    max_scan_stderr_bytes = 0
     store_scan_error_detected = False
     store_scan_timeout_detected = False
     final_store_scan: dict[str, Any] | None = None
     try:
+        observer_id = _start_live_store_scan_observer(
+            store_root, label=observer_label, worker_timeout_seconds=timeout_seconds,
+        )
+        process = subprocess.Popen(
+            list(command), cwd=root, env=child_env, start_new_session=True,
+        )
+        deadline = time.monotonic() + timeout_seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1726,7 +1792,7 @@ def _run_nix_worker_guarded(
                 break
             try:
                 scan = _bounded_live_store_scan(
-                    store_root,
+                    observer_id, label=observer_label,
                     timeout_seconds=min(NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, remaining),
                 )
             except StoreScanTimeout:
@@ -1737,6 +1803,7 @@ def _run_nix_worker_guarded(
                     store_scan_timeout_detected = True
                     trigger = "store-scan-timeout"
                 break
+            max_scan_stderr_bytes = max(max_scan_stderr_bytes, scan.get("stderr_bytes", 0))
             if scan["error_count"] != 0:
                 store_scan_error_detected = True
                 trigger = "store-scan-error"
@@ -1758,11 +1825,13 @@ def _run_nix_worker_guarded(
         _terminate_process_group(process)
         if process.poll() is None:
             process.wait(timeout=NIX_CANCEL_GRACE_SECONDS)
-        removed, cleanup_verified = _remove_exact_nix_containers(label)
+        removed, worker_cleanup_verified = _remove_exact_nix_containers(label)
+        observer_cleanup_verified = _cleanup_live_store_scan_container(observer_label)
+        cleanup_verified = worker_cleanup_verified and observer_cleanup_verified
         # Final exact-label state is the lifecycle authority. A successful explicit
         # force-removal only means the manager won that cleanup race and remains
         # telemetry; an unverified final state is rejected below before returning.
-        orphan_detected = not cleanup_verified
+        orphan_detected = not worker_cleanup_verified
         try:
             final_scan = _bounded_store_scan(
                 store_root,
@@ -1783,12 +1852,15 @@ def _run_nix_worker_guarded(
                     trigger = "store-scan-error"
             final_bytes = final_scan["allocated_bytes"]
             max_observed = max(max_observed, final_bytes)
-        if not cleanup_verified:
+        if not observer_cleanup_verified:
+            raise ManagedBuildError("managed Nix live-scan observer cleanup could not be verified")
+        if not worker_cleanup_verified:
             raise ManagedBuildError("managed Nix container cleanup could not be verified")
     except BaseException as exc:
         process_cleanup_error: BaseException | None = None
         try:
-            _terminate_process_group(process)
+            if process is not None:
+                _terminate_process_group(process)
         except BaseException as cleanup_exc:
             process_cleanup_error = cleanup_exc
         container_cleanup_error: BaseException | None = None
@@ -1797,7 +1869,16 @@ def _run_nix_worker_guarded(
             _removed, containers_clean = _remove_exact_nix_containers(label)
         except BaseException as cleanup_exc:
             container_cleanup_error = cleanup_exc
-        if process_cleanup_error is not None or container_cleanup_error is not None or not containers_clean:
+        observer_cleanup_error: BaseException | None = None
+        observer_clean = False
+        try:
+            observer_clean = _cleanup_live_store_scan_container(observer_label)
+        except BaseException as cleanup_exc:
+            observer_cleanup_error = cleanup_exc
+        if (
+            process_cleanup_error is not None or container_cleanup_error is not None
+            or observer_cleanup_error is not None or not containers_clean or not observer_clean
+        ):
             raise ManagedBuildError(
                 "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
             ) from exc
@@ -1815,9 +1896,11 @@ def _run_nix_worker_guarded(
         "container_orphan_detected": orphan_detected,
         "container_count_force_removed": removed,
         "container_cleanup_verified": cleanup_verified,
+        "observer_cleanup_verified": observer_cleanup_verified,
         "store_stop_threshold_bytes": stop_threshold,
         "store_hard_limit_bytes": hard_limit,
         "store_max_observed_bytes": max_observed,
+        "store_scan_max_stderr_bytes": max_scan_stderr_bytes,
         "store_budget_stop_triggered": trigger == "store-budget" or final_bytes >= stop_threshold,
         "store_scan_error_detected": store_scan_error_detected,
         "store_scan_timeout_detected": store_scan_timeout_detected,
