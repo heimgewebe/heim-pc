@@ -48,7 +48,7 @@ def make_policy(path: Path, producer_path: Path, *, warning: int = 10, hard: int
 
 
 class StorageInventoryTests(unittest.TestCase):
-    def test_scan_tolerates_only_vanished_entries_when_explicitly_requested(self) -> None:
+    def test_scan_tolerates_only_transient_entry_races_when_explicitly_requested(self) -> None:
         class Entry:
             def __init__(self, exc: OSError) -> None:
                 self.exc = exc
@@ -86,13 +86,36 @@ class StorageInventoryTests(unittest.TestCase):
                 tolerant = scan_path(root, tolerate_vanished_entries=True)
             with patch(
                 "scripts.storage_inventory.os.scandir",
+                return_value=Entries(Entry(NotADirectoryError())),
+            ):
+                retyped = scan_path(root, tolerate_vanished_entries=True)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
                 return_value=Entries(Entry(PermissionError())),
             ):
                 denied = scan_path(root, tolerate_vanished_entries=True)
 
         self.assertEqual(strict.error_count, 1)
         self.assertEqual(tolerant.error_count, 0)
+        self.assertEqual(retyped.error_count, 0)
         self.assertEqual(denied.error_count, 1)
+
+    def test_scan_tolerates_scandir_type_change_only_when_explicitly_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
+                side_effect=NotADirectoryError(),
+            ):
+                strict = scan_path(root)
+            with patch(
+                "scripts.storage_inventory.os.scandir",
+                side_effect=NotADirectoryError(),
+            ):
+                tolerant = scan_path(root, tolerate_vanished_entries=True)
+
+        self.assertEqual(strict.error_count, 1)
+        self.assertEqual(tolerant.error_count, 0)
 
     def test_scan_does_not_follow_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
