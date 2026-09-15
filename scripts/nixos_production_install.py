@@ -61,8 +61,7 @@ MANAGED_BUILD_ATTESTATION_PREDICATE_TYPE = "https://heimgewebe.local/attestation
 MANAGED_BUILD_ATTESTATION_PREDICATE_KIND = "heim_pc.nixos_independent_managed_rebuild_match"
 INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "schema_version", "kind", "source_revision", "system_path", "nix_volume",
-    "nix_image", "profile", "source_authority", "closure_manifest_sha256",
-    "closure_path_count",
+    "nix_image", "profile", "closure_manifest_sha256", "closure_path_count",
 )
 GH_BIN = "/usr/bin/gh"
 SEALED_TOOL_LAUNCHER = "/usr/bin/env"
@@ -444,7 +443,9 @@ def managed_build_attestation_path(artifact_path: Path) -> Path:
 
 
 def verify_independent_rebuild_candidate(
-    candidate_path: Path, independent_path: Path, *, candidate_receipt_path: Path, flake_source: str
+    candidate_path: Path, independent_path: Path, *, candidate_receipt_path: Path, flake_source: str,
+    attestation_signer_revision: str, source_revision_ancestor_of_signer: bool,
+    sealed_source_surface_unchanged: bool,
 ) -> dict[str, Any]:
     candidate_path = Path(candidate_path)
     independent_path = Path(independent_path)
@@ -453,8 +454,20 @@ def verify_independent_rebuild_candidate(
         raise ProductionInstallError("candidate managed-build receipt path is not canonical")
     candidate = load_install_artifact(candidate_path)
     independent = load_install_artifact(independent_path)
-    if candidate["source_authority"] != "merged-main" or independent["source_authority"] != "merged-main":
-        raise ProductionInstallError("independent rebuild comparison requires merged-main artifacts")
+    if candidate["source_authority"] != "merged-main":
+        raise ProductionInstallError("independent rebuild candidate requires merged-main authority")
+    if SOURCE_REVISION_RE.fullmatch(attestation_signer_revision) is None:
+        raise ProductionInstallError("independent rebuild signer revision is invalid")
+    historical_source_rebuild = candidate["source_revision"] != attestation_signer_revision
+    expected_independent_authority = "proof-only" if historical_source_rebuild else "merged-main"
+    if independent["source_authority"] != expected_independent_authority:
+        raise ProductionInstallError(
+            "independent rebuild authority does not match signer/source relationship"
+        )
+    if source_revision_ancestor_of_signer is not True:
+        raise ProductionInstallError("independent rebuild source is not an ancestor of signer main")
+    if sealed_source_surface_unchanged is not True:
+        raise ProductionInstallError("sealed source contract surface changed after readiness seal")
     mismatches = [
         field for field in INDEPENDENT_REBUILD_MATCH_FIELDS
         if candidate.get(field) != independent.get(field)
@@ -485,7 +498,14 @@ def verify_independent_rebuild_candidate(
         "independent_managed_receipt_sha256": receipt["managed_receipt_sha256"],
         "managed_policy_sha256": policy_sha256,
         "semantic_identity_sha256": sha256_json(semantic_identity),
-        "excluded_nonsemantic_fields": ["source_bundle_sha256"],
+        "candidate_source_revision": candidate["source_revision"],
+        "candidate_source_authority": candidate["source_authority"],
+        "independent_source_authority": independent["source_authority"],
+        "attestation_signer_revision": attestation_signer_revision,
+        "historical_source_rebuild": historical_source_rebuild,
+        "source_revision_ancestor_of_signer": True,
+        "sealed_source_surface_unchanged": True,
+        "excluded_nonsemantic_fields": ["source_bundle_sha256", "source_authority"],
     }
 
 
@@ -507,26 +527,31 @@ def _attestation_bundle_sha256(path: Path) -> str:
 
 
 def managed_build_attestation_verify_argv(
-    artifact_path: Path, bundle_path: Path, source_revision: str
+    artifact_path: Path, bundle_path: Path, signer_revision: str | None
 ) -> list[str]:
-    if SOURCE_REVISION_RE.fullmatch(source_revision) is None:
-        raise ProductionInstallError("managed-build attestation source revision is invalid")
+    if signer_revision is not None and SOURCE_REVISION_RE.fullmatch(signer_revision) is None:
+        raise ProductionInstallError("managed-build attestation signer revision is invalid")
     for path, label in ((Path(artifact_path), "artifact"), (Path(bundle_path), "bundle")):
         if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
             raise ProductionInstallError(f"managed-build attestation {label} path is not canonical")
-    return [
+    argv = [
         GH_BIN, "attestation", "verify", str(artifact_path),
         "--repo", MANAGED_BUILD_ATTESTATION_REPOSITORY,
         "--bundle", str(bundle_path),
         "--signer-workflow", MANAGED_BUILD_ATTESTATION_WORKFLOW,
-        "--signer-digest", source_revision,
-        "--source-digest", source_revision,
+    ]
+    if signer_revision is not None:
+        argv += [
+            "--signer-digest", signer_revision,
+            "--source-digest", signer_revision,
+        ]
+    argv += [
         "--source-ref", MANAGED_BUILD_ATTESTATION_SOURCE_REF,
         "--predicate-type", MANAGED_BUILD_ATTESTATION_PREDICATE_TYPE,
         "--deny-self-hosted-runners",
         "--format", "json",
     ]
-
+    return argv
 
 def verify_managed_build_attestation(
     artifact_path: Path,
@@ -539,39 +564,72 @@ def verify_managed_build_attestation(
     artifact_path = Path(artifact_path)
     bundle_path = Path(bundle_path)
     artifact = load_install_artifact(artifact_path)
+    if artifact["source_authority"] != "merged-main":
+        raise ProductionInstallError("production attestation requires merged-main artifact")
+    if artifact["source_revision"] != source_revision:
+        raise ProductionInstallError("managed-build attestation source revision changed")
     artifact_sha256 = _sha256_file(artifact_path)
     bundle_sha256 = _attestation_bundle_sha256(bundle_path)
     if not isinstance(expected_policy_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_policy_sha256) is None:
         raise ProductionInstallError("managed-build attestation policy digest is invalid")
-    argv = managed_build_attestation_verify_argv(artifact_path, bundle_path, source_revision)
     run_command = _run if runner is None else runner
-    result = run_command(argv)
-    try:
-        output = json.loads(result.stdout.decode("utf-8", "strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
-        raise ProductionInstallError("managed-build attestation verifier returned invalid JSON") from exc
-    if not isinstance(output, list) or len(output) != 1 or not isinstance(output[0], dict):
-        raise ProductionInstallError("managed-build attestation verifier returned no unique verified attestation")
-    verification_result = output[0].get("verificationResult")
-    statement = verification_result.get("statement") if isinstance(verification_result, dict) else None
-    predicate = statement.get("predicate") if isinstance(statement, dict) else None
+
+    def verified_predicate(argv: list[str]) -> dict[str, Any]:
+        result = run_command(argv)
+        try:
+            output = json.loads(result.stdout.decode("utf-8", "strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
+            raise ProductionInstallError("managed-build attestation verifier returned invalid JSON") from exc
+        if not isinstance(output, list) or len(output) != 1 or not isinstance(output[0], dict):
+            raise ProductionInstallError("managed-build attestation verifier returned no unique verified attestation")
+        verification_result = output[0].get("verificationResult")
+        statement = verification_result.get("statement") if isinstance(verification_result, dict) else None
+        predicate = statement.get("predicate") if isinstance(statement, dict) else None
+        if not isinstance(predicate, dict):
+            raise ProductionInstallError("managed-build attestation predicate is invalid")
+        return predicate
+
+    discovery_argv = managed_build_attestation_verify_argv(artifact_path, bundle_path, None)
+    predicate = verified_predicate(discovery_argv)
+    signer_revision = predicate.get("attestation_signer_revision")
+    if not isinstance(signer_revision, str) or SOURCE_REVISION_RE.fullmatch(signer_revision) is None:
+        raise ProductionInstallError("managed-build attestation signer revision is invalid")
+    argv = managed_build_attestation_verify_argv(artifact_path, bundle_path, signer_revision)
+    strict_predicate = verified_predicate(argv)
+    if strict_predicate != predicate:
+        raise ProductionInstallError("managed-build attestation changed during strict verification")
+    predicate = strict_predicate
+
     required_predicate = {
         "schema_version", "kind", "candidate_artifact_sha256",
         "candidate_receipt_sha256", "candidate_managed_receipt_sha256",
         "independent_artifact_sha256", "independent_receipt_sha256",
         "independent_managed_receipt_sha256", "managed_policy_sha256",
-        "semantic_identity_sha256", "excluded_nonsemantic_fields",
+        "semantic_identity_sha256", "candidate_source_revision",
+        "candidate_source_authority", "independent_source_authority",
+        "attestation_signer_revision", "historical_source_rebuild",
+        "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
+        "excluded_nonsemantic_fields",
     }
-    if not isinstance(predicate, dict) or set(predicate) != required_predicate:
+    if set(predicate) != required_predicate:
         raise ProductionInstallError("managed-build attestation predicate is invalid")
     semantic_identity = {field: artifact[field] for field in INDEPENDENT_REBUILD_MATCH_FIELDS}
+    historical_source_rebuild = source_revision != signer_revision
+    expected_independent_authority = "proof-only" if historical_source_rebuild else "merged-main"
     if (
         predicate.get("schema_version") != 1
         or predicate.get("kind") != MANAGED_BUILD_ATTESTATION_PREDICATE_KIND
         or predicate.get("candidate_artifact_sha256") != artifact_sha256
         or predicate.get("managed_policy_sha256") != expected_policy_sha256
         or predicate.get("semantic_identity_sha256") != sha256_json(semantic_identity)
-        or predicate.get("excluded_nonsemantic_fields") != ["source_bundle_sha256"]
+        or predicate.get("candidate_source_revision") != source_revision
+        or predicate.get("candidate_source_authority") != "merged-main"
+        or predicate.get("independent_source_authority") != expected_independent_authority
+        or predicate.get("attestation_signer_revision") != signer_revision
+        or predicate.get("historical_source_rebuild") is not historical_source_rebuild
+        or predicate.get("source_revision_ancestor_of_signer") is not True
+        or predicate.get("sealed_source_surface_unchanged") is not True
+        or predicate.get("excluded_nonsemantic_fields") != ["source_bundle_sha256", "source_authority"]
     ):
         raise ProductionInstallError("managed-build attestation predicate does not bind current artifact")
     for field in (
@@ -596,9 +654,12 @@ def verify_managed_build_attestation(
         "independent_managed_receipt_sha256": predicate["independent_managed_receipt_sha256"],
         "managed_policy_sha256": predicate["managed_policy_sha256"],
         "semantic_identity_sha256": predicate["semantic_identity_sha256"],
+        "attestation_signer_revision": signer_revision,
+        "historical_source_rebuild": historical_source_rebuild,
+        "source_revision_ancestor_of_signer": True,
+        "sealed_source_surface_unchanged": True,
         "verified_attestation_count": 1,
     }
-
 
 def validate_managed_build_attestation_summary(
     value: Any, *, expected_artifact_sha256: str, expected_policy_sha256: str
@@ -608,7 +669,10 @@ def validate_managed_build_attestation_summary(
         "verifier_argv_sha256", "predicate_sha256", "candidate_receipt_sha256",
         "candidate_managed_receipt_sha256", "independent_artifact_sha256",
         "independent_receipt_sha256", "independent_managed_receipt_sha256",
-        "managed_policy_sha256", "semantic_identity_sha256", "verified_attestation_count",
+        "managed_policy_sha256", "semantic_identity_sha256",
+        "attestation_signer_revision", "historical_source_rebuild",
+        "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
+        "verified_attestation_count",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise ProductionInstallError("managed-build attestation verification summary is invalid")
@@ -620,13 +684,22 @@ def validate_managed_build_attestation_summary(
         or isinstance(value.get("verified_attestation_count"), bool)
         or not isinstance(value.get("verified_attestation_count"), int)
         or value["verified_attestation_count"] != 1
+        or not isinstance(value.get("attestation_signer_revision"), str)
+        or SOURCE_REVISION_RE.fullmatch(value["attestation_signer_revision"]) is None
+        or not isinstance(value.get("historical_source_rebuild"), bool)
+        or value.get("source_revision_ancestor_of_signer") is not True
+        or value.get("sealed_source_surface_unchanged") is not True
     ):
         raise ProductionInstallError("managed-build attestation verification summary is invalid")
-    for field in required - {"schema_version", "kind", "verified_attestation_count"}:
+    digest_fields = required - {
+        "schema_version", "kind", "verified_attestation_count",
+        "attestation_signer_revision", "historical_source_rebuild",
+        "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
+    }
+    for field in digest_fields:
         if not isinstance(value.get(field), str) or re.fullmatch(r"[0-9a-f]{64}", value[field]) is None:
             raise ProductionInstallError("managed-build attestation verification digest is invalid")
     return json.loads(json.dumps(value))
-
 
 def verify_managed_build_binding(plan: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
     artifact_path_raw = plan.get("install_artifact_path")
@@ -4220,7 +4293,24 @@ def execute_plan(
         raise ProductionInstallError(
             "production apply requires a merged-main install artifact"
         )
-    verify_promoted_main_revision(artifact["source_revision"])
+    attestation = plan.get("managed_build_attestation_verification")
+    if not isinstance(attestation, dict):
+        raise ProductionInstallError("production apply lacks independent attestation authority")
+    signer_revision = attestation.get("attestation_signer_revision")
+    historical_source_rebuild = attestation.get("historical_source_rebuild")
+    if (
+        not isinstance(signer_revision, str)
+        or SOURCE_REVISION_RE.fullmatch(signer_revision) is None
+        or not isinstance(historical_source_rebuild, bool)
+        or historical_source_rebuild != (signer_revision != artifact["source_revision"])
+        or attestation.get("source_revision_ancestor_of_signer") is not True
+    ):
+        raise ProductionInstallError("production attestation source/signer authority is inconsistent")
+    # JIT authority is the protected-main commit that signed the independent
+    # rebuild. For a historical sealed source this intentionally differs from
+    # the immutable source revision, whose ancestry is part of the signed
+    # predicate. Any later main movement invalidates the apply until re-attested.
+    verify_promoted_main_revision(signer_revision)
     if sha256_json(artifact) != plan.get("install_artifact_sha256"):
         raise ProductionInstallError("install artifact digest no longer matches the reviewed plan")
     if artifact["source_revision"] != plan.get("source_revision"):
@@ -4335,7 +4425,7 @@ def execute_plan(
         verify_partlabel_namespace_clear(contract)
         verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
         verify_managed_build_binding(plan, artifact)
-        verify_promoted_main_revision(artifact["source_revision"])
+        verify_promoted_main_revision(signer_revision)
         verify_docker_quiesced()
         verify_sealed_nix_structure(artifact, seal)
         if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
