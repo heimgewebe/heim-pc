@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,16 @@ TRUSTED_PROBE_EXECUTABLE_DIRS = (
     Path("/run/current-system/sw/bin"),
     Path("/usr/bin"),
 )
+MIDI_SYSFS_ROOT = Path("/sys/class/sound")
+ROLAND_FP30X_USB_ID = "0582:01b1"
+_MIDI_KERNEL_CLIENT_RE = re.compile(
+    r"^client\s+\d+:\s+'(?P<name>[^']+)'\s+\[type=kernel,card=(?P<card>\d+)\]\s*$",
+    re.IGNORECASE,
+)
+_MIDI_USB_ID_RE = re.compile(
+    r"^card=(?P<card>\d+)\s+usb=(?P<usb>[0-9a-f]{4}:[0-9a-f]{4})$",
+    re.IGNORECASE,
+)
 PROBE_ENVIRONMENT = {
     "PATH": ":".join(str(path) for path in TRUSTED_PROBE_EXECUTABLE_DIRS),
     "LANG": "C",
@@ -42,6 +53,10 @@ PROBE_DEFINITION = {
     ],
     "audio": {"read": "/proc/asound/cards"},
     "midi": ["aconnect", "-l"],
+    "midi_usb": {
+        "sysfs_root": str(MIDI_SYSFS_ROOT),
+        "expected_usb_id": ROLAND_FP30X_USB_ID,
+    },
     "trusted_executable_dirs": [str(path) for path in TRUSTED_PROBE_EXECUTABLE_DIRS],
     "environment": PROBE_ENVIRONMENT.copy(),
     "shell": False,
@@ -72,11 +87,13 @@ ANCHORS = {
         "label": "MOTU M2",
     },
     "midi": {
-        # A user-space ALSA client can choose its own name. Require the FP-30X
-        # identity and the kernel/card markers on the same client header line.
-        "observation_keys": ("midi",),
-        "needles": ("fp-30x",),
-        "same_line_needles": ("fp-30x", "type=kernel", "card="),
+        # ALSA exposes this FP-30X as either its model name or the kernel's
+        # generic Roland Digital Piano identity. Name alone is not model proof:
+        # the accepted kernel client must resolve through the same ALSA card to
+        # the FP-30X's exact USB vendor/product identity.
+        "observation_keys": ("midi", "midi_usb"),
+        "kernel_aliases": ("fp-30x", "roland digital piano"),
+        "usb_id": ROLAND_FP30X_USB_ID,
         "label": "Roland FP-30X MIDI path",
     },
 }
@@ -140,6 +157,53 @@ def _read_probe_file(path: Path) -> str:
     return text if text else f"ERROR:read-empty:{path}"
 
 
+def _kernel_midi_cards(midi_text: str) -> set[str]:
+    cards: set[str] = set()
+    for raw_line in midi_text.splitlines():
+        match = _MIDI_KERNEL_CLIENT_RE.fullmatch(raw_line.strip())
+        if match is not None:
+            cards.add(match.group("card"))
+    return cards
+
+
+def _sound_card_usb_identity(card: str) -> str:
+    if re.fullmatch(r"\d{1,3}", card) is None:
+        return f"card={card} usb=ERROR:invalid-card"
+    device_link = MIDI_SYSFS_ROOT / f"card{card}" / "device"
+    try:
+        resolved = device_link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return f"card={card} usb=ERROR:missing-device"
+    sys_devices = Path("/sys/devices")
+    if not resolved.is_relative_to(sys_devices):
+        return f"card={card} usb=ERROR:outside-sysfs"
+    for candidate in (resolved, *resolved.parents):
+        if not candidate.is_relative_to(sys_devices):
+            break
+        vendor_path = candidate / "idVendor"
+        product_path = candidate / "idProduct"
+        if not vendor_path.exists() or not product_path.exists():
+            continue
+        try:
+            vendor = vendor_path.read_text(encoding="ascii").strip().casefold()
+            product = product_path.read_text(encoding="ascii").strip().casefold()
+        except (OSError, UnicodeError):
+            return f"card={card} usb=ERROR:identity-read"
+        if re.fullmatch(r"[0-9a-f]{4}", vendor) is None or re.fullmatch(
+            r"[0-9a-f]{4}", product
+        ) is None:
+            return f"card={card} usb=ERROR:identity-format"
+        return f"card={card} usb={vendor}:{product}"
+    return f"card={card} usb=ERROR:not-usb"
+
+
+def _probe_midi_usb_identities(midi_text: str) -> str:
+    cards = sorted(_kernel_midi_cards(midi_text), key=int)
+    if not cards:
+        return "ERROR:no-kernel-midi-card"
+    return "\n".join(_sound_card_usb_identity(card) for card in cards)
+
+
 def probe_current_hardware(source_revision: str) -> dict[str, Any]:
     """Create fresh runtime facts from the fixed local read-only probe definition.
 
@@ -148,10 +212,14 @@ def probe_current_hardware(source_revision: str) -> dict[str, Any]:
     substituted by CLI input.
     """
 
+    gpu = _run_probe_command(list(PROBE_DEFINITION["gpu"]))
+    audio = _read_probe_file(Path(PROBE_DEFINITION["audio"]["read"]))
+    midi = _run_probe_command(list(PROBE_DEFINITION["midi"]))
     observations = {
-        "gpu": _run_probe_command(list(PROBE_DEFINITION["gpu"])),
-        "audio": _read_probe_file(Path(PROBE_DEFINITION["audio"]["read"])),
-        "midi": _run_probe_command(list(PROBE_DEFINITION["midi"])),
+        "gpu": gpu,
+        "audio": audio,
+        "midi": midi,
+        "midi_usb": _probe_midi_usb_identities(midi),
     }
     try:
         return runtime_facts(
@@ -179,15 +247,27 @@ def _observation_text(facts: Mapping[str, Any], keys: tuple[str, ...]) -> str:
 
 def _matches_anchor(haystack: str, spec: Mapping[str, Any]) -> bool:
     needles = tuple(spec.get("needles", ()))
-    if not all(needle in haystack for needle in needles):
+    return all(needle in haystack for needle in needles)
+
+
+def _matches_midi_anchor(facts: Mapping[str, Any], spec: Mapping[str, Any]) -> bool:
+    midi = _observation_text(facts, ("midi",))
+    usb = _observation_text(facts, ("midi_usb",))
+    aliases = {str(alias).casefold() for alias in spec.get("kernel_aliases", ())}
+    expected_usb = str(spec.get("usb_id", "")).casefold()
+    accepted_cards: set[str] = set()
+    for raw_line in midi.splitlines():
+        match = _MIDI_KERNEL_CLIENT_RE.fullmatch(raw_line.strip())
+        if match is not None and match.group("name").casefold() in aliases:
+            accepted_cards.add(match.group("card"))
+    if not accepted_cards or not expected_usb:
         return False
-    same_line_needles = tuple(spec.get("same_line_needles", ()))
-    if not same_line_needles:
-        return True
-    return any(
-        all(needle in line for needle in same_line_needles)
-        for line in haystack.splitlines()
-    )
+    matching_usb_cards: set[str] = set()
+    for raw_line in usb.splitlines():
+        match = _MIDI_USB_ID_RE.fullmatch(raw_line.strip())
+        if match is not None and match.group("usb").casefold() == expected_usb:
+            matching_usb_cards.add(match.group("card"))
+    return bool(accepted_cards & matching_usb_cards)
 
 
 def evaluate_hardware_acceptance(
@@ -216,7 +296,11 @@ def evaluate_hardware_acceptance(
     checks: dict[str, dict[str, Any]] = {}
     for name, spec in ANCHORS.items():
         haystack = _observation_text(facts, spec["observation_keys"])
-        matched = _matches_anchor(haystack, spec)
+        matched = (
+            _matches_midi_anchor(facts, spec)
+            if name == "midi"
+            else _matches_anchor(haystack, spec)
+        )
         checks[name] = {
             "label": spec["label"],
             "status": "pass" if matched else "fail",
