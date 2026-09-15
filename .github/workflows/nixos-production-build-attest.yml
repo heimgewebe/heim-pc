@@ -75,10 +75,12 @@ jobs:
 
           CANDIDATE="$CANDIDATE" CANDIDATE_RECEIPT="$CANDIDATE_RECEIPT" SOURCE_ROOT="$SOURCE_ROOT" python3 -c 'import os; from pathlib import Path; from scripts import nixos_production_install as prod; candidate=Path(os.environ["CANDIDATE"]); receipt=Path(os.environ["CANDIDATE_RECEIPT"]); value=prod.load_install_artifact(candidate); policy=prod.managed_policy_sha256_for_source(os.environ["SOURCE_ROOT"]); prod.load_managed_build_receipt(receipt, value, expected_policy_sha256=policy, artifact_path=candidate)'
 
-          echo "source_revision=$SOURCE_REVISION" >> "$GITHUB_OUTPUT"
-          echo "source_root=$SOURCE_ROOT" >> "$GITHUB_OUTPUT"
-          echo "independent_authority=$INDEPENDENT_AUTHORITY" >> "$GITHUB_OUTPUT"
-          echo "historical_source_rebuild=$HISTORICAL_SOURCE_REBUILD" >> "$GITHUB_OUTPUT"
+          {
+            echo "source_revision=$SOURCE_REVISION"
+            echo "source_root=$SOURCE_ROOT"
+            echo "independent_authority=$INDEPENDENT_AUTHORITY"
+            echo "historical_source_rebuild=$HISTORICAL_SOURCE_REBUILD"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Independently rebuild exact sealed source through managed Nix
         env:
