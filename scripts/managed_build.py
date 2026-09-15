@@ -53,6 +53,7 @@ NIX_LIVE_SCAN_SLEEP = "/root/.nix-profile/bin/sleep"
 NIX_LIVE_SCAN_OBSERVER_MARGIN_SECONDS = 300
 NIX_LIVE_SCAN_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 NIX_LIVE_SCAN_MAX_STDERR_BYTES = 64 * 1024
+NIX_LIVE_SCAN_FAILURE_STDERR_EXCERPT_BYTES = 4 * 1024
 NIX_LIVE_SCAN_MAX_ROW_BYTES = 128
 NIX_LIVE_SCAN_ROW_RE = re.compile(rb"[0-9]+ [0-9]+ [0-9]+\n")
 NIX_RECEIPT_SUFFIX = ".managed-build-receipt.json"
@@ -740,6 +741,20 @@ def _parse_live_store_find_output(chunks: Iterable[bytes] | bytes) -> dict[str, 
     return parser.finish()
 
 
+def _live_store_scan_failure_detail(returncode: int, stderr: bytes) -> str:
+    if returncode == 0:
+        raise ValueError("live store scan failure detail requires a nonzero return code")
+    digest = hashlib.sha256(stderr).hexdigest()
+    limit = NIX_LIVE_SCAN_FAILURE_STDERR_EXCERPT_BYTES
+    excerpt = stderr[-limit:] if len(stderr) > limit else stderr
+    excerpt_text = excerpt.decode("utf-8", "backslashreplace")
+    return (
+        f"exit={returncode} stderr_sha256={digest} "
+        f"stderr_truncated={'true' if len(stderr) > limit else 'false'} "
+        f"stderr_excerpt={json.dumps(excerpt_text, ensure_ascii=True)}"
+    )
+
+
 def _capture_live_store_scan_output(
     process: subprocess.Popen[Any], *, label: str, timeout_seconds: float
 ) -> dict[str, Any]:
@@ -753,6 +768,7 @@ def _capture_live_store_scan_output(
         deadline = time.monotonic() + timeout_seconds
         parser = _LiveStoreFindParser()
         stderr_bytes = 0
+        stderr_capture = bytearray()
         selector = selectors.DefaultSelector()
         for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             os.set_blocking(pipe.fileno(), False)
@@ -774,6 +790,7 @@ def _capture_live_store_scan_output(
                     stderr_bytes += len(chunk)
                     if stderr_bytes > NIX_LIVE_SCAN_MAX_STDERR_BYTES:
                         raise ManagedBuildError("managed Nix live store scan exceeded its stderr bound")
+                    stderr_capture.extend(chunk)
                 else:
                     parser.feed(chunk)
         remaining = deadline - time.monotonic()
@@ -781,7 +798,8 @@ def _capture_live_store_scan_output(
             raise StoreScanTimeout("managed Nix live store scan exceeded its bounded observation window")
         process.wait(timeout=remaining)
         if process.returncode != 0:
-            raise ManagedBuildError("managed Nix live store scan failed")
+            detail = _live_store_scan_failure_detail(process.returncode, bytes(stderr_capture))
+            raise ManagedBuildError(f"managed Nix live store scan failed: {detail}")
         observation = parser.finish()
         # Reaping the leader alone does not prove that its process group is gone.
         _terminate_process_group(process)

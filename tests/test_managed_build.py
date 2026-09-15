@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -2086,12 +2087,29 @@ class ManagedBuildTests(unittest.TestCase):
         with patch.object(
             managed_build, "_cleanup_live_store_scan_container", return_value=True
         ) as cleanup:
-            with self.assertRaisesRegex(managed_build.ManagedBuildError, "scan failed"):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "scan failed") as caught:
                 managed_build._capture_live_store_scan_output(
                     process, label=label, timeout_seconds=3
                 )
+        message = str(caught.exception)
+        self.assertIn("exit=3", message)
+        expected_stderr = b"find failed\n"
+        self.assertIn("stderr_sha256=" + hashlib.sha256(expected_stderr).hexdigest(), message)
+        self.assertIn("stderr_truncated=false", message)
+        self.assertIn('stderr_excerpt="find failed\\n"', message)
         cleanup.assert_called_once_with(label)
         self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_failure_detail_bounds_and_escapes_stderr(self) -> None:
+        stderr = b"prefix\n" + b"x" * 20 + b"\x1b[31mfind failed\n"
+        with patch.object(managed_build, "NIX_LIVE_SCAN_FAILURE_STDERR_EXCERPT_BYTES", 17):
+            detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertIn("exit=1", detail)
+        self.assertIn(f"stderr_sha256={hashlib.sha256(stderr).hexdigest()}", detail)
+        self.assertIn("stderr_truncated=true", detail)
+        self.assertNotIn("prefix", detail)
+        self.assertNotIn("\x1b", detail)
+        self.assertIn("\\u001b", detail)
 
     def test_live_store_scan_capture_enforces_stdout_and_stderr_bounds(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
