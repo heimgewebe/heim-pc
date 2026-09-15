@@ -64,7 +64,11 @@ def _hwdb_with_children(characters: list[int]) -> bytes:
     return bytes(data)
 
 
-def _hwdb_with_wildcard_value(*, null_wildcard_prefix: bool) -> bytes:
+def _hwdb_with_wildcard_value(
+    *,
+    null_wildcard_prefix: bool,
+    null_filename_offset: bool = False,
+) -> bytes:
     header_size = 80
     node_size = 24
     child_size = 16
@@ -118,7 +122,7 @@ def _hwdb_with_wildcard_value(*, null_wildcard_prefix: bool) -> bytes:
         value_entry,
         key_offset,
         value_offset,
-        filename_offset,
+        0 if null_filename_offset else filename_offset,
     )
     struct.pack_into("<I", data, value_entry + 24, 1)
     struct.pack_into("<H", data, value_entry + 28, 1)
@@ -215,6 +219,21 @@ def test_hwdb_projection_rejects_null_prefix_in_wildcard_node(tmp_path):
     ])
 
     path.write_bytes(_hwdb_with_wildcard_value(null_wildcard_prefix=True))
+    with pytest.raises(
+        hist.HistoricalReproducibilityError,
+        match="string offset is outside the string table",
+    ):
+        hist._hwdb_projection(path)
+
+
+def test_hwdb_projection_rejects_null_filename_offset(tmp_path):
+    path = tmp_path / "hwdb.bin"
+    path.write_bytes(
+        _hwdb_with_wildcard_value(
+            null_wildcard_prefix=False,
+            null_filename_offset=True,
+        )
+    )
     with pytest.raises(
         hist.HistoricalReproducibilityError,
         match="string offset is outside the string table",
