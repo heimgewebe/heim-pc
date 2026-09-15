@@ -5,6 +5,7 @@ import tarfile
 import importlib.util
 import json
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -4667,6 +4668,8 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert 'git rev-list --first-parent "$GITHUB_SHA" | grep -Fx -- "$SOURCE_REVISION" >/dev/null' in workflow
     assert "git -c core.hooksPath=/dev/null worktree add --detach" in workflow
     assert 'git diff --quiet "$SOURCE_REVISION" "$GITHUB_SHA"' in workflow
+    assert "flake.nix" in workflow
+    assert "flake.lock" in workflow
     assert "nixos/system" in workflow
     assert "nixos/production/contract-v1.json" in workflow
     assert "nixos/deployment/contract-v1.json" in workflow
@@ -4697,10 +4700,31 @@ def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_bi
     assert managed_spec.loader is not None
     managed_spec.loader.exec_module(managed)
 
+    primary = tmp_path / "primary"
     sealed_root = tmp_path / "sealed-source"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", str(ROOT), str(primary)],
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(primary), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        [
+            "git", "-C", str(primary), "-c", "core.hooksPath=/dev/null",
+            "worktree", "add", "--quiet", "--detach", str(sealed_root), revision,
+        ],
+        check=True,
+    )
+
+    facts = managed.repository_facts(sealed_root)
+    assert facts["root"] == str(sealed_root.resolve())
+    assert facts["git_common_dir"] == str((primary / ".git").resolve())
+
     sealed_script = sealed_root / "scripts" / "nixos_production_prepare.py"
-    sealed_script.parent.mkdir(parents=True)
-    sealed_script.write_text("# historical entrypoint placeholder\n", encoding="utf-8")
     output = tmp_path / "remote-install-artifact.json"
     command = [
         managed._trusted_nix_worker_python(),
@@ -4710,13 +4734,28 @@ def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_bi
         "--output", str(output),
         "--source-authority", "proof-only",
     ]
-    managed._require_nix_prepare_worker_binding(command, sealed_root, "nixos-production-prepare")
+    policy = managed.load_policy(sealed_root / "config" / "managed-build.v1.json")
+    context = managed._build_identity_context(
+        policy,
+        repo=sealed_root,
+        command=command,
+        home=tmp_path / "home",
+        explicit_tool="nix",
+        explicit_profile="nixos-production-prepare",
+    )
+    assert context["repository_root"] == str(sealed_root.resolve())
+    assert context["command"]["executable"] == Path(managed._trusted_nix_worker_python()).name
 
     wrong_checkout = list(command)
     wrong_checkout[1] = str(ROOT / "scripts" / "nixos_production_prepare.py")
     with pytest.raises(managed.ManagedBuildError, match="canonical repository prepare script"):
-        managed._require_nix_prepare_worker_binding(
-            wrong_checkout, sealed_root, "nixos-production-prepare"
+        managed._build_identity_context(
+            policy,
+            repo=sealed_root,
+            command=wrong_checkout,
+            home=tmp_path / "home-wrong",
+            explicit_tool="nix",
+            explicit_profile="nixos-production-prepare",
         )
 
 

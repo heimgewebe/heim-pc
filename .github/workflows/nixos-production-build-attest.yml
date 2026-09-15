@@ -55,6 +55,8 @@ jobs:
           git merge-base --is-ancestor "$SOURCE_REVISION" "$GITHUB_SHA"
           git rev-list --first-parent "$GITHUB_SHA" | grep -Fx -- "$SOURCE_REVISION" >/dev/null
           git diff --quiet "$SOURCE_REVISION" "$GITHUB_SHA" -- \
+            flake.nix \
+            flake.lock \
             nixos/system \
             nixos/production/contract-v1.json \
             nixos/deployment/contract-v1.json \
