@@ -497,10 +497,17 @@ def _toolchain_digest(
         observations["docker"] = _run_readonly(
             [_docker_executable(), "--version"], cwd=repo, env=_docker_client_environment()
         )
-        observations["nix_contract_files"] = _files_digest(
+        trusted_tool_root = Path(__file__).resolve().parents[1]
+        observations["nix_source_contract_files"] = _files_digest(
             repo, [
+                "flake.nix",
                 "flake.lock",
                 "nixos/production/contract-v1.json",
+            ]
+        )["sha256"]
+        observations["nix_trusted_tool_files"] = _files_digest(
+            trusted_tool_root, [
+                "scripts/managed_build.py",
                 "scripts/nixos_production_install.py",
                 "scripts/nixos_production_prepare.py",
             ]
@@ -994,7 +1001,7 @@ def _require_nix_prepare_worker_binding(
     if not command or str(command[0]) != _trusted_nix_worker_python():
         raise ManagedBuildError("managed Nix worker must use the exact current Python interpreter")
     args = [str(item) for item in command[1:]]
-    expected_script = root / "scripts" / "nixos_production_prepare.py"
+    expected_script = Path(__file__).resolve().with_name("nixos_production_prepare.py")
     if (
         len(args) != 8
         or args[1] != "--managed-worker"
@@ -1009,7 +1016,7 @@ def _require_nix_prepare_worker_binding(
         or os.path.normpath(script_value) != script_value
         or Path(script_value) != expected_script
     ):
-        raise ManagedBuildError("managed Nix worker must use the canonical repository prepare script")
+        raise ManagedBuildError("managed Nix worker must use the canonical trusted prepare script")
     repo_value = args[3]
     if (
         not Path(repo_value).is_absolute()

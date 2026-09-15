@@ -4676,8 +4676,12 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "config/managed-build.v1.json" in workflow
     assert 'INDEPENDENT_AUTHORITY="proof-only"' in workflow
     assert 'INDEPENDENT_AUTHORITY="merged-main"' in workflow
-    assert 'python3 "$SOURCE_ROOT/scripts/nixos_production_prepare.py"' in workflow
-    assert "python3 scripts/nixos_production_prepare.py" not in workflow
+    assert "python3 scripts/nixos_production_prepare.py" in workflow
+    assert 'python3 "$SOURCE_ROOT/scripts/nixos_production_prepare.py"' not in workflow
+    assert "candidate_sha256=$CANDIDATE_SHA256" in workflow
+    assert "candidate_receipt_sha256=$CANDIDATE_RECEIPT_SHA256" in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
+    assert 'test "$(sha256sum "$CANDIDATE" | cut -d ' in workflow
     assert '--source-authority "$INDEPENDENT_AUTHORITY"' in workflow
     assert "verify_independent_rebuild_candidate" in workflow
     assert 'attestation_signer_revision=os.environ["GITHUB_SHA"]' in workflow
@@ -4724,11 +4728,11 @@ def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_bi
     assert facts["root"] == str(sealed_root.resolve())
     assert facts["git_common_dir"] == str((primary / ".git").resolve())
 
-    sealed_script = sealed_root / "scripts" / "nixos_production_prepare.py"
+    trusted_script = ROOT / "scripts" / "nixos_production_prepare.py"
     output = tmp_path / "remote-install-artifact.json"
     command = [
         managed._trusted_nix_worker_python(),
-        str(sealed_script),
+        str(trusted_script),
         "--managed-worker",
         "--repo", str(sealed_root),
         "--output", str(output),
@@ -4747,8 +4751,8 @@ def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_bi
     assert context["command"]["executable"] == Path(managed._trusted_nix_worker_python()).name
 
     wrong_checkout = list(command)
-    wrong_checkout[1] = str(ROOT / "scripts" / "nixos_production_prepare.py")
-    with pytest.raises(managed.ManagedBuildError, match="canonical repository prepare script"):
+    wrong_checkout[1] = str(sealed_root / "scripts" / "nixos_production_prepare.py")
+    with pytest.raises(managed.ManagedBuildError, match="canonical trusted prepare script"):
         managed._build_identity_context(
             policy,
             repo=sealed_root,

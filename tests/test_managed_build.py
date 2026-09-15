@@ -90,15 +90,14 @@ class ManagedBuildTests(unittest.TestCase):
     def fixed_toolchain(self) -> dict[str, object]:
         return {"observations": {"fixture": "1"}, "sha256": "a" * 64}
 
+    def trusted_nix_prepare_path(self) -> Path:
+        return Path(managed_build.__file__).resolve().with_name("nixos_production_prepare.py")
+
     def make_nix_execution(self, root: Path):
         home = root / "home"
         home.mkdir()
         repo = self.make_git_repo(root)
-        worker = repo / "scripts/nixos_production_prepare.py"
-        worker.parent.mkdir()
-        worker.write_text("# fixture\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "worker fixture"], check=True)
+        worker = self.trusted_nix_prepare_path()
         output = root / "artifact.json"
         command = [sys.executable, str(worker), "--managed-worker", "--repo", str(repo),
                    "--output", str(output), "--source-authority", "proof-only"]
@@ -1543,7 +1542,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -1581,7 +1580,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -1648,7 +1647,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -1729,7 +1728,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -2768,20 +2767,29 @@ class ManagedBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(managed_build.ManagedBuildError, "exact current Python"):
             managed_build._require_nix_prepare_worker_binding(command, Path("/tmp"), "nixos-production-prepare")
 
-    def test_nix_profile_rejects_same_named_worker_outside_repository(self) -> None:
+    def test_nix_profile_allows_separate_source_repo_but_rejects_untrusted_prepare_script(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            repo = root / "repo"
+            repo = root / "historical-source"
             repo.mkdir()
             output = root / "artifact.json"
+            trusted_script = Path(managed_build.__file__).resolve().with_name(
+                "nixos_production_prepare.py"
+            )
             command = [
-                sys.executable, str(root / "other" / "nixos_production_prepare.py"),
+                sys.executable, str(trusted_script),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
-            with self.assertRaisesRegex(managed_build.ManagedBuildError, "canonical repository prepare script"):
+            managed_build._require_nix_prepare_worker_binding(
+                command, repo, "nixos-production-prepare"
+            )
+
+            untrusted = list(command)
+            untrusted[1] = str(repo / "scripts" / "nixos_production_prepare.py")
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "canonical trusted prepare script"):
                 managed_build._require_nix_prepare_worker_binding(
-                    command, repo, "nixos-production-prepare"
+                    untrusted, repo, "nixos-production-prepare"
                 )
 
     def test_nix_profile_rejects_token_smuggled_python_payload(self) -> None:
@@ -2817,6 +2825,52 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(len(observation["entries"]), 1)
             self.assertEqual(observation["entries"][0]["relative_path"], "target")
             self.assertGreaterEqual(observation["entries"][0]["logical_bytes"], 7)
+
+    def test_nix_toolchain_digest_separates_historical_source_from_trusted_tooling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "historical-source"
+            (repo / "nixos/production").mkdir(parents=True)
+            (repo / "scripts").mkdir()
+            for relative, content in (
+                ("flake.nix", "# historical flake\n"),
+                ("flake.lock", "{}\n"),
+                ("nixos/production/contract-v1.json", "{}\n"),
+                ("scripts/managed_build.py", "# historical untrusted tool\n"),
+                ("scripts/nixos_production_install.py", "# historical untrusted tool\n"),
+                ("scripts/nixos_production_prepare.py", "# historical untrusted tool\n"),
+            ):
+                (repo / relative).write_text(content, encoding="utf-8")
+
+            with patch.object(managed_build, "_run_readonly", return_value="rc=0\nDocker fixture"):
+                digest = managed_build._toolchain_digest("nix", [sys.executable], repo)
+
+            trusted_root = Path(managed_build.__file__).resolve().parents[1]
+            self.assertEqual(
+                digest["observations"]["nix_source_contract_files"],
+                managed_build._files_digest(
+                    repo, ["flake.nix", "flake.lock", "nixos/production/contract-v1.json"]
+                )["sha256"],
+            )
+            self.assertEqual(
+                digest["observations"]["nix_trusted_tool_files"],
+                managed_build._files_digest(
+                    trusted_root, [
+                        "scripts/managed_build.py",
+                        "scripts/nixos_production_install.py",
+                        "scripts/nixos_production_prepare.py",
+                    ],
+                )["sha256"],
+            )
+            self.assertNotEqual(
+                digest["observations"]["nix_trusted_tool_files"],
+                managed_build._files_digest(
+                    repo, [
+                        "scripts/managed_build.py",
+                        "scripts/nixos_production_install.py",
+                        "scripts/nixos_production_prepare.py",
+                    ],
+                )["sha256"],
+            )
 
     def test_toolchain_probe_uses_resolved_cargo_and_sibling_rustc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

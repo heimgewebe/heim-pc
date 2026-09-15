@@ -48,6 +48,8 @@ jobs:
           printf '%s' "$CANDIDATE_ARTIFACT_B64" | base64 --decode > "$CANDIDATE"
           printf '%s' "$CANDIDATE_MANAGED_RECEIPT_B64" | base64 --decode > "$CANDIDATE_RECEIPT"
           chmod 0600 "$CANDIDATE" "$CANDIDATE_RECEIPT"
+          CANDIDATE_SHA256="$(sha256sum "$CANDIDATE" | cut -d ' ' -f1)"
+          CANDIDATE_RECEIPT_SHA256="$(sha256sum "$CANDIDATE_RECEIPT" | cut -d ' ' -f1)"
 
           SOURCE_REVISION="$(CANDIDATE="$CANDIDATE" python3 -c 'import os; from pathlib import Path; from scripts import nixos_production_install as prod; value=prod.load_install_artifact(Path(os.environ["CANDIDATE"])); assert value["source_authority"] == "merged-main"; print(value["source_revision"])')"
           test -n "$SOURCE_REVISION"
@@ -82,6 +84,8 @@ jobs:
             echo "source_root=$SOURCE_ROOT"
             echo "independent_authority=$INDEPENDENT_AUTHORITY"
             echo "historical_source_rebuild=$HISTORICAL_SOURCE_REBUILD"
+            echo "candidate_sha256=$CANDIDATE_SHA256"
+            echo "candidate_receipt_sha256=$CANDIDATE_RECEIPT_SHA256"
           } >> "$GITHUB_OUTPUT"
 
       - name: Independently rebuild exact sealed source through managed Nix
@@ -95,7 +99,7 @@ jobs:
           set -euo pipefail
           docker pull "$NIX_IMAGE_REF"
           test "$(docker image inspect --format '{{.Id}}' "$NIX_IMAGE_REF")" = "$NIX_IMAGE_ID"
-          python3 "$SOURCE_ROOT/scripts/nixos_production_prepare.py" \
+          python3 scripts/nixos_production_prepare.py \
             --repo "$SOURCE_ROOT" \
             --output "$REMOTE_OUT" \
             --source-authority "$INDEPENDENT_AUTHORITY"
@@ -109,8 +113,19 @@ jobs:
           REMOTE_OUT: ${{ runner.temp }}/remote-install-artifact.json
           PREDICATE: ${{ runner.temp }}/independent-managed-rebuild-predicate.json
           SOURCE_ROOT: ${{ steps.source.outputs.source_root }}
+          SOURCE_REVISION: ${{ steps.source.outputs.source_revision }}
+          CANDIDATE_SHA256: ${{ steps.source.outputs.candidate_sha256 }}
+          CANDIDATE_RECEIPT_SHA256: ${{ steps.source.outputs.candidate_receipt_sha256 }}
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "heimgewebe/heim-pc"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_REVISION"
+          test -z "$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all)"
+          test "$(sha256sum "$CANDIDATE" | cut -d ' ' -f1)" = "$CANDIDATE_SHA256"
+          test "$(sha256sum "$CANDIDATE_RECEIPT" | cut -d ' ' -f1)" = "$CANDIDATE_RECEIPT_SHA256"
           CANDIDATE="$CANDIDATE" CANDIDATE_RECEIPT="$CANDIDATE_RECEIPT" REMOTE_OUT="$REMOTE_OUT" PREDICATE="$PREDICATE" SOURCE_ROOT="$SOURCE_ROOT" python3 -c 'import json, os; from pathlib import Path; from scripts import nixos_production_install as prod; result=prod.verify_independent_rebuild_candidate(Path(os.environ["CANDIDATE"]), Path(os.environ["REMOTE_OUT"]), candidate_receipt_path=Path(os.environ["CANDIDATE_RECEIPT"]), flake_source=os.environ["SOURCE_ROOT"], attestation_signer_revision=os.environ["GITHUB_SHA"], source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=True); Path(os.environ["PREDICATE"]).write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")'
           test -s "$PREDICATE"
 
