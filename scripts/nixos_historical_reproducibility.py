@@ -424,7 +424,7 @@ def _hwdb_projection(path: Path) -> dict[str, Any]:
             key_offset, data_offset, filename_offset = struct.unpack_from("<QQQ", data, value_offset)
             line_number = struct.unpack_from("<I", data, value_offset + 24)[0]
             file_priority = struct.unpack_from("<H", data, value_offset + 28)[0]
-            filename = cstring(filename_offset) if filename_offset else ""
+            filename = cstring(filename_offset)
             records.append({
                 "match": pattern,
                 "key": cstring(key_offset),
