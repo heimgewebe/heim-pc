@@ -2123,6 +2123,13 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(detail, "exit=1 stderr_classes=not-found")
         self.assertNotIn("/subject/private", detail)
 
+    def test_live_store_scan_failure_detail_unclassified_fallback_is_path_free(self) -> None:
+        stderr = b"find: '/subject/secret': Frobnicated beyond repair\n"
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertEqual(detail, "exit=1 stderr_classes=unclassified")
+        self.assertNotIn("/subject/secret", detail)
+        self.assertNotIn("Frobnicated", detail)
+
     def test_live_store_scan_failure_preserves_safe_detail_when_observer_cleanup_fails(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
         process = subprocess.Popen(
@@ -2768,6 +2775,56 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertIn("exit=1 stderr_classes=not-a-directory", message)
         self.assertIn("observer_cleanup_verified=true", message)
         self.assertIn("exceptional_cleanup_verified=false", message)
+        self.assertNotIn("/subject/", message)
+
+    def test_nix_live_scan_failure_preserves_safe_detail_if_outer_cleanup_succeeds(self) -> None:
+        class Process:
+            pid = 4434
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "f" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "f" * 12,
+            "store_root": "/tmp/managed-nix-store-live-failure-cleanup-success-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 2},
+        }
+
+        def terminate(item):
+            item.returncode = -15
+
+        with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_live_store_scan",
+                side_effect=managed_build.LiveStoreScanFailure(
+                    "exit=1 stderr_classes=not-a-directory",
+                    observer_cleanup_verified=True,
+                ),
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=1 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertNotIn("exceptional_cleanup_verified=", message)
         self.assertNotIn("/subject/", message)
 
     def test_nix_monitor_exception_still_terminates_worker_and_exact_container(self) -> None:
