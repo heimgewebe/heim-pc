@@ -4425,7 +4425,7 @@ def execute_plan(
         verify_partlabel_namespace_clear(contract)
         verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
         verify_managed_build_binding(plan, artifact)
-        verify_promoted_main_revision(artifact["source_revision"])
+        verify_promoted_main_revision(signer_revision)
         verify_docker_quiesced()
         verify_sealed_nix_structure(artifact, seal)
         if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:

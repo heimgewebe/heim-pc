@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           docker pull "$NIX_IMAGE_REF"
           test "$(docker image inspect --format '{{.Id}}' "$NIX_IMAGE_REF")" = "$NIX_IMAGE_ID"
-          python3 scripts/nixos_production_prepare.py \
+          python3 "$SOURCE_ROOT/scripts/nixos_production_prepare.py" \
             --repo "$SOURCE_ROOT" \
             --output "$REMOTE_OUT" \
             --source-authority "$INDEPENDENT_AUTHORITY"

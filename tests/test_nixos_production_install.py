@@ -695,6 +695,90 @@ def test_apply_uses_attested_signer_as_jit_main_authority_for_historical_source(
     assert promoted == [signer_revision]
 
 
+def _historical_apply_plan_with_signer(signer_revision):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    attestation = dict(compiled["managed_build_attestation_verification"])
+    attestation["attestation_signer_revision"] = signer_revision
+    attestation["historical_source_rebuild"] = True
+    attestation["source_revision_ancestor_of_signer"] = True
+    compiled["managed_build_attestation_verification"] = attestation
+    return _rehash_plan(compiled)
+
+
+def _mock_historical_apply_until_final_gate(monkeypatch, compiled):
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_source", lambda *args, **kwargs: REVISION)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding",
+        lambda *args, **kwargs: compiled["managed_build_receipt"],
+    )
+    monkeypatch.setattr(prod, "verify_install_artifact_environment", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_scratch_state", lambda *_args: None)
+    monkeypatch.setattr(prod, "validate_preflight", lambda *_args: compiled["preflight"])
+    monkeypatch.setattr(prod, "verify_no_hidden_target_signatures", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
+    monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
+    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
+    return mock_trusted_build_gate(monkeypatch, compiled)
+
+
+def test_historical_apply_rechecks_attested_signer_at_final_pre_mutation_gate(monkeypatch, tmp_path):
+    signer_revision = "f" * 40
+    compiled = _historical_apply_plan_with_signer(signer_revision)
+    promoted = []
+    gate_events = _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda revision: promoted.append(revision))
+    monkeypatch.setattr(
+        prod, "efi_nvram_digest",
+        lambda: (_ for _ in ()).throw(prod.ProductionInstallError("stop-after-final-main-gate")),
+    )
+
+    with pytest.raises(prod.ProductionInstallError, match="stop-after-final-main-gate"):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+
+    assert promoted == [signer_revision, signer_revision]
+    assert "efi-freeze" in gate_events
+    assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
+
+
+def test_historical_apply_fails_closed_if_main_moves_between_promotion_gates(monkeypatch, tmp_path):
+    signer_revision = "f" * 40
+    compiled = _historical_apply_plan_with_signer(signer_revision)
+    promoted = []
+    gate_events = _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+
+    def promotion_gate(revision):
+        promoted.append(revision)
+        if len(promoted) == 2:
+            raise prod.ProductionInstallError("current canonical GitHub main changed after authorization")
+
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", promotion_gate)
+    monkeypatch.setattr(
+        prod, "efi_nvram_digest",
+        lambda: (_ for _ in ()).throw(AssertionError("must not pass a failed final promotion gate")),
+    )
+
+    with pytest.raises(prod.ProductionInstallError, match="main changed after authorization"):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+
+    assert promoted == [signer_revision, signer_revision]
+    assert "efi-freeze" in gate_events
+    assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
+
+
 def test_apply_rejects_inconsistent_historical_attestation_before_main_check(monkeypatch, tmp_path):
     compiled = plan(artifact=MERGED_ARTIFACT)
     attestation = dict(compiled["managed_build_attestation_verification"])
@@ -4589,7 +4673,8 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "config/managed-build.v1.json" in workflow
     assert 'INDEPENDENT_AUTHORITY="proof-only"' in workflow
     assert 'INDEPENDENT_AUTHORITY="merged-main"' in workflow
-    assert "python3 scripts/nixos_production_prepare.py" in workflow
+    assert 'python3 "$SOURCE_ROOT/scripts/nixos_production_prepare.py"' in workflow
+    assert "python3 scripts/nixos_production_prepare.py" not in workflow
     assert '--source-authority "$INDEPENDENT_AUTHORITY"' in workflow
     assert "verify_independent_rebuild_candidate" in workflow
     assert 'attestation_signer_revision=os.environ["GITHUB_SHA"]' in workflow
@@ -4603,6 +4688,36 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "self-hosted" not in workflow
     assert "remote-install-artifact.json" in workflow
+
+
+def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_binding(tmp_path):
+    managed_path = ROOT / "scripts" / "managed_build.py"
+    managed_spec = importlib.util.spec_from_file_location("managed_build_historical_guard_test", managed_path)
+    managed = importlib.util.module_from_spec(managed_spec)
+    assert managed_spec.loader is not None
+    managed_spec.loader.exec_module(managed)
+
+    sealed_root = tmp_path / "sealed-source"
+    sealed_script = sealed_root / "scripts" / "nixos_production_prepare.py"
+    sealed_script.parent.mkdir(parents=True)
+    sealed_script.write_text("# historical entrypoint placeholder\n", encoding="utf-8")
+    output = tmp_path / "remote-install-artifact.json"
+    command = [
+        managed._trusted_nix_worker_python(),
+        str(sealed_script),
+        "--managed-worker",
+        "--repo", str(sealed_root),
+        "--output", str(output),
+        "--source-authority", "proof-only",
+    ]
+    managed._require_nix_prepare_worker_binding(command, sealed_root, "nixos-production-prepare")
+
+    wrong_checkout = list(command)
+    wrong_checkout[1] = str(ROOT / "scripts" / "nixos_production_prepare.py")
+    with pytest.raises(managed.ManagedBuildError, match="canonical repository prepare script"):
+        managed._require_nix_prepare_worker_binding(
+            wrong_checkout, sealed_root, "nixos-production-prepare"
+        )
 
 
 def test_managed_build_receipt_is_plan_bound_and_rejects_failed_evidence():
