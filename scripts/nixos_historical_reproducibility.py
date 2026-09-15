@@ -199,12 +199,17 @@ def load_acceptance(path: Path) -> tuple[dict[str, Any], str]:
     _require_sha256(hwdb.get("records_sha256"), "hwdb records")
 
     nvidia = projections["nvidia"]
-    if not isinstance(nvidia, dict) or set(nvidia) != {"kind", "inventory_count", "inventory_sha256", "module_semantic_sha256"}:
+    if not isinstance(nvidia, dict) or set(nvidia) != {
+        "kind", "inventory_count", "inventory_sha256", "module_executable",
+        "module_semantic_sha256",
+    }:
         raise HistoricalReproducibilityError("NVIDIA acceptance shape is invalid")
     if nvidia.get("kind") != "nvidia-kernel-modules-elf-semantic-v1":
         raise HistoricalReproducibilityError("NVIDIA acceptance identity is invalid")
     if type(nvidia.get("inventory_count")) is not int or nvidia["inventory_count"] < 1:
         raise HistoricalReproducibilityError("NVIDIA acceptance inventory count is invalid")
+    if type(nvidia.get("module_executable")) is not bool:
+        raise HistoricalReproducibilityError("NVIDIA acceptance executable status is invalid")
     _require_sha256(nvidia.get("inventory_sha256"), "NVIDIA inventory")
     modules = nvidia.get("module_semantic_sha256")
     if not isinstance(modules, dict) or len(modules) != 5:
@@ -407,6 +412,13 @@ def _hwdb_projection(path: Path) -> dict[str, Any]:
             if target < node_start or target >= node_end:
                 raise HistoricalReproducibilityError("hwdb child target is outside the node table")
             children.append((character, target))
+        if any(
+            previous[0] >= current[0]
+            for previous, current in zip(children, children[1:])
+        ):
+            raise HistoricalReproducibilityError(
+                "hwdb child characters are not strictly increasing"
+            )
         for index in range(value_count):
             value_offset = value_base + index * value_size
             key_offset, data_offset, filename_offset = struct.unpack_from("<QQQ", data, value_offset)
@@ -441,16 +453,24 @@ def _hwdb_projection(path: Path) -> dict[str, Any]:
 
 
 def _decompress_module(path: Path) -> bytes:
-    info = _regular_file(path, max_bytes=_MAX_MODULE_COMPRESSED_BYTES)
-    if info.st_size <= 0:
+    raw = _bounded_read(path, _MAX_MODULE_COMPRESSED_BYTES)
+    if not raw:
         raise HistoricalReproducibilityError("NVIDIA module is empty")
     try:
-        with lzma.open(path, "rb") as handle:
-            data = handle.read(_MAX_MODULE_UNCOMPRESSED_BYTES + 1)
-            if len(data) > _MAX_MODULE_UNCOMPRESSED_BYTES or handle.read(1):
-                raise HistoricalReproducibilityError("NVIDIA module exceeds the decompression bound")
-    except (OSError, lzma.LZMAError) as exc:
+        decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+        data = decoder.decompress(raw, max_length=_MAX_MODULE_UNCOMPRESSED_BYTES + 1)
+    except lzma.LZMAError as exc:
         raise HistoricalReproducibilityError("NVIDIA module compression is invalid") from exc
+    if len(data) > _MAX_MODULE_UNCOMPRESSED_BYTES:
+        raise HistoricalReproducibilityError("NVIDIA module exceeds the decompression bound")
+    if not decoder.eof:
+        raise HistoricalReproducibilityError(
+            "NVIDIA module XZ stream is truncated or exceeds the decompression bound"
+        )
+    if decoder.unused_data:
+        raise HistoricalReproducibilityError(
+            "NVIDIA module contains trailing data after the XZ stream"
+        )
     return data
 
 
@@ -540,13 +560,16 @@ def _elf_semantic_digest(data: bytes) -> str:
     normalized_debug_strings.sort()
 
     records: list[dict[str, Any]] = []
-    max_end = section_offset + section_entry_size * section_count
+    file_regions: list[tuple[int, int]] = [
+        (0, 64),
+        (section_offset, section_offset + section_entry_size * section_count),
+    ]
     for index, header in enumerate(sections):
         _name_offset, section_type, flags, address, offset, size, link, info, alignment, entry_size = header
         name = section_names[index]
         payload = b"" if section_type == 8 else data[offset : offset + size]
-        if section_type != 8:
-            max_end = max(max_end, offset + size)
+        if section_type != 8 and size:
+            file_regions.append((offset, offset + size))
         record: dict[str, Any] = {
             "index": index,
             "name": name,
@@ -660,12 +683,30 @@ def _elf_semantic_digest(data: bytes) -> str:
                 "sha256": hashlib.sha256(payload).hexdigest(),
             })
         records.append(record)
-    if max_end != len(data):
+    file_regions.sort()
+    cursor = 0
+    for start, end in file_regions:
+        if start < cursor:
+            raise HistoricalReproducibilityError(
+                "NVIDIA module ELF on-disk regions overlap"
+            )
+        if start > cursor and any(data[cursor:start]):
+            raise HistoricalReproducibilityError(
+                "NVIDIA module ELF padding contains non-zero bytes"
+            )
+        cursor = end
+    if cursor != len(data):
         raise HistoricalReproducibilityError("NVIDIA module contains unbound bytes outside the ELF structure")
     return sha256_json(records)
 
 
-def _nvidia_projection(path: Path, expected_modules: set[str]) -> dict[str, Any]:
+def _nvidia_projection(
+    path: Path,
+    expected_modules: set[str],
+    expected_module_executable: bool,
+) -> dict[str, Any]:
+    if type(expected_module_executable) is not bool:
+        raise HistoricalReproducibilityError("NVIDIA expected executable status is invalid")
     try:
         root_info = path.lstat()
     except OSError as exc:
@@ -690,6 +731,10 @@ def _nvidia_projection(path: Path, expected_modules: set[str]) -> dict[str, Any]
             elif stat.S_ISREG(info.st_mode):
                 if relative in expected_modules:
                     observed_modules.add(relative)
+                    if bool(info.st_mode & 0o111) != expected_module_executable:
+                        raise HistoricalReproducibilityError(
+                            "NVIDIA module executable status differs from reviewed acceptance"
+                        )
                     module_digests[relative] = _elf_semantic_digest(_decompress_module(member))
                 else:
                     raw = _bounded_read(member, _MAX_MODULE_COMPRESSED_BYTES)
@@ -709,6 +754,7 @@ def _nvidia_projection(path: Path, expected_modules: set[str]) -> dict[str, Any]
         "kind": "nvidia-kernel-modules-elf-semantic-v1",
         "inventory_count": len(inventory),
         "inventory_sha256": sha256_json(inventory),
+        "module_executable": expected_module_executable,
         "module_semantic_sha256": {key: module_digests[key] for key in sorted(module_digests)},
     }
 
@@ -778,7 +824,9 @@ def verify_historical_rebuild(
     expected_nvidia = acceptance["semantic_projections"]["nvidia"]
     expected_modules = set(expected_nvidia["module_semantic_sha256"])
     observed_nvidia = _nvidia_projection(
-        _store_member(store_root, nvidia_item["path"]), expected_modules
+        _store_member(store_root, nvidia_item["path"]),
+        expected_modules,
+        expected_nvidia["module_executable"],
     )
     if observed_nvidia != expected_nvidia:
         raise HistoricalReproducibilityError("independent NVIDIA module semantics differ from reviewed acceptance")

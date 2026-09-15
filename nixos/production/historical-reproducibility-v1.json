@@ -35,6 +35,7 @@
       "inventory_count": 6,
       "inventory_sha256": "28bd5d6bbcca102059a36fdd16a53317e8b37c1b3962762b528729954b7a4729",
       "kind": "nvidia-kernel-modules-elf-semantic-v1",
+      "module_executable": false,
       "module_semantic_sha256": {
         "lib/modules/6.18.48/kernel/drivers/video/nvidia-drm.ko.xz": "a7fb0239978ab1f6f9f6f0a9b96302d86eebe6976ca9692883357d4224aa9ee1",
         "lib/modules/6.18.48/kernel/drivers/video/nvidia-modeset.ko.xz": "f261c99cecb7f260d0ba9129e40acbd4e28e07deb46004eeab1b649810622870",
