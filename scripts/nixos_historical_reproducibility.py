@@ -398,7 +398,7 @@ def _hwdb_projection(path: Path) -> dict[str, Any]:
             value_count = struct.unpack_from("<Q", data, offset + 16)[0]
         except (IndexError, struct.error) as exc:
             raise HistoricalReproducibilityError("hwdb node is truncated") from exc
-        pattern = prefix + (cstring(prefix_offset) if prefix_offset else "")
+        pattern = prefix + cstring(prefix_offset)
         child_base = offset + node_size
         value_base = child_base + child_count * child_size
         end = value_base + value_count * value_size
