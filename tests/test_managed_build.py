@@ -2241,6 +2241,53 @@ class ManagedBuildTests(unittest.TestCase):
             os.close(stdout_write)
             os.close(stderr_write)
 
+    def test_live_store_scan_capture_non_live_failure_preserves_cleanup_failure(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        interruption = PowerLoss("capture interrupted")
+        cleanup_error = managed_build.ManagedBuildError(
+            "managed Nix live store scan observer cleanup could not be verified"
+        )
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        stdout = os.fdopen(stdout_read, "rb")
+        stderr = os.fdopen(stderr_read, "rb")
+        process = Mock(pid=5153, returncode=None, stdout=stdout, stderr=stderr)
+        process.poll.return_value = None
+        selector = Mock()
+        selector.register.return_value = None
+        selector.get_map.return_value = {
+            stdout.fileno(): Mock(fileobj=stdout),
+            stderr.fileno(): Mock(fileobj=stderr),
+        }
+        selector.select.side_effect = interruption
+
+        try:
+            with (
+                patch.object(managed_build.selectors, "DefaultSelector", return_value=selector),
+                patch.object(
+                    managed_build, "_quiesce_live_store_scan_observer",
+                    side_effect=cleanup_error,
+                ) as quiesce,
+            ):
+                with self.assertRaises(managed_build.ManagedBuildError) as caught:
+                    managed_build._capture_live_store_scan_output(
+                        process, label=label, timeout_seconds=3
+                    )
+
+            self.assertIs(caught.exception, cleanup_error)
+            quiesce.assert_called_once_with(process, label)
+            self.assertTrue(stdout.closed)
+            self.assertTrue(stderr.closed)
+            selector.close.assert_called_once()
+        finally:
+            stdout.close()
+            stderr.close()
+            os.close(stdout_write)
+            os.close(stderr_write)
+
     def test_live_store_scan_cleanup_requires_repeated_absence(self) -> None:
         with (
             patch.object(
@@ -2773,7 +2820,7 @@ class ManagedBuildTests(unittest.TestCase):
                 )
         message = str(caught.exception)
         self.assertIn("exit=1 stderr_classes=not-a-directory", message)
-        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertIn("observer_cleanup_verified=false", message)
         self.assertIn("exceptional_cleanup_verified=false", message)
         self.assertNotIn("/subject/", message)
 

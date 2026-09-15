@@ -1956,7 +1956,11 @@ def _run_nix_worker_guarded(
             if isinstance(exc, LiveStoreScanFailure):
                 raise LiveStoreScanFailure(
                     exc.diagnostic,
-                    observer_cleanup_verified=exc.observer_cleanup_verified,
+                    observer_cleanup_verified=(
+                        bool(exc.observer_cleanup_verified)
+                        and observer_cleanup_error is None
+                        and observer_clean
+                    ),
                     exceptional_cleanup_verified=False,
                 ) from exc
             raise ManagedBuildError(
