@@ -72,6 +72,30 @@ class StoreScanTimeout(ManagedBuildError):
     """Raised when a managed Nix store scan exceeds its bounded observation window."""
 
 
+class LiveStoreScanFailure(ManagedBuildError):
+    """Path-free diagnostic for one failed root-visible live store scan."""
+
+    def __init__(
+        self, diagnostic: str, *, observer_cleanup_verified: bool | None = None,
+        exceptional_cleanup_verified: bool | None = None,
+    ) -> None:
+        self.diagnostic = diagnostic
+        self.observer_cleanup_verified = observer_cleanup_verified
+        self.exceptional_cleanup_verified = exceptional_cleanup_verified
+        parts = ["managed Nix live store scan failed:", diagnostic]
+        if observer_cleanup_verified is not None:
+            parts.append(
+                "observer_cleanup_verified="
+                + ("true" if observer_cleanup_verified else "false")
+            )
+        if exceptional_cleanup_verified is not None:
+            parts.append(
+                "exceptional_cleanup_verified="
+                + ("true" if exceptional_cleanup_verified else "false")
+            )
+        super().__init__(" ".join(parts))
+
+
 @lru_cache(maxsize=1)
 def _docker_executable() -> str:
     """Bind all Docker observations and cleanup to one system executable."""
@@ -757,16 +781,15 @@ NIX_LIVE_SCAN_STDERR_CLASSIFIERS: tuple[tuple[bytes, str], ...] = (
 
 def _live_store_scan_failure_detail(returncode: int, stderr: bytes) -> str:
     if returncode == 0:
-        raise ValueError("live store scan failure detail requires a nonzero return code")
+        raise ManagedBuildError("live store scan failure detail requires a nonzero return code")
     classes = sorted({
-        label for marker, label in NIX_LIVE_SCAN_STDERR_CLASSIFIERS if marker in stderr
+        label
+        for line in stderr.splitlines()
+        for marker, label in NIX_LIVE_SCAN_STDERR_CLASSIFIERS
+        if line.endswith(b": " + marker)
     })
     class_text = ",".join(classes) if classes else "unclassified"
-    return (
-        f"exit={returncode} stderr_bytes={len(stderr)} "
-        f"stderr_sha256={hashlib.sha256(stderr).hexdigest()} "
-        f"stderr_classes={class_text}"
-    )
+    return f"exit={returncode} stderr_classes={class_text}"
 
 
 def _capture_live_store_scan_output(
@@ -813,7 +836,7 @@ def _capture_live_store_scan_output(
         process.wait(timeout=remaining)
         if process.returncode != 0:
             detail = _live_store_scan_failure_detail(process.returncode, bytes(stderr_capture))
-            raise ManagedBuildError(f"managed Nix live store scan failed: {detail}")
+            raise LiveStoreScanFailure(detail)
         observation = parser.finish()
         # Reaping the leader alone does not prove that its process group is gone.
         _terminate_process_group(process)
@@ -832,7 +855,18 @@ def _capture_live_store_scan_output(
                         failure = exc
 
     if failure is not None:
-        _quiesce_live_store_scan_observer(process, label)
+        try:
+            _quiesce_live_store_scan_observer(process, label)
+        except BaseException as cleanup_exc:
+            if isinstance(failure, LiveStoreScanFailure):
+                raise LiveStoreScanFailure(
+                    failure.diagnostic, observer_cleanup_verified=False
+                ) from cleanup_exc
+            raise
+        if isinstance(failure, LiveStoreScanFailure):
+            raise LiveStoreScanFailure(
+                failure.diagnostic, observer_cleanup_verified=True
+            ) from failure
         if isinstance(failure, subprocess.TimeoutExpired):
             raise StoreScanTimeout(
                 "managed Nix live store scan exceeded its bounded observation window"
@@ -918,7 +952,8 @@ def _bounded_live_store_scan(
     if NIX_CONTAINER_ID_RE.fullmatch(observer_id) is None or NIX_LIVE_SCAN_LABEL_RE.fullmatch(label) is None:
         raise ManagedBuildError("managed Nix live-scan observer identity is invalid")
     argv = [
-        _docker_executable(), "exec", observer_id, NIX_LIVE_SCAN_FIND,
+        _docker_executable(), "exec", "-e", "LC_ALL=C", "-e", "LANG=C",
+        observer_id, NIX_LIVE_SCAN_FIND,
         "/subject",
         "-xdev",
         "-ignore_readdir_race",
@@ -1918,6 +1953,12 @@ def _run_nix_worker_guarded(
             process_cleanup_error is not None or container_cleanup_error is not None
             or observer_cleanup_error is not None or not containers_clean or not observer_clean
         ):
+            if isinstance(exc, LiveStoreScanFailure):
+                raise LiveStoreScanFailure(
+                    exc.diagnostic,
+                    observer_cleanup_verified=exc.observer_cleanup_verified,
+                    exceptional_cleanup_verified=False,
+                ) from exc
             raise ManagedBuildError(
                 "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
             ) from exc

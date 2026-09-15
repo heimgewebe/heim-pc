@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -1969,8 +1968,8 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(
             argv,
             [
-                "/usr/bin/docker", "exec", observer_id,
-                managed_build.NIX_LIVE_SCAN_FIND, "/subject", "-xdev",
+                "/usr/bin/docker", "exec", "-e", "LC_ALL=C", "-e", "LANG=C",
+                observer_id, managed_build.NIX_LIVE_SCAN_FIND, "/subject", "-xdev",
                 "-ignore_readdir_race", "-printf", "%D %i %b\n",
             ],
         )
@@ -2078,7 +2077,9 @@ class ManagedBuildTests(unittest.TestCase):
         process = subprocess.Popen(
             [
                 sys.executable, "-c",
-                "import sys; sys.stdout.write('1 10 2\\n'); sys.stderr.write('find failed\\n'); raise SystemExit(3)",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                "sys.stderr.write(\"find: '/subject/private': Not a directory\\n\"); "
+                "raise SystemExit(3)",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2093,33 +2094,57 @@ class ManagedBuildTests(unittest.TestCase):
                 )
         message = str(caught.exception)
         self.assertIn("exit=3", message)
-        expected_stderr = b"find failed\n"
-        self.assertIn(f"stderr_bytes={len(expected_stderr)}", message)
-        self.assertIn("stderr_sha256=" + hashlib.sha256(expected_stderr).hexdigest(), message)
-        self.assertIn("stderr_classes=unclassified", message)
-        self.assertNotIn("find failed", message)
+        self.assertIn("stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertNotIn("/subject/private", message)
+        self.assertNotIn("stderr_bytes=", message)
+        self.assertNotIn("stderr_sha256=", message)
         cleanup.assert_called_once_with(label)
         self.assertIsNotNone(process.poll())
 
-    def test_live_store_scan_failure_detail_classifies_without_disclosing_paths(self) -> None:
-        private_path = b"/subject/nix/store/secret-user-controlled-name"
+    def test_live_store_scan_failure_detail_classifies_suffix_without_disclosing_paths(self) -> None:
+        private_path = b"/subject/nix/store/Permission denied"
         stderr = (
             b"find: '" + private_path + b"': Not a directory\n"
-            b"find: '" + private_path + b"/child': Permission denied\n"
+            b"find: '/subject/child': Permission denied\n"
         )
         detail = managed_build._live_store_scan_failure_detail(1, stderr)
-        self.assertIn("exit=1", detail)
-        self.assertIn(f"stderr_bytes={len(stderr)}", detail)
-        self.assertIn(f"stderr_sha256={hashlib.sha256(stderr).hexdigest()}", detail)
-        self.assertIn("stderr_classes=not-a-directory,permission-denied", detail)
+        self.assertEqual(
+            detail, "exit=1 stderr_classes=not-a-directory,permission-denied"
+        )
         self.assertNotIn(private_path.decode(), detail)
         self.assertNotIn("find:", detail)
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires a nonzero"):
+            managed_build._live_store_scan_failure_detail(0, stderr)
 
     def test_live_store_scan_failure_detail_has_bounded_known_vocabulary(self) -> None:
         stderr = b"find: /subject/private: No such file or directory\n"
         detail = managed_build._live_store_scan_failure_detail(1, stderr)
-        self.assertIn("stderr_classes=not-found", detail)
+        self.assertEqual(detail, "exit=1 stderr_classes=not-found")
         self.assertNotIn("/subject/private", detail)
+
+    def test_live_store_scan_failure_preserves_safe_detail_when_observer_cleanup_fails(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                "sys.stderr.write(\"find: '/subject/private': Not a directory\\n\"); "
+                "raise SystemExit(3)",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=False
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=3 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=false", message)
+        self.assertNotIn("/subject/private", message)
 
     def test_live_store_scan_capture_enforces_stdout_and_stderr_bounds(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
@@ -2694,6 +2719,56 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertTrue(telemetry["store_scan_error_detected"])
         self.assertTrue(telemetry["container_cleanup_verified"])
         self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
+
+    def test_nix_live_scan_failure_preserves_safe_detail_if_outer_cleanup_fails(self) -> None:
+        class Process:
+            pid = 4433
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "e" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "e" * 12,
+            "store_root": "/tmp/managed-nix-store-live-failure-cleanup-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 2},
+        }
+
+        def terminate(item):
+            item.returncode = -15
+
+        with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_live_store_scan",
+                side_effect=managed_build.LiveStoreScanFailure(
+                    "exit=1 stderr_classes=not-a-directory",
+                    observer_cleanup_verified=True,
+                ),
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, False)),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=False),
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=1 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertIn("exceptional_cleanup_verified=false", message)
+        self.assertNotIn("/subject/", message)
 
     def test_nix_monitor_exception_still_terminates_worker_and_exact_container(self) -> None:
         class Process:
