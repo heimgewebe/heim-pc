@@ -98,6 +98,10 @@ def managed_attestation_verification(artifact, receipt=None):
         "independent_managed_receipt_sha256": "b" * 64,
         "managed_policy_sha256": MANAGED_POLICY_SHA256,
         "semantic_identity_sha256": prod.sha256_json(semantic_identity),
+        "attestation_signer_revision": artifact["source_revision"],
+        "historical_source_rebuild": False,
+        "source_revision_ancestor_of_signer": True,
+        "sealed_source_surface_unchanged": True,
         "verified_attestation_count": 1,
     }
 
@@ -656,6 +660,57 @@ def test_apply_promotion_authority_rejects_non_main_revision(monkeypatch):
     monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
     with pytest.raises(prod.ProductionInstallError, match="current canonical GitHub main"):
         prod.verify_promoted_main_revision(REVISION)
+
+
+def _rehash_plan(compiled):
+    value = dict(compiled)
+    value.pop("plan_sha256", None)
+    value["plan_sha256"] = prod.sha256_json(value)
+    return value
+
+
+def test_apply_uses_attested_signer_as_jit_main_authority_for_historical_source(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    attestation = dict(compiled["managed_build_attestation_verification"])
+    signer_revision = "f" * 40
+    assert signer_revision != MERGED_ARTIFACT["source_revision"]
+    attestation["attestation_signer_revision"] = signer_revision
+    attestation["historical_source_rebuild"] = True
+    attestation["source_revision_ancestor_of_signer"] = True
+    compiled["managed_build_attestation_verification"] = attestation
+    compiled = _rehash_plan(compiled)
+    promoted = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda revision: promoted.append(revision))
+    monkeypatch.setattr(
+        prod, "verify_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(prod.ProductionInstallError("stop-after-authority")),
+    )
+    with pytest.raises(prod.ProductionInstallError, match="stop-after-authority"):
+        prod.execute_plan(
+            compiled, contract=CONTRACT, confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+        )
+    assert promoted == [signer_revision]
+
+
+def test_apply_rejects_inconsistent_historical_attestation_before_main_check(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    attestation = dict(compiled["managed_build_attestation_verification"])
+    attestation["historical_source_rebuild"] = True
+    compiled["managed_build_attestation_verification"] = attestation
+    compiled = _rehash_plan(compiled)
+    promoted = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_managed_build_binding", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda revision: promoted.append(revision))
+    with pytest.raises(prod.ProductionInstallError, match="source/signer authority is inconsistent"):
+        prod.execute_plan(
+            compiled, contract=CONTRACT, confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+        )
+    assert promoted == []
 
 
 def test_invalid_artifact_source_revision_is_rejected():
@@ -4352,7 +4407,14 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
         "independent_managed_receipt_sha256": "b" * 64,
         "managed_policy_sha256": MANAGED_POLICY_SHA256,
         "semantic_identity_sha256": prod.sha256_json(semantic_identity),
-        "excluded_nonsemantic_fields": ["source_bundle_sha256"],
+        "candidate_source_revision": REVISION,
+        "candidate_source_authority": "merged-main",
+        "independent_source_authority": "merged-main",
+        "attestation_signer_revision": REVISION,
+        "historical_source_rebuild": False,
+        "source_revision_ancestor_of_signer": True,
+        "sealed_source_surface_unchanged": True,
+        "excluded_nonsemantic_fields": ["source_bundle_sha256", "source_authority"],
     }
     output = json.dumps([{
         "verificationResult": {"statement": {"predicate": predicate}}
@@ -4411,13 +4473,17 @@ def test_independent_rebuild_validates_remote_managed_success_and_semantic_ident
 
     result = prod.verify_independent_rebuild_candidate(
         candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
-        flake_source="/synthetic/source"
+        flake_source="/synthetic/source", attestation_signer_revision=REVISION,
+        source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=True,
     )
     assert result["candidate_artifact_sha256"] == hashlib.sha256(candidate_path.read_bytes()).hexdigest()
     assert result["candidate_receipt_sha256"] == hashlib.sha256(candidate_receipt_path.read_bytes()).hexdigest()
     assert result["candidate_managed_receipt_sha256"] == candidate_receipt["managed_receipt_sha256"]
     assert result["independent_receipt_sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
-    assert result["excluded_nonsemantic_fields"] == ["source_bundle_sha256"]
+    assert result["excluded_nonsemantic_fields"] == ["source_bundle_sha256", "source_authority"]
+    assert result["historical_source_rebuild"] is False
+    assert result["candidate_source_authority"] == "merged-main"
+    assert result["independent_source_authority"] == "merged-main"
 
     changed = dict(independent)
     changed["closure_manifest_sha256"] = "8" * 64
@@ -4425,7 +4491,55 @@ def test_independent_rebuild_validates_remote_managed_success_and_semantic_ident
     with pytest.raises(prod.ProductionInstallError, match="closure_manifest_sha256"):
         prod.verify_independent_rebuild_candidate(
             candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
-            flake_source="/synthetic/source"
+            flake_source="/synthetic/source", attestation_signer_revision=REVISION,
+            source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=True,
+        )
+
+
+def test_independent_rebuild_supports_historical_sealed_source_with_current_main_signer(monkeypatch, tmp_path):
+    candidate_path = (tmp_path / "candidate.json").resolve()
+    independent_path = (tmp_path / "independent.json").resolve()
+    candidate = dict(MERGED_ARTIFACT)
+    independent = dict(MERGED_ARTIFACT, source_authority="proof-only", source_bundle_sha256="9" * 64)
+    candidate_path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    independent_path.write_text(json.dumps(independent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt = managed_receipt(candidate)
+    candidate_receipt["artifact_file_sha256"] = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    candidate_receipt_path = prod.managed_build_receipt_path(candidate_path)
+    candidate_receipt_path.write_text(json.dumps(candidate_receipt, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt_path.chmod(0o600)
+    receipt = managed_receipt(independent)
+    receipt["artifact_file_sha256"] = hashlib.sha256(independent_path.read_bytes()).hexdigest()
+    receipt_path = prod.managed_build_receipt_path(independent_path)
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda _source: MANAGED_POLICY_SHA256)
+    signer_revision = "f" * 40
+
+    result = prod.verify_independent_rebuild_candidate(
+        candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+        flake_source="/synthetic/sealed-source", attestation_signer_revision=signer_revision,
+        source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=True,
+    )
+    assert result["historical_source_rebuild"] is True
+    assert result["candidate_source_revision"] == REVISION
+    assert result["attestation_signer_revision"] == signer_revision
+    assert result["candidate_source_authority"] == "merged-main"
+    assert result["independent_source_authority"] == "proof-only"
+    assert result["source_revision_ancestor_of_signer"] is True
+    assert result["sealed_source_surface_unchanged"] is True
+
+    with pytest.raises(prod.ProductionInstallError, match="not an ancestor"):
+        prod.verify_independent_rebuild_candidate(
+            candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+            flake_source="/synthetic/sealed-source", attestation_signer_revision=signer_revision,
+            source_revision_ancestor_of_signer=False, sealed_source_surface_unchanged=True,
+        )
+    with pytest.raises(prod.ProductionInstallError, match="contract surface changed"):
+        prod.verify_independent_rebuild_candidate(
+            candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+            flake_source="/synthetic/sealed-source", attestation_signer_revision=signer_revision,
+            source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=False,
         )
 
 
@@ -4464,9 +4578,22 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "id-token: write" in workflow
     assert "attestations: write" in workflow
     assert "artifact-metadata: write" not in workflow
+    assert "fetch-depth: 0" in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "git -c core.hooksPath=/dev/null worktree add --detach" in workflow
+    assert 'git diff --quiet "$SOURCE_REVISION" "$GITHUB_SHA"' in workflow
+    assert "nixos/system" in workflow
+    assert "nixos/production/contract-v1.json" in workflow
+    assert "nixos/deployment/contract-v1.json" in workflow
+    assert "config/managed-build.v1.json" in workflow
+    assert 'INDEPENDENT_AUTHORITY="proof-only"' in workflow
+    assert 'INDEPENDENT_AUTHORITY="merged-main"' in workflow
     assert "python3 scripts/nixos_production_prepare.py" in workflow
-    assert "--source-authority merged-main" in workflow
+    assert '--source-authority "$INDEPENDENT_AUTHORITY"' in workflow
     assert "verify_independent_rebuild_candidate" in workflow
+    assert 'attestation_signer_revision=os.environ["GITHUB_SHA"]' in workflow
+    assert "source_revision_ancestor_of_signer=True" in workflow
+    assert "sealed_source_surface_unchanged=True" in workflow
     assert "subject-path: ${{ runner.temp }}/candidate-install-artifact.json" in workflow
     assert "predicate-type: https://heimgewebe.local/attestations/nixos-independent-managed-build/v1" in workflow
     assert "predicate-path: ${{ runner.temp }}/independent-managed-rebuild-predicate.json" in workflow
