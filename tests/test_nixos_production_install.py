@@ -4580,6 +4580,7 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "artifact-metadata: write" not in workflow
     assert "fetch-depth: 0" in workflow
     assert "git merge-base --is-ancestor" in workflow
+    assert 'git rev-list --first-parent "$GITHUB_SHA" | grep -Fx -- "$SOURCE_REVISION" >/dev/null' in workflow
     assert "git -c core.hooksPath=/dev/null worktree add --detach" in workflow
     assert 'git diff --quiet "$SOURCE_REVISION" "$GITHUB_SHA"' in workflow
     assert "nixos/system" in workflow
