@@ -103,6 +103,9 @@ def managed_attestation_verification(artifact, receipt=None):
         "historical_source_rebuild": False,
         "source_revision_ancestor_of_signer": True,
         "sealed_source_surface_unchanged": True,
+        "independent_rebuild_match_mode": "exact",
+        "historical_reproducibility_acceptance_sha256": None,
+        "historical_reproducibility_verification_sha256": None,
         "verified_attestation_count": 1,
     }
 
@@ -4467,6 +4470,74 @@ def test_attestation_verify_argv_pins_exact_artifact_repository_workflow_source_
     ]
 
 
+def test_historical_repro_closure_manifest_projection_matches_production_schema():
+    records = {
+        SYSTEM_PATH: {
+            "path": SYSTEM_PATH,
+            "narHash": CLOSURE_PATH_INFO[SYSTEM_PATH]["narHash"],
+            "narSize": CLOSURE_PATH_INFO[SYSTEM_PATH]["narSize"],
+            "references": [],
+            "deriver": None,
+        },
+    }
+    assert (
+        prod.historical_reproducibility._closure_manifest_sha256(records)
+        == CLOSURE["closure_manifest_sha256"]
+    )
+
+
+def test_historical_repro_signed_evidence_is_bound_to_reviewed_acceptance():
+    acceptance, acceptance_sha256 = prod.historical_reproducibility.load_acceptance(
+        prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
+    )
+    candidate = {
+        "source_revision": acceptance["source_revision"],
+        "system_path": acceptance["system_path"],
+        "closure_manifest_sha256": acceptance["candidate_closure_manifest_sha256"],
+        "closure_path_count": acceptance["candidate_closure_path_count"],
+    }
+    projection = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_historical_reproducibility_verification",
+        "acceptance_sha256": acceptance_sha256,
+        "source_revision": acceptance["source_revision"],
+        "system_path": acceptance["system_path"],
+        "candidate_closure_manifest_sha256": acceptance["candidate_closure_manifest_sha256"],
+        "independent_closure_manifest_sha256": "f" * 64,
+        "closure_path_count": acceptance["candidate_closure_path_count"],
+        "stable_closure_projection_sha256": acceptance["stable_closure_projection_sha256"],
+        "exception_paths": sorted(item["path"] for item in acceptance["exceptions"]),
+        "hwdb_records_sha256": acceptance["semantic_projections"]["hwdb"]["records_sha256"],
+        "nvidia_inventory_sha256": acceptance["semantic_projections"]["nvidia"]["inventory_sha256"],
+        "nvidia_module_semantic_sha256": acceptance["semantic_projections"]["nvidia"]["module_semantic_sha256"],
+    }
+    evidence = {
+        **projection,
+        "verification_sha256": prod.historical_reproducibility.sha256_json(projection),
+    }
+    assert prod.historical_reproducibility.validate_verification_evidence(
+        acceptance_path=prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+        candidate_artifact=candidate,
+        value=evidence,
+    ) == evidence
+
+    forged = dict(evidence, stable_closure_projection_sha256="0" * 64)
+    forged_projection = dict(forged)
+    forged_projection.pop("verification_sha256")
+    forged["verification_sha256"] = prod.historical_reproducibility.sha256_json(
+        forged_projection
+    )
+    with pytest.raises(
+        prod.historical_reproducibility.HistoricalReproducibilityError,
+        match="does not match acceptance",
+    ):
+        prod.historical_reproducibility.validate_verification_evidence(
+            acceptance_path=prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+            candidate_artifact=candidate,
+            value=forged,
+        )
+
+
 def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
     artifact = (tmp_path / "artifact.json").resolve()
     bundle = (tmp_path / "bundle.json").resolve()
@@ -4500,6 +4571,8 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
         "source_revision_ancestor_of_signer": True,
         "sealed_source_surface_unchanged": True,
         "excluded_nonsemantic_fields": ["source_bundle_sha256", "source_authority"],
+        "independent_rebuild_match_mode": "exact",
+        "historical_reproducibility_verification": None,
     }
     output = json.dumps([{
         "verificationResult": {"statement": {"predicate": predicate}}
@@ -4515,6 +4588,9 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
     assert summary["candidate_managed_receipt_sha256"] == "d" * 64
     assert summary["independent_managed_receipt_sha256"] == "b" * 64
     assert summary["managed_policy_sha256"] == MANAGED_POLICY_SHA256
+    assert summary["independent_rebuild_match_mode"] == "exact"
+    assert summary["historical_reproducibility_acceptance_sha256"] is None
+    assert summary["historical_reproducibility_verification_sha256"] is None
     with pytest.raises(prod.ProductionInstallError, match="no unique verified attestation"):
         prod.verify_managed_build_attestation(
             artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
@@ -4533,6 +4609,87 @@ def test_attestation_verifier_requires_nonempty_verified_json(tmp_path):
         prod.verify_managed_build_attestation(
             artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
             runner=lambda _argv: Result(forged_output),
+        )
+
+
+def test_attestation_verifier_revalidates_historical_reproducibility_evidence(monkeypatch, tmp_path):
+    artifact = (tmp_path / "artifact.json").resolve()
+    bundle = (tmp_path / "bundle.json").resolve()
+    artifact_value = dict(MERGED_ARTIFACT)
+    artifact.write_text(json.dumps(artifact_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    bundle.write_text("{}\n", encoding="utf-8")
+    artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    semantic_identity = {
+        field: artifact_value[field] for field in prod.INDEPENDENT_REBUILD_MATCH_FIELDS
+    }
+    signer_revision = "f" * 40
+    historical_evidence = {
+        "acceptance_sha256": "4" * 64,
+        "verification_sha256": "5" * 64,
+    }
+    predicate = {
+        "schema_version": 1,
+        "kind": prod.MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
+        "candidate_artifact_sha256": artifact_sha,
+        "candidate_receipt_sha256": "c" * 64,
+        "candidate_managed_receipt_sha256": "d" * 64,
+        "independent_artifact_sha256": "9" * 64,
+        "independent_receipt_sha256": "a" * 64,
+        "independent_managed_receipt_sha256": "b" * 64,
+        "managed_policy_sha256": MANAGED_POLICY_SHA256,
+        "semantic_identity_sha256": prod.sha256_json(semantic_identity),
+        "candidate_source_revision": REVISION,
+        "candidate_source_authority": "merged-main",
+        "independent_source_authority": "proof-only",
+        "attestation_signer_revision": signer_revision,
+        "historical_source_rebuild": True,
+        "source_revision_ancestor_of_signer": True,
+        "sealed_source_surface_unchanged": True,
+        "excluded_nonsemantic_fields": ["source_bundle_sha256", "source_authority"],
+        "independent_rebuild_match_mode": "historical-reproducibility-acceptance",
+        "historical_reproducibility_verification": historical_evidence,
+    }
+
+    class Result:
+        stdout = json.dumps([{
+            "verificationResult": {"statement": {"predicate": predicate}}
+        }]).encode()
+
+    calls = []
+
+    def validate_evidence(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["acceptance_path"] == prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
+        assert kwargs["candidate_artifact"] == artifact_value
+        assert kwargs["value"] == historical_evidence
+        return dict(historical_evidence)
+
+    monkeypatch.setattr(
+        prod.historical_reproducibility, "validate_verification_evidence", validate_evidence
+    )
+    summary = prod.verify_managed_build_attestation(
+        artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+        runner=lambda _argv: Result(),
+    )
+    assert len(calls) == 1
+    assert summary["attestation_signer_revision"] == signer_revision
+    assert summary["historical_source_rebuild"] is True
+    assert summary["independent_rebuild_match_mode"] == "historical-reproducibility-acceptance"
+    assert summary["historical_reproducibility_acceptance_sha256"] == "4" * 64
+    assert summary["historical_reproducibility_verification_sha256"] == "5" * 64
+
+    def reject_evidence(**_kwargs):
+        raise prod.historical_reproducibility.HistoricalReproducibilityError("tampered")
+
+    monkeypatch.setattr(
+        prod.historical_reproducibility, "validate_verification_evidence", reject_evidence
+    )
+    with pytest.raises(
+        prod.ProductionInstallError, match="historical reproducibility evidence is invalid"
+    ):
+        prod.verify_managed_build_attestation(
+            artifact, bundle, REVISION, expected_policy_sha256=MANAGED_POLICY_SHA256,
+            runner=lambda _argv: Result(),
         )
 
 
@@ -4626,6 +4783,53 @@ def test_independent_rebuild_supports_historical_sealed_source_with_current_main
             flake_source="/synthetic/sealed-source", attestation_signer_revision=signer_revision,
             source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=False,
         )
+
+
+def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_verifier(monkeypatch, tmp_path):
+    candidate_path = (tmp_path / "candidate.json").resolve()
+    independent_path = (tmp_path / "independent.json").resolve()
+    candidate = dict(MERGED_ARTIFACT)
+    independent = dict(
+        MERGED_ARTIFACT,
+        source_authority="proof-only",
+        source_bundle_sha256="9" * 64,
+        closure_manifest_sha256="8" * 64,
+    )
+    candidate_path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    independent_path.write_text(json.dumps(independent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt = managed_receipt(candidate)
+    candidate_receipt["artifact_file_sha256"] = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    candidate_receipt_path = prod.managed_build_receipt_path(candidate_path)
+    candidate_receipt_path.write_text(json.dumps(candidate_receipt, sort_keys=True) + "\n", encoding="utf-8")
+    candidate_receipt_path.chmod(0o600)
+    receipt = managed_receipt(independent)
+    receipt["artifact_file_sha256"] = hashlib.sha256(independent_path.read_bytes()).hexdigest()
+    receipt_path = prod.managed_build_receipt_path(independent_path)
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+    monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda _source: MANAGED_POLICY_SHA256)
+    evidence = {"acceptance_sha256": "4" * 64, "verification_sha256": "5" * 64}
+    calls = []
+
+    def verify_historical(**kwargs):
+        calls.append(kwargs)
+        return dict(evidence)
+
+    monkeypatch.setattr(
+        prod.historical_reproducibility, "verify_historical_rebuild", verify_historical
+    )
+    signer_revision = "f" * 40
+    result = prod.verify_independent_rebuild_candidate(
+        candidate_path, independent_path, candidate_receipt_path=candidate_receipt_path,
+        flake_source="/synthetic/sealed-source", attestation_signer_revision=signer_revision,
+        source_revision_ancestor_of_signer=True, sealed_source_surface_unchanged=True,
+    )
+    assert len(calls) == 1
+    assert calls[0]["candidate_artifact"] == candidate
+    assert calls[0]["independent_artifact"] == independent
+    assert calls[0]["independent_store_root"] == Path(receipt["store_root"])
+    assert result["independent_rebuild_match_mode"] == "historical-reproducibility-acceptance"
+    assert result["historical_reproducibility_verification"] == evidence
 
 
 def test_merged_main_plan_requires_independent_attestation():

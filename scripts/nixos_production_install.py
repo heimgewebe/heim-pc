@@ -59,6 +59,9 @@ MANAGED_BUILD_ATTESTATION_SOURCE_REF = "refs/heads/main"
 MANAGED_BUILD_ATTESTATION_KIND = "heim_pc.nixos_independent_managed_build_attestation_verification"
 MANAGED_BUILD_ATTESTATION_PREDICATE_TYPE = "https://heimgewebe.local/attestations/nixos-independent-managed-build/v1"
 MANAGED_BUILD_ATTESTATION_PREDICATE_KIND = "heim_pc.nixos_independent_managed_rebuild_match"
+HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH = (
+    ROOT / "nixos" / "production" / "historical-reproducibility-v1.json"
+)
 INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "schema_version", "kind", "source_revision", "system_path", "nix_volume",
     "nix_image", "profile", "closure_manifest_sha256", "closure_path_count",
@@ -122,6 +125,15 @@ if _IDENTITY_SPEC is None or _IDENTITY_SPEC.loader is None:
     raise RuntimeError("cannot load production identity module")
 storage_identity = importlib.util.module_from_spec(_IDENTITY_SPEC)
 _IDENTITY_SPEC.loader.exec_module(storage_identity)
+
+_HISTORICAL_REPRO_SPEC = importlib.util.spec_from_file_location(
+    "nixos_historical_reproducibility",
+    Path(__file__).with_name("nixos_historical_reproducibility.py"),
+)
+if _HISTORICAL_REPRO_SPEC is None or _HISTORICAL_REPRO_SPEC.loader is None:
+    raise RuntimeError("cannot load historical reproducibility verifier")
+historical_reproducibility = importlib.util.module_from_spec(_HISTORICAL_REPRO_SPEC)
+_HISTORICAL_REPRO_SPEC.loader.exec_module(historical_reproducibility)
 
 
 class ProductionInstallError(RuntimeError):
@@ -472,7 +484,11 @@ def verify_independent_rebuild_candidate(
         field for field in INDEPENDENT_REBUILD_MATCH_FIELDS
         if candidate.get(field) != independent.get(field)
     ]
-    if mismatches:
+    historical_variance = (
+        historical_source_rebuild
+        and mismatches == ["closure_manifest_sha256"]
+    )
+    if mismatches and not historical_variance:
         raise ProductionInstallError(
             "independent managed rebuild differs from candidate: " + ", ".join(mismatches)
         )
@@ -486,6 +502,21 @@ def verify_independent_rebuild_candidate(
         receipt_path, independent,
         expected_policy_sha256=policy_sha256, artifact_path=independent_path,
     )
+    match_mode = "exact"
+    historical_verification = None
+    if historical_variance:
+        try:
+            historical_verification = historical_reproducibility.verify_historical_rebuild(
+                acceptance_path=HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+                candidate_artifact=candidate,
+                independent_artifact=independent,
+                independent_store_root=Path(receipt["store_root"]),
+            )
+        except historical_reproducibility.HistoricalReproducibilityError as exc:
+            raise ProductionInstallError(
+                "independent historical rebuild does not satisfy reviewed reproducibility acceptance"
+            ) from exc
+        match_mode = "historical-reproducibility-acceptance"
     semantic_identity = {field: candidate[field] for field in INDEPENDENT_REBUILD_MATCH_FIELDS}
     return {
         "schema_version": 1,
@@ -506,6 +537,8 @@ def verify_independent_rebuild_candidate(
         "source_revision_ancestor_of_signer": True,
         "sealed_source_surface_unchanged": True,
         "excluded_nonsemantic_fields": ["source_bundle_sha256", "source_authority"],
+        "independent_rebuild_match_mode": match_mode,
+        "historical_reproducibility_verification": historical_verification,
     }
 
 
@@ -609,7 +642,8 @@ def verify_managed_build_attestation(
         "candidate_source_authority", "independent_source_authority",
         "attestation_signer_revision", "historical_source_rebuild",
         "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
-        "excluded_nonsemantic_fields",
+        "excluded_nonsemantic_fields", "independent_rebuild_match_mode",
+        "historical_reproducibility_verification",
     }
     if set(predicate) != required_predicate:
         raise ProductionInstallError("managed-build attestation predicate is invalid")
@@ -632,6 +666,35 @@ def verify_managed_build_attestation(
         or predicate.get("excluded_nonsemantic_fields") != ["source_bundle_sha256", "source_authority"]
     ):
         raise ProductionInstallError("managed-build attestation predicate does not bind current artifact")
+    match_mode = predicate.get("independent_rebuild_match_mode")
+    historical_verification = predicate.get("historical_reproducibility_verification")
+    if match_mode == "exact":
+        if historical_verification is not None:
+            raise ProductionInstallError(
+                "exact independent rebuild unexpectedly carries historical reproducibility evidence"
+            )
+    elif match_mode == "historical-reproducibility-acceptance":
+        if historical_source_rebuild is not True:
+            raise ProductionInstallError(
+                "historical reproducibility acceptance requires a historical source rebuild"
+            )
+        try:
+            validated_historical = historical_reproducibility.validate_verification_evidence(
+                acceptance_path=HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+                candidate_artifact=artifact,
+                value=historical_verification,
+            )
+        except historical_reproducibility.HistoricalReproducibilityError as exc:
+            raise ProductionInstallError(
+                "managed-build attestation historical reproducibility evidence is invalid"
+            ) from exc
+        if validated_historical != historical_verification:
+            raise ProductionInstallError(
+                "managed-build attestation historical reproducibility evidence changed"
+            )
+    else:
+        raise ProductionInstallError("managed-build attestation rebuild match mode is invalid")
+
     for field in (
         "candidate_artifact_sha256", "candidate_receipt_sha256",
         "candidate_managed_receipt_sha256", "independent_artifact_sha256",
@@ -658,6 +721,15 @@ def verify_managed_build_attestation(
         "historical_source_rebuild": historical_source_rebuild,
         "source_revision_ancestor_of_signer": True,
         "sealed_source_surface_unchanged": True,
+        "independent_rebuild_match_mode": match_mode,
+        "historical_reproducibility_acceptance_sha256": (
+            historical_verification["acceptance_sha256"]
+            if isinstance(historical_verification, dict) else None
+        ),
+        "historical_reproducibility_verification_sha256": (
+            historical_verification["verification_sha256"]
+            if isinstance(historical_verification, dict) else None
+        ),
         "verified_attestation_count": 1,
     }
 
@@ -672,6 +744,9 @@ def validate_managed_build_attestation_summary(
         "managed_policy_sha256", "semantic_identity_sha256",
         "attestation_signer_revision", "historical_source_rebuild",
         "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
+        "independent_rebuild_match_mode",
+        "historical_reproducibility_acceptance_sha256",
+        "historical_reproducibility_verification_sha256",
         "verified_attestation_count",
     }
     if not isinstance(value, dict) or set(value) != required:
@@ -691,10 +766,37 @@ def validate_managed_build_attestation_summary(
         or value.get("sealed_source_surface_unchanged") is not True
     ):
         raise ProductionInstallError("managed-build attestation verification summary is invalid")
+    match_mode = value.get("independent_rebuild_match_mode")
+    historical_acceptance_sha256 = value.get(
+        "historical_reproducibility_acceptance_sha256"
+    )
+    historical_verification_sha256 = value.get(
+        "historical_reproducibility_verification_sha256"
+    )
+    if match_mode == "exact":
+        if historical_acceptance_sha256 is not None or historical_verification_sha256 is not None:
+            raise ProductionInstallError(
+                "exact managed-build attestation summary carries historical evidence"
+            )
+    elif match_mode == "historical-reproducibility-acceptance":
+        if value.get("historical_source_rebuild") is not True:
+            raise ProductionInstallError(
+                "historical managed-build attestation summary requires historical source"
+            )
+        for field_value in (historical_acceptance_sha256, historical_verification_sha256):
+            if not isinstance(field_value, str) or re.fullmatch(r"[0-9a-f]{64}", field_value) is None:
+                raise ProductionInstallError(
+                    "historical managed-build attestation summary digest is invalid"
+                )
+    else:
+        raise ProductionInstallError("managed-build attestation summary match mode is invalid")
     digest_fields = required - {
         "schema_version", "kind", "verified_attestation_count",
         "attestation_signer_revision", "historical_source_rebuild",
         "source_revision_ancestor_of_signer", "sealed_source_surface_unchanged",
+        "independent_rebuild_match_mode",
+        "historical_reproducibility_acceptance_sha256",
+        "historical_reproducibility_verification_sha256",
     }
     for field in digest_fields:
         if not isinstance(value.get(field), str) or re.fullmatch(r"[0-9a-f]{64}", value[field]) is None:
