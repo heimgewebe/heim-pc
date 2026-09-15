@@ -2094,22 +2094,32 @@ class ManagedBuildTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("exit=3", message)
         expected_stderr = b"find failed\n"
+        self.assertIn(f"stderr_bytes={len(expected_stderr)}", message)
         self.assertIn("stderr_sha256=" + hashlib.sha256(expected_stderr).hexdigest(), message)
-        self.assertIn("stderr_truncated=false", message)
-        self.assertIn('stderr_excerpt="find failed\\n"', message)
+        self.assertIn("stderr_classes=unclassified", message)
+        self.assertNotIn("find failed", message)
         cleanup.assert_called_once_with(label)
         self.assertIsNotNone(process.poll())
 
-    def test_live_store_scan_failure_detail_bounds_and_escapes_stderr(self) -> None:
-        stderr = b"prefix\n" + b"x" * 20 + b"\x1b[31mfind failed\n"
-        with patch.object(managed_build, "NIX_LIVE_SCAN_FAILURE_STDERR_EXCERPT_BYTES", 17):
-            detail = managed_build._live_store_scan_failure_detail(1, stderr)
+    def test_live_store_scan_failure_detail_classifies_without_disclosing_paths(self) -> None:
+        private_path = b"/subject/nix/store/secret-user-controlled-name"
+        stderr = (
+            b"find: '" + private_path + b"': Not a directory\n"
+            b"find: '" + private_path + b"/child': Permission denied\n"
+        )
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
         self.assertIn("exit=1", detail)
+        self.assertIn(f"stderr_bytes={len(stderr)}", detail)
         self.assertIn(f"stderr_sha256={hashlib.sha256(stderr).hexdigest()}", detail)
-        self.assertIn("stderr_truncated=true", detail)
-        self.assertNotIn("prefix", detail)
-        self.assertNotIn("\x1b", detail)
-        self.assertIn("\\u001b", detail)
+        self.assertIn("stderr_classes=not-a-directory,permission-denied", detail)
+        self.assertNotIn(private_path.decode(), detail)
+        self.assertNotIn("find:", detail)
+
+    def test_live_store_scan_failure_detail_has_bounded_known_vocabulary(self) -> None:
+        stderr = b"find: /subject/private: No such file or directory\n"
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertIn("stderr_classes=not-found", detail)
+        self.assertNotIn("/subject/private", detail)
 
     def test_live_store_scan_capture_enforces_stdout_and_stderr_bounds(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
