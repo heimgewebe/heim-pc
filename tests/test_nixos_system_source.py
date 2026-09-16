@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "333bf8b110c1311c3e38bcb4802735ec0aff6d0cd936337504632cd6ee3df3e7"
+SOURCE_SNAPSHOT_SHA256 = "bc1c6d04073104f404b1541d84db8455d47a5dbbf263e0f7a42ed38a554a02b1"
 ROOT_LOCK_SHA256 = "902c1919c817461fa1c23d05a3336c336d09805e36c350c2373f6eca8ca8193e"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -30,6 +30,22 @@ class T(unittest.TestCase):
         self.assertIn("(import ./nixos/system/flake.nix).outputs inputs", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
+        self.assertIn(
+            'nixer.url = "github:heimgewebe/nixer/7647a342f4e31e29d643f0e9fb64c9bd4b0906a8";',
+            nested,
+        )
+
+    def test_nixer_image_preparation_has_bounded_network_retry(self):
+        module = (SOURCE / "modules/nixer.nix").read_text()
+        self.assertIn("runtimeInputs = [ pkgs.coreutils pkgs.podman ];", module)
+        self.assertIn("max_attempts=6", module)
+        self.assertIn("while ! podman pull", module)
+        self.assertIn("delay=$((attempt * 5))", module)
+        self.assertIn('sleep "$delay"', module)
+        self.assertNotIn('after = [ "network-online.target" ];', module)
+        self.assertNotIn('wants = [ "network-online.target" ];', module)
+        self.assertIn("wants = lib.mkForce [ ];", module)
+        self.assertIn('after = lib.mkForce [ "nixer-image.service" ];', module)
 
     def test_nix_workflow_binds_exact_source_without_lock_update(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
