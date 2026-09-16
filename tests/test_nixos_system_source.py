@@ -11,8 +11,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "bb88a32ccf7c17bf9c15ff364bd1a447e82ede31fd2d6ffab5b1854ce252b7d0"
-ROOT_LOCK_SHA256 = "19d83aededafff8a80ca354e4fba18c1470d638b683079bd983639eb5719e26d"
+SOURCE_SNAPSHOT_SHA256 = "bc1c6d04073104f404b1541d84db8455d47a5dbbf263e0f7a42ed38a554a02b1"
+ROOT_LOCK_SHA256 = "902c1919c817461fa1c23d05a3336c336d09805e36c350c2373f6eca8ca8193e"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -26,10 +26,26 @@ class T(unittest.TestCase):
         inputs = r"  inputs = \{.*?\n  \};"
         self.assertEqual(re.search(metadata, root_flake).group(), re.search(metadata, nested).group())
         self.assertEqual(re.search(inputs, root_flake, re.S).group(), re.search(inputs, nested, re.S).group())
-        self.assertIn("outputs = inputs@{ self, nixpkgs, microvm }:", root_flake)
+        self.assertIn("outputs = inputs@{ self, nixpkgs, microvm, nixer }:", root_flake)
         self.assertIn("(import ./nixos/system/flake.nix).outputs inputs", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
+        self.assertIn(
+            'nixer.url = "github:heimgewebe/nixer/7647a342f4e31e29d643f0e9fb64c9bd4b0906a8";',
+            nested,
+        )
+
+    def test_nixer_image_preparation_has_bounded_network_retry(self):
+        module = (SOURCE / "modules/nixer.nix").read_text()
+        self.assertIn("runtimeInputs = [ pkgs.coreutils pkgs.podman ];", module)
+        self.assertIn("max_attempts=6", module)
+        self.assertIn("while ! podman pull", module)
+        self.assertIn("delay=$((attempt * 5))", module)
+        self.assertIn('sleep "$delay"', module)
+        self.assertNotIn('after = [ "network-online.target" ];', module)
+        self.assertNotIn('wants = [ "network-online.target" ];', module)
+        self.assertIn("wants = lib.mkForce [ ];", module)
+        self.assertIn('after = lib.mkForce [ "nixer-image.service" ];', module)
 
     def test_nix_workflow_binds_exact_source_without_lock_update(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
@@ -152,7 +168,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 24)
+        self.assertEqual(len(files), 25)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -162,7 +178,7 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nvidia.nix", "modules/observability.nix", "modules/physical-gates.nix",
+            "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",

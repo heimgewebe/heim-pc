@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -228,21 +230,154 @@ def build_exact_closure(*, source_volume: str, nix_volume: str) -> str:
     return system_path
 
 
-def readonly_nix_argv(*, nix_volume: str, args: list[str]) -> list[str]:
-    return [
+def _managed_nix_db_snapshot(
+    *, managed_nix_store_root: Path, destination: Path, system_path: str
+) -> Path:
+    """Materialize current SQLite state without checkpointing the managed store.
+
+    Nix read-only-local-store deliberately opens db.sqlite as immutable, which
+    ignores WAL-only registrations. The managed build lock already excludes a
+    second writer, so take one SQLite backup through a read-only WAL-aware
+    connection and expose only that private snapshot to the immutable verifier.
+    """
+    root_text = str(managed_nix_store_root)
+    if (
+        not managed_nix_store_root.is_absolute()
+        or managed_nix_store_root.is_symlink()
+        or not managed_nix_store_root.is_dir()
+        or os.path.normpath(root_text) != root_text
+    ):
+        raise PrepareError("managed Nix store root is unsafe for verification snapshot")
+    if installer.SYSTEM_PATH_RE.fullmatch(system_path) is None:
+        raise PrepareError("managed Nix verification snapshot system path is invalid")
+    if (
+        not destination.is_absolute()
+        or destination.exists()
+        or destination.is_symlink()
+        or os.path.normpath(str(destination)) != str(destination)
+    ):
+        raise PrepareError("managed Nix verification snapshot destination is unsafe")
+
+    source = managed_nix_store_root / "var" / "nix" / "db" / "db.sqlite"
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise PrepareError("managed Nix database is unavailable for verification snapshot") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size <= 0
+    ):
+        raise PrepareError("managed Nix database identity is unsafe for verification snapshot")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o600)
+    os.close(descriptor)
+    try:
+        source_db = None
+        snapshot_db = None
+        try:
+            source_db = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)
+            snapshot_db = sqlite3.connect(str(destination))
+            source_db.backup(snapshot_db)
+        finally:
+            if snapshot_db is not None:
+                snapshot_db.close()
+            if source_db is not None:
+                source_db.close()
+
+        after = source.lstat()
+        before_identity = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+            before.st_nlink, before.st_size, before.st_mtime_ns,
+        )
+        after_identity = (
+            after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+            after.st_nlink, after.st_size, after.st_mtime_ns,
+        )
+        if after_identity != before_identity:
+            raise PrepareError("managed Nix database identity changed during verification snapshot")
+
+        os.chmod(destination, 0o400)
+        read_flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            read_flags |= os.O_NOFOLLOW
+        descriptor = os.open(destination, read_flags)
+        try:
+            snapshot_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(snapshot_stat.st_mode)
+                or snapshot_stat.st_uid != os.getuid()
+                or snapshot_stat.st_nlink != 1
+                or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
+            ):
+                raise PrepareError("managed Nix verification snapshot identity is unsafe")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(destination.parent)
+
+        immutable = sqlite3.connect(destination.as_uri() + "?immutable=1", uri=True)
+        try:
+            row = immutable.execute(
+                "select 1 from ValidPaths where path = ? limit 1", (system_path,)
+            ).fetchone()
+        finally:
+            immutable.close()
+        if row is None:
+            raise PrepareError("managed Nix verification snapshot lacks the built system path")
+    except PrepareError:
+        destination.unlink(missing_ok=True)
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        destination.unlink(missing_ok=True)
+        raise PrepareError("managed Nix verification snapshot failed") from exc
+    return destination
+
+
+def readonly_nix_argv(
+    *, nix_volume: str, args: list[str], db_snapshot: Path | None = None
+) -> list[str]:
+    argv = [
         "docker", "run", "--rm", "--network", "none",
         "-v", f"{nix_volume}:/subject/nix:ro",
+    ]
+    if db_snapshot is not None:
+        try:
+            snapshot_stat = db_snapshot.lstat()
+        except OSError as exc:
+            raise PrepareError("managed Nix verification snapshot is unavailable") from exc
+        if (
+            not db_snapshot.is_absolute()
+            or os.path.normpath(str(db_snapshot)) != str(db_snapshot)
+            or not stat.S_ISREG(snapshot_stat.st_mode)
+            or stat.S_ISLNK(snapshot_stat.st_mode)
+            or snapshot_stat.st_uid != os.getuid()
+            or snapshot_stat.st_nlink != 1
+            or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
+        ):
+            raise PrepareError("managed Nix verification snapshot is unsafe")
+        argv += [
+            "-v", f"{db_snapshot}:/subject/nix/var/nix/db/db.sqlite:ro",
+        ]
+    argv += [
         "--entrypoint", NIX_BIN,
         installer.PINNED_NIX_IMAGE,
         "--extra-experimental-features", installer.READONLY_NIX_FEATURES,
         "--store", installer.READONLY_NIX_STORE,
         *args,
     ]
+    return argv
 
 
-def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, object]:
+def capture_closure_manifest(
+    *, nix_volume: str, system_path: str, db_snapshot: Path | None = None
+) -> dict[str, object]:
     result = run(readonly_nix_argv(
-        nix_volume=nix_volume,
+        nix_volume=nix_volume, db_snapshot=db_snapshot,
         args=["path-info", "--json", "--recursive", system_path],
     ))
     try:
@@ -252,9 +387,11 @@ def capture_closure_manifest(*, nix_volume: str, system_path: str) -> dict[str, 
     return installer.closure_manifest_metadata(payload)
 
 
-def verify_closure(*, nix_volume: str, system_path: str) -> None:
+def verify_closure(
+    *, nix_volume: str, system_path: str, db_snapshot: Path | None = None
+) -> None:
     run(readonly_nix_argv(
-        nix_volume=nix_volume,
+        nix_volume=nix_volume, db_snapshot=db_snapshot,
         args=["store", "verify", "--no-trust", "--recursive", system_path],
     ))
     checks = [
@@ -345,8 +482,19 @@ def prepare(
             source_created = True
             clone_bundle_to_volume(bundle=bundle, source_volume=source_volume, revision=revision)
             system_path = build_exact_closure(source_volume=source_volume, nix_volume=nix_volume)
-            verify_closure(nix_volume=nix_volume, system_path=system_path)
-            closure = capture_closure_manifest(nix_volume=nix_volume, system_path=system_path)
+            db_snapshot = None
+            if managed_nix_store_root is not None:
+                db_snapshot = _managed_nix_db_snapshot(
+                    managed_nix_store_root=managed_nix_store_root,
+                    destination=Path(tmp) / "nix-verification-db.sqlite",
+                    system_path=system_path,
+                )
+            verify_closure(
+                nix_volume=nix_volume, system_path=system_path, db_snapshot=db_snapshot,
+            )
+            closure = capture_closure_manifest(
+                nix_volume=nix_volume, system_path=system_path, db_snapshot=db_snapshot,
+            )
             artifact = make_artifact(
                 revision=revision,
                 system_path=system_path,

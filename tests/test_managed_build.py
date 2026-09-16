@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -89,15 +90,14 @@ class ManagedBuildTests(unittest.TestCase):
     def fixed_toolchain(self) -> dict[str, object]:
         return {"observations": {"fixture": "1"}, "sha256": "a" * 64}
 
+    def trusted_nix_prepare_path(self) -> Path:
+        return Path(managed_build.__file__).resolve().with_name("nixos_production_prepare.py")
+
     def make_nix_execution(self, root: Path):
         home = root / "home"
         home.mkdir()
         repo = self.make_git_repo(root)
-        worker = repo / "scripts/nixos_production_prepare.py"
-        worker.parent.mkdir()
-        worker.write_text("# fixture\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "worker fixture"], check=True)
+        worker = self.trusted_nix_prepare_path()
         output = root / "artifact.json"
         command = [sys.executable, str(worker), "--managed-worker", "--repo", str(repo),
                    "--output", str(output), "--source-authority", "proof-only"]
@@ -949,18 +949,26 @@ class ManagedBuildTests(unittest.TestCase):
                 if argv[1:3] == ["volume", "create"]:
                     volumes.add(argv[-1])
                 elif argv[1] == "run":
-                    self.assertEqual(argv[2], "--label")
-                    containers.append(("c" * 64, argv[3]))
-                    events.append("worker-container")
+                    if argv[2] == "-d":
+                        self.assertFalse(containers)
+                        containers.append(("d" * 64, argv[argv.index("--label") + 1]))
+                        stdout = ("d" * 64 + "\n").encode("ascii")
+                        events.append("observer-container")
+                    else:
+                        self.assertEqual(argv[2], "--label")
+                        self.assertEqual([cid for cid, _tag in containers], ["d" * 64])
+                        containers.append(("c" * 64, argv[3]))
+                        events.append("worker-container")
                 elif argv[1] == "ps":
                     self.assertEqual(kwargs["timeout"], 5)
                     label = argv[-1].removeprefix("label=")
                     stdout = "\n".join(cid for cid, tag in containers if tag == label).encode("ascii")
                 elif argv[1] == "rm":
                     self.assertEqual(kwargs["timeout"], 5)
-                    self.assertEqual(argv[2:], ["--force", "c" * 64])
-                    containers.clear()
-                    events.append("container-removal")
+                    self.assertEqual(argv[2], "--force")
+                    self.assertIn(argv[3], {"c" * 64, "d" * 64})
+                    containers[:] = [(cid, tag) for cid, tag in containers if cid != argv[3]]
+                    events.append("container-removal" if argv[3] == "c" * 64 else "observer-removal")
                 elif argv[1:3] == ["volume", "ls"]:
                     self.assertEqual(kwargs["timeout"], 5)
                     stdout = "\n".join(sorted(volumes)).encode("ascii")
@@ -1018,7 +1026,7 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertTrue(receipt["nix_build"]["container_cleanup_verified"])
             self.assertEqual(receipt["nix_build"]["container_count_force_removed"], 1)
             self.assertEqual(events, [
-                "worker-container", "terminate-worker", "container-removal",
+                "observer-container", "worker-container", "terminate-worker", "container-removal", "observer-removal",
                 "volume-removal", "volume-removal",
             ])
             self.assertEqual(len(worker_environments), 3)
@@ -2093,7 +2101,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -2131,7 +2139,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -2198,7 +2206,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -2279,7 +2287,7 @@ class ManagedBuildTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "nix fixture"], check=True)
             output = root / "artifact.json"
             command = [
-                sys.executable, str(repo / "scripts/nixos_production_prepare.py"),
+                sys.executable, str(self.trusted_nix_prepare_path()),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
@@ -2372,6 +2380,8 @@ class ManagedBuildTests(unittest.TestCase):
             "runtime_budget_seconds": {"warning": 10, "hard": 20},
         }
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2423,6 +2433,8 @@ class ManagedBuildTests(unittest.TestCase):
             return {"allocated_bytes": 1, "error_count": 0, "entries": []}
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2438,7 +2450,8 @@ class ManagedBuildTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         live_scan.assert_called_once()
-        self.assertEqual(live_scan.call_args.args, (Path(guard["store_root"]),))
+        self.assertEqual(live_scan.call_args.args, ("d" * 64,))
+        self.assertRegex(live_scan.call_args.kwargs["label"], managed_build.NIX_LIVE_SCAN_LABEL_RE)
         self.assertGreater(live_scan.call_args.kwargs["timeout_seconds"], 0)
         self.assertLessEqual(
             live_scan.call_args.kwargs["timeout_seconds"],
@@ -2452,104 +2465,180 @@ class ManagedBuildTests(unittest.TestCase):
 
         self.assertEqual(managed_build.PINNED_NIX_IMAGE, installer.PINNED_NIX_IMAGE)
 
-    def test_bounded_live_store_scan_uses_pinned_read_only_root_find_and_deduplicates_hardlinks(self) -> None:
+    def test_live_store_monitor_interval_is_two_seconds(self) -> None:
+        self.assertEqual(managed_build.NIX_STORE_MONITOR_INTERVAL_SECONDS, 2.0)
+
+    def test_live_store_find_parser_is_incremental_and_deduplicates_hardlinks(self) -> None:
+        observation = managed_build._parse_live_store_find_output(
+            [b"1 10 ", b"2\n1 11 3\n1 ", b"10 2\n"]
+        )
+        self.assertEqual(
+            observation,
+            {"allocated_bytes": 5 * 512, "error_count": 0, "entries": []},
+        )
+        # A single bytes object remains a supported internal convenience and must
+        # not be iterated as integers.
+        self.assertEqual(
+            managed_build._parse_live_store_find_output(b"1 12 4\n")["allocated_bytes"],
+            4 * 512,
+        )
+
+    def test_live_store_find_parser_fails_closed_on_bad_rows_and_bounds(self) -> None:
+        bad_cases = [
+            ([b"not three fields\n"], "malformed"),
+            ([b"1 2 \xff\n"], "malformed"),
+            ([b"1 2 3"], "partial terminal row"),
+            ([], "no filesystem rows"),
+        ]
+        for chunks, message in bad_cases:
+            with self.subTest(chunks=chunks, message=message):
+                with self.assertRaisesRegex(managed_build.ManagedBuildError, message):
+                    managed_build._parse_live_store_find_output(chunks)
+        with patch.object(managed_build, "NIX_LIVE_SCAN_MAX_ROW_BYTES", 4):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "row bound"):
+                managed_build._parse_live_store_find_output([b"1 2 3\n"])
+        with patch.object(managed_build, "NIX_LIVE_SCAN_MAX_OUTPUT_BYTES", 5):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "output bound"):
+                managed_build._parse_live_store_find_output([b"1 2 3\n"])
+
+    def test_bounded_live_store_scan_uses_reused_observer_exec(self) -> None:
+        observer_id = "d" * 64
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
         process = Mock()
+        expected = {
+            "allocated_bytes": 5 * 512,
+            "error_count": 0,
+            "entries": [],
+            "stderr_bytes": 7,
+        }
         with (
-            tempfile.TemporaryDirectory() as directory,
             patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
             patch.object(managed_build.subprocess, "Popen", return_value=process) as popen,
             patch.object(
-                managed_build, "_capture_live_store_scan_output",
-                return_value=b"1 10 2\n1 11 3\n1 10 2\n",
+                managed_build, "_capture_live_store_scan_output", return_value=expected
             ) as capture,
         ):
             observation = managed_build._bounded_live_store_scan(
-                Path(directory), timeout_seconds=3
+                observer_id, label=label, timeout_seconds=3
             )
 
-        self.assertEqual(observation, {"allocated_bytes": 5 * 512, "error_count": 0, "entries": []})
+        self.assertEqual(observation, expected)
         argv = popen.call_args.args[0]
-        self.assertEqual(argv[:8], [
-            "/usr/bin/docker", "run", "--rm", "--network", "none",
-            "--read-only", "--security-opt", "no-new-privileges",
-        ])
-        self.assertEqual(argv[argv.index("--user") + 1], "0:0")
-        self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
-        self.assertEqual(argv[argv.index("--cap-add") + 1], "DAC_READ_SEARCH")
-        self.assertIn("--label", argv)
-        self.assertIn(managed_build.PINNED_NIX_IMAGE, argv)
-        self.assertIn(f"{directory}:/subject:ro", argv)
-        self.assertEqual(argv[-6:], [
-            managed_build.PINNED_NIX_IMAGE,
-            "/subject", "-xdev", "-ignore_readdir_race", "-printf", "%D %i %b\n",
-        ])
-        self.assertEqual(popen.call_args.kwargs["env"], managed_build._docker_client_environment())
+        self.assertEqual(
+            argv,
+            [
+                "/usr/bin/docker", "exec", "-e", "LC_ALL=C", "-e", "LANG=C",
+                observer_id, managed_build.NIX_LIVE_SCAN_FIND, "/subject", "-xdev",
+                "-ignore_readdir_race", "-printf", "%D %i %b\n",
+            ],
+        )
+        self.assertNotIn("run", argv)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.PIPE)
         self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.PIPE)
-        capture.assert_called_once()
-        self.assertIs(capture.call_args.args[0], process)
-        self.assertEqual(capture.call_args.kwargs["timeout_seconds"], 3)
+        capture.assert_called_once_with(process, label=label, timeout_seconds=3)
 
-    def test_bounded_live_store_scan_fails_closed_on_scanner_error_or_malformed_output(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            process = Mock()
-            with (
-                patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
-                patch.object(managed_build.subprocess, "Popen", return_value=process),
-                patch.object(
-                    managed_build, "_capture_live_store_scan_output",
-                    side_effect=managed_build.ManagedBuildError("scanner failed"),
-                ),
-            ):
-                with self.assertRaises(managed_build.ManagedBuildError):
-                    managed_build._bounded_live_store_scan(root, timeout_seconds=3)
-            for stdout in (b"not three fields\n", b""):
-                with self.subTest(stdout=stdout):
-                    with (
-                        patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
-                        patch.object(managed_build.subprocess, "Popen", return_value=process),
-                        patch.object(
-                            managed_build, "_capture_live_store_scan_output",
-                            return_value=stdout,
-                        ),
-                    ):
-                        with self.assertRaises(managed_build.ManagedBuildError):
-                            managed_build._bounded_live_store_scan(root, timeout_seconds=3)
+    def test_bounded_live_store_scan_propagates_capture_failure_and_timeout(self) -> None:
+        observer_id = "d" * 64
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        for failure in (
+            managed_build.ManagedBuildError("scanner failed"),
+            managed_build.StoreScanTimeout("synthetic timeout"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+                    patch.object(managed_build.subprocess, "Popen", return_value=Mock()),
+                    patch.object(
+                        managed_build, "_capture_live_store_scan_output", side_effect=failure
+                    ),
+                ):
+                    with self.assertRaises(type(failure)):
+                        managed_build._bounded_live_store_scan(
+                            observer_id, label=label, timeout_seconds=0.01
+                        )
 
-    def test_live_store_scan_capture_enforces_stdout_cap_during_execution(self) -> None:
+    def test_start_live_store_observer_uses_pinned_hardened_container_once(self) -> None:
+        container_id = "d" * 64
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        completed = subprocess.CompletedProcess(
+            ["docker"], 0, stdout=(container_id + "\n").encode("ascii"), stderr=b""
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=completed) as run,
+            patch.object(
+                managed_build, "_live_store_scan_container_ids", return_value=[container_id]
+            ) as inventory,
+        ):
+            result = managed_build._start_live_store_scan_observer(
+                Path(directory), label=label, worker_timeout_seconds=20
+            )
+            root = directory
+
+        self.assertEqual(result, container_id)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["/usr/bin/docker", "run", "-d", "--rm"])
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertIn("--read-only", argv)
+        self.assertEqual(argv[argv.index("--security-opt") + 1], "no-new-privileges")
+        self.assertEqual(argv[argv.index("--user") + 1], "0:0")
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(argv[argv.index("--cap-add") + 1], "DAC_READ_SEARCH")
+        self.assertEqual(argv[argv.index("--label") + 1], label)
+        self.assertEqual(argv[argv.index("-v") + 1], f"{root}:/subject:ro")
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], managed_build.NIX_LIVE_SCAN_SLEEP)
+        self.assertIn(managed_build.PINNED_NIX_IMAGE, argv)
+        self.assertGreater(int(argv[-1]), 20 + managed_build.NIX_LIVE_SCAN_OBSERVER_MARGIN_SECONDS)
+        inventory.assert_called_once_with(label)
+
+    def test_start_live_store_observer_rejects_unsafe_root_and_inventory_mismatch(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "bind-safe"):
+            managed_build._start_live_store_scan_observer(
+                Path("/tmp/store:unsafe"), label=label, worker_timeout_seconds=20
+            )
+        completed = subprocess.CompletedProcess(
+            ["docker"], 0, stdout=("d" * 64 + "\n").encode("ascii"), stderr=b""
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(managed_build.subprocess, "run", return_value=completed),
+            patch.object(managed_build, "_live_store_scan_container_ids", return_value=[]),
+        ):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "inventory"):
+                managed_build._start_live_store_scan_observer(
+                    Path(directory), label=label, worker_timeout_seconds=20
+                )
+
+    def test_live_store_scan_capture_accepts_bounded_stderr_on_success(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
         process = subprocess.Popen(
             [
-                sys.executable,
-                "-c",
-                "import sys,time; sys.stdout.buffer.write(b'x'*4096); sys.stdout.flush(); time.sleep(10)",
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); sys.stderr.write('docker warning\\n')",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        with (
-            patch.object(managed_build, "NIX_LIVE_SCAN_MAX_OUTPUT_BYTES", 32),
-            patch.object(
-                managed_build, "_cleanup_live_store_scan_container", return_value=True
-            ) as cleanup,
-        ):
-            with self.assertRaisesRegex(managed_build.ManagedBuildError, "output bound"):
-                managed_build._capture_live_store_scan_output(
-                    process, label=label, timeout_seconds=3
-                )
-        cleanup.assert_called_once_with(label)
+        observation = managed_build._capture_live_store_scan_output(
+            process, label=label, timeout_seconds=3
+        )
+        self.assertEqual(observation["allocated_bytes"], 2 * 512)
+        self.assertEqual(observation["stderr_bytes"], len(b"docker warning\n"))
         self.assertIsNotNone(process.poll())
 
-    def test_live_store_scan_capture_stderr_fails_without_buffering_and_cleans_up(self) -> None:
+    def test_live_store_scan_capture_nonzero_exit_fails_and_cleans_observer(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
         process = subprocess.Popen(
             [
-                sys.executable,
-                "-c",
-                "import sys,time; sys.stderr.write('scanner error\n'); sys.stderr.flush(); time.sleep(10)",
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                "sys.stderr.write(\"find: '/subject/private': Not a directory\\n\"); "
+                "raise SystemExit(3)",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2558,12 +2647,99 @@ class ManagedBuildTests(unittest.TestCase):
         with patch.object(
             managed_build, "_cleanup_live_store_scan_container", return_value=True
         ) as cleanup:
-            with self.assertRaisesRegex(managed_build.ManagedBuildError, "scan failed"):
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "scan failed") as caught:
                 managed_build._capture_live_store_scan_output(
                     process, label=label, timeout_seconds=3
                 )
+        message = str(caught.exception)
+        self.assertIn("exit=3", message)
+        self.assertIn("stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertNotIn("/subject/private", message)
+        self.assertNotIn("stderr_bytes=", message)
+        self.assertNotIn("stderr_sha256=", message)
         cleanup.assert_called_once_with(label)
         self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_failure_detail_classifies_suffix_without_disclosing_paths(self) -> None:
+        private_path = b"/subject/nix/store/Permission denied"
+        stderr = (
+            b"find: '" + private_path + b"': Not a directory\n"
+            b"find: '/subject/child': Permission denied\n"
+        )
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertEqual(
+            detail, "exit=1 stderr_classes=not-a-directory,permission-denied"
+        )
+        self.assertNotIn(private_path.decode(), detail)
+        self.assertNotIn("find:", detail)
+        with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires a nonzero"):
+            managed_build._live_store_scan_failure_detail(0, stderr)
+
+    def test_live_store_scan_failure_detail_has_bounded_known_vocabulary(self) -> None:
+        stderr = b"find: /subject/private: No such file or directory\n"
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertEqual(detail, "exit=1 stderr_classes=not-found")
+        self.assertNotIn("/subject/private", detail)
+
+    def test_live_store_scan_failure_detail_unclassified_fallback_is_path_free(self) -> None:
+        stderr = b"find: '/subject/secret': Frobnicated beyond repair\n"
+        detail = managed_build._live_store_scan_failure_detail(1, stderr)
+        self.assertEqual(detail, "exit=1 stderr_classes=unclassified")
+        self.assertNotIn("/subject/secret", detail)
+        self.assertNotIn("Frobnicated", detail)
+
+    def test_live_store_scan_failure_preserves_safe_detail_when_observer_cleanup_fails(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                "sys.stderr.write(\"find: '/subject/private': Not a directory\\n\"); "
+                "raise SystemExit(3)",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=False
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=3 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=false", message)
+        self.assertNotIn("/subject/private", message)
+
+    def test_live_store_scan_capture_enforces_stdout_and_stderr_bounds(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        cases = [
+            ("import sys,time; sys.stdout.buffer.write(b'x'*4096); sys.stdout.flush(); time.sleep(10)",
+             "NIX_LIVE_SCAN_MAX_OUTPUT_BYTES", 32, "output bound"),
+            ("import sys,time; sys.stdout.write('1 2 3\\n'); sys.stdout.flush(); sys.stderr.buffer.write(b'x'*4096); sys.stderr.flush(); time.sleep(10)",
+             "NIX_LIVE_SCAN_MAX_STDERR_BYTES", 32, "stderr bound"),
+        ]
+        for program, constant, bound, message in cases:
+            with self.subTest(message=message):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", program],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                with (
+                    patch.object(managed_build, constant, bound),
+                    patch.object(
+                        managed_build, "_cleanup_live_store_scan_container", return_value=True
+                    ) as cleanup,
+                ):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, message):
+                        managed_build._capture_live_store_scan_output(
+                            process, label=label, timeout_seconds=3
+                        )
+                cleanup.assert_called_once_with(label)
+                self.assertIsNotNone(process.poll())
 
     def test_live_store_scan_capture_timeout_requires_verified_cleanup(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "c" * 64 + "-" + "d" * 12
@@ -2583,6 +2759,94 @@ class ManagedBuildTests(unittest.TestCase):
         cleanup.assert_called_once_with(label)
         self.assertIsNotNone(process.poll())
 
+    def test_live_store_scan_capture_baseexception_closes_pipes_and_quiesces_observer(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        interruption = PowerLoss("capture interrupted")
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        stdout = os.fdopen(stdout_read, "rb")
+        stderr = os.fdopen(stderr_read, "rb")
+        process = Mock(pid=5152, returncode=None, stdout=stdout, stderr=stderr)
+        process.poll.return_value = None
+        selector = Mock()
+        selector.register.return_value = None
+        selector.get_map.return_value = {
+            stdout.fileno(): Mock(fileobj=stdout),
+            stderr.fileno(): Mock(fileobj=stderr),
+        }
+        selector.select.side_effect = interruption
+
+        try:
+            with (
+                patch.object(managed_build.selectors, "DefaultSelector", return_value=selector),
+                patch.object(managed_build, "_quiesce_live_store_scan_observer") as quiesce,
+            ):
+                with self.assertRaises(PowerLoss) as caught:
+                    managed_build._capture_live_store_scan_output(
+                        process, label=label, timeout_seconds=3
+                    )
+
+            self.assertIs(caught.exception, interruption)
+            quiesce.assert_called_once_with(process, label)
+            self.assertTrue(stdout.closed)
+            self.assertTrue(stderr.closed)
+            selector.close.assert_called_once()
+        finally:
+            stdout.close()
+            stderr.close()
+            os.close(stdout_write)
+            os.close(stderr_write)
+
+    def test_live_store_scan_capture_non_live_failure_preserves_cleanup_failure(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        interruption = PowerLoss("capture interrupted")
+        cleanup_error = managed_build.ManagedBuildError(
+            "managed Nix live store scan observer cleanup could not be verified"
+        )
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        stdout = os.fdopen(stdout_read, "rb")
+        stderr = os.fdopen(stderr_read, "rb")
+        process = Mock(pid=5153, returncode=None, stdout=stdout, stderr=stderr)
+        process.poll.return_value = None
+        selector = Mock()
+        selector.register.return_value = None
+        selector.get_map.return_value = {
+            stdout.fileno(): Mock(fileobj=stdout),
+            stderr.fileno(): Mock(fileobj=stderr),
+        }
+        selector.select.side_effect = interruption
+
+        try:
+            with (
+                patch.object(managed_build.selectors, "DefaultSelector", return_value=selector),
+                patch.object(
+                    managed_build, "_quiesce_live_store_scan_observer",
+                    side_effect=cleanup_error,
+                ) as quiesce,
+            ):
+                with self.assertRaises(managed_build.ManagedBuildError) as caught:
+                    managed_build._capture_live_store_scan_output(
+                        process, label=label, timeout_seconds=3
+                    )
+
+            self.assertIs(caught.exception, cleanup_error)
+            quiesce.assert_called_once_with(process, label)
+            self.assertTrue(stdout.closed)
+            self.assertTrue(stderr.closed)
+            selector.close.assert_called_once()
+        finally:
+            stdout.close()
+            stderr.close()
+            os.close(stdout_write)
+            os.close(stderr_write)
+
     def test_live_store_scan_cleanup_requires_repeated_absence(self) -> None:
         with (
             patch.object(
@@ -2598,22 +2862,140 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(inventory.call_count, 2)
         sleep.assert_called_once_with(0.1)
 
-    def test_bounded_live_store_scan_propagates_capture_timeout(self) -> None:
+    def test_live_store_scan_cleanup_rejects_ambiguous_nonzero_remove(self) -> None:
+        container_id = "d" * 64
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        result = subprocess.CompletedProcess(
+            ["docker", "rm"], 1, stdout=b"unexpected\n", stderr=b"daemon error\n"
+        )
         with (
-            tempfile.TemporaryDirectory() as directory,
+            patch.object(managed_build, "_live_store_scan_container_ids", return_value=[container_id]),
             patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
-            patch.object(managed_build.subprocess, "Popen", return_value=Mock()),
-            patch.object(
-                managed_build, "_capture_live_store_scan_output",
-                side_effect=managed_build.StoreScanTimeout("synthetic timeout"),
-            ),
+            patch.object(managed_build.subprocess, "run", return_value=result),
         ):
-            with self.assertRaises(managed_build.StoreScanTimeout):
-                managed_build._bounded_live_store_scan(Path(directory), timeout_seconds=0.01)
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "ambiguous"):
+                managed_build._cleanup_live_store_scan_container(label)
 
-    def test_bounded_live_store_scan_rejects_bind_unsafe_root(self) -> None:
-        with self.assertRaisesRegex(managed_build.ManagedBuildError, "bind-safe"):
-            managed_build._bounded_live_store_scan(Path("/tmp/store:unsafe"), timeout_seconds=1)
+    def test_live_store_scan_cleanup_timeout_needs_repeated_absence(self) -> None:
+        container_id = "d" * 64
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        with (
+            patch.object(
+                managed_build, "_live_store_scan_container_ids",
+                side_effect=[[container_id], [], []],
+            ) as inventory,
+            patch.object(managed_build, "_docker_executable", return_value="/usr/bin/docker"),
+            patch.object(
+                managed_build.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired(["docker", "rm"], 5),
+            ),
+            patch.object(managed_build.time, "sleep"),
+        ):
+            self.assertTrue(managed_build._cleanup_live_store_scan_container(label))
+        self.assertEqual(inventory.call_count, 3)
+
+    def test_nix_observer_startup_failure_cleans_before_worker_start(self) -> None:
+        guard = {
+            "source_revision": "8" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "8" * 12,
+            "store_root": "/tmp/managed-nix-store-observer-startup-failure-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        startup_error = managed_build.ManagedBuildError("observer startup inventory mismatch")
+        with (
+            patch.object(managed_build, "_start_live_store_scan_observer", side_effect=startup_error),
+            patch.object(managed_build.subprocess, "Popen") as worker_start,
+            patch.object(
+                managed_build, "_remove_exact_nix_containers", return_value=(0, True)
+            ) as build_cleanup,
+            patch.object(
+                managed_build, "_cleanup_live_store_scan_container", return_value=True
+            ) as observer_cleanup,
+        ):
+            with self.assertRaises(managed_build.ManagedBuildError) as caught:
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+
+        self.assertIs(caught.exception, startup_error)
+        worker_start.assert_not_called()
+        build_cleanup.assert_called_once()
+        build_label = build_cleanup.call_args.args[0]
+        build_cleanup.assert_called_once_with(build_label)
+        self.assertRegex(build_label, managed_build.NIX_CONTAINER_LABEL_RE)
+        observer_cleanup.assert_called_once()
+        observer_label = observer_cleanup.call_args.args[0]
+        observer_cleanup.assert_called_once_with(observer_label)
+        self.assertRegex(observer_label, managed_build.NIX_LIVE_SCAN_LABEL_RE)
+        self.assertEqual(build_label.rsplit("-", 1)[1], observer_label.rsplit("-", 1)[1])
+
+    def test_nix_worker_reuses_one_observer_for_multiple_samples(self) -> None:
+        class Process:
+            pid = 5151
+            returncode = None
+
+            def __init__(self):
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                if self.poll_count >= 2:
+                    self.returncode = 0
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+        process = Process()
+        guard = {
+            "source_revision": "8" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "8" * 12,
+            "store_root": "/tmp/managed-nix-store-observer-reuse-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 10, "hard": 20},
+        }
+        observer_id = "d" * 64
+        samples = [
+            {"allocated_bytes": 1, "error_count": 0, "entries": [], "stderr_bytes": 3},
+            {"allocated_bytes": 2, "error_count": 0, "entries": [], "stderr_bytes": 7},
+        ]
+        with (
+            patch.object(
+                managed_build, "_start_live_store_scan_observer", return_value=observer_id
+            ) as start_observer,
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_live_store_scan", side_effect=samples
+            ) as live_scan,
+            patch.object(
+                managed_build, "_bounded_store_scan",
+                return_value={"allocated_bytes": 2, "error_count": 0, "entries": []},
+            ),
+            patch.object(managed_build, "_terminate_process_group"),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+            patch.object(
+                managed_build, "_cleanup_live_store_scan_container", return_value=True
+            ) as observer_cleanup,
+            patch.object(managed_build.time, "sleep") as sleep,
+        ):
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+
+        self.assertEqual(result.returncode, 0)
+        start_observer.assert_called_once()
+        self.assertEqual(live_scan.call_count, 2)
+        self.assertEqual([item.args[0] for item in live_scan.call_args_list], [observer_id, observer_id])
+        labels = [item.kwargs["label"] for item in live_scan.call_args_list]
+        self.assertEqual(labels[0], labels[1])
+        sleep.assert_called_once_with(2.0)
+        observer_cleanup.assert_called_once_with(labels[0])
+        self.assertEqual(telemetry["store_scan_max_stderr_bytes"], 7)
+        self.assertTrue(telemetry["observer_cleanup_verified"])
 
     def test_bounded_store_scan_toleration_is_an_explicit_internal_helper_flag(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -2662,6 +3044,8 @@ class ManagedBuildTests(unittest.TestCase):
             "runtime_budget_seconds": {"warning": 10, "hard": 20},
         }
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2704,6 +3088,8 @@ class ManagedBuildTests(unittest.TestCase):
             "runtime_budget_seconds": {"warning": 10, "hard": 20},
         }
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2758,6 +3144,8 @@ class ManagedBuildTests(unittest.TestCase):
             return 1, True
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2813,6 +3201,8 @@ class ManagedBuildTests(unittest.TestCase):
             return 0, True
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_store_scan",
@@ -2864,6 +3254,8 @@ class ManagedBuildTests(unittest.TestCase):
             return 0, True
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_store_scan",
@@ -2917,6 +3309,8 @@ class ManagedBuildTests(unittest.TestCase):
             return 0, True
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -2938,6 +3332,106 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertTrue(telemetry["store_scan_error_detected"])
         self.assertTrue(telemetry["container_cleanup_verified"])
         self.assertEqual(events, ["terminate-process-group", "remove-exact-container"])
+
+    def test_nix_live_scan_failure_preserves_safe_detail_if_outer_cleanup_fails(self) -> None:
+        class Process:
+            pid = 4433
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "e" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "e" * 12,
+            "store_root": "/tmp/managed-nix-store-live-failure-cleanup-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 2},
+        }
+
+        def terminate(item):
+            item.returncode = -15
+
+        with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_live_store_scan",
+                side_effect=managed_build.LiveStoreScanFailure(
+                    "exit=1 stderr_classes=not-a-directory",
+                    observer_cleanup_verified=True,
+                ),
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, False)),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=False),
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=1 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=false", message)
+        self.assertIn("exceptional_cleanup_verified=false", message)
+        self.assertNotIn("/subject/", message)
+
+    def test_nix_live_scan_failure_preserves_safe_detail_if_outer_cleanup_succeeds(self) -> None:
+        class Process:
+            pid = 4434
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        process = Process()
+        guard = {
+            "source_revision": "f" * 40,
+            "docker_volume": "heim-pc-nixos-production-" + "f" * 12,
+            "store_root": "/tmp/managed-nix-store-live-failure-cleanup-success-test",
+            "store_stop_threshold_bytes": 64,
+            "store_budget_bytes": {"warning": 64, "hard": 96},
+            "runtime_budget_seconds": {"warning": 1, "hard": 2},
+        }
+
+        def terminate(item):
+            item.returncode = -15
+
+        with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build.subprocess, "Popen", return_value=process),
+            patch.object(
+                managed_build, "_bounded_live_store_scan",
+                side_effect=managed_build.LiveStoreScanFailure(
+                    "exit=1 stderr_classes=not-a-directory",
+                    observer_cleanup_verified=True,
+                ),
+            ),
+            patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+            patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
+        ):
+            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                managed_build._run_nix_worker_guarded(
+                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+                )
+        message = str(caught.exception)
+        self.assertIn("exit=1 stderr_classes=not-a-directory", message)
+        self.assertIn("observer_cleanup_verified=true", message)
+        self.assertNotIn("exceptional_cleanup_verified=", message)
+        self.assertNotIn("/subject/", message)
 
     def test_nix_monitor_exception_still_terminates_worker_and_exact_container(self) -> None:
         class Process:
@@ -2972,6 +3466,8 @@ class ManagedBuildTests(unittest.TestCase):
             return 1, True
 
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(
                 managed_build, "_bounded_live_store_scan",
@@ -3004,6 +3500,8 @@ class ManagedBuildTests(unittest.TestCase):
         def terminate(item): events.append("terminate-process-group"); item.returncode = -15
         def remove(label): events.append("remove-exact-container"); return 0, True
         with (
+            patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+            patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
             patch.object(managed_build.subprocess, "Popen", return_value=process),
             patch.object(managed_build, "_bounded_live_store_scan", side_effect=managed_build.StoreScanTimeout("synthetic slow scan")),
             patch.object(managed_build, "_bounded_store_scan", return_value={"allocated_bytes": 1, "error_count": 0, "entries": []}),
@@ -3035,20 +3533,29 @@ class ManagedBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(managed_build.ManagedBuildError, "exact current Python"):
             managed_build._require_nix_prepare_worker_binding(command, Path("/tmp"), "nixos-production-prepare")
 
-    def test_nix_profile_rejects_same_named_worker_outside_repository(self) -> None:
+    def test_nix_profile_allows_separate_source_repo_but_rejects_untrusted_prepare_script(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            repo = root / "repo"
+            repo = root / "historical-source"
             repo.mkdir()
             output = root / "artifact.json"
+            trusted_script = Path(managed_build.__file__).resolve().with_name(
+                "nixos_production_prepare.py"
+            )
             command = [
-                sys.executable, str(root / "other" / "nixos_production_prepare.py"),
+                sys.executable, str(trusted_script),
                 "--managed-worker", "--repo", str(repo),
                 "--output", str(output), "--source-authority", "proof-only",
             ]
-            with self.assertRaisesRegex(managed_build.ManagedBuildError, "canonical repository prepare script"):
+            managed_build._require_nix_prepare_worker_binding(
+                command, repo, "nixos-production-prepare"
+            )
+
+            untrusted = list(command)
+            untrusted[1] = str(repo / "scripts" / "nixos_production_prepare.py")
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "canonical trusted prepare script"):
                 managed_build._require_nix_prepare_worker_binding(
-                    command, repo, "nixos-production-prepare"
+                    untrusted, repo, "nixos-production-prepare"
                 )
 
     def test_nix_profile_rejects_token_smuggled_python_payload(self) -> None:
@@ -3084,6 +3591,52 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(len(observation["entries"]), 1)
             self.assertEqual(observation["entries"][0]["relative_path"], "target")
             self.assertGreaterEqual(observation["entries"][0]["logical_bytes"], 7)
+
+    def test_nix_toolchain_digest_separates_historical_source_from_trusted_tooling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "historical-source"
+            (repo / "nixos/production").mkdir(parents=True)
+            (repo / "scripts").mkdir()
+            for relative, content in (
+                ("flake.nix", "# historical flake\n"),
+                ("flake.lock", "{}\n"),
+                ("nixos/production/contract-v1.json", "{}\n"),
+                ("scripts/managed_build.py", "# historical untrusted tool\n"),
+                ("scripts/nixos_production_install.py", "# historical untrusted tool\n"),
+                ("scripts/nixos_production_prepare.py", "# historical untrusted tool\n"),
+            ):
+                (repo / relative).write_text(content, encoding="utf-8")
+
+            with patch.object(managed_build, "_run_readonly", return_value="rc=0\nDocker fixture"):
+                digest = managed_build._toolchain_digest("nix", [sys.executable], repo)
+
+            trusted_root = Path(managed_build.__file__).resolve().parents[1]
+            self.assertEqual(
+                digest["observations"]["nix_source_contract_files"],
+                managed_build._files_digest(
+                    repo, ["flake.nix", "flake.lock", "nixos/production/contract-v1.json"]
+                )["sha256"],
+            )
+            self.assertEqual(
+                digest["observations"]["nix_trusted_tool_files"],
+                managed_build._files_digest(
+                    trusted_root, [
+                        "scripts/managed_build.py",
+                        "scripts/nixos_production_install.py",
+                        "scripts/nixos_production_prepare.py",
+                    ],
+                )["sha256"],
+            )
+            self.assertNotEqual(
+                digest["observations"]["nix_trusted_tool_files"],
+                managed_build._files_digest(
+                    repo, [
+                        "scripts/managed_build.py",
+                        "scripts/nixos_production_install.py",
+                        "scripts/nixos_production_prepare.py",
+                    ],
+                )["sha256"],
+            )
 
     def test_toolchain_probe_uses_resolved_cargo_and_sibling_rustc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
