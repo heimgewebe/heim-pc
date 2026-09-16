@@ -119,6 +119,565 @@ class ManagedBuildTests(unittest.TestCase):
 
         return home, plan, command, runner
 
+    def make_nix_reconciliation(self, root: Path):
+        """Produce the legacy digest-only receipt through the unchanged failure path."""
+        home, plan, command, runner = self.make_nix_execution(root)
+        store = Path(plan["nix_guard"]["store_root"])
+        real_scan = managed_build.scan_worktree_payloads
+        worker_finished = False
+
+        def failed_worker(argv, **kwargs):
+            nonlocal worker_finished
+            worker_finished = True
+            return subprocess.CompletedProcess(argv, 77)
+
+        def scan(path, payloads):
+            if path == store and worker_finished:
+                return {"allocated_bytes": 0, "error_count": 1, "entries": []}
+            return real_scan(path, payloads)
+
+        with (
+            patch.object(managed_build, "scan_worktree_payloads", side_effect=scan),
+            patch.object(managed_build, "_nix_volume_exists", return_value=False),
+        ):
+            self.assertEqual(managed_build.execute_plan(
+                self.policy, plan, command, home=home, runner=failed_worker,
+            ), 77)
+        receipt, = (Path(plan["state_root"]) / "receipts").glob("*.json")
+        guard = plan["nix_guard"]
+        arguments = {
+            "repo": Path(plan["repository_root"]), "home": home,
+            "expected_cache_key": plan["cache_key"],
+            "expected_source_revision": guard["source_revision"],
+            "expected_docker_volume": guard["docker_volume"],
+            "prior_receipt": receipt, "expected_receipt_sha256": managed_build._sha256_file(receipt),
+            "command": command,
+        }
+        return plan, arguments, runner
+
+    def test_nix_reconcile_exact_evidence_then_execute_admission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, arguments, runner = self.make_nix_reconciliation(Path(directory))
+            primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            original_bytes = primary.read_bytes()
+            original_identity = managed_build._reconciliation_file_identity(primary.stat())
+            blocked_worker = Mock()
+            with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                # Empty inventories still cannot clear a retained ACTIVE implicitly.
+                for _ in range(2):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires reconciliation"):
+                        managed_build.execute_plan(self.policy, plan, arguments["command"],
+                                                   home=arguments["home"], runner=blocked_worker)
+                blocked_worker.assert_not_called()
+                result = managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertEqual(result["status"], "reconciled")
+                authority = Path(result["authority_path"])
+                evidence = json.loads(authority.read_text())
+                self.assertEqual(result["authority_sha256"], managed_build._sha256_file(authority))
+                self.assertEqual(evidence["fence_payload"], json.loads(original_bytes))
+                self.assertEqual(evidence["fence_file_identity"], original_identity)
+                self.assertEqual(evidence["fence_file_sha256"], result["fence_file_sha256"])
+                self.assertEqual(evidence["prior_receipt_sha256"], arguments["expected_receipt_sha256"])
+                checked = evidence["evidence_checked"]
+                self.assertEqual(checked["docker_volumes_absent"], [
+                    plan["nix_guard"]["docker_volume"], plan["nix_guard"]["source_volume"],
+                ])
+                self.assertIs(checked["container_cleanup_verified"], True)
+                self.assertIs(checked["store_scan_error_detected"], True)
+                self.assertEqual(checked["output_absent"], arguments["command"][6])
+                for path in result["lifecycle_markers_absent"]:
+                    self.assertFalse(os.path.lexists(path))
+                self.assertEqual(stat.S_IMODE(authority.stat().st_mode), 0o600)
+                self.assertEqual(authority.stat().st_nlink, 1)
+                self.assertNotIn("argv", evidence)
+                # Missing ACTIVE is fail-closed, even with a previous authority.
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertEqual(managed_build.execute_plan(
+                    self.policy, plan, arguments["command"], home=arguments["home"], runner=runner,
+                ), 0)
+                self.assertTrue(authority.is_file())
+
+    def test_nix_reconcile_cli_emits_deterministic_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+            argv = ["--policy", str(self.policy_path), "reconcile-nix"]
+            for key in ("repo", "expected_cache_key", "expected_source_revision", "expected_docker_volume",
+                        "prior_receipt", "expected_receipt_sha256"):
+                argv.extend(["--" + key.replace("_", "-"), str(arguments[key])])
+            with (
+                patch.dict(os.environ, {"HOME": str(arguments["home"])}),
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(sys, "stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(managed_build.main([*argv, "--", *arguments["command"]]), 0)
+            result = json.loads(stdout.getvalue())
+            self.assertEqual(stdout.getvalue(), json.dumps(result, indent=2, sort_keys=True) + "\n")
+            self.assertEqual(result["kind"], "heim_pc.managed_nix_reconciliation_result")
+            self.assertEqual(result["cache_key"], plan["cache_key"])
+
+    def test_nix_reconcile_rejects_wrong_operator_bindings_and_argv(self) -> None:
+        for field in ("source", "docker", "cache", "sha", "receipt", "output", "argv-missing"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                before = primary.read_bytes()
+                if field == "source":
+                    arguments["expected_source_revision"] = arguments["expected_source_revision"][:12] + "0" * 28
+                elif field == "docker":
+                    arguments["expected_docker_volume"] += "-other"
+                elif field == "cache":
+                    arguments["expected_cache_key"] = "0" * 64
+                elif field == "sha":
+                    arguments["expected_receipt_sha256"] = "0" * 64
+                elif field == "receipt":
+                    arguments["prior_receipt"] = arguments["prior_receipt"].with_name("missing.json")
+                elif field == "output":
+                    arguments["command"][6] += ".caller-chosen"
+                else:
+                    arguments["command"] = []
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertEqual(primary.read_bytes(), before)
+                self.assertFalse(list(primary.parent.glob("*.reconcile-*.json")))
+
+    def test_nix_reconcile_rejects_unbound_or_ambiguous_receipts(self) -> None:
+        cases = [
+            ("schema_version", True), ("kind", "other"), ("tool", "cargo"), ("profile", "other"),
+            ("cache_key", "0" * 64), ("repository_identity_sha256", "0" * 64),
+            ("returncode", 0), ("returncode", False), ("returncode", "77"), ("returncode", None),
+            ("status", "success"), ("nix_build", None),
+            ("nix_build.source_revision", "0" * 40), ("nix_build.docker_volume", "other"),
+            ("nix_build.source_volume", "other"), ("nix_build.lifecycle_lock_path", "/other.lock"),
+            ("nix_build.lock_mode", "other"), ("nix_build.store_scan_error_detected", False),
+            ("nix_build.store_scan_error_detected", 1), ("nix_build.store_scan_error_detected", None),
+            ("nix_build.container_cleanup_verified", False), ("nix_build.container_cleanup_verified", 1),
+            ("nix_build.container_cleanup_verified", None), ("nix_build.system_closure", "/nix/store/ambiguous"),
+            ("command.argv_sha256", "0" * 64),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                receipt = arguments["prior_receipt"]
+                payload = json.loads(receipt.read_text())
+                if "." in field:
+                    section, key = field.split(".")
+                    payload[section][key] = value
+                else:
+                    payload[field] = value
+                managed_build._atomic_write_json(receipt, payload)
+                arguments["expected_receipt_sha256"] = managed_build._sha256_file(receipt)
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertTrue(Path(plan["nix_guard"]["lifecycle_fence_path"]).exists())
+
+    def test_nix_reconcile_requires_canonical_hash_bound_prior_command(self) -> None:
+        for field in ("output-relative", "duplicate-output", "worker", "repository"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                command = arguments["command"]
+                if field == "output-relative":
+                    command[6] = "artifact.json"
+                elif field == "duplicate-output":
+                    command.extend(["--output", command[6]])
+                elif field == "worker":
+                    command[1] = str(Path(directory) / "unrelated.py")
+                else:
+                    other_root = Path(directory) / "other"
+                    other_root.mkdir()
+                    other_repo = self.make_git_repo(other_root)
+                    command[4] = str(other_repo)
+                    command[1] = str(other_repo / "scripts/nixos_production_prepare.py")
+                receipt = arguments["prior_receipt"]
+                payload = json.loads(receipt.read_text())
+                payload["command"]["argv_sha256"] = managed_build._sha256_json(command)
+                managed_build._atomic_write_json(receipt, payload)
+                arguments["expected_receipt_sha256"] = managed_build._sha256_file(receipt)
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertTrue(Path(plan["nix_guard"]["lifecycle_fence_path"]).exists())
+
+    def test_nix_reconcile_rejects_outputs_and_other_markers(self) -> None:
+        for name in ("output", "success", "recovery", "pending"):
+            for kind in ("file", "directory", "symlink"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                    primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                    paths = {
+                        "output": Path(arguments["command"][6]),
+                        "success": managed_build._managed_nix_success_receipt_path(arguments["command"]),
+                        "recovery": managed_build._nix_recovery_fence_path(primary),
+                        "pending": managed_build._nix_pending_completion_path(primary),
+                    }
+                    target = paths[name]
+                    if kind == "file":
+                        target.touch()
+                    elif kind == "directory":
+                        target.mkdir()
+                    else:
+                        target.symlink_to(Path(directory) / "missing")
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    self.assertTrue(primary.exists())
+                    self.assertTrue(os.path.lexists(target))
+
+    def test_nix_reconcile_rejects_unsafe_fence_receipt_and_lock(self) -> None:
+        for name in ("fence", "receipt", "lock"):
+            for kind in ("symlink", "hardlink", "public", "special-mode", "directory", "fifo", "missing"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                    primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                    target = {"fence": primary, "receipt": arguments["prior_receipt"],
+                              "lock": Path(plan["nix_guard"]["lifecycle_lock_path"])}[name]
+                    if kind == "symlink":
+                        original = target.with_name(target.name + ".original")
+                        target.rename(original)
+                        target.symlink_to(original)
+                    elif kind == "hardlink":
+                        os.link(target, target.with_name(target.name + ".other"))
+                    elif kind in {"public", "special-mode"}:
+                        target.chmod(0o644 if kind == "public" else 0o1600)
+                    else:
+                        target.unlink()
+                        if kind == "directory":
+                            target.mkdir()
+                        elif kind == "fifo":
+                            os.mkfifo(target, 0o600)
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    self.assertFalse(list(primary.parent.glob("*.reconcile-*.json")))
+
+    def test_nix_reconcile_rejects_malformed_or_nonexact_fence(self) -> None:
+        for kind in ("json", "array", "duplicate", "extra", "boolean-schema", "readonly"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                payload = json.loads(primary.read_text())
+                if kind == "json":
+                    primary.write_text("{")
+                elif kind == "array":
+                    primary.write_text("[]")
+                elif kind == "duplicate":
+                    primary.write_text('{"schema_version":1,' + json.dumps(payload)[1:])
+                elif kind == "readonly":
+                    primary.chmod(0o400)
+                else:
+                    payload["extra" if kind == "extra" else "schema_version"] = True
+                    primary.write_text(json.dumps(payload))
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertTrue(primary.exists())
+
+    def test_nix_reconcile_requires_owned_files_and_real_ancestry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+            primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            with patch.object(managed_build.os, "getuid", return_value=os.getuid() + 1):
+                with self.assertRaisesRegex(managed_build.ManagedBuildError, "unsafe"):
+                    managed_build._read_reconciliation_file(primary, fence=True)
+            real_parent = primary.parent.with_name("moved-nix")
+            primary.parent.rename(real_parent)
+            primary.parent.symlink_to(real_parent, target_is_directory=True)
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "ancestry"):
+                managed_build.reconcile_nix_fence(self.policy, **arguments)
+
+    def test_nix_reconcile_requires_exact_successful_docker_inventory(self) -> None:
+        for case in ("store", "source", "failure", "timeout", "invalid", "non-ascii", "blank", "similar"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                guard = plan["nix_guard"]
+                real_run = subprocess.run
+
+                def docker(argv, **kwargs):
+                    if argv[0] != "/usr/bin/docker":
+                        return real_run(argv, **kwargs)
+                    self.assertEqual(argv[1:], ["volume", "ls", "--format", "{{.Name}}"])
+                    self.assertEqual(kwargs["env"], DOCKER_CLIENT_ENVIRONMENT)
+                    self.assertEqual(kwargs["timeout"], 5)
+                    if case == "timeout":
+                        raise subprocess.TimeoutExpired(argv, 5)
+                    output = {
+                        "store": (guard["docker_volume"] + "\n").encode(),
+                        "source": (guard["source_volume"] + "\n").encode(),
+                        "failure": b"", "invalid": b"invalid name\n", "non-ascii": b"\xff\n", "blank": b"\n",
+                        "similar": (guard["docker_volume"] + "-other\n" + guard["source_volume"] + "-other\n").encode(),
+                    }[case]
+                    return subprocess.CompletedProcess(argv, 1 if case == "failure" else 0, output, b"")
+
+                with patch.object(managed_build.subprocess, "run", side_effect=docker):
+                    if case == "similar":
+                        self.assertEqual(managed_build.reconcile_nix_fence(self.policy, **arguments)["status"], "reconciled")
+                    else:
+                        with self.assertRaises(managed_build.ManagedBuildError):
+                            managed_build.reconcile_nix_fence(self.policy, **arguments)
+                        self.assertTrue(Path(guard["lifecycle_fence_path"]).exists())
+
+    def test_nix_reconcile_locks_before_any_authoritative_evidence_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+            lock = Path(plan["nix_guard"]["lifecycle_lock_path"])
+            with lock.open("r+") as handle:
+                managed_build.fcntl.flock(handle, managed_build.fcntl.LOCK_EX | managed_build.fcntl.LOCK_NB)
+                with (
+                    patch.object(managed_build, "_read_reconciliation_file") as read,
+                    patch.object(managed_build, "_nix_volume_exists") as inventory,
+                    self.assertRaisesRegex(managed_build.ManagedBuildError, "active build lease"),
+                ):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                read.assert_not_called()
+                inventory.assert_not_called()
+
+    def test_nix_reconcile_detects_mutation_during_file_read(self) -> None:
+        for name in ("fence", "receipt"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                target = primary if name == "fence" else arguments["prior_receipt"]
+                inode = target.stat().st_ino
+                real_fstat = os.fstat
+                observations = 0
+
+                def fstat(fd):
+                    nonlocal observations
+                    info = real_fstat(fd)
+                    if info.st_ino == inode:
+                        observations += 1
+                        if observations == 2:
+                            target.write_text("{}\n")
+                    return real_fstat(fd)
+
+                with patch.object(managed_build.os, "fstat", side_effect=fstat):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, "changed while reading"):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertEqual(observations, 2)
+                self.assertTrue(primary.exists())
+
+    def test_nix_reconcile_rechecks_races_under_lock_at_retirement_boundaries(self) -> None:
+        for phase in ("active", "linked", "recovery"):
+            for kind in ("fence-write", "fence-replace", "fence-ctime", "receipt", "lock", "output", "success", "pending", "authority", "volume"):
+                with self.subTest(phase=phase, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                    primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                    recovery = managed_build._nix_recovery_fence_path(primary)
+                    lock = Path(plan["nix_guard"]["lifecycle_lock_path"])
+                    triggered = False
+
+                    def inventory(volume):
+                        nonlocal triggered
+                        # A competing execute/reconcile cannot enter during any evidence check.
+                        with lock.open("r+") as handle:
+                            with self.assertRaises(BlockingIOError):
+                                managed_build.fcntl.flock(handle, managed_build.fcntl.LOCK_EX | managed_build.fcntl.LOCK_NB)
+                        current_phase = "linked" if primary.exists() and recovery.exists() else "active" if primary.exists() else "recovery"
+                        authorities = list(primary.parent.glob("*.reconcile-*.json"))
+                        if triggered or current_phase != phase or (kind == "authority" and not authorities):
+                            return False
+                        triggered = True
+                        fence = recovery if phase == "recovery" else primary
+                        if kind == "fence-write":
+                            fence.write_text("{}\n")
+                        elif kind == "fence-replace":
+                            managed_build._atomic_write_json(fence, json.loads(fence.read_text()))
+                        elif kind == "fence-ctime":
+                            fence.chmod(0o400)
+                            fence.chmod(0o600)
+                        elif kind == "receipt":
+                            receipt = arguments["prior_receipt"]
+                            managed_build._atomic_write_json(receipt, json.loads(receipt.read_text()))
+                        elif kind == "lock":
+                            managed_build._atomic_write_json(lock, {})
+                        elif kind == "output":
+                            Path(arguments["command"][6]).touch()
+                        elif kind == "success":
+                            managed_build._managed_nix_success_receipt_path(arguments["command"]).touch()
+                        elif kind == "pending":
+                            managed_build._nix_pending_completion_path(primary).touch()
+                        elif kind == "volume":
+                            return True
+                        else:
+                            authorities[0].write_text("{}\n")
+                        return False
+
+                    with patch.object(managed_build, "_nix_volume_exists", side_effect=inventory):
+                        with self.assertRaises(managed_build.ManagedBuildError):
+                            managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    self.assertTrue(triggered)
+                    self.assertTrue(primary.exists() or recovery.exists())
+
+    def test_nix_reconcile_new_marker_during_lock_acquisition_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+            primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            real_flock = managed_build.fcntl.flock
+
+            def flock(fd, operation):
+                real_flock(fd, operation)
+                managed_build._nix_pending_completion_path(primary).touch()
+
+            with patch.object(managed_build.fcntl, "flock", side_effect=flock):
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+            self.assertTrue(primary.exists())
+            self.assertFalse(list(primary.parent.glob("*.reconcile-*.json")))
+
+    def test_nix_reconcile_authority_retry_is_immutable_and_bound_to_fence_instance(self) -> None:
+        for replace_fence in (False, True):
+            with self.subTest(replace_fence=replace_fence), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                with (
+                    patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                    patch.object(managed_build.os, "link", side_effect=OSError("before link")),
+                    self.assertRaises(managed_build.ManagedBuildError),
+                ):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                authority, = primary.parent.glob("*.reconcile-*.json")
+                before = authority.read_bytes()
+                if replace_fence:
+                    managed_build._atomic_write_json(primary, json.loads(primary.read_text()))
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                    result = managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertEqual(authority.read_bytes(), before)
+                self.assertEqual(result["authority_path"] == str(authority), not replace_fence)
+                self.assertEqual(len(list(primary.parent.glob("*.reconcile-*.json"))), 2 if replace_fence else 1)
+
+    def test_nix_reconcile_rejects_partial_conflicting_or_unsafe_authority_on_retry(self) -> None:
+        for kind in ("partial", "conflicting", "boolean-schema", "symlink", "hardlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                with (
+                    patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                    patch.object(managed_build.os, "link", side_effect=OSError("before link")),
+                    self.assertRaises(managed_build.ManagedBuildError),
+                ):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                authority, = primary.parent.glob("*.reconcile-*.json")
+                if kind in {"partial", "conflicting"}:
+                    authority.write_text("{" if kind == "partial" else "{}")
+                elif kind == "boolean-schema":
+                    payload = json.loads(authority.read_text())
+                    payload["schema_version"] = True
+                    authority.write_text(json.dumps(payload))
+                elif kind == "symlink":
+                    other = authority.with_name("other.json")
+                    authority.rename(other)
+                    authority.symlink_to(other)
+                else:
+                    os.link(authority, authority.with_name("other.json"))
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertTrue(primary.exists())
+                self.assertFalse(managed_build._nix_recovery_fence_path(primary).exists())
+
+    def test_nix_reconcile_retirement_failures_leave_a_blocking_marker(self) -> None:
+        windows = ("authority", "authority-fsync", "link", "linked-fsync", "primary-unlink",
+                   "primary-fsync", "recovery-unlink", "retirement-fsync")
+        for window in windows:
+            with self.subTest(window=window), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                recovery = managed_build._nix_recovery_fence_path(primary)
+                real_create = managed_build._atomic_create_json
+                real_sync = managed_build._fsync_directory
+                real_link = os.link
+                real_unlink = Path.unlink
+                triggered = False
+
+                def fail(label):
+                    nonlocal triggered
+                    if window == label and not triggered:
+                        triggered = True
+                        raise OSError(label)
+
+                def create(path, payload):
+                    if ".reconcile-" in path.name:
+                        fail("authority")
+                    real_create(path, payload)
+
+                def sync(path):
+                    if path == primary.parent:
+                        phase = "linked-fsync" if primary.exists() and recovery.exists() else "authority-fsync" if primary.exists() else "primary-fsync" if recovery.exists() else "retirement-fsync"
+                        fail(phase)
+                    real_sync(path)
+
+                def link(source, destination, **kwargs):
+                    fail("link")
+                    real_link(source, destination, **kwargs)
+
+                def unlink(path, *args, **kwargs):
+                    fail("primary-unlink" if path == primary else "recovery-unlink")
+                    return real_unlink(path, *args, **kwargs)
+
+                with (
+                    patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                    patch.object(managed_build, "_atomic_create_json", side_effect=create),
+                    patch.object(managed_build, "_fsync_directory", side_effect=sync),
+                    patch.object(managed_build.os, "link", side_effect=link),
+                    patch.object(Path, "unlink", new=unlink),
+                    self.assertRaises(managed_build.ManagedBuildError),
+                ):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                self.assertTrue(triggered)
+                self.assertTrue(primary.exists() or recovery.exists())
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                    with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires reconciliation"):
+                        managed_build.execute_plan(self.policy, plan, arguments["command"],
+                                                   home=arguments["home"], runner=Mock())
+
+    def test_nix_reconcile_process_crash_has_blocker_or_durable_terminal_authority(self) -> None:
+        # Real process death skips Python finally/exception restoration entirely.
+        for window in ("authority", "linked", "primary-retired", "recovery-retired"):
+            with self.subTest(window=window), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                recovery = managed_build._nix_recovery_fence_path(primary)
+                real_create = managed_build._atomic_create_json
+                real_link = os.link
+                real_unlink = Path.unlink
+
+                def create(path, payload):
+                    real_create(path, payload)
+                    if window == "authority":
+                        os._exit(91)
+
+                def link(source, destination, **kwargs):
+                    real_link(source, destination, **kwargs)
+                    if window == "linked":
+                        os._exit(91)
+
+                def unlink(path, *args, **kwargs):
+                    result = real_unlink(path, *args, **kwargs)
+                    if (path == primary and window == "primary-retired") or (path == recovery and window == "recovery-retired"):
+                        os._exit(91)
+                    return result
+
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        with (
+                            patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                            patch.object(managed_build, "_atomic_create_json", side_effect=create),
+                            patch.object(managed_build.os, "link", side_effect=link),
+                            patch.object(Path, "unlink", new=unlink),
+                        ):
+                            managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    finally:
+                        os._exit(92)
+                _, status = os.waitpid(pid, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 91)
+                authority, = primary.parent.glob("*.reconcile-*.json")
+                evidence = managed_build._read_reconciliation_file(authority)["payload"]
+                self.assertEqual(evidence["prior_receipt_sha256"], arguments["expected_receipt_sha256"])
+                self.assertEqual(evidence["fence_payload"]["source_revision"], arguments["expected_source_revision"])
+                self.assertEqual(primary.exists() or recovery.exists(), window != "recovery-retired")
+                if window != "recovery-retired":
+                    with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                        with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires reconciliation"):
+                            managed_build.execute_plan(self.policy, plan, arguments["command"],
+                                                       home=arguments["home"], runner=Mock())
+
     def test_docker_binary_and_environment_are_fixed_for_all_observations_and_cleanup(self) -> None:
         self.docker_executable_patch.stop()
         managed_build._docker_executable.cache_clear()
