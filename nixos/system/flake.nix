@@ -9,7 +9,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, microvm }:
+  outputs = { self, nixpkgs, microvm, nixer }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
@@ -37,7 +37,8 @@
       # that the declarative proof configuration and its transformed VM runtime
       # are the same Store object.
       # One storage/boot base for the candidate and both physical proof variants.
-      physicalHostModules = [ ./hosts/heim-pc ./modules/storage-layout.nix ];
+      hostModules = [ nixer.nixosModules.default ./modules/nixer.nix ./hosts/heim-pc ];
+      physicalHostModules = hostModules ++ [ ./modules/storage-layout.nix ];
 
       proofConfig = self.nixosConfigurations.heim-pc-vm.config;
       proofVmConfig = proofConfig.virtualisation.vmVariant;
@@ -69,7 +70,7 @@
             physicalGates = false;
           };
         };
-        modules = [ ./hosts/heim-pc ];
+        modules = hostModules;
       };
 
       # Build-only closure for T011/T003. Unlike the deliberately impossible
@@ -176,7 +177,7 @@
             physicalGates = false;
           };
         };
-        modules = [ ./hosts/heim-pc ];
+        modules = hostModules;
       };
 
       # Negative pre-deployment proof is exported as a module, not as a normal
@@ -298,8 +299,7 @@
                   physicalGates = false;
                 };
               };
-              modules = [
-                ./hosts/heim-pc
+              modules = hostModules ++ [
                 ({ lib, ... }: {
                   fileSystems."/".device = lib.mkForce "/dev/disk/by-label/REAL-WITHOUT-PERSIST";
                 })

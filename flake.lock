@@ -21,7 +21,42 @@
         "type": "github"
       }
     },
+    "nixer": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1789539626,
+        "narHash": "sha256-fq/qrYTUDuL0ZXfvzuUhmEvumHphyjrQTm/VpO7SLNg=",
+        "owner": "heimgewebe",
+        "repo": "nixer",
+        "rev": "7647a342f4e31e29d643f0e9fb64c9bd4b0906a8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "heimgewebe",
+        "repo": "nixer",
+        "rev": "7647a342f4e31e29d643f0e9fb64c9bd4b0906a8",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
+      "locked": {
+        "lastModified": 1789286504,
+        "narHash": "sha256-eiEK7cKZORNEvX0GeF3RtNEF/JXhgf2RqSp3230q13E=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ef34387ddd751e1ab8857adf4676492d32eb24ec",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
       "locked": {
         "lastModified": 1787962033,
         "narHash": "sha256-u6z9VTZA4Kf3RkHQo9sQI7NI4Ei/uiU9vrMqOiwWP1Y=",
@@ -40,7 +75,8 @@
     "root": {
       "inputs": {
         "microvm": "microvm",
-        "nixpkgs": "nixpkgs"
+        "nixer": "nixer",
+        "nixpkgs": "nixpkgs_2"
       }
     },
     "spectrum": {
