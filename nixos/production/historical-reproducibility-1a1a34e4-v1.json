@@ -1,0 +1,51 @@
+{
+  "candidate_closure_manifest_sha256": "c9c37e7548869734a0b3ec34cf01d8dd48def6a96a6966cadff6e4f3a286ca1f",
+  "candidate_closure_path_count": 2081,
+  "exceptions": [
+    {
+      "candidate_record": {
+        "deriver": "/nix/store/vv81scx4x6sci66jd8id32id4n7c370g-nvidia-kernel-modules-595.71.05-6.18.48.drv",
+        "narHash": "sha256-uKYW49qM/T+DYgGcttrZkNTwDThmXBmedL0kc/9Ypl4=",
+        "narSize": 95845008,
+        "references": []
+      },
+      "path": "/nix/store/9rxmkw4dgx4zbg4knpgf4ks180g08n85-nvidia-kernel-modules-595.71.05-6.18.48"
+    },
+    {
+      "candidate_record": {
+        "deriver": "/nix/store/p0m5kqzy7a1cm44z5602p9wzafx882ib-hwdb.bin.drv",
+        "narHash": "sha256-W9QBE9ZsF6wUlVs3Yx1uH/P4BKqCmr+dO5clQVjQSbs=",
+        "narSize": 13849376,
+        "references": []
+      },
+      "path": "/nix/store/ih9f81k5fs8kma02wynqd8lry3s0g4xf-hwdb.bin"
+    }
+  ],
+  "kind": "heim_pc.nixos_historical_reproducibility_acceptance",
+  "schema_version": 1,
+  "semantic_projections": {
+    "hwdb": {
+      "kind": "systemd-hwdb-v260-build-root-normalized",
+      "node_count": 168836,
+      "record_count": 132275,
+      "records_sha256": "ec1b545e0345e98246dc984c591afd5255c17596d7ea0588f4d991dbb77c4228",
+      "tool_version": 260
+    },
+    "nvidia": {
+      "inventory_count": 6,
+      "inventory_sha256": "28bd5d6bbcca102059a36fdd16a53317e8b37c1b3962762b528729954b7a4729",
+      "kind": "nvidia-kernel-modules-elf-semantic-v1",
+      "module_executable": false,
+      "module_semantic_sha256": {
+        "lib/modules/6.18.48/kernel/drivers/video/nvidia-drm.ko.xz": "a7fb0239978ab1f6f9f6f0a9b96302d86eebe6976ca9692883357d4224aa9ee1",
+        "lib/modules/6.18.48/kernel/drivers/video/nvidia-modeset.ko.xz": "f261c99cecb7f260d0ba9129e40acbd4e28e07deb46004eeab1b649810622870",
+        "lib/modules/6.18.48/kernel/drivers/video/nvidia-peermem.ko.xz": "a9793e5af75118c0ca09289cefd5ee26540acef36b4ca67dcd7bde7b30d3a530",
+        "lib/modules/6.18.48/kernel/drivers/video/nvidia-uvm.ko.xz": "bbb2eab580433742a25fee2a166223e473f260d2dbeb916cd85649e75ae95dfc",
+        "lib/modules/6.18.48/kernel/drivers/video/nvidia.ko.xz": "e584eda0f99f79da2734015fef30c01f7a985045235eaf944e9b73a60e11f503"
+      }
+    }
+  },
+  "source_revision": "1a1a34e4ce5321cfaa530df4eeb15b991cf87263",
+  "stable_closure_projection_sha256": "dbb85ff85853786d0c88add1ebf43a50fafa7a70a708866e7a15e97c83ab5f0d",
+  "system_path": "/nix/store/dbsd1qd8fx6v6aq66q7mw2bdrz0d87la-nixos-system-heim-pc-26.05.20260829.c5c4a43"
+}

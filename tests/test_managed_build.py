@@ -2604,6 +2604,13 @@ class ManagedBuildTests(unittest.TestCase):
     def test_live_store_monitor_interval_is_two_seconds(self) -> None:
         self.assertEqual(managed_build.NIX_STORE_MONITOR_INTERVAL_SECONDS, 2.0)
 
+    def test_final_store_scan_timeout_is_bounded_for_large_store_walks(self) -> None:
+        self.assertEqual(managed_build.NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS, 120.0)
+        self.assertLessEqual(
+            managed_build.NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS,
+            managed_build.NIX_LIVE_SCAN_OBSERVER_MARGIN_SECONDS,
+        )
+
     def test_live_store_find_parser_is_incremental_and_deduplicates_hardlinks(self) -> None:
         observation = managed_build._parse_live_store_find_output(
             [b"1 10 ", b"2\n1 11 3\n1 ", b"10 2\n"]

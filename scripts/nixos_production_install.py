@@ -62,6 +62,12 @@ MANAGED_BUILD_ATTESTATION_PREDICATE_KIND = "heim_pc.nixos_independent_managed_re
 HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH = (
     ROOT / "nixos" / "production" / "historical-reproducibility-v1.json"
 )
+HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS = {
+    "1f78b89ed89e4a1bb697e4bbec4589a190a36abf": HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+    "1a1a34e4ce5321cfaa530df4eeb15b991cf87263": (
+        ROOT / "nixos" / "production" / "historical-reproducibility-1a1a34e4-v1.json"
+    ),
+}
 INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "schema_version", "kind", "source_revision", "system_path", "nix_volume",
     "nix_image", "profile", "closure_manifest_sha256", "closure_path_count",
@@ -138,6 +144,17 @@ _HISTORICAL_REPRO_SPEC.loader.exec_module(historical_reproducibility)
 
 class ProductionInstallError(RuntimeError):
     pass
+
+
+def historical_reproducibility_acceptance_path(source_revision: str) -> Path:
+    if not isinstance(source_revision, str) or SOURCE_REVISION_RE.fullmatch(source_revision) is None:
+        raise ProductionInstallError("historical reproducibility source revision is invalid")
+    path = HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS.get(source_revision)
+    if path is None:
+        raise ProductionInstallError(
+            "no reviewed historical reproducibility acceptance for source revision"
+        )
+    return path
 
 
 class ProtectedEfiThawError(ProductionInstallError):
@@ -507,7 +524,7 @@ def verify_independent_rebuild_candidate(
     if historical_variance:
         try:
             historical_verification = historical_reproducibility.verify_historical_rebuild(
-                acceptance_path=HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+                acceptance_path=historical_reproducibility_acceptance_path(candidate["source_revision"]),
                 candidate_artifact=candidate,
                 independent_artifact=independent,
                 independent_store_root=Path(receipt["store_root"]),
@@ -680,7 +697,7 @@ def verify_managed_build_attestation(
             )
         try:
             validated_historical = historical_reproducibility.validate_verification_evidence(
-                acceptance_path=HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+                acceptance_path=historical_reproducibility_acceptance_path(source_revision),
                 candidate_artifact=artifact,
                 value=historical_verification,
             )
