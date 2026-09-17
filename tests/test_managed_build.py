@@ -119,9 +119,10 @@ class ManagedBuildTests(unittest.TestCase):
 
         return home, plan, command, runner
 
-    def make_nix_reconciliation(self, root: Path):
-        """Produce the legacy digest-only receipt through the unchanged failure path."""
-        home, plan, command, runner = self.make_nix_execution(root)
+    def run_nix_scan_error(self, plan, command, *, home: Path) -> Path:
+        """Produce a terminal receipt through the managed execution failure path."""
+        receipts = Path(plan["state_root"]) / "receipts"
+        previous_receipts = set(receipts.glob("*.json"))
         store = Path(plan["nix_guard"]["store_root"])
         real_scan = managed_build.scan_worktree_payloads
         worker_finished = False
@@ -143,7 +144,12 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(managed_build.execute_plan(
                 self.policy, plan, command, home=home, runner=failed_worker,
             ), 77)
-        receipt, = (Path(plan["state_root"]) / "receipts").glob("*.json")
+        receipt, = set(receipts.glob("*.json")) - previous_receipts
+        return receipt
+
+    def make_nix_reconciliation(self, root: Path):
+        home, plan, command, runner = self.make_nix_execution(root)
+        receipt = self.run_nix_scan_error(plan, command, home=home)
         guard = plan["nix_guard"]
         arguments = {
             "repo": Path(plan["repository_root"]), "home": home,
@@ -154,6 +160,128 @@ class ManagedBuildTests(unittest.TestCase):
             "command": command,
         }
         return plan, arguments, runner
+
+    def test_nix_reconcile_rejects_prior_incarnation_and_accepts_current_receipt(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("secrets.token_hex", side_effect=["1" * 64, "2" * 64]) as entropy,
+            patch.object(managed_build.time, "time", return_value=1000.0) as timestamp,
+            patch.object(managed_build, "_nix_volume_exists", return_value=False),
+        ):
+            plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+            primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            first_payload = json.loads(primary.read_text())
+            first_receipt = arguments["prior_receipt"].read_bytes()
+            first_result = managed_build.reconcile_nix_fence(self.policy, **arguments)
+            first_authority = Path(first_result["authority_path"])
+            first_authority_bytes = first_authority.read_bytes()
+
+            # Reuse the identical plan, source, cache key, volumes and argv.
+            timestamp.return_value = 1001.0
+            current_receipt = self.run_nix_scan_error(plan, arguments["command"], home=arguments["home"])
+            current_receipt_bytes = current_receipt.read_bytes()
+            current_fence_bytes = primary.read_bytes()
+            current_identity = managed_build._reconciliation_file_identity(primary.stat())
+            with patch.object(managed_build, "_nix_volume_exists", return_value=False) as inventory:
+                with self.assertRaises(managed_build.ManagedBuildError):
+                    managed_build.reconcile_nix_fence(self.policy, **arguments)
+                inventory.assert_not_called()
+            self.assertEqual(primary.read_bytes(), current_fence_bytes)
+            self.assertEqual(managed_build._reconciliation_file_identity(primary.stat()), current_identity)
+            self.assertFalse(os.path.lexists(managed_build._nix_recovery_fence_path(primary)))
+            self.assertFalse(os.path.lexists(managed_build._nix_pending_completion_path(primary)))
+            self.assertEqual(list(primary.parent.glob("*.reconcile-*.json")), [first_authority])
+            self.assertEqual(first_authority.read_bytes(), first_authority_bytes)
+            self.assertEqual(arguments["prior_receipt"].read_bytes(), first_receipt)
+            self.assertEqual(current_receipt.read_bytes(), current_receipt_bytes)
+
+            current_payload = json.loads(current_fence_bytes)
+            self.assertEqual(first_payload.pop("incarnation_id"), "1" * 64)
+            self.assertEqual(current_payload.pop("incarnation_id"), "2" * 64)
+            self.assertEqual(first_payload, current_payload)
+            self.assertEqual(json.loads(first_receipt)["nix_build"]["incarnation_id"], "1" * 64)
+            self.assertEqual(json.loads(current_receipt_bytes)["nix_build"]["incarnation_id"], "2" * 64)
+            self.assertEqual(entropy.call_args_list, [call(32), call(32)])
+            result = managed_build.reconcile_nix_fence(self.policy, **{
+                **arguments, "prior_receipt": current_receipt,
+                "expected_receipt_sha256": managed_build._sha256_file(current_receipt),
+            })
+            self.assertEqual(result["status"], "reconciled")
+            evidence = json.loads(Path(result["authority_path"]).read_text())
+            self.assertEqual(evidence["fence_payload"]["incarnation_id"], "2" * 64)
+            self.assertEqual(evidence["prior_receipt_sha256"], managed_build._sha256_file(current_receipt))
+            self.assertNotEqual(result["authority_path"], first_result["authority_path"])
+            for path in result["lifecycle_markers_absent"]:
+                self.assertFalse(os.path.lexists(path))
+
+    def test_nix_reconcile_rejects_legacy_evidence_without_incarnation(self) -> None:
+        for missing in ("fence", "receipt", "both"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                receipt = arguments["prior_receipt"]
+                if missing in {"fence", "both"}:
+                    payload = json.loads(primary.read_text())
+                    payload.pop("incarnation_id", None)
+                    managed_build._atomic_write_json(primary, payload)
+                if missing in {"receipt", "both"}:
+                    payload = json.loads(receipt.read_text())
+                    payload["nix_build"].pop("incarnation_id", None)
+                    managed_build._atomic_write_json(receipt, payload)
+                    arguments["expected_receipt_sha256"] = managed_build._sha256_file(receipt)
+                before = primary.read_bytes()
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False) as inventory:
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    inventory.assert_not_called()
+                self.assertEqual(primary.read_bytes(), before)
+                self.assertEqual(primary.stat().st_nlink, 1)
+                self.assertFalse(list(primary.parent.glob("*.reconcile-*.json")))
+
+    def test_nix_reconcile_rejects_matching_malformed_incarnations(self) -> None:
+        for incarnation in (None, "", True, 1, [], {}, "a" * 63, "a" * 65, "g" * 64, "A" * 64, "a" * 64 + "\n"):
+            with self.subTest(incarnation=incarnation), tempfile.TemporaryDirectory() as directory:
+                plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
+                primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+                receipt = arguments["prior_receipt"]
+                payload = json.loads(primary.read_text())
+                payload["incarnation_id"] = incarnation
+                managed_build._atomic_write_json(primary, payload)
+                payload = json.loads(receipt.read_text())
+                payload["nix_build"]["incarnation_id"] = incarnation
+                managed_build._atomic_write_json(receipt, payload)
+                arguments["expected_receipt_sha256"] = managed_build._sha256_file(receipt)
+                before = primary.read_bytes()
+                with patch.object(managed_build, "_nix_volume_exists", return_value=False) as inventory:
+                    with self.assertRaises(managed_build.ManagedBuildError):
+                        managed_build.reconcile_nix_fence(self.policy, **arguments)
+                    inventory.assert_not_called()
+                self.assertEqual(primary.read_bytes(), before)
+                self.assertEqual(primary.stat().st_nlink, 1)
+                self.assertFalse(list(primary.parent.glob("*.reconcile-*.json")))
+
+    def test_nix_incarnation_entropy_failure_prevents_execution_and_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, _ = self.make_nix_execution(Path(directory))
+            worker = Mock()
+            with (
+                patch("secrets.token_hex", side_effect=OSError("entropy unavailable")) as entropy,
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                self.assertRaisesRegex(OSError, "entropy unavailable"),
+            ):
+                managed_build.execute_plan(self.policy, plan, command, home=home, runner=worker)
+            entropy.assert_called_once_with(32)
+            worker.assert_not_called()
+            primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
+            for path in (primary, managed_build._nix_recovery_fence_path(primary),
+                         managed_build._nix_pending_completion_path(primary)):
+                self.assertFalse(os.path.lexists(path))
+            self.assertFalse(list((Path(plan["state_root"]) / "receipts").glob("*.json")))
+            lock_fd = os.open(plan["nix_guard"]["lifecycle_lock_path"], os.O_RDWR)
+            try:
+                managed_build.fcntl.flock(lock_fd, managed_build.fcntl.LOCK_EX | managed_build.fcntl.LOCK_NB)
+            finally:
+                os.close(lock_fd)
 
     def test_nix_reconcile_exact_evidence_then_execute_admission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -579,6 +707,7 @@ class ManagedBuildTests(unittest.TestCase):
                 plan, arguments, _ = self.make_nix_reconciliation(Path(directory))
                 primary = Path(plan["nix_guard"]["lifecycle_fence_path"])
                 recovery = managed_build._nix_recovery_fence_path(primary)
+                original_payload = json.loads(primary.read_text())
                 real_create = managed_build._atomic_create_json
                 real_sync = managed_build._fsync_directory
                 real_link = os.link
@@ -621,6 +750,9 @@ class ManagedBuildTests(unittest.TestCase):
                     managed_build.reconcile_nix_fence(self.policy, **arguments)
                 self.assertTrue(triggered)
                 self.assertTrue(primary.exists() or recovery.exists())
+                for path in (primary, recovery):
+                    if path.exists():
+                        self.assertEqual(json.loads(path.read_text()), original_payload)
                 with patch.object(managed_build, "_nix_volume_exists", return_value=False):
                     with self.assertRaisesRegex(managed_build.ManagedBuildError, "requires reconciliation"):
                         managed_build.execute_plan(self.policy, plan, arguments["command"],
@@ -2150,7 +2282,9 @@ class ManagedBuildTests(unittest.TestCase):
                 )
             guard = plan["nix_guard"]
             closure = "/nix/store/" + "0" * 32 + "-nixos-system-heim-pc-test"
+            active_fence = {}
             def runner(argv, **kwargs):
+                active_fence.update(json.loads(Path(guard["lifecycle_fence_path"]).read_text()))
                 self.assertEqual(kwargs["env"]["HEIM_PC_NIXOS_PRODUCTION_PREPARE_MANAGED"], "1")
                 store = Path(kwargs["env"]["HEIM_PC_MANAGED_NIX_STORE_ROOT"])
                 (store / "payload").write_bytes(b"store")
@@ -2169,6 +2303,8 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(len(receipts), 1)
             receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
             nix = receipt["nix_build"]
+            self.assertRegex(active_fence["incarnation_id"], r"\A[0-9a-f]{64}\Z")
+            self.assertEqual(nix["incarnation_id"], active_fence["incarnation_id"])
             self.assertEqual(nix["source_revision"], guard["source_revision"])
             self.assertEqual(nix["docker_volume"], guard["docker_volume"])
             self.assertEqual(nix["system_closure"], closure)

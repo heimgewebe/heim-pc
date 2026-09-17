@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import selectors
 import shutil
 import signal
@@ -1682,7 +1683,7 @@ def reconcile_nix_fence(
 ) -> dict[str, Any]:
     """Explicit authority for one terminal scan-error failure; never called by execute_plan.
 
-    Old receipts record only an argv digest. The supplied argv is its preimage,
+    Receipts record only an argv digest. The supplied argv is its preimage,
     not independent output-path authority, and is never executed here.
     Retry is allowed only with the unchanged singleton ACTIVE and exact authority.
     Missing primaries and recovery/completion states require separate investigation.
@@ -1725,6 +1726,10 @@ def reconcile_nix_fence(
         _reconciliation_require_absent(recovery)
         _reconciliation_require_absent(pending)
         original = _read_reconciliation_file(primary, fence=True)
+        incarnation_id = original["payload"].get("incarnation_id")
+        if not isinstance(incarnation_id, str) or re.fullmatch(r"[0-9a-f]{64}", incarnation_id) is None:
+            raise ManagedBuildError("active fence lacks a valid incarnation identifier")
+        expected_fence["incarnation_id"] = incarnation_id
         if _canonical_json(original["payload"]) != _canonical_json(expected_fence):
             raise ManagedBuildError("active fence does not match expected Nix binding")
         if prior_receipt.parent != state_root / "receipts":
@@ -1744,6 +1749,7 @@ def reconcile_nix_fence(
         if (
             any(_canonical_json(receipt.get(k)) != _canonical_json(v) for k, v in expected_receipt.items())
             or not isinstance(nix, dict)
+            or nix.get("incarnation_id") != incarnation_id
             or nix.get("source_revision") != expected_source_revision
             or nix.get("docker_volume") != expected_docker_volume
             or nix.get("source_volume") != source_volume
@@ -2329,6 +2335,7 @@ def execute_plan(
     fence_path: Path | None = None
     recovery_fence_path: Path | None = None
     pending_completion_path: Path | None = None
+    nix_incarnation_id: str | None = None
     fence_created = False
     cleanup_verified = plan["tool"] != "nix"
     before_store = {"allocated_bytes": 0}
@@ -2377,12 +2384,15 @@ def execute_plan(
             os.close(lock_fd)
             lock_fd = None
             raise ManagedBuildError("managed Nix lifecycle fence requires reconciliation")
-        fence_payload = {
-            "schema_version": 1, "kind": "heim_pc.managed_nix_active_fence",
-            "source_revision": nix_guard["source_revision"],
-            "docker_volume": nix_guard["docker_volume"],
-        }
         try:
+            # Cache/source identities repeat; only this execution may retire its fence.
+            nix_incarnation_id = secrets.token_hex(32)
+            fence_payload = {
+                "schema_version": 1, "kind": "heim_pc.managed_nix_active_fence",
+                "incarnation_id": nix_incarnation_id,
+                "source_revision": nix_guard["source_revision"],
+                "docker_volume": nix_guard["docker_volume"],
+            }
             _atomic_create_json(fence_path, fence_payload)
             _fsync_directory_ancestors(fence_path.parent)
         except BaseException:
@@ -2491,6 +2501,7 @@ def execute_plan(
                 "lifecycle_lock_path": nix_guard["lifecycle_lock_path"],
                 "lock_mode": nix_guard["lock_mode"],
                 **(telemetry or {}),
+                "incarnation_id": nix_incarnation_id,
             }
             if effective_returncode == 0:
                 nix_receipt.update(_nix_artifact_receipt(command, nix_guard))
