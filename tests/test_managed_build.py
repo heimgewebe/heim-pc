@@ -3519,7 +3519,7 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertIn("exceptional_cleanup_verified=false", message)
         self.assertNotIn("/subject/", message)
 
-    def test_nix_live_scan_failure_preserves_safe_detail_if_outer_cleanup_succeeds(self) -> None:
+    def test_nix_live_scan_failure_with_verified_outer_cleanup_returns_terminal_scan_error(self) -> None:
         class Process:
             pid = 4434
             returncode = None
@@ -3558,16 +3558,87 @@ class ManagedBuildTests(unittest.TestCase):
             patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
             patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
             patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
+            patch.object(
+                managed_build, "_bounded_store_scan",
+                return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+            ),
         ):
-            with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
-                managed_build._run_nix_worker_guarded(
-                    ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
-                )
-        message = str(caught.exception)
-        self.assertIn("exit=1 stderr_classes=not-a-directory", message)
-        self.assertIn("observer_cleanup_verified=true", message)
-        self.assertNotIn("exceptional_cleanup_verified=", message)
-        self.assertNotIn("/subject/", message)
+            result, telemetry = managed_build._run_nix_worker_guarded(
+                ["python3", "worker.py"], root=Path("/tmp"), environment={}, guard=guard
+            )
+        self.assertEqual(result.returncode, 77)
+        self.assertTrue(telemetry["store_scan_error_detected"])
+        self.assertTrue(telemetry["container_cleanup_verified"])
+        self.assertTrue(telemetry["observer_cleanup_verified"])
+        self.assertEqual(
+            telemetry["live_store_scan_failure_diagnostic"],
+            "exit=1 stderr_classes=not-a-directory",
+        )
+        self.assertEqual(telemetry["store_final_scan"]["error_count"], 0)
+
+    def test_nix_live_scan_failure_execute_plan_writes_reconcilable_receipt(self) -> None:
+        class Process:
+            pid = 4435
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = -15
+                return self.returncode
+
+        def terminate(item):
+            item.returncode = -15
+
+        real_guarded = managed_build._run_nix_worker_guarded
+
+        def guarded(*args, **kwargs):
+            with patch.object(managed_build.subprocess, "Popen", return_value=Process()):
+                return real_guarded(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            home, plan, command, _ = self.make_nix_execution(Path(directory))
+            receipts = Path(plan["state_root"]) / "receipts"
+            with (
+                patch.object(managed_build, "_nix_volume_exists", return_value=False),
+                patch.object(managed_build, "_run_nix_worker_guarded", side_effect=guarded),
+                patch.object(managed_build, "_start_live_store_scan_observer", return_value="d" * 64),
+                patch.object(
+                    managed_build, "_bounded_live_store_scan",
+                    side_effect=managed_build.LiveStoreScanFailure(
+                        "exit=1 stderr_classes=not-found", observer_cleanup_verified=True,
+                    ),
+                ),
+                patch.object(managed_build, "_terminate_process_group", side_effect=terminate),
+                patch.object(managed_build, "_remove_exact_nix_containers", return_value=(0, True)),
+                patch.object(managed_build, "_cleanup_live_store_scan_container", return_value=True),
+                patch.object(
+                    managed_build, "_bounded_store_scan",
+                    return_value={"allocated_bytes": 1, "error_count": 0, "entries": []},
+                ),
+            ):
+                self.assertEqual(managed_build.execute_plan(self.policy, plan, command, home=home), 77)
+            receipt, = receipts.glob("*.json")
+            payload = json.loads(receipt.read_text())
+            self.assertEqual(payload["returncode"], 77)
+            self.assertTrue(payload["nix_build"]["store_scan_error_detected"])
+            self.assertTrue(payload["nix_build"]["container_cleanup_verified"])
+            self.assertEqual(payload["nix_build"]["incarnation_id"], json.loads(
+                Path(plan["nix_guard"]["lifecycle_fence_path"]).read_text()
+            )["incarnation_id"])
+            arguments = {
+                "repo": Path(plan["repository_root"]), "home": home,
+                "expected_cache_key": plan["cache_key"],
+                "expected_source_revision": plan["nix_guard"]["source_revision"],
+                "expected_docker_volume": plan["nix_guard"]["docker_volume"],
+                "prior_receipt": receipt, "expected_receipt_sha256": managed_build._sha256_file(receipt),
+                "command": command,
+            }
+            with patch.object(managed_build, "_nix_volume_exists", return_value=False):
+                result = managed_build.reconcile_nix_fence(self.policy, **arguments)
+            self.assertEqual(result["status"], "reconciled")
 
     def test_nix_monitor_exception_still_terminates_worker_and_exact_container(self) -> None:
         class Process:
