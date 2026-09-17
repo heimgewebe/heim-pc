@@ -34,7 +34,9 @@ DEFAULT_POLICY_PATH = ROOT / "config" / "managed-build.v1.json"
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 NIX_STORE_MONITOR_INTERVAL_SECONDS = 2.0
-NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 30.0
+# Final allocation scans walk the complete managed store after the worker exits.
+# Keep them fail-closed but allow slower GitHub-hosted runners enough bounded time.
+NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS = 120.0
 # Container cleanup has its own bounded Docker-client window; exact label readback is authoritative.
 NIX_CONTAINER_REMOVE_TIMEOUT_SECONDS = 5.0
 # Volume deletion gets the same bounded I/O window as the final store scan.

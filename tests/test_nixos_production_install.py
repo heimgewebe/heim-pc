@@ -4486,6 +4486,26 @@ def test_historical_repro_closure_manifest_projection_matches_production_schema(
     )
 
 
+def test_historical_repro_acceptance_selector_is_source_specific_and_fail_closed():
+    old_acceptance, _ = prod.historical_reproducibility.load_acceptance(
+        prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
+    )
+    current_source = "1a1a34e4ce5321cfaa530df4eeb15b991cf87263"
+    current_path = prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS[current_source]
+    current_acceptance, _ = prod.historical_reproducibility.load_acceptance(current_path)
+
+    assert prod.historical_reproducibility_acceptance_path(old_acceptance["source_revision"]) == prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
+    assert prod.historical_reproducibility_acceptance_path(current_source) == current_path
+    assert current_acceptance["source_revision"] == current_source
+    assert current_acceptance["candidate_closure_manifest_sha256"] == "c9c37e7548869734a0b3ec34cf01d8dd48def6a96a6966cadff6e4f3a286ca1f"
+    assert current_acceptance["candidate_closure_path_count"] == 2081
+    assert current_acceptance["stable_closure_projection_sha256"] == "dbb85ff85853786d0c88add1ebf43a50fafa7a70a708866e7a15e97c83ab5f0d"
+    with pytest.raises(prod.ProductionInstallError, match="no reviewed historical reproducibility acceptance"):
+        prod.historical_reproducibility_acceptance_path("f" * 40)
+    with pytest.raises(prod.ProductionInstallError, match="source revision is invalid"):
+        prod.historical_reproducibility_acceptance_path("not-a-revision")
+
+
 def test_historical_repro_signed_evidence_is_bound_to_reviewed_acceptance():
     acceptance, acceptance_sha256 = prod.historical_reproducibility.load_acceptance(
         prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
@@ -4627,6 +4647,10 @@ def test_attestation_verifier_revalidates_historical_reproducibility_evidence(mo
         "acceptance_sha256": "4" * 64,
         "verification_sha256": "5" * 64,
     }
+    monkeypatch.setattr(
+        prod, "historical_reproducibility_acceptance_path",
+        lambda _source_revision: prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+    )
     predicate = {
         "schema_version": 1,
         "kind": prod.MANAGED_BUILD_ATTESTATION_PREDICATE_KIND,
@@ -4808,6 +4832,10 @@ def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
     receipt_path.chmod(0o600)
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda _source: MANAGED_POLICY_SHA256)
+    monkeypatch.setattr(
+        prod, "historical_reproducibility_acceptance_path",
+        lambda _source_revision: prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH,
+    )
     evidence = {"acceptance_sha256": "4" * 64, "verification_sha256": "5" * 64}
     calls = []
 
