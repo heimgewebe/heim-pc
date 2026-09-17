@@ -622,7 +622,7 @@ def verify_managed_build_attestation(
     bundle_sha256 = _attestation_bundle_sha256(bundle_path)
     if not isinstance(expected_policy_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_policy_sha256) is None:
         raise ProductionInstallError("managed-build attestation policy digest is invalid")
-    run_command = _run if runner is None else runner
+    run_command = _run_attestation_verifier if runner is None else runner
 
     def verified_predicate(argv: list[str]) -> dict[str, Any]:
         result = run_command(argv)
@@ -2441,6 +2441,37 @@ def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = Tru
     if check and result.returncode != 0:
         if input_bytes is not None:
             raise ProductionInstallError(f"command failed ({argv[0]}) with sensitive stdin; stderr withheld")
+        stderr = result.stderr.decode("utf-8", "replace")[-4000:]
+        raise ProductionInstallError(f"command failed ({argv[0]}): {stderr}")
+    return result
+
+
+def _run_attestation_verifier(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    if argv[:3] != [GH_BIN, "attestation", "verify"]:
+        raise ProductionInstallError("managed-build attestation runner only permits gh attestation verify")
+    # gh attestation verify needs a writable Sigstore/TUF cache. Keep that
+    # state ephemeral and isolated instead of relaxing the generic HOME=/
+    # subprocess contract or inheriting user gh config/credentials.
+    with tempfile.TemporaryDirectory(prefix="heim-pc-gh-attestation-", dir="/tmp") as home:
+        home_path = Path(home)
+        cache_path = home_path / "cache"
+        config_path = home_path / "config"
+        cache_path.mkdir(mode=0o700)
+        config_path.mkdir(mode=0o700)
+        command_env = {
+            "PATH": TRUSTED_PATH,
+            "LC_ALL": "C",
+            "LANG": "C",
+            "HOME": str(home_path),
+            "XDG_CACHE_HOME": str(cache_path),
+            "XDG_CONFIG_HOME": str(config_path),
+            "SYSTEMD_COLORS": "0",
+        }
+        result = subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=command_env,
+        )
+    if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", "replace")[-4000:]
         raise ProductionInstallError(f"command failed ({argv[0]}): {stderr}")
     return result

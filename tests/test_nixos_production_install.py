@@ -4452,6 +4452,52 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
         prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
 
 
+def test_attestation_verifier_runner_uses_isolated_writable_home(monkeypatch, tmp_path):
+    home = tmp_path / "attestation-home"
+    captured = {}
+
+    class TemporaryHome:
+        def __enter__(self):
+            home.mkdir(mode=0o700)
+            return str(home)
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(
+        prod.tempfile, "TemporaryDirectory",
+        lambda *, prefix, dir: TemporaryHome(),
+    )
+
+    def fake_run(argv, *, stdout, stderr, check, env):
+        captured["argv"] = argv
+        captured["env"] = env
+        assert stdout is subprocess.PIPE
+        assert stderr is subprocess.PIPE
+        assert check is False
+        return subprocess.CompletedProcess(argv, 0, stdout=b"[]", stderr=b"")
+
+    monkeypatch.setattr(prod.subprocess, "run", fake_run)
+    argv = [prod.GH_BIN, "attestation", "verify", "/tmp/artifact"]
+    result = prod._run_attestation_verifier(argv)
+    assert result.returncode == 0
+    assert captured["argv"] == argv
+    assert captured["env"] == {
+        "PATH": prod.TRUSTED_PATH,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "SYSTEMD_COLORS": "0",
+    }
+    assert captured["env"]["HOME"] != "/"
+    assert (home / "cache").is_dir()
+    assert (home / "config").is_dir()
+    with pytest.raises(prod.ProductionInstallError, match="only permits gh attestation verify"):
+        prod._run_attestation_verifier([prod.GH_BIN, "api", "user"])
+
+
 def test_attestation_verify_argv_pins_exact_artifact_repository_workflow_source_and_runner(tmp_path):
     artifact_path = (tmp_path / "artifact.json").resolve()
     bundle_path = (tmp_path / "artifact.managed-build-attestation.json").resolve()
