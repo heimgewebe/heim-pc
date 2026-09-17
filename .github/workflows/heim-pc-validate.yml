@@ -48,6 +48,10 @@ jobs:
       - name: Verify scripts syntax
         run: python3 -m compileall -q heim-pc/scripts
 
+      - name: Verify pinned Nix GNU find contract
+        working-directory: ./heim-pc
+        run: python3 scripts/ci/check_pinned_nix_find_contract.py
+
       - name: Run test suite
         working-directory: ./heim-pc
         run: python3 -m pytest -q
