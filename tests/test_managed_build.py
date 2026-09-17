@@ -2767,6 +2767,117 @@ class ManagedBuildTests(unittest.TestCase):
         self.assertEqual(observation["stderr_bytes"], len(b"docker warning\n"))
         self.assertIsNotNone(process.poll())
 
+    def test_live_store_scan_capture_accepts_only_descendant_enoent_race(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject/nix/store/transient': No such file or directory\\n\"); "
+                "raise SystemExit(1)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        observation = managed_build._capture_live_store_scan_output(
+            process, label=label, timeout_seconds=3
+        )
+        self.assertEqual(observation["allocated_bytes"], 2 * 512)
+        self.assertEqual(observation["vanished_descendant_count"], 1)
+        self.assertGreater(observation["stderr_bytes"], 0)
+        self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_capture_rejects_mixed_or_non_descendant_enoent(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
+        cases = [
+            (
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject/nix/store/transient': No such file or directory\\n\"); "
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject/private': Permission denied\\n\"); ",
+                1,
+                "not-found,permission-denied",
+            ),
+            (
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject': No such file or directory\\n\"); ",
+                1,
+                "not-found",
+            ),
+            (
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject/nix/store/transient': No such file or directory\\n\"); ",
+                2,
+                "not-found",
+            ),
+        ]
+        for stderr_program, returncode, classes in cases:
+            with self.subTest(returncode=returncode, classes=classes):
+                process = subprocess.Popen(
+                    [
+                        sys.executable, "-c",
+                        "import sys; sys.stdout.write('1 10 2\\n'); "
+                        + stderr_program
+                        + f"raise SystemExit({returncode})",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                with patch.object(
+                    managed_build, "_cleanup_live_store_scan_container", return_value=True
+                ) as cleanup:
+                    with self.assertRaises(managed_build.LiveStoreScanFailure) as caught:
+                        managed_build._capture_live_store_scan_output(
+                            process, label=label, timeout_seconds=3
+                        )
+                self.assertIn(
+                    f"exit={returncode} stderr_classes={classes}", str(caught.exception)
+                )
+                cleanup.assert_called_once_with(label)
+                self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_capture_rejects_unconfigured_find_prefix(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; sys.stdout.write('1 10 2\\n'); "
+                "sys.stderr.write(\"find: '/subject/nix/store/transient': No such file or directory\\n\"); "
+                "raise SystemExit(1)",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=True
+        ) as cleanup:
+            with self.assertRaises(managed_build.LiveStoreScanFailure):
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        cleanup.assert_called_once_with(label)
+        self.assertIsNotNone(process.poll())
+
+    def test_live_store_scan_capture_enoent_race_still_requires_valid_rows(self) -> None:
+        label = "heim-pc.managed-nix-scan=" + "a" * 64 + "-" + "b" * 12
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys; "
+                f"sys.stderr.write(\"{managed_build.NIX_LIVE_SCAN_FIND}: '/subject/nix/store/transient': No such file or directory\\n\"); "
+                "raise SystemExit(1)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        with patch.object(
+            managed_build, "_cleanup_live_store_scan_container", return_value=True
+        ) as cleanup:
+            with self.assertRaisesRegex(managed_build.ManagedBuildError, "no filesystem rows"):
+                managed_build._capture_live_store_scan_output(
+                    process, label=label, timeout_seconds=3
+                )
+        cleanup.assert_called_once_with(label)
+        self.assertIsNotNone(process.poll())
+
     def test_live_store_scan_capture_nonzero_exit_fails_and_cleans_observer(self) -> None:
         label = "heim-pc.managed-nix-scan=" + "e" * 64 + "-" + "f" * 12
         process = subprocess.Popen(
