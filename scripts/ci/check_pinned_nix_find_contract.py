@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Verify the live-store ENOENT parser against the pinned GNU find binary."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts import managed_build  # noqa: E402
+from scripts import nixos_production_install as installer  # noqa: E402
+
+PULL_TIMEOUT_SECONDS = 300
+COMMAND_TIMEOUT_SECONDS = 60
+MISSING_DESCENDANT = "/subject/heim-pc-pinned-find-contract-missing"
+
+
+def _run(argv: Sequence[str], *, timeout_seconds: int) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        list(argv),
+        env=managed_build._docker_client_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=timeout_seconds,
+    )
+
+
+def _detail(result: subprocess.CompletedProcess[bytes]) -> str:
+    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    stdout = result.stdout.decode("utf-8", errors="replace").strip()
+    detail = stderr or stdout or "no output"
+    return detail[:2000]
+
+
+def _require_success(result: subprocess.CompletedProcess[bytes], operation: str) -> None:
+    if result.returncode != 0:
+        raise RuntimeError(f"{operation} failed with exit {result.returncode}: {_detail(result)}")
+
+
+def main() -> int:
+    if managed_build.PINNED_NIX_IMAGE != installer.PINNED_NIX_IMAGE:
+        raise RuntimeError("managed-build and production installer Nix image IDs diverged")
+
+    docker = managed_build._docker_executable()
+    pull = _run(
+        [docker, "pull", installer.PINNED_NIX_IMAGE_REF],
+        timeout_seconds=PULL_TIMEOUT_SECONDS,
+    )
+    _require_success(pull, "pulling pinned Nix image")
+
+    inspect = _run(
+        [docker, "image", "inspect", "--format", "{{.Id}}", installer.PINNED_NIX_IMAGE_REF],
+        timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+    )
+    _require_success(inspect, "inspecting pinned Nix image")
+    image_id = inspect.stdout.decode("ascii", errors="strict").strip()
+    if image_id != managed_build.PINNED_NIX_IMAGE:
+        raise RuntimeError(
+            "pinned Nix image reference resolved to an unexpected image ID: "
+            f"expected {managed_build.PINNED_NIX_IMAGE}, got {image_id}"
+        )
+
+    find_result = _run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-e",
+            "LC_ALL=C",
+            "-e",
+            "LANG=C",
+            "--entrypoint",
+            managed_build.NIX_LIVE_SCAN_FIND,
+            managed_build.PINNED_NIX_IMAGE,
+            MISSING_DESCENDANT,
+            "-xdev",
+            "-ignore_readdir_race",
+            "-printf",
+            "%D %i %b\\n",
+        ],
+        timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+    )
+    if find_result.returncode != 1:
+        raise RuntimeError(
+            "pinned GNU find missing-path contract changed: "
+            f"expected exit 1, got {find_result.returncode}: {_detail(find_result)}"
+        )
+    if find_result.stdout:
+        raise RuntimeError("pinned GNU find emitted filesystem rows for a missing path")
+
+    expected_stderr = (
+        os.fsencode(managed_build.NIX_LIVE_SCAN_FIND)
+        + b": '"
+        + os.fsencode(MISSING_DESCENDANT)
+        + b"': No such file or directory\n"
+    )
+    if find_result.stderr != expected_stderr:
+        raise RuntimeError(
+            "pinned GNU find diagnostic contract changed: "
+            f"expected {expected_stderr!r}, got {find_result.stderr!r}"
+        )
+
+    accepted = managed_build._live_store_scan_vanished_descendant_count(
+        find_result.returncode, find_result.stderr
+    )
+    if accepted != 1:
+        raise RuntimeError(
+            "live-store ENOENT parser rejected the diagnostic emitted by the pinned GNU find"
+        )
+
+    print(
+        json.dumps(
+            {
+                "kind": "heim_pc.pinned_nix_find_contract",
+                "image_id": image_id,
+                "image_ref": installer.PINNED_NIX_IMAGE_REF,
+                "find": managed_build.NIX_LIVE_SCAN_FIND,
+                "returncode": find_result.returncode,
+                "stderr_sha256": hashlib.sha256(find_result.stderr).hexdigest(),
+                "accepted_vanished_descendants": accepted,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
