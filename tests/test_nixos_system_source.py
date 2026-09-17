@@ -11,8 +11,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "bc1c6d04073104f404b1541d84db8455d47a5dbbf263e0f7a42ed38a554a02b1"
-ROOT_LOCK_SHA256 = "902c1919c817461fa1c23d05a3336c336d09805e36c350c2373f6eca8ca8193e"
+SOURCE_SNAPSHOT_SHA256 = "6f3a107ab644c7ebfd7fe05dbbd24bb8575a4f45df31a63c5fb360f26f5fd446"
+ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -31,7 +31,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/7647a342f4e31e29d643f0e9fb64c9bd4b0906a8";',
+            'nixer.url = "github:heimgewebe/nixer/2e457e533517c379395e11d8ab3d4e6687c4c6e2";',
             nested,
         )
 

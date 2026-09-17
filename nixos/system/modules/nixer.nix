@@ -45,6 +45,7 @@ in
   config = lib.mkIf enableNixer {
     services.nixer = {
       enable = true;
+      user = "alex";
       port = 18187;
       containerCli = "${pkgs.podman}/bin/podman";
     };
