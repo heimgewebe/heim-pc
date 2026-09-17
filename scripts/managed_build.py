@@ -793,6 +793,35 @@ def _live_store_scan_failure_detail(returncode: int, stderr: bytes) -> str:
     return f"exit={returncode} stderr_classes={class_text}"
 
 
+def _live_store_scan_vanished_descendant_count(
+    returncode: int, stderr: bytes
+) -> int | None:
+    """Accept only GNU find descendant-disappearance races from the live observer."""
+    if returncode != 1:
+        return None
+    lines = stderr.splitlines()
+    if not lines:
+        return None
+    prefix = b"find: "
+    suffix = b": No such file or directory"
+    for line in lines:
+        if not line.startswith(prefix) or not line.endswith(suffix):
+            return None
+        raw_path = line[len(prefix) : -len(suffix)].strip()
+        # LC_ALL=C gives ASCII quoting, but accept either quoted or unquoted
+        # GNU find paths. Never accept the bind root itself: only descendants
+        # may legitimately disappear while Nix atomically mutates the store.
+        if (
+            len(raw_path) >= 2
+            and raw_path[:1] == raw_path[-1:]
+            and raw_path[:1] in {b"'", b'"'}
+        ):
+            raw_path = raw_path[1:-1]
+        if not raw_path.startswith(b"/subject/"):
+            return None
+    return len(lines)
+
+
 def _capture_live_store_scan_output(
     process: subprocess.Popen[Any], *, label: str, timeout_seconds: float
 ) -> dict[str, Any]:
@@ -835,13 +864,25 @@ def _capture_live_store_scan_output(
         if remaining <= 0:
             raise StoreScanTimeout("managed Nix live store scan exceeded its bounded observation window")
         process.wait(timeout=remaining)
+        vanished_descendant_count = 0
         if process.returncode != 0:
-            detail = _live_store_scan_failure_detail(process.returncode, bytes(stderr_capture))
-            raise LiveStoreScanFailure(detail)
+            accepted = _live_store_scan_vanished_descendant_count(
+                process.returncode, bytes(stderr_capture)
+            )
+            if accepted is None:
+                detail = _live_store_scan_failure_detail(
+                    process.returncode, bytes(stderr_capture)
+                )
+                raise LiveStoreScanFailure(detail)
+            vanished_descendant_count = accepted
+        # Even an accepted disappearance race grants no authority to trust
+        # partial/malformed output. The parser must still prove a complete,
+        # non-empty observation; the stopped-store final scan remains strict.
         observation = parser.finish()
         # Reaping the leader alone does not prove that its process group is gone.
         _terminate_process_group(process)
         observation["stderr_bytes"] = stderr_bytes
+        observation["vanished_descendant_count"] = vanished_descendant_count
     except BaseException as exc:
         failure = exc
     finally:
