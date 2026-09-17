@@ -802,7 +802,7 @@ def _live_store_scan_vanished_descendant_count(
     lines = stderr.splitlines()
     if not lines:
         return None
-    prefix = b"find: "
+    prefix = os.fsencode(NIX_LIVE_SCAN_FIND) + b": "
     suffix = b": No such file or directory"
     for line in lines:
         if not line.startswith(prefix) or not line.endswith(suffix):
