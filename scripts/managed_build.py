@@ -1865,6 +1865,8 @@ def reconcile_nix_fence(
             # A hard crash here can expose only terminal absence backed by the
             # already durable authority, or a surviving recovery name (fail closed).
             if not os.path.lexists(primary) and not os.path.lexists(recovery):
+                # Restore the same incarnation; minting a new one would detach the
+                # receipt/authority evidence from the fence incarnation it proved.
                 _atomic_create_json(primary, expected_fence)
             raise
         return {
