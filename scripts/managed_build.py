@@ -2135,6 +2135,7 @@ def _run_nix_worker_guarded(
     store_scan_error_detected = False
     store_scan_timeout_detected = False
     final_store_scan: dict[str, Any] | None = None
+    live_store_scan_failure_diagnostic: str | None = None
     try:
         observer_id = _start_live_store_scan_observer(
             store_root, label=observer_label, worker_timeout_seconds=timeout_seconds,
@@ -2250,7 +2251,34 @@ def _run_nix_worker_guarded(
             raise ManagedBuildError(
                 "managed Nix exceptional-path cleanup could not be verified; lifecycle fence retained"
             ) from exc
-        raise
+        if not isinstance(exc, LiveStoreScanFailure):
+            raise
+        # A classified live-scan failure is terminal only after the exceptional
+        # path independently proves that the worker and observer are gone.  From
+        # here it must rejoin the ordinary returncode=77 path so execute_plan can
+        # remove rejected volumes, persist an incarnation-bound failure receipt,
+        # and retain the ACTIVE fence for explicit evidence-bound reconciliation.
+        removed = _removed
+        worker_cleanup_verified = containers_clean
+        observer_cleanup_verified = observer_clean
+        cleanup_verified = worker_cleanup_verified and observer_cleanup_verified
+        orphan_detected = not worker_cleanup_verified
+        store_scan_error_detected = True
+        trigger = "store-scan-error"
+        live_store_scan_failure_diagnostic = exc.diagnostic
+        try:
+            final_scan = _bounded_store_scan(
+                store_root,
+                timeout_seconds=NIX_STORE_FINAL_SCAN_TIMEOUT_SECONDS,
+                tolerate_vanished_entries=False,
+            )
+        except StoreScanTimeout:
+            store_scan_timeout_detected = True
+            final_bytes = max_observed
+        else:
+            final_store_scan = final_scan
+            final_bytes = final_scan["allocated_bytes"]
+            max_observed = max(max_observed, final_bytes)
     if trigger == "runtime-timeout":
         effective = 124
     elif store_scan_error_detected:
@@ -2274,6 +2302,7 @@ def _run_nix_worker_guarded(
         "store_scan_timeout_detected": store_scan_timeout_detected,
         "store_final_scan": final_store_scan,
         "runtime_timeout_triggered": trigger == "runtime-timeout",
+        "live_store_scan_failure_diagnostic": live_store_scan_failure_diagnostic,
     }
 
 
