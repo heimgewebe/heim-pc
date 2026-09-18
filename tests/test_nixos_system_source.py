@@ -279,7 +279,22 @@ class T(unittest.TestCase):
             recovery["evidence_receipt"]["kind"],
             "heim_pc.nixos_recovery_evidence_receipt",
         )
-        self.assertFalse(recovery["evidence_receipt"]["production_effects_authorized"])
+        receipt_contract = recovery["evidence_receipt"]
+        self.assertTrue(receipt_contract["evidence_scope_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_sha256_bound"])
+        self.assertTrue(receipt_contract["restore_test_requirement_bound"])
+        self.assertEqual(receipt_contract["required_restore_test_status"], "passed")
+        self.assertTrue(receipt_contract["required_restore_test_freshness_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_sha256_bound"])
+        self.assertFalse(receipt_contract["production_effects_authorized"])
+        restore_required = [
+            item for item in recovery["required_evidence"] if item["requires_restore_test"]
+        ]
+        self.assertEqual(len(restore_required), 6)
+        self.assertEqual(
+            [item["id"] for item in recovery["required_evidence"] if not item["requires_restore_test"]],
+            ["rpo-rto-record"],
+        )
         self.assertEqual(
             recovery["readiness_bundle"]["kind"],
             "heim_pc.nixos_pre_cutover_readiness",

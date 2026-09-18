@@ -216,10 +216,27 @@ def synthetic_readiness_path(
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
+        restore_test = (
+            {
+                "status": "passed",
+                "observed_at": observed_at,
+                "evidence_provenance_sha256": hashlib.sha256(
+                    f"{item['id']}:restore-test".encode()
+                ).hexdigest(),
+            }
+            if item["requires_restore_test"]
+            else {"status": "not-required"}
+        )
         receipt = {
             "schema_version": 1,
             "kind": prod.pre_cutover_readiness.RECOVERY_RECEIPT_KIND,
             "evidence_id": item["id"],
+            "evidence_scope": item["scope"],
+            "requires_restore_test": item["requires_restore_test"],
+            "evidence_provenance_sha256": hashlib.sha256(
+                f"{item['id']}:evidence".encode()
+            ).hexdigest(),
+            "restore_test": restore_test,
             "status": "passed",
             "source_revision": REVISION,
             "recovery_contract_sha256": recovery_sha,

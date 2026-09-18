@@ -236,7 +236,9 @@ def _load_contract(path: Path, *, label: str) -> tuple[dict[str, Any], dict[str,
     return _json(payload, label), meta
 
 
-def _recovery_policy(contract: dict[str, Any]) -> tuple[list[str], int, int]:
+def _recovery_policy(
+    contract: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int, int]:
     if (
         contract.get("schema_version") != 1
         or contract.get("kind") != RECOVERY_CONTRACT_KIND
@@ -245,14 +247,52 @@ def _recovery_policy(contract: dict[str, Any]) -> tuple[list[str], int, int]:
     required = contract.get("required_evidence")
     if not isinstance(required, list) or not required:
         raise ReadinessError("recovery contract required_evidence is invalid")
-    ids: list[str] = []
+    requirements: list[dict[str, Any]] = []
+    ids: set[str] = set()
     for item in required:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "scope",
+            "requires_restore_test",
+        }:
             raise ReadinessError("recovery contract evidence item is invalid")
         evidence_id = item.get("id")
-        if not isinstance(evidence_id, str) or not evidence_id or evidence_id in ids:
-            raise ReadinessError("recovery contract evidence ids are invalid")
-        ids.append(evidence_id)
+        scope = item.get("scope")
+        requires_restore_test = item.get("requires_restore_test")
+        if (
+            not isinstance(evidence_id, str)
+            or not evidence_id
+            or evidence_id in ids
+            or not isinstance(scope, str)
+            or not scope
+            or type(requires_restore_test) is not bool
+        ):
+            raise ReadinessError("recovery contract evidence requirement is invalid")
+        ids.add(evidence_id)
+        requirements.append({
+            "id": evidence_id,
+            "scope": scope,
+            "requires_restore_test": requires_restore_test,
+        })
+
+    receipt_contract = contract.get("evidence_receipt")
+    if (
+        not isinstance(receipt_contract, dict)
+        or receipt_contract.get("schema_version") != 1
+        or receipt_contract.get("kind") != RECOVERY_RECEIPT_KIND
+        or receipt_contract.get("source_revision_bound") is not True
+        or receipt_contract.get("recovery_contract_sha256_bound") is not True
+        or receipt_contract.get("evidence_scope_bound") is not True
+        or receipt_contract.get("evidence_provenance_sha256_bound") is not True
+        or receipt_contract.get("restore_test_requirement_bound") is not True
+        or receipt_contract.get("required_restore_test_status") != "passed"
+        or receipt_contract.get("required_restore_test_freshness_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_sha256_bound") is not True
+        or receipt_contract.get("status") != "passed"
+        or receipt_contract.get("production_effects_authorized") is not False
+    ):
+        raise ReadinessError("recovery contract receipt policy is not fail-closed")
+
     freshness = contract.get("evidence_freshness")
     if not isinstance(freshness, dict):
         raise ReadinessError("recovery contract evidence freshness is missing")
@@ -276,7 +316,7 @@ def _recovery_policy(contract: dict[str, Any]) -> tuple[list[str], int, int]:
         or admission.get("production_storage_mutation_blocked_without_complete_evidence") is not True
     ):
         raise ReadinessError("recovery contract admission is not fail-closed")
-    return ids, max_age, skew
+    return requirements, max_age, skew
 
 
 def _validate_lifecycle_contract(contract: dict[str, Any]) -> None:
@@ -300,7 +340,7 @@ def _validate_lifecycle_contract(contract: dict[str, Any]) -> None:
 def _validate_receipt(
     value: dict[str, Any],
     *,
-    evidence_id: str,
+    requirement: dict[str, Any],
     source_revision: str,
     recovery_contract_sha256: str,
     observed_bundle: datetime,
@@ -308,10 +348,19 @@ def _validate_receipt(
     max_age_seconds: int,
     future_skew_seconds: int,
 ) -> dict[str, Any]:
+    evidence_id = requirement["id"]
     if value.get("schema_version") != 1 or value.get("kind") != RECOVERY_RECEIPT_KIND:
         raise ReadinessError(f"recovery receipt {evidence_id} identity mismatch")
     if value.get("evidence_id") != evidence_id:
         raise ReadinessError(f"recovery receipt {evidence_id} evidence id mismatch")
+    if value.get("evidence_scope") != requirement["scope"]:
+        raise ReadinessError(f"recovery receipt {evidence_id} evidence scope mismatch")
+    if value.get("requires_restore_test") is not requirement["requires_restore_test"]:
+        raise ReadinessError(f"recovery receipt {evidence_id} restore-test requirement mismatch")
+    _sha(
+        value.get("evidence_provenance_sha256"),
+        f"recovery receipt {evidence_id} evidence provenance digest",
+    )
     if value.get("status") != "passed":
         raise ReadinessError(f"recovery receipt {evidence_id} did not pass")
     if value.get("source_revision") != source_revision:
@@ -329,10 +378,52 @@ def _validate_receipt(
     )
     if (observed - observed_bundle).total_seconds() > future_skew_seconds:
         raise ReadinessError(f"recovery receipt {evidence_id} is newer than its bundle observation")
+
+    restore_test = value.get("restore_test")
+    restore_observed_at = None
+    if requirement["requires_restore_test"]:
+        if not isinstance(restore_test, dict) or set(restore_test) != {
+            "status",
+            "observed_at",
+            "evidence_provenance_sha256",
+        }:
+            raise ReadinessError(
+                f"recovery receipt {evidence_id} required restore test is missing or malformed"
+            )
+        if restore_test.get("status") != "passed":
+            raise ReadinessError(f"recovery receipt {evidence_id} restore test did not pass")
+        _sha(
+            restore_test.get("evidence_provenance_sha256"),
+            f"recovery receipt {evidence_id} restore-test provenance digest",
+        )
+        restore_observed = _fresh(
+            restore_test.get("observed_at"),
+            now=now,
+            max_age_seconds=max_age_seconds,
+            future_skew_seconds=future_skew_seconds,
+            label=f"recovery receipt {evidence_id}.restore_test.observed_at",
+        )
+        if (restore_observed - observed).total_seconds() > future_skew_seconds:
+            raise ReadinessError(
+                f"recovery receipt {evidence_id} restore test is newer than receipt observation"
+            )
+        restore_observed_at = restore_test["observed_at"]
+        restore_status = "passed"
+    else:
+        if restore_test != {"status": "not-required"}:
+            raise ReadinessError(
+                f"recovery receipt {evidence_id} restore test must be exactly not-required"
+            )
+        restore_status = "not-required"
+
     return {
         "evidence_id": evidence_id,
+        "evidence_scope": requirement["scope"],
         "status": "passed",
         "observed_at": value["observed_at"],
+        "restore_test_required": requirement["requires_restore_test"],
+        "restore_test_status": restore_status,
+        "restore_test_observed_at": restore_observed_at,
     }
 
 
@@ -354,7 +445,8 @@ def validate_readiness(
     lifecycle_contract, lifecycle_meta = _load_contract(
         lifecycle_contract_path, label="Nix lifecycle contract"
     )
-    required_ids, max_age, skew = _recovery_policy(recovery_contract)
+    requirements, max_age, skew = _recovery_policy(recovery_contract)
+    required_ids = [item["id"] for item in requirements]
     _validate_lifecycle_contract(lifecycle_contract)
 
     expected_bundle_owner = None
@@ -440,7 +532,8 @@ def validate_readiness(
 
     normalized_receipts: list[dict[str, Any]] = []
     evidence_summary: list[dict[str, Any]] = []
-    for evidence_id in required_ids:
+    for requirement in requirements:
+        evidence_id = requirement["id"]
         binding = by_id[evidence_id]
         payload, meta = _read_regular(
             Path(binding["path"]),
@@ -454,7 +547,7 @@ def validate_readiness(
         receipt = _json(payload, f"recovery receipt {evidence_id}")
         summary = _validate_receipt(
             receipt,
-            evidence_id=evidence_id,
+            requirement=requirement,
             source_revision=source_revision,
             recovery_contract_sha256=recovery_meta["sha256"],
             observed_bundle=observed_bundle,

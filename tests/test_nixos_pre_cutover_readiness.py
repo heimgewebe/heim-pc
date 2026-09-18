@@ -40,17 +40,35 @@ def _contracts(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _fixture(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     recovery_path, lifecycle_path = _contracts(tmp_path)
     recovery = json.loads(recovery_path.read_text())
-    ids = [item["id"] for item in recovery["required_evidence"]]
     receipts = []
     receipt_paths = {}
-    for index, evidence_id in enumerate(ids):
+    for index, requirement in enumerate(recovery["required_evidence"]):
+        evidence_id = requirement["id"]
         path = tmp_path / f"receipt-{index}.json"
+        restore_test = (
+            {
+                "status": "passed",
+                "observed_at": "2026-09-18T09:45:00Z",
+                "evidence_provenance_sha256": hashlib.sha256(
+                    f"{evidence_id}:restore-test".encode()
+                ).hexdigest(),
+            }
+            if requirement["requires_restore_test"]
+            else {"status": "not-required"}
+        )
         value = {
             "schema_version": 1,
             "kind": ready.RECOVERY_RECEIPT_KIND,
             "evidence_id": evidence_id,
+            "evidence_scope": requirement["scope"],
+            "requires_restore_test": requirement["requires_restore_test"],
+            "evidence_provenance_sha256": hashlib.sha256(
+                f"{evidence_id}:evidence".encode()
+            ).hexdigest(),
+            "restore_test": restore_test,
             "status": "passed",
             "source_revision": REVISION,
             "recovery_contract_sha256": _sha(recovery_path),
@@ -95,6 +113,30 @@ def test_valid_private_readiness_bundle_binds_all_receipts(tmp_path):
         item["id"] for item in recovery["required_evidence"]
     ]
     assert result["production_effects_authorized"] is False
+    requirements = {
+        item["id"]: item for item in recovery["required_evidence"]
+    }
+    assert all(
+        item["evidence_scope"] == requirements[item["evidence_id"]]["scope"]
+        for item in result["evidence_summary"]
+    )
+    assert all(
+        item["restore_test_status"]
+        == ("passed" if item["restore_test_required"] else "not-required")
+        for item in result["evidence_summary"]
+    )
+
+
+def _rewrite_receipt_and_rebind(fx, evidence_id, transform):
+    path = fx[3][evidence_id]
+    receipt = json.loads(path.read_text())
+    transform(receipt)
+    _write_private(path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == evidence_id:
+            binding["sha256"] = _sha(path)
+    _write_private(fx[0], bundle)
 
 
 def test_readiness_bundle_wrong_mode_is_rejected(tmp_path):
@@ -176,6 +218,93 @@ def test_receipt_status_must_pass(tmp_path):
             binding["sha256"] = _sha(path)
     _write_private(fx[0], bundle)
     with pytest.raises(ready.ReadinessError, match="did not pass"):
+        _validate(fx)
+
+
+def test_receipt_scope_must_match_contract(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id = next(iter(fx[3]))
+    _rewrite_receipt_and_rebind(
+        fx, evidence_id, lambda receipt: receipt.__setitem__("evidence_scope", "foreign-scope")
+    )
+    with pytest.raises(ready.ReadinessError, match="evidence scope mismatch"):
+        _validate(fx)
+
+
+def test_receipt_restore_requirement_must_match_contract(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"])
+    _rewrite_receipt_and_rebind(
+        fx, evidence_id, lambda receipt: receipt.__setitem__("requires_restore_test", False)
+    )
+    with pytest.raises(ready.ReadinessError, match="restore-test requirement mismatch"):
+        _validate(fx)
+
+
+def test_required_restore_test_must_be_present_and_pass(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"])
+    _rewrite_receipt_and_rebind(
+        fx, evidence_id, lambda receipt: receipt.__setitem__("restore_test", {"status": "not-required"})
+    )
+    with pytest.raises(ready.ReadinessError, match="required restore test"):
+        _validate(fx)
+
+    fx = _fixture(tmp_path / "failed")
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"])
+    def fail_restore(receipt):
+        receipt["restore_test"]["status"] = "failed"
+    _rewrite_receipt_and_rebind(fx, evidence_id, fail_restore)
+    with pytest.raises(ready.ReadinessError, match="restore test did not pass"):
+        _validate(fx)
+
+
+def test_required_restore_test_provenance_and_freshness_are_bound(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"])
+
+    def bad_digest(receipt):
+        receipt["restore_test"]["evidence_provenance_sha256"] = "not-a-digest"
+    _rewrite_receipt_and_rebind(fx, evidence_id, bad_digest)
+    with pytest.raises(ready.ReadinessError, match="restore-test provenance digest"):
+        _validate(fx)
+
+    fx = _fixture(tmp_path / "stale")
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"])
+    def stale_restore(receipt):
+        receipt["restore_test"]["observed_at"] = "2020-01-01T00:00:00Z"
+    _rewrite_receipt_and_rebind(fx, evidence_id, stale_restore)
+    with pytest.raises(ready.ReadinessError, match="stale"):
+        _validate(fx)
+
+
+def test_non_restore_evidence_must_mark_restore_test_not_required(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(item["id"] for item in recovery["required_evidence"] if not item["requires_restore_test"])
+    def invent_restore(receipt):
+        receipt["restore_test"] = {
+            "status": "passed",
+            "observed_at": "2026-09-18T09:45:00Z",
+            "evidence_provenance_sha256": "1" * 64,
+        }
+    _rewrite_receipt_and_rebind(fx, evidence_id, invent_restore)
+    with pytest.raises(ready.ReadinessError, match="exactly not-required"):
+        _validate(fx)
+
+
+def test_receipt_evidence_provenance_digest_is_required(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id = next(iter(fx[3]))
+    _rewrite_receipt_and_rebind(
+        fx, evidence_id, lambda receipt: receipt.__setitem__("evidence_provenance_sha256", "bad")
+    )
+    with pytest.raises(ready.ReadinessError, match="evidence provenance digest"):
         _validate(fx)
 
 

@@ -63,6 +63,12 @@
     "kind": "heim_pc.nixos_recovery_evidence_receipt",
     "source_revision_bound": true,
     "recovery_contract_sha256_bound": true,
+    "evidence_scope_bound": true,
+    "evidence_provenance_sha256_bound": true,
+    "restore_test_requirement_bound": true,
+    "required_restore_test_status": "passed",
+    "required_restore_test_freshness_bound": true,
+    "required_restore_test_provenance_sha256_bound": true,
     "status": "passed",
     "production_effects_authorized": false
   },
