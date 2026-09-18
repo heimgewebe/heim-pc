@@ -238,7 +238,11 @@ def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
 
 @pytest.mark.parametrize(
     "repository",
-    ["heimgewebe/heim-pc", "HEIMGEWEBE/HEIM-PC"],
+    [
+        "heimgewebe/heim-pc",
+        "heimgewebe/Heim-PC",
+        "HeimGewebe/HEIM-PC",
+    ],
 )
 def test_same_repository_attestation_is_not_independent(tmp_path, repository):
     fx = _fixture(tmp_path)
@@ -255,6 +259,19 @@ def test_same_repository_attestation_is_not_independent(tmp_path, repository):
         match="not an independent exact producer",
     ):
         _validate(fx)
+
+
+def test_external_repository_identity_matching_is_case_insensitive(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    policy = dict(recovery["evidence_attestation"])
+    policy["repository"] = "HeimGewebe/recovery-evidence-authority"
+    policy["signer_workflow"] = (
+        "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml"
+    )
+    recovery["evidence_attestation"] = policy
+    _requirements, _max_age, _skew, validated_policy = ready._recovery_policy(recovery)
+    assert validated_policy["repository"] == "HeimGewebe/recovery-evidence-authority"
 
 
 def test_non_string_recovery_evidence_id_is_rejected_cleanly():

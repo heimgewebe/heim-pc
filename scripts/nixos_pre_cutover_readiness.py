@@ -419,12 +419,21 @@ def _recovery_policy(
     elif attestation_status == "provisioned":
         repository = attestation_policy.get("repository")
         signer_workflow = attestation_policy.get("signer_workflow")
+        workflow_repository = ""
+        workflow_separator = ""
+        workflow_path = ""
+        if isinstance(signer_workflow, str):
+            workflow_repository, workflow_separator, workflow_path = signer_workflow.partition(
+                "/.github/workflows/"
+            )
         if (
             not isinstance(repository, str)
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
             or repository.casefold() == "heimgewebe/heim-pc"
             or not isinstance(signer_workflow, str)
-            or not signer_workflow.startswith(repository + "/.github/workflows/")
+            or workflow_separator != "/.github/workflows/"
+            or workflow_repository.casefold() != repository.casefold()
+            or not workflow_path
             or not signer_workflow.endswith((".yml", ".yaml"))
         ):
             raise ReadinessError(
