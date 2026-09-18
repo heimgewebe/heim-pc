@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "ee411b264d21e19dffe7c71d5e8c2717cd1864b7b07b62bf31c148b547f7b8a8"
+SOURCE_SNAPSHOT_SHA256 = "a4f8cf0b4ff5abbfb0af2760119fb862337cf3999e361d53a858d26ce5c9556d"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -239,6 +239,35 @@ class T(unittest.TestCase):
             "contract.inputs.nixer.runtime_nixpkgs_required_revision",
             flake,
         )
+        from scripts.ci import check_pinned_nix_find_contract as verifier_check
+
+        verifier = trust["managed_nix_verifier"]
+        self.assertEqual(
+            verifier_check.verify_managed_nix_verifier_contract(
+                ROOT / "nixos/production/trust-contract-v1.json"
+            ),
+            {
+                "image_id": verifier["image_id"],
+                "image_tag": verifier["image_tag"],
+                "image_ref": verifier["image_ref"],
+            },
+        )
+        mismatches = {
+            "image_id": "sha256:" + ("0" * 64),
+            "image_tag": "nixos/nix:0.0.0",
+            "image_ref": "nixos/nix@sha256:" + ("0" * 64),
+        }
+        for field, value in mismatches.items():
+            mutated = json.loads(json.dumps(trust))
+            mutated["managed_nix_verifier"][field] = value
+            with self.subTest(verifier_pin=field), tempfile.TemporaryDirectory() as tmp:
+                contract_path = Path(tmp) / "trust-contract.json"
+                contract_path.write_text(json.dumps(mutated), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, field):
+                    verifier_check.verify_managed_nix_verifier_contract(contract_path)
+        self.assertIn("check_pinned_nix_find_contract.py", flake)
+        self.assertIn("--trust-contract-only", flake)
+        self.assertNotIn("pythonAssignment", flake)
 
         self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")
         self.assertFalse(lifecycle["automatic_gc"])

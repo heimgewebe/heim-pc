@@ -412,6 +412,7 @@
         supply-chain-trust =
           let
             contract = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
+            sourceRoot = ../..;
             lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
             rootNode = builtins.getAttr lock.root lock.nodes;
             rootNixpkgsNode = builtins.getAttr contract.inputs.root_nixpkgs.lock_node lock.nodes;
@@ -442,8 +443,14 @@
           assert nixerRuntimeNixpkgsNode.locked.rev
             == contract.inputs.nixer.runtime_nixpkgs_required_revision;
           pkgs.runCommand "heim-pc-supply-chain-trust-contract" { } ''
+            verifier_report="$TMPDIR/managed-nix-verifier-contract.json"
+            PYTHONPATH=${sourceRoot} ${pkgs.python3}/bin/python ${sourceRoot}/scripts/ci/check_pinned_nix_find_contract.py \
+              --trust-contract-only \
+              --trust-contract ${../production/trust-contract-v1.json} \
+              > "$verifier_report"
             mkdir -p "$out"
             cp ${../production/trust-contract-v1.json} "$out/trust-contract-v1.json"
+            cp "$verifier_report" "$out/managed-nix-verifier-contract.json"
           '';
 
         nix-lifecycle-contract =
