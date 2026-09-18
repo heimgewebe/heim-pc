@@ -32,6 +32,10 @@ zones:
       - home-entry.md
       - software-inventory.md
       - program-inventory-summary.md
+  nixos_system:
+    path: nixos/system/
+    canonical_docs:
+      - README.md
 
 checks:
   - scripts/ci/check_repo_index_consistency.py

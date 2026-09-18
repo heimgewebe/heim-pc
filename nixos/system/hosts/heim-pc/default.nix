@@ -38,7 +38,7 @@ let
   );
 in
 {
-  imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/observability.nix ../../modules/physical-gates.nix ];
+  imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/physical-gates.nix ];
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
 

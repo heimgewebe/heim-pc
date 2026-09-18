@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "6f3a107ab644c7ebfd7fe05dbbd24bb8575a4f45df31a63c5fb360f26f5fd446"
+SOURCE_SNAPSHOT_SHA256 = "81cb22ee42d7611e9b704ceaf94cdbe7a4a1e9f395f6613d6e112043dbefa95e"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -54,6 +54,16 @@ class T(unittest.TestCase):
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
         self.assertIn("nix flake check --no-build --no-update-lock-file", workflow)
         self.assertIn(".#checks.x86_64-linux.profile-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.supply-chain-trust", workflow)
+        self.assertIn(".#checks.x86_64-linux.nix-lifecycle-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.recovery-readiness-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.intentional-break-rejected", workflow)
+        self.assertIn(".#checks.x86_64-linux.agent-zone-contract", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-proprietary-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-open-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-proprietary-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-open-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.agent-vsock-proof-microvm", workflow)
         self.assertIn(".#checks.x86_64-linux.firstboot-credentials", workflow)
 
     def test_firstboot_vm_proof_is_exact_source_headless_and_input_free(self):
@@ -168,7 +178,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 25)
+        self.assertEqual(len(files), 27)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -178,12 +188,53 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
+
+    def test_pre_cutover_contracts_are_machine_readable_and_fail_closed(self):
+        trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
+        lifecycle = json.loads((ROOT / "nixos/production/nix-lifecycle-contract-v1.json").read_text())
+        recovery = json.loads((ROOT / "nixos/production/recovery-contract-v1.json").read_text())
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        trust_module = (SOURCE / "modules/nix-trust.nix").read_text()
+        lifecycle_module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        backup_module = (SOURCE / "modules/backup.nix").read_text()
+        validate_workflow = (ROOT / ".github/workflows/heim-pc-validate.yml").read_text()
+
+        self.assertEqual(trust["kind"], "heim_pc.nixos_supply_chain_trust_contract")
+        self.assertEqual(trust["nix"]["trusted_users"], ["root"])
+        self.assertTrue(trust["nix"]["require_sigs"])
+        self.assertFalse(trust["nix"]["accept_flake_config"])
+        self.assertEqual(
+            trust["inputs"]["nixer"]["required_revision"],
+            "2e457e533517c379395e11d8ab3d4e6687c4c6e2",
+        )
+        self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
+        self.assertIn("nix.settings", trust_module)
+        self.assertIn("trusted-users = lib.mkForce", trust_module)
+        self.assertIn("../../modules/nix-trust.nix", host)
+
+        self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")
+        self.assertFalse(lifecycle["automatic_gc"])
+        self.assertFalse(lifecycle["budget"]["automatic_reclaim_authorized"])
+        self.assertIn("nix.gc.automatic = lib.mkForce false;", lifecycle_module)
+        self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
+        self.assertNotIn("nix-collect-garbage", lifecycle_module)
+        self.assertIn("../../modules/nix-lifecycle.nix", host)
+
+        self.assertEqual(recovery["status"], "external-evidence-required")
+        self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
+        self.assertTrue(
+            recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"]
+        )
+        self.assertFalse(recovery["same_disk_recovery_partition_is_off_host_backup"])
+        self.assertIn("heim-pc/recovery-contract.json", backup_module)
+        self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 
     def test_managed_root_entrypoint_exists(self):
         flake = (SOURCE / "flake.nix").read_text()

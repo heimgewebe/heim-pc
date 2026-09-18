@@ -36,19 +36,36 @@ jobs:
       - name: Evaluate complete flake without building checks
         run: nix flake check --no-build --no-update-lock-file --print-build-logs
 
-      - name: Prove evaluated Heim-PC profile contract
-        run: nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs .#checks.x86_64-linux.profile-contract
+      - name: Prove evaluated Heim-PC contracts
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#checks.x86_64-linux.profile-contract
+          .#checks.x86_64-linux.supply-chain-trust
+          .#checks.x86_64-linux.nix-lifecycle-contract
+          .#checks.x86_64-linux.recovery-readiness-contract
+          .#checks.x86_64-linux.intentional-break-rejected
+          .#checks.x86_64-linux.agent-zone-contract
 
-      - name: Build storage-target and VM closures
+      - name: Build storage, VM and physical-gate closures
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
           .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel
+          .#packages.x86_64-linux.physical-gate-proprietary-system
+          .#packages.x86_64-linux.physical-gate-open-system
 
-      - name: Build live safety script
+      - name: Build both live-gate ISOs
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
-          .#nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.heimPcLiveSafety
+          .#packages.x86_64-linux.physical-gate-live-proprietary-iso
+          .#packages.x86_64-linux.physical-gate-live-open-iso
+
+      - name: Build no-IP agent-zone closures
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#packages.x86_64-linux.agent-microvm
+          .#packages.x86_64-linux.agent-vsock-proof-microvm
+          .#packages.x86_64-linux.trust-zone-host-system
 
       - name: Run scoped VM checks
         run: >-

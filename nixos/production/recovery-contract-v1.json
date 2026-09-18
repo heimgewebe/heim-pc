@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_recovery_readiness_contract",
+  "profile": "nixos-executor-2026",
+  "status": "external-evidence-required",
+  "same_disk_recovery_partition_is_off_host_backup": false,
+  "secrets_in_repository_forbidden": true,
+  "required_evidence": [
+    {
+      "id": "off-host-home-restore",
+      "scope": "critical-user-data",
+      "requires_restore_test": true
+    },
+    {
+      "id": "offline-secret-recovery",
+      "scope": "recovery-identity",
+      "requires_restore_test": true
+    },
+    {
+      "id": "luks-header-metadata-backup",
+      "scope": "storage-recovery-material",
+      "requires_restore_test": true
+    },
+    {
+      "id": "bootable-recovery-media",
+      "scope": "host-independent-boot",
+      "requires_restore_test": true
+    },
+    {
+      "id": "offline-host-control-closure",
+      "scope": "known-good-host-and-control-closure",
+      "requires_restore_test": true
+    },
+    {
+      "id": "network-off-reconstruction-boot",
+      "scope": "replacement-or-isolated-target",
+      "requires_restore_test": true
+    },
+    {
+      "id": "rpo-rto-record",
+      "scope": "representative-recovery",
+      "requires_restore_test": false
+    }
+  ],
+  "admission": {
+    "all_required_evidence_must_be_fresh": true,
+    "point_of_no_return_blocked_without_complete_evidence": true,
+    "production_storage_mutation_blocked_without_complete_evidence": true
+  },
+  "does_not_establish": [
+    "existence of any off-host backup",
+    "successful restore",
+    "fresh recovery media",
+    "permission to mutate production storage",
+    "permission to cross the point of no return"
+  ]
+}

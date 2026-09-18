@@ -48,6 +48,14 @@ It provides a complete overview of the canonical documentation zones and their c
 | software-inventory | [runtime/software-inventory.md](runtime/software-inventory.md) | canonical | 2026-07-09 | home-entry, security |
 | program-inventory-summary | [runtime/program-inventory-summary.md](runtime/program-inventory-summary.md) | canonical | 2026-07-09 | software-inventory |
 
+## Zone: nixos_system
+
+**Path**: `nixos/system/`
+
+| ID | File | Status | Last Reviewed | Depends On |
+|---|---|---|---|---|
+| nixos-system-status | [nixos/system/README.md](nixos/system/README.md) | canonical | 2026-09-18 | nixos-executor-2026, security |
+
 ## Automated Checks
 
 The following checks verify the consistency and review status of the documents:

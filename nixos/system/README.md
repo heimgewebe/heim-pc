@@ -1,3 +1,16 @@
+---
+id: nixos-system-status
+role: reality
+status: canonical
+last_reviewed: 2026-09-18
+depends_on:
+  - nixos-executor-2026
+  - security
+verifies_with:
+  - .github/workflows/heim-pc-nix.yml
+  - tests/test_nixos_system_source.py
+---
+
 # NixOS Heim-PC vNext prototype
 
 Non-production prototype for the long-term Heim-PC operating-system architecture.
@@ -28,10 +41,13 @@ The hard security assumption is that an arbitrary coding agent may become root i
 - `hosts/heim-pc/default.nix`: shared Heim-PC host assembly; the default root remains a non-installing placeholder unless `storage-layout.nix` is explicitly layered in.
 - `modules/storage-layout.nix`: production-contract-derived EFI/recovery/LUKS2/Btrfs boot/storage target used by the managed build and physical gate profiles; it is intentionally separate from the disposable Freecom rehearsal contract.
 - `../production/contract-v1.json`: isolated parallel-disk production topology. It contains only public structural expectations and non-unique model/size anchors. Exact target/fallback by-id, serial/WWN, filesystem UUIDs and GPT PARTUUIDs come from the mandatory local private identity contract, which is bound to the exact source revision and public-contract digest.
-- `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup and observability.
-- `zones/agent.nix`: fail-closed untrusted coding-agent zone and capability manifest.
+- `../production/trust-contract-v1.json`: machine-readable Nix/input/cache/CI trust contract. The host module enforces its Nix trust settings.
+- `../production/nix-lifecycle-contract-v1.json`: fail-closed Nix store/generation lifecycle contract. Automatic GC remains disabled until protected-generation and budget evidence exists.
+- `../production/recovery-contract-v1.json`: recovery admission contract. It deliberately remains `external-evidence-required`; the repository does not manufacture off-host restore evidence.
+- `modules/*.nix`: desktop, NVIDIA, audio, development, containers, Grabowski, Bureau, networking, backup, Nix trust/lifecycle and observability.
+- `zones/agent.nix`: fail-closed no-IP untrusted coding-agent MicroVM and capability manifest.
 - `tests/integration.nix`: scoped Grabowski/Bureau VM integration proof.
-- `tests/trust-zones.nix`: adversarial trust-zone proof.
+- `tests/trust-zones.nix`: legacy adversarial IP-network boundary test; it is not the no-IP/VSOCK MicroVM proof.
 - `tests/vsock-broker.nix`: test-only no-IP AF_VSOCK broker handshake.
 - `../../tests/test_nixos_system_source.py`: repository-level static safety and source-snapshot checks.
 
@@ -84,13 +100,13 @@ This manifest is an architecture contract, not yet the final production authoriz
 
 ## Current snapshot evidence status
 
-Workflow presence alone has not re-established Nix/QEMU/KVM execution evidence. Current acceptance comes only from the exact checked-out revision and completed step results below. The source now carries a dedicated `heim-pc-nix` CI lane. It is designed to run `nix flake check --no-build`, evaluate the storage target, both gated physical profiles and the VM profile, assert the evaluated storage/boot/microcode/user-group/gate values, and build the storage-target and VM system closures without activating either. Presence of that workflow is **not** itself a passing result: PR metadata may claim current Nix evidence only after GitHub reports the exact PR head green.
+For any newly selected revision, workflow presence alone has not re-established Nix/QEMU/KVM execution evidence. Evidence is revision-specific: the source carries a dedicated `heim-pc-nix` CI lane, but acceptance for a candidate must be read back from GitHub for that exact source revision. This status document therefore does not hard-code a transient current pass/fail claim.
 
-The `profile-contract` report is evaluated configuration metadata, not a system-build receipt. Its VM derivation path deliberately carries no build dependency; the separate storage-target/VM closure build remains mandatory. `live-block-inventory.jq` is exercised by executable JSON and shell-failure tests; the CI also builds the live safety script and runs the scoped VM checks. None of these establishes a physical live-ISO boot.
+The `profile-contract` report is evaluated configuration metadata, not a system-build receipt. CI separately realizes the storage target, VM, both physical-gate system closures, both live-gate ISOs and the no-IP agent-zone build closures. It also executes the scoped integration/firstboot/trust-zone VM checks and requires the intentional-break negative configuration to fail evaluation. Building a live ISO still does not prove a physical boot, and building the no-IP MicroVM/VSOCK closures does not by itself re-establish the historical runtime handshake.
 
 Historical Store paths, QEMU/KVM runs and earlier Nix evaluations remain historical. They cannot be promoted to evidence for a later source revision after NixOS modules, storage profiles, tests or workflow definitions change. Exact-head CI/review evidence and historical architecture evidence must remain separately labelled.
 
-The current source statically exports `nixosModules.intentionalBreak` as an explicit negative-path module. That source shape is not an execution claim until the exact revision has actually passed the Nix evaluation lane.
+The current source exports `nixosModules.intentionalBreak` as an explicit negative-path module, and the mandatory Nix lane now instantiates it through `checks.x86_64-linux.intentional-break-rejected` and requires evaluation to fail.
 
 ## Historical evidence from earlier revisions — not re-established for this snapshot
 
@@ -208,7 +224,10 @@ That run closed Git→build→runtime identity for the historical prototype revi
 
 It does not yet establish:
 
-- a successful exact-head Nix CI result until GitHub has actually completed the `heim-pc-nix` lane for that revision; workflow presence alone is not evidence;
+- a successful exact-head Nix CI result for any selected revision unless GitHub has actually completed the `heim-pc-nix` lane for that exact revision; workflow presence alone is not evidence;
+- full conformance with the executor profile's Home Manager and Disko choices; neither is currently integrated into the production source graph, so this remains an explicit architecture decision rather than an implicit pass;
+- recovery readiness: `recovery-contract-v1.json` remains `external-evidence-required` until off-host restore, recovery media and network-off reconstruction evidence are freshly bound;
+- automatic Nix garbage-collection readiness: the lifecycle contract installs read-only auditing but keeps automatic GC disabled until protected-generation and budget evidence exists;
 - a current guest→host AF_VSOCK handshake or no-IP runtime proof for this exact PR head;
 - real RTX 4070 Ti SUPER + KDE/Wayland reliability;
 - CUDA/Ollama/llama.cpp/GPU-container behavior on the physical card;
@@ -236,7 +255,7 @@ Current strategic hypothesis:
 - NixOS is the conditional "best future" option because host, services, trust zones, tests and rollout identity can live in one coherent declarative graph.
 - The decision remains reversible until the physical GPU/audio/Secure-Boot/recovery gates pass and long-duration real-workload behavior is acceptable.
 
-See `../../architecture/os-future-evaluation-20260901.md` for the evidence-weighted comparison and flip conditions.
+The current canonical decision frame is `../../architecture/nixos-executor-2026.md`. Any future comparative OS decision record must be added as a canonical document before this status file cites it.
 
 
 ### Production Seagate installer

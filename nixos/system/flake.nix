@@ -409,6 +409,79 @@
             mkdir -p "$out"
             cp "$reportPath" "$out/profile-contract.json"
           '';
+        supply-chain-trust =
+          let
+            contract = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
+            target = self.nixosConfigurations.heim-pc-storage-target.config;
+          in
+          assert target.nix.settings.substituters == contract.nix.substituters;
+          assert target.nix.settings.trusted-substituters == contract.nix.trusted_substituters;
+          assert target.nix.settings.trusted-public-keys == contract.nix.trusted_public_keys;
+          assert target.nix.settings.trusted-users == contract.nix.trusted_users;
+          assert target.nix.settings.require-sigs == contract.nix.require_sigs;
+          assert target.nix.settings.accept-flake-config == contract.nix.accept_flake_config;
+          pkgs.runCommand "heim-pc-supply-chain-trust-contract" { } ''
+            mkdir -p "$out"
+            cp ${../production/trust-contract-v1.json} "$out/trust-contract-v1.json"
+          '';
+
+        nix-lifecycle-contract =
+          let
+            contract = builtins.fromJSON (builtins.readFile ../production/nix-lifecycle-contract-v1.json);
+            target = self.nixosConfigurations.heim-pc-storage-target.config;
+          in
+          assert !target.nix.gc.automatic;
+          assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.timers;
+          assert !contract.automatic_gc;
+          assert !contract.budget.automatic_reclaim_authorized;
+          pkgs.runCommand "heim-pc-nix-lifecycle-contract" { } ''
+            mkdir -p "$out"
+            cp ${../production/nix-lifecycle-contract-v1.json} "$out/nix-lifecycle-contract-v1.json"
+          '';
+
+        recovery-readiness-contract =
+          let
+            contract = builtins.fromJSON (builtins.readFile ../production/recovery-contract-v1.json);
+            target = self.nixosConfigurations.heim-pc-storage-target.config;
+          in
+          assert contract.status == "external-evidence-required";
+          assert contract.admission.point_of_no_return_blocked_without_complete_evidence;
+          assert contract.admission.production_storage_mutation_blocked_without_complete_evidence;
+          assert builtins.hasAttr "heim-pc/recovery-contract.json" target.environment.etc;
+          pkgs.runCommand "heim-pc-recovery-readiness-contract" { } ''
+            mkdir -p "$out"
+            cp ${../production/recovery-contract-v1.json} "$out/recovery-contract-v1.json"
+          '';
+
+        intentional-break-rejected =
+          let
+            broken = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [ self.nixosModules.intentionalBreak ];
+            };
+            evaluated = builtins.tryEval broken.config.system.build.toplevel.drvPath;
+          in
+          assert !evaluated.success;
+          pkgs.runCommand "heim-pc-intentional-break-rejected" { } ''
+            mkdir -p "$out"
+            touch "$out/pass"
+          '';
+
+        agent-zone-contract =
+          let
+            agent = self.nixosConfigurations.agent-zone.config;
+          in
+          assert agent.microvm.interfaces == [ ];
+          assert agent.microvm.forwardPorts == [ ];
+          assert agent.microvm.shares == [ ];
+          assert agent.microvm.devices == [ ];
+          assert agent.microvm.vsock.cid == 445;
+          pkgs.runCommand "heim-pc-agent-zone-contract" { } ''
+            mkdir -p "$out"
+            touch "$out/pass"
+          '';
+
         integration = import ./tests/integration.nix { inherit pkgs; };
         firstboot-credentials = import ./tests/firstboot-credentials.nix {
           inherit pkgs;
