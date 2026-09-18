@@ -274,6 +274,22 @@ def test_external_repository_identity_matching_is_case_insensitive(tmp_path):
     assert validated_policy["repository"] == "HeimGewebe/recovery-evidence-authority"
 
 
+def test_external_repository_identity_mismatch_is_rejected_case_insensitively(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    policy = dict(recovery["evidence_attestation"])
+    policy["repository"] = "HeimGewebe/recovery-evidence-authority"
+    policy["signer_workflow"] = (
+        "heimgewebe/other-recovery-authority/.github/workflows/recovery-evidence.yml"
+    )
+    recovery["evidence_attestation"] = policy
+    with pytest.raises(
+        ready.ReadinessError,
+        match="not an independent exact producer",
+    ):
+        ready._recovery_policy(recovery)
+
+
 def test_non_string_recovery_evidence_id_is_rejected_cleanly():
     recovery = json.loads(
         (ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text()
