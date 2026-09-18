@@ -320,11 +320,17 @@ class T(unittest.TestCase):
         )
         receipt_contract = recovery["evidence_receipt"]
         self.assertTrue(receipt_contract["evidence_scope_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_path_bound"])
         self.assertTrue(receipt_contract["evidence_provenance_sha256_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_object_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_contract_bound"])
         self.assertTrue(receipt_contract["restore_test_requirement_bound"])
         self.assertEqual(receipt_contract["required_restore_test_status"], "passed")
         self.assertTrue(receipt_contract["required_restore_test_freshness_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_path_bound"])
         self.assertTrue(receipt_contract["required_restore_test_provenance_sha256_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_object_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_contract_bound"])
         self.assertFalse(receipt_contract["production_effects_authorized"])
         restore_required = [
             item for item in recovery["required_evidence"] if item["requires_restore_test"]

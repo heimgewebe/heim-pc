@@ -48,26 +48,51 @@ def _fixture(tmp_path: Path):
     for index, requirement in enumerate(recovery["required_evidence"]):
         evidence_id = requirement["id"]
         path = tmp_path / f"receipt-{index}.json"
-        restore_test = (
-            {
+        evidence_provenance_path = tmp_path / f"evidence-provenance-{index}.json"
+        _write_private(evidence_provenance_path, {
+            "schema_version": 1,
+            "kind": ready.RECOVERY_EVIDENCE_PROVENANCE_KIND,
+            "evidence_id": evidence_id,
+            "evidence_scope": requirement["scope"],
+            "source_revision": REVISION,
+            "recovery_contract_sha256": _sha(recovery_path),
+            "status": "passed",
+            "observed_at": "2026-09-18T09:50:00Z",
+            "producer": "pytest-recovery-evidence",
+            "evidence": {"operation": "recovery-evidence-check", "result": "passed"},
+            "production_effects_authorized": False,
+        })
+        if requirement["requires_restore_test"]:
+            restore_provenance_path = tmp_path / f"restore-provenance-{index}.json"
+            _write_private(restore_provenance_path, {
+                "schema_version": 1,
+                "kind": ready.RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
+                "evidence_id": evidence_id,
+                "evidence_scope": requirement["scope"],
+                "source_revision": REVISION,
+                "recovery_contract_sha256": _sha(recovery_path),
                 "status": "passed",
                 "observed_at": "2026-09-18T09:45:00Z",
-                "evidence_provenance_sha256": hashlib.sha256(
-                    f"{evidence_id}:restore-test".encode()
-                ).hexdigest(),
+                "producer": "pytest-restore-test",
+                "evidence": {"operation": "restore-test", "result": "passed"},
+                "production_effects_authorized": False,
+            })
+            restore_test = {
+                "status": "passed",
+                "observed_at": "2026-09-18T09:45:00Z",
+                "evidence_provenance_path": str(restore_provenance_path),
+                "evidence_provenance_sha256": _sha(restore_provenance_path),
             }
-            if requirement["requires_restore_test"]
-            else {"status": "not-required"}
-        )
+        else:
+            restore_test = {"status": "not-required"}
         value = {
             "schema_version": 1,
             "kind": ready.RECOVERY_RECEIPT_KIND,
             "evidence_id": evidence_id,
             "evidence_scope": requirement["scope"],
             "requires_restore_test": requirement["requires_restore_test"],
-            "evidence_provenance_sha256": hashlib.sha256(
-                f"{evidence_id}:evidence".encode()
-            ).hexdigest(),
+            "evidence_provenance_path": str(evidence_provenance_path),
+            "evidence_provenance_sha256": _sha(evidence_provenance_path),
             "restore_test": restore_test,
             "status": "passed",
             "source_revision": REVISION,
@@ -305,6 +330,127 @@ def test_receipt_evidence_provenance_digest_is_required(tmp_path):
         fx, evidence_id, lambda receipt: receipt.__setitem__("evidence_provenance_sha256", "bad")
     )
     with pytest.raises(ready.ReadinessError, match="evidence provenance digest"):
+        _validate(fx)
+
+
+
+def test_receipt_evidence_provenance_object_is_required_and_digest_bound(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id, receipt_path = next(iter(fx[3].items()))
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(receipt["evidence_provenance_path"])
+    _write_private(provenance_path, {"tampered": True})
+    with pytest.raises(ready.ReadinessError, match="evidence provenance digest mismatch"):
+        _validate(fx)
+
+    fx = _fixture(tmp_path / "missing")
+    evidence_id = next(iter(fx[3]))
+    _rewrite_receipt_and_rebind(
+        fx,
+        evidence_id,
+        lambda receipt: receipt.__setitem__(
+            "evidence_provenance_path", str((tmp_path / "missing-object.json").absolute())
+        ),
+    )
+    with pytest.raises(ready.ReadinessError, match="cannot be opened safely"):
+        _validate(fx)
+
+
+@pytest.mark.parametrize("missing_field", ["producer", "evidence"])
+def test_provenance_object_requires_substantive_evidence_payload(tmp_path, missing_field):
+    fx = _fixture(tmp_path)
+    evidence_id, receipt_path = next(iter(fx[3].items()))
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(receipt["evidence_provenance_path"])
+    provenance = json.loads(provenance_path.read_text())
+    provenance[missing_field] = "" if missing_field == "producer" else {}
+    _write_private(provenance_path, provenance)
+
+    def rebind(receipt_value):
+        receipt_value["evidence_provenance_sha256"] = _sha(provenance_path)
+
+    _rewrite_receipt_and_rebind(fx, evidence_id, rebind)
+    expected = "producer is missing" if missing_field == "producer" else "evidence payload is missing"
+    with pytest.raises(ready.ReadinessError, match=expected):
+        _validate(fx)
+
+
+def test_required_restore_test_provenance_object_is_digest_bound(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    evidence_id = next(
+        item["id"] for item in recovery["required_evidence"] if item["requires_restore_test"]
+    )
+    receipt = json.loads(fx[3][evidence_id].read_text())
+    provenance_path = Path(receipt["restore_test"]["evidence_provenance_path"])
+    _write_private(provenance_path, {"tampered": True})
+    with pytest.raises(ready.ReadinessError, match="restore-test provenance digest mismatch"):
+        _validate(fx)
+
+
+def test_same_bytes_provenance_replacement_is_plan_drift(tmp_path):
+    fx = _fixture(tmp_path)
+    snapshot = _validate(fx)
+    receipt = json.loads(next(iter(fx[3].values())).read_text())
+    provenance_path = Path(receipt["evidence_provenance_path"])
+    payload = provenance_path.read_bytes()
+    replacement = tmp_path / "replacement-provenance.json"
+    replacement.write_bytes(payload)
+    replacement.chmod(0o600)
+    replacement.replace(provenance_path)
+    with pytest.raises(ready.ReadinessError, match="drifted after plan compilation"):
+        ready.revalidate_readiness(
+            snapshot,
+            source_revision=REVISION,
+            recovery_contract_path=fx[1],
+            lifecycle_contract_path=fx[2],
+            now=NOW,
+        )
+
+def test_provenance_object_semantics_are_verified_after_digest_rebind(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id, receipt_path = next(iter(fx[3].items()))
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(receipt["evidence_provenance_path"])
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence_id"] = "foreign-evidence"
+    _write_private(provenance_path, provenance)
+
+    def rebind(receipt_value):
+        receipt_value["evidence_provenance_sha256"] = _sha(provenance_path)
+
+    _rewrite_receipt_and_rebind(fx, evidence_id, rebind)
+    with pytest.raises(ready.ReadinessError, match="evidence id mismatch"):
+        _validate(fx)
+
+
+def test_provenance_object_recovery_contract_digest_is_bound(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id, receipt_path = next(iter(fx[3].items()))
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(receipt["evidence_provenance_path"])
+    provenance = json.loads(provenance_path.read_text())
+    provenance["recovery_contract_sha256"] = "0" * 64
+    _write_private(provenance_path, provenance)
+
+    def rebind(receipt_value):
+        receipt_value["evidence_provenance_sha256"] = _sha(provenance_path)
+
+    _rewrite_receipt_and_rebind(fx, evidence_id, rebind)
+    with pytest.raises(ready.ReadinessError, match="recovery contract digest mismatch"):
+        _validate(fx)
+
+
+def test_provenance_path_cannot_reuse_receipt_path(tmp_path):
+    fx = _fixture(tmp_path)
+    evidence_id, receipt_path = next(iter(fx[3].items()))
+
+    def point_at_receipt(receipt_value):
+        receipt_value["evidence_provenance_path"] = str(receipt_path)
+        receipt_value["evidence_provenance_sha256"] = _sha(receipt_path)
+
+    _rewrite_receipt_and_rebind(fx, evidence_id, point_at_receipt)
+    with pytest.raises(ready.ReadinessError):
         _validate(fx)
 
 

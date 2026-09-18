@@ -216,25 +216,62 @@ def synthetic_readiness_path(
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
-        restore_test = (
-            {
+        evidence_provenance_path = root / f"evidence-provenance-{index}.json"
+        evidence_provenance = {
+            "schema_version": 1,
+            "kind": prod.pre_cutover_readiness.RECOVERY_EVIDENCE_PROVENANCE_KIND,
+            "evidence_id": item["id"],
+            "evidence_scope": item["scope"],
+            "source_revision": REVISION,
+            "recovery_contract_sha256": recovery_sha,
+            "status": "passed",
+            "observed_at": observed_at,
+            "producer": "pytest-recovery-evidence",
+            "evidence": {"operation": "recovery-evidence-check", "result": "passed"},
+            "production_effects_authorized": False,
+        }
+        evidence_provenance_path.write_text(
+            json.dumps(evidence_provenance, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        evidence_provenance_path.chmod(0o600)
+        if item["requires_restore_test"]:
+            restore_provenance_path = root / f"restore-provenance-{index}.json"
+            restore_provenance = {
+                "schema_version": 1,
+                "kind": prod.pre_cutover_readiness.RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
+                "evidence_id": item["id"],
+                "evidence_scope": item["scope"],
+                "source_revision": REVISION,
+                "recovery_contract_sha256": recovery_sha,
                 "status": "passed",
                 "observed_at": observed_at,
+                "producer": "pytest-restore-test",
+                "evidence": {"operation": "restore-test", "result": "passed"},
+                "production_effects_authorized": False,
+            }
+            restore_provenance_path.write_text(
+                json.dumps(restore_provenance, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            restore_provenance_path.chmod(0o600)
+            restore_test = {
+                "status": "passed",
+                "observed_at": observed_at,
+                "evidence_provenance_path": str(restore_provenance_path),
                 "evidence_provenance_sha256": hashlib.sha256(
-                    f"{item['id']}:restore-test".encode()
+                    restore_provenance_path.read_bytes()
                 ).hexdigest(),
             }
-            if item["requires_restore_test"]
-            else {"status": "not-required"}
-        )
+        else:
+            restore_test = {"status": "not-required"}
         receipt = {
             "schema_version": 1,
             "kind": prod.pre_cutover_readiness.RECOVERY_RECEIPT_KIND,
             "evidence_id": item["id"],
             "evidence_scope": item["scope"],
             "requires_restore_test": item["requires_restore_test"],
+            "evidence_provenance_path": str(evidence_provenance_path),
             "evidence_provenance_sha256": hashlib.sha256(
-                f"{item['id']}:evidence".encode()
+                evidence_provenance_path.read_bytes()
             ).hexdigest(),
             "restore_test": restore_test,
             "status": "passed",

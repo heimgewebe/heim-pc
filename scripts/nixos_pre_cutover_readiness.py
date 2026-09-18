@@ -15,6 +15,8 @@ from typing import Any
 READINESS_KIND = "heim_pc.nixos_pre_cutover_readiness"
 VERIFICATION_KIND = "heim_pc.nixos_pre_cutover_readiness_verification"
 RECOVERY_RECEIPT_KIND = "heim_pc.nixos_recovery_evidence_receipt"
+RECOVERY_EVIDENCE_PROVENANCE_KIND = "heim_pc.nixos_recovery_evidence_provenance"
+RECOVERY_RESTORE_TEST_PROVENANCE_KIND = "heim_pc.nixos_recovery_restore_test_provenance"
 RECOVERY_CONTRACT_KIND = "heim_pc.nixos_recovery_readiness_contract"
 LIFECYCLE_CONTRACT_KIND = "heim_pc.nixos_store_lifecycle_contract"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -22,6 +24,7 @@ REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 MAX_BUNDLE_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 256 * 1024
+MAX_PROVENANCE_BYTES = 256 * 1024
 MAX_CONTRACT_BYTES = 256 * 1024
 
 
@@ -283,11 +286,17 @@ def _recovery_policy(
         or receipt_contract.get("source_revision_bound") is not True
         or receipt_contract.get("recovery_contract_sha256_bound") is not True
         or receipt_contract.get("evidence_scope_bound") is not True
+        or receipt_contract.get("evidence_provenance_path_bound") is not True
         or receipt_contract.get("evidence_provenance_sha256_bound") is not True
+        or receipt_contract.get("evidence_provenance_object_bound") is not True
+        or receipt_contract.get("evidence_provenance_contract_bound") is not True
         or receipt_contract.get("restore_test_requirement_bound") is not True
         or receipt_contract.get("required_restore_test_status") != "passed"
         or receipt_contract.get("required_restore_test_freshness_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_path_bound") is not True
         or receipt_contract.get("required_restore_test_provenance_sha256_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_object_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_contract_bound") is not True
         or receipt_contract.get("status") != "passed"
         or receipt_contract.get("production_effects_authorized") is not False
     ):
@@ -337,6 +346,84 @@ def _validate_lifecycle_contract(contract: dict[str, Any]) -> None:
         raise ReadinessError("Nix lifecycle initial-cutover/GC admission mismatch")
 
 
+def _validate_provenance_object(
+    *,
+    path_value: Any,
+    digest_value: Any,
+    label: str,
+    expected_kind: str,
+    evidence_id: str,
+    evidence_scope: str,
+    source_revision: str,
+    recovery_contract_sha256: str,
+    observed_at: str,
+    expected_owner_uid: int,
+) -> dict[str, Any]:
+    if not isinstance(path_value, str):
+        raise ReadinessError(f"{label} path must be canonical and absolute")
+    path = _canonical_absolute(Path(path_value), label)
+    expected_digest = _sha(digest_value, f"{label} digest")
+    payload, meta = _read_regular(
+        path,
+        label=label,
+        max_bytes=MAX_PROVENANCE_BYTES,
+        private=True,
+        expected_owner_uid=expected_owner_uid,
+    )
+    if meta["sha256"] != expected_digest:
+        raise ReadinessError(f"{label} digest mismatch")
+    value = _json(payload, label)
+    expected_keys = {
+        "schema_version",
+        "kind",
+        "evidence_id",
+        "evidence_scope",
+        "source_revision",
+        "recovery_contract_sha256",
+        "status",
+        "observed_at",
+        "producer",
+        "evidence",
+        "production_effects_authorized",
+    }
+    actual_keys = set(value)
+    missing_keys = expected_keys - actual_keys
+    if "producer" in missing_keys:
+        raise ReadinessError(f"{label} producer is missing")
+    if "evidence" in missing_keys:
+        raise ReadinessError(f"{label} evidence payload is missing")
+    if actual_keys != expected_keys:
+        raise ReadinessError(f"{label} object is malformed")
+    if value.get("schema_version") != 1 or value.get("kind") != expected_kind:
+        raise ReadinessError(f"{label} identity mismatch")
+    if value.get("evidence_id") != evidence_id:
+        raise ReadinessError(f"{label} evidence id mismatch")
+    if value.get("evidence_scope") != evidence_scope:
+        raise ReadinessError(f"{label} evidence scope mismatch")
+    if value.get("source_revision") != source_revision:
+        raise ReadinessError(f"{label} source revision mismatch")
+    if value.get("recovery_contract_sha256") != recovery_contract_sha256:
+        raise ReadinessError(f"{label} recovery contract digest mismatch")
+    if value.get("status") != "passed":
+        raise ReadinessError(f"{label} did not pass")
+    producer = value.get("producer")
+    if not isinstance(producer, str) or not producer.strip():
+        raise ReadinessError(f"{label} producer is missing")
+    evidence = value.get("evidence")
+    if not isinstance(evidence, dict) or not evidence:
+        raise ReadinessError(f"{label} evidence payload is missing")
+    if value.get("observed_at") != observed_at:
+        raise ReadinessError(f"{label} observation mismatch")
+    _utc(value.get("observed_at"), f"{label}.observed_at")
+    if value.get("production_effects_authorized") is not False:
+        raise ReadinessError(f"{label} must not authorize production effects")
+    return {
+        "path": meta["path"],
+        "sha256": meta["sha256"],
+        "owner_uid": meta["owner_uid"],
+        "file_identity": _identity_binding(meta),
+    }
+
 def _validate_receipt(
     value: dict[str, Any],
     *,
@@ -347,7 +434,8 @@ def _validate_receipt(
     now: datetime,
     max_age_seconds: int,
     future_skew_seconds: int,
-) -> dict[str, Any]:
+    expected_owner_uid: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     evidence_id = requirement["id"]
     if value.get("schema_version") != 1 or value.get("kind") != RECOVERY_RECEIPT_KIND:
         raise ReadinessError(f"recovery receipt {evidence_id} identity mismatch")
@@ -357,10 +445,6 @@ def _validate_receipt(
         raise ReadinessError(f"recovery receipt {evidence_id} evidence scope mismatch")
     if value.get("requires_restore_test") is not requirement["requires_restore_test"]:
         raise ReadinessError(f"recovery receipt {evidence_id} restore-test requirement mismatch")
-    _sha(
-        value.get("evidence_provenance_sha256"),
-        f"recovery receipt {evidence_id} evidence provenance digest",
-    )
     if value.get("status") != "passed":
         raise ReadinessError(f"recovery receipt {evidence_id} did not pass")
     if value.get("source_revision") != source_revision:
@@ -379,12 +463,26 @@ def _validate_receipt(
     if (observed - observed_bundle).total_seconds() > future_skew_seconds:
         raise ReadinessError(f"recovery receipt {evidence_id} is newer than its bundle observation")
 
+    evidence_provenance = _validate_provenance_object(
+        path_value=value.get("evidence_provenance_path"),
+        digest_value=value.get("evidence_provenance_sha256"),
+        label=f"recovery receipt {evidence_id} evidence provenance",
+        expected_kind=RECOVERY_EVIDENCE_PROVENANCE_KIND,
+        evidence_id=evidence_id,
+        evidence_scope=requirement["scope"],
+        source_revision=source_revision,
+        recovery_contract_sha256=recovery_contract_sha256,
+        observed_at=value["observed_at"],
+        expected_owner_uid=expected_owner_uid,
+    )
+
     restore_test = value.get("restore_test")
     restore_observed_at = None
     if requirement["requires_restore_test"]:
         if not isinstance(restore_test, dict) or set(restore_test) != {
             "status",
             "observed_at",
+            "evidence_provenance_path",
             "evidence_provenance_sha256",
         }:
             raise ReadinessError(
@@ -392,10 +490,6 @@ def _validate_receipt(
             )
         if restore_test.get("status") != "passed":
             raise ReadinessError(f"recovery receipt {evidence_id} restore test did not pass")
-        _sha(
-            restore_test.get("evidence_provenance_sha256"),
-            f"recovery receipt {evidence_id} restore-test provenance digest",
-        )
         restore_observed = _fresh(
             restore_test.get("observed_at"),
             now=now,
@@ -407,6 +501,18 @@ def _validate_receipt(
             raise ReadinessError(
                 f"recovery receipt {evidence_id} restore test is newer than receipt observation"
             )
+        restore_provenance = _validate_provenance_object(
+            path_value=restore_test.get("evidence_provenance_path"),
+            digest_value=restore_test.get("evidence_provenance_sha256"),
+            label=f"recovery receipt {evidence_id} restore-test provenance",
+            expected_kind=RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
+            evidence_id=evidence_id,
+            evidence_scope=requirement["scope"],
+            source_revision=source_revision,
+            recovery_contract_sha256=recovery_contract_sha256,
+            observed_at=restore_test["observed_at"],
+            expected_owner_uid=expected_owner_uid,
+        )
         restore_observed_at = restore_test["observed_at"]
         restore_status = "passed"
     else:
@@ -415,6 +521,7 @@ def _validate_receipt(
                 f"recovery receipt {evidence_id} restore test must be exactly not-required"
             )
         restore_status = "not-required"
+        restore_provenance = None
 
     return {
         "evidence_id": evidence_id,
@@ -424,7 +531,7 @@ def _validate_receipt(
         "restore_test_required": requirement["requires_restore_test"],
         "restore_test_status": restore_status,
         "restore_test_observed_at": restore_observed_at,
-    }
+    }, evidence_provenance, restore_provenance
 
 
 def validate_readiness(
@@ -501,7 +608,11 @@ def validate_readiness(
     if not isinstance(entries, list):
         raise ReadinessError("pre-cutover readiness receipt set is invalid")
     by_id: dict[str, dict[str, Any]] = {}
-    seen_paths: set[str] = set()
+    seen_paths: set[str] = {
+        bundle_meta["path"],
+        recovery_meta["path"],
+        lifecycle_meta["path"],
+    }
     for item in entries:
         if not isinstance(item, dict) or set(item) != {"evidence_id", "path", "sha256"}:
             raise ReadinessError("pre-cutover readiness receipt binding is invalid")
@@ -545,7 +656,7 @@ def validate_readiness(
         if meta["sha256"] != binding["sha256"]:
             raise ReadinessError(f"recovery receipt {evidence_id} digest mismatch")
         receipt = _json(payload, f"recovery receipt {evidence_id}")
-        summary = _validate_receipt(
+        summary, evidence_provenance, restore_provenance = _validate_receipt(
             receipt,
             requirement=requirement,
             source_revision=source_revision,
@@ -554,13 +665,25 @@ def validate_readiness(
             now=current,
             max_age_seconds=max_age,
             future_skew_seconds=skew,
+            expected_owner_uid=meta["owner_uid"],
         )
+        for provenance in (evidence_provenance, restore_provenance):
+            if provenance is None:
+                continue
+            provenance_path = provenance["path"]
+            if provenance_path in seen_paths:
+                raise ReadinessError(
+                    f"recovery receipt {evidence_id} reuses a bound evidence path"
+                )
+            seen_paths.add(provenance_path)
         normalized_receipts.append({
             "evidence_id": evidence_id,
             "path": binding["path"],
             "sha256": meta["sha256"],
             "owner_uid": meta["owner_uid"],
             "file_identity": _identity_binding(meta),
+            "evidence_provenance": evidence_provenance,
+            "restore_test_provenance": restore_provenance,
         })
         evidence_summary.append(summary)
 
