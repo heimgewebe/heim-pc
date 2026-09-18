@@ -37,6 +37,7 @@ CONFIRM_PREFIX = "APPLY-NIXOS-PRODUCTION:"
 PINNED_NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
 PINNED_NIX_IMAGE_TAG = "nixos/nix:2.35.2"
 PINNED_NIX_IMAGE_REF = "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c"
+PINNED_NIX_CONTAINERD_IMAGE_REF = f"docker.io/{PINNED_NIX_IMAGE_TAG}"
 TRUSTED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 CANONICAL_MAIN_REMOTE = "https://github.com/heimgewebe/heim-pc.git"
 READONLY_NIX_STORE = "local?root=/subject&read-only=true"
@@ -3597,7 +3598,7 @@ def _containerd_nix_run_argv(
         "--mount", "type=tmpfs,dst=/tmp,options=nosuid:nodev:mode=1777",
         "--env", "HOME=/tmp",
         "--env", "TMPDIR=/tmp",
-        "docker.io/nixos/nix:2.35.2", container_id,
+        PINNED_NIX_CONTAINERD_IMAGE_REF, container_id,
         "/nix/var/nix/profiles/default/bin/nix",
         "--extra-experimental-features", READONLY_NIX_FEATURES,
         "--store", READONLY_NIX_STORE,
@@ -3612,7 +3613,7 @@ def _cleanup_containerd_verifier_namespace(namespace: str) -> None:
         raise ProductionInstallError("cannot prove containerd verifier task cleanup")
     if tasks.stdout.strip() or containers.stdout.strip():
         raise ProductionInstallError("containerd verifier left tasks or containers behind")
-    _run(_ctr_argv(namespace, ["images", "remove", "docker.io/nixos/nix:2.35.2"]), check=False)
+    _run(_ctr_argv(namespace, ["images", "remove", PINNED_NIX_CONTAINERD_IMAGE_REF]), check=False)
     result = _run(_ctr_argv(None, ["namespaces", "remove", namespace]), check=False)
     if result.returncode != 0 or namespace in _containerd_namespaces():
         raise ProductionInstallError("containerd verifier namespace cleanup could not be verified")
@@ -3657,13 +3658,13 @@ def verify_sealed_nix_with_containerd(
             "utf-8", "strict"
         ).splitlines()
         image_refs = [item.strip() for item in image_refs if item.strip()]
-        if image_refs != ["docker.io/nixos/nix:2.35.2"]:
+        if image_refs != [PINNED_NIX_CONTAINERD_IMAGE_REF]:
             raise ProductionInstallError("containerd verifier imported unexpected image references")
         ready_refs = _run(_ctr_argv(namespace, ["images", "check", "--quiet"])).stdout.decode(
             "utf-8", "strict"
         ).splitlines()
         ready_refs = [item.strip() for item in ready_refs if item.strip()]
-        if ready_refs != ["docker.io/nixos/nix:2.35.2"]:
+        if ready_refs != [PINNED_NIX_CONTAINERD_IMAGE_REF]:
             raise ProductionInstallError("containerd verifier image is not fully ready")
         info_id = f"{namespace}-info"
         path_info = _json_command(_containerd_nix_run_argv(

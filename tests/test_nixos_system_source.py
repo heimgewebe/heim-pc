@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
@@ -265,6 +266,15 @@ class T(unittest.TestCase):
                 contract_path.write_text(json.dumps(mutated), encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, field):
                     verifier_check.verify_managed_nix_verifier_contract(contract_path)
+        with mock.patch.object(
+            verifier_check.installer,
+            "PINNED_NIX_CONTAINERD_IMAGE_REF",
+            "docker.io/nixos/nix:0.0.0",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "containerd Nix image reference"):
+                verifier_check.verify_managed_nix_verifier_contract(
+                    ROOT / "nixos/production/trust-contract-v1.json"
+                )
         self.assertIn("check_pinned_nix_find_contract.py", flake)
         self.assertIn("--trust-contract-only", flake)
         self.assertNotIn("pythonAssignment", flake)

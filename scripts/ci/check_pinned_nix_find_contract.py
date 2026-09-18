@@ -77,6 +77,9 @@ def verify_managed_nix_verifier_contract(path: Path = TRUST_CONTRACT_PATH) -> di
             )
     if managed_build.PINNED_NIX_IMAGE != runtime["image_id"]:
         raise RuntimeError("managed-build Nix image ID diverged from trust contract")
+    expected_containerd_ref = f"docker.io/{runtime['image_tag']}"
+    if installer.PINNED_NIX_CONTAINERD_IMAGE_REF != expected_containerd_ref:
+        raise RuntimeError("production installer containerd Nix image reference diverged from trust contract")
     return runtime
 
 

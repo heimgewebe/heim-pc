@@ -4038,7 +4038,7 @@ def test_root_only_containerd_verifier_argv_is_readonly_and_plan_bounded():
     assert "--read-only" in argv
     assert "type=bind,src=/nix,dst=/subject/nix,options=rbind:ro" in argv
     assert "type=tmpfs,dst=/tmp,options=nosuid:nodev:mode=1777" in argv
-    assert "docker.io/nixos/nix:2.35.2" in argv
+    assert prod.PINNED_NIX_CONTAINERD_IMAGE_REF in argv
     assert "/nix/var/nix/profiles/default/bin/nix" in argv
     assert prod.READONLY_NIX_STORE in argv
     assert "--net-host" not in argv
