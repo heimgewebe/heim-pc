@@ -53,6 +53,11 @@ def _isolated_production_apply_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", tmp_path / "production-apply-locks")
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", owner.st_uid)
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", owner.st_gid)
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness,
+        "_run_attestation_verifier",
+        _synthetic_recovery_attestation_verifier,
+    )
 
 
 def managed_receipt(artifact):
@@ -201,6 +206,46 @@ def observation():
     }
 
 
+def _recovery_evidence_sha(value: dict) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _synthetic_recovery_attestation_verifier(
+    argv: list[str],
+) -> subprocess.CompletedProcess:
+    assert argv[:3] == [
+        prod.pre_cutover_readiness.GH_BIN,
+        "attestation",
+        "verify",
+    ]
+    subject_path = Path(argv[3])
+    bundle_path = Path(argv[argv.index("--bundle") + 1])
+    assert bundle_path.is_file()
+    subject = json.loads(subject_path.read_text(encoding="utf-8"))
+    evidence = subject["evidence"]
+    predicate = {
+        "schema_version": 1,
+        "kind": prod.pre_cutover_readiness.RECOVERY_ATTESTATION_KIND,
+        "provenance_kind": subject["kind"],
+        "provenance_sha256": hashlib.sha256(subject_path.read_bytes()).hexdigest(),
+        "producer": subject["producer"],
+        "evidence_id": subject["evidence_id"],
+        "evidence_scope": subject["evidence_scope"],
+        "evidence_schema": subject["evidence_schema"],
+        "evidence_sha256": _recovery_evidence_sha(evidence),
+        "producer_receipt_sha256": evidence["producer_receipt_sha256"],
+        "source_revision": subject["source_revision"],
+        "recovery_contract_sha256": subject["recovery_contract_sha256"],
+        "observed_at": subject["observed_at"],
+        "production_effects_authorized": False,
+    }
+    stdout = json.dumps([
+        {"verificationResult": {"statement": {"predicate": predicate}}}
+    ]).encode("utf-8")
+    return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+
+
 def synthetic_readiness_path(
     *,
     recovery_path: Path | None = None,
@@ -216,7 +261,14 @@ def synthetic_readiness_path(
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
+
         evidence_provenance_path = root / f"evidence-provenance-{index}.json"
+        evidence_payload = {
+            "schema_version": 1,
+            "kind": item["evidence_schema"],
+            "result": "passed",
+            "producer_receipt_sha256": "a" * 64,
+        }
         evidence_provenance = {
             "schema_version": 1,
             "kind": prod.pre_cutover_readiness.RECOVERY_EVIDENCE_PROVENANCE_KIND,
@@ -226,16 +278,30 @@ def synthetic_readiness_path(
             "recovery_contract_sha256": recovery_sha,
             "status": "passed",
             "observed_at": observed_at,
-            "producer": "pytest-recovery-evidence",
-            "evidence": {"operation": "recovery-evidence-check", "result": "passed"},
+            "producer": item["producer"],
+            "evidence_schema": item["evidence_schema"],
+            "evidence": evidence_payload,
             "production_effects_authorized": False,
         }
         evidence_provenance_path.write_text(
             json.dumps(evidence_provenance, sort_keys=True) + "\n", encoding="utf-8"
         )
         evidence_provenance_path.chmod(0o600)
+        evidence_attestation_path = root / f"evidence-attestation-{index}.json"
+        evidence_attestation_path.write_text(
+            json.dumps({"synthetic_sigstore_bundle": item["id"]}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence_attestation_path.chmod(0o600)
+
         if item["requires_restore_test"]:
             restore_provenance_path = root / f"restore-provenance-{index}.json"
+            restore_payload = {
+                "schema_version": 1,
+                "kind": item["restore_test_schema"],
+                "result": "passed",
+                "producer_receipt_sha256": "b" * 64,
+            }
             restore_provenance = {
                 "schema_version": 1,
                 "kind": prod.pre_cutover_readiness.RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
@@ -245,14 +311,25 @@ def synthetic_readiness_path(
                 "recovery_contract_sha256": recovery_sha,
                 "status": "passed",
                 "observed_at": observed_at,
-                "producer": "pytest-restore-test",
-                "evidence": {"operation": "restore-test", "result": "passed"},
+                "producer": item["producer"],
+                "evidence_schema": item["restore_test_schema"],
+                "evidence": restore_payload,
                 "production_effects_authorized": False,
             }
             restore_provenance_path.write_text(
                 json.dumps(restore_provenance, sort_keys=True) + "\n", encoding="utf-8"
             )
             restore_provenance_path.chmod(0o600)
+            restore_attestation_path = root / f"restore-attestation-{index}.json"
+            restore_attestation_path.write_text(
+                json.dumps(
+                    {"synthetic_sigstore_bundle": item["id"] + "-restore"},
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            restore_attestation_path.chmod(0o600)
             restore_test = {
                 "status": "passed",
                 "observed_at": observed_at,
@@ -260,9 +337,14 @@ def synthetic_readiness_path(
                 "evidence_provenance_sha256": hashlib.sha256(
                     restore_provenance_path.read_bytes()
                 ).hexdigest(),
+                "evidence_attestation_path": str(restore_attestation_path),
+                "evidence_attestation_sha256": hashlib.sha256(
+                    restore_attestation_path.read_bytes()
+                ).hexdigest(),
             }
         else:
             restore_test = {"status": "not-required"}
+
         receipt = {
             "schema_version": 1,
             "kind": prod.pre_cutover_readiness.RECOVERY_RECEIPT_KIND,
@@ -272,6 +354,10 @@ def synthetic_readiness_path(
             "evidence_provenance_path": str(evidence_provenance_path),
             "evidence_provenance_sha256": hashlib.sha256(
                 evidence_provenance_path.read_bytes()
+            ).hexdigest(),
+            "evidence_attestation_path": str(evidence_attestation_path),
+            "evidence_attestation_sha256": hashlib.sha256(
+                evidence_attestation_path.read_bytes()
             ).hexdigest(),
             "restore_test": restore_test,
             "status": "passed",
@@ -287,6 +373,7 @@ def synthetic_readiness_path(
             "path": str(receipt_path),
             "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
         })
+
     bundle_path = root / "readiness.json"
     bundle = {
         "schema_version": 1,
@@ -302,7 +389,6 @@ def synthetic_readiness_path(
     bundle_path.write_text(json.dumps(bundle, sort_keys=True) + "\n", encoding="utf-8")
     bundle_path.chmod(0o600)
     return bundle_path
-
 
 def plan(
     obs=None,

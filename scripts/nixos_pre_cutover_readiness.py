@@ -8,6 +8,8 @@ import json
 import os
 import re
 import stat
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,12 +21,16 @@ RECOVERY_EVIDENCE_PROVENANCE_KIND = "heim_pc.nixos_recovery_evidence_provenance"
 RECOVERY_RESTORE_TEST_PROVENANCE_KIND = "heim_pc.nixos_recovery_restore_test_provenance"
 RECOVERY_CONTRACT_KIND = "heim_pc.nixos_recovery_readiness_contract"
 LIFECYCLE_CONTRACT_KIND = "heim_pc.nixos_store_lifecycle_contract"
+RECOVERY_ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
+GH_BIN = "/usr/bin/gh"
+TRUSTED_PATH = "/usr/bin:/bin"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 MAX_BUNDLE_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 256 * 1024
 MAX_PROVENANCE_BYTES = 256 * 1024
+MAX_ATTESTATION_BYTES = 2 * 1024 * 1024
 MAX_CONTRACT_BYTES = 256 * 1024
 
 
@@ -34,6 +40,11 @@ class ReadinessError(ValueError):
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_json(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256(payload)
 
 
 def _copy_json(value: Any) -> Any:
@@ -239,9 +250,77 @@ def _load_contract(path: Path, *, label: str) -> tuple[dict[str, Any], dict[str,
     return _json(payload, label), meta
 
 
+def _run_attestation_verifier(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+    if argv[:3] != [GH_BIN, "attestation", "verify"]:
+        raise ReadinessError("recovery attestation runner only permits gh attestation verify")
+    with tempfile.TemporaryDirectory(prefix="heim-pc-recovery-attestation-", dir="/tmp") as home:
+        home_path = Path(home)
+        cache_path = home_path / "cache"
+        config_path = home_path / "config"
+        cache_path.mkdir(mode=0o700)
+        config_path.mkdir(mode=0o700)
+        env = {
+            "PATH": TRUSTED_PATH,
+            "LC_ALL": "C",
+            "LANG": "C",
+            "HOME": str(home_path),
+            "XDG_CACHE_HOME": str(cache_path),
+            "XDG_CONFIG_HOME": str(config_path),
+            "SYSTEMD_COLORS": "0",
+        }
+        try:
+            result = subprocess.run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=env,
+            )
+        except OSError as exc:
+            raise ReadinessError("recovery attestation verifier could not execute") from exc
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace")[-2000:]
+        raise ReadinessError(f"recovery attestation verification failed: {stderr}")
+    return result
+
+
+def _attestation_verify_argv(
+    subject_path: Path,
+    bundle_path: Path,
+    *,
+    source_revision: str,
+    policy: dict[str, Any],
+) -> list[str]:
+    subject_path = _canonical_absolute(subject_path, "recovery provenance subject")
+    bundle_path = _canonical_absolute(bundle_path, "recovery provenance attestation")
+    return [
+        GH_BIN,
+        "attestation",
+        "verify",
+        str(subject_path),
+        "--repo",
+        policy["repository"],
+        "--bundle",
+        str(bundle_path),
+        "--signer-workflow",
+        policy["signer_workflow"],
+        "--signer-digest",
+        source_revision,
+        "--source-digest",
+        source_revision,
+        "--source-ref",
+        policy["source_ref"],
+        "--predicate-type",
+        policy["predicate_type"],
+        "--deny-self-hosted-runners",
+        "--format",
+        "json",
+    ]
+
+
 def _recovery_policy(
     contract: dict[str, Any],
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], int, int, dict[str, Any]]:
     if (
         contract.get("schema_version") != 1
         or contract.get("kind") != RECOVERY_CONTRACT_KIND
@@ -257,11 +336,17 @@ def _recovery_policy(
             "id",
             "scope",
             "requires_restore_test",
+            "producer",
+            "evidence_schema",
+            "restore_test_schema",
         }:
             raise ReadinessError("recovery contract evidence item is invalid")
         evidence_id = item.get("id")
         scope = item.get("scope")
         requires_restore_test = item.get("requires_restore_test")
+        producer = item.get("producer")
+        evidence_schema = item.get("evidence_schema")
+        restore_test_schema = item.get("restore_test_schema")
         if (
             not isinstance(evidence_id, str)
             or not evidence_id
@@ -269,6 +354,15 @@ def _recovery_policy(
             or not isinstance(scope, str)
             or not scope
             or type(requires_restore_test) is not bool
+            or not isinstance(producer, str)
+            or not producer
+            or not isinstance(evidence_schema, str)
+            or not evidence_schema
+            or (
+                requires_restore_test
+                and (not isinstance(restore_test_schema, str) or not restore_test_schema)
+            )
+            or (not requires_restore_test and restore_test_schema is not None)
         ):
             raise ReadinessError("recovery contract evidence requirement is invalid")
         ids.add(evidence_id)
@@ -276,7 +370,32 @@ def _recovery_policy(
             "id": evidence_id,
             "scope": scope,
             "requires_restore_test": requires_restore_test,
+            "producer": producer,
+            "evidence_schema": evidence_schema,
+            "restore_test_schema": restore_test_schema,
         })
+
+    attestation_policy = contract.get("evidence_attestation")
+    if (
+        not isinstance(attestation_policy, dict)
+        or set(attestation_policy) != {
+            "repository",
+            "signer_workflow",
+            "source_ref",
+            "predicate_type",
+            "deny_self_hosted_runners",
+            "signer_revision_must_equal_source_revision",
+        }
+        or attestation_policy.get("repository") != "heimgewebe/heim-pc"
+        or attestation_policy.get("signer_workflow")
+        != "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml"
+        or attestation_policy.get("source_ref") != "refs/heads/main"
+        or attestation_policy.get("predicate_type")
+        != "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1"
+        or attestation_policy.get("deny_self_hosted_runners") is not True
+        or attestation_policy.get("signer_revision_must_equal_source_revision") is not True
+    ):
+        raise ReadinessError("recovery attestation policy is not fail-closed")
 
     receipt_contract = contract.get("evidence_receipt")
     if (
@@ -290,6 +409,11 @@ def _recovery_policy(
         or receipt_contract.get("evidence_provenance_sha256_bound") is not True
         or receipt_contract.get("evidence_provenance_object_bound") is not True
         or receipt_contract.get("evidence_provenance_contract_bound") is not True
+        or receipt_contract.get("evidence_provenance_producer_bound") is not True
+        or receipt_contract.get("evidence_provenance_schema_bound") is not True
+        or receipt_contract.get("evidence_provenance_external_attestation_required") is not True
+        or receipt_contract.get("evidence_attestation_path_bound") is not True
+        or receipt_contract.get("evidence_attestation_sha256_bound") is not True
         or receipt_contract.get("restore_test_requirement_bound") is not True
         or receipt_contract.get("required_restore_test_status") != "passed"
         or receipt_contract.get("required_restore_test_freshness_bound") is not True
@@ -297,6 +421,11 @@ def _recovery_policy(
         or receipt_contract.get("required_restore_test_provenance_sha256_bound") is not True
         or receipt_contract.get("required_restore_test_provenance_object_bound") is not True
         or receipt_contract.get("required_restore_test_provenance_contract_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_producer_bound") is not True
+        or receipt_contract.get("required_restore_test_provenance_schema_bound") is not True
+        or receipt_contract.get("required_restore_test_external_attestation_required") is not True
+        or receipt_contract.get("required_restore_test_attestation_path_bound") is not True
+        or receipt_contract.get("required_restore_test_attestation_sha256_bound") is not True
         or receipt_contract.get("status") != "passed"
         or receipt_contract.get("production_effects_authorized") is not False
     ):
@@ -325,7 +454,7 @@ def _recovery_policy(
         or admission.get("production_storage_mutation_blocked_without_complete_evidence") is not True
     ):
         raise ReadinessError("recovery contract admission is not fail-closed")
-    return requirements, max_age, skew
+    return requirements, max_age, skew, _copy_json(attestation_policy)
 
 
 def _validate_lifecycle_contract(contract: dict[str, Any]) -> None:
@@ -358,6 +487,8 @@ def _validate_provenance_object(
     recovery_contract_sha256: str,
     observed_at: str,
     expected_owner_uid: int,
+    expected_producer: str,
+    expected_schema: str,
 ) -> dict[str, Any]:
     if not isinstance(path_value, str):
         raise ReadinessError(f"{label} path must be canonical and absolute")
@@ -383,6 +514,7 @@ def _validate_provenance_object(
         "status",
         "observed_at",
         "producer",
+        "evidence_schema",
         "evidence",
         "production_effects_authorized",
     }
@@ -407,11 +539,24 @@ def _validate_provenance_object(
     if value.get("status") != "passed":
         raise ReadinessError(f"{label} did not pass")
     producer = value.get("producer")
-    if not isinstance(producer, str) or not producer.strip():
-        raise ReadinessError(f"{label} producer is missing")
+    if producer != expected_producer:
+        raise ReadinessError(f"{label} producer mismatch")
+    evidence_schema = value.get("evidence_schema")
+    if evidence_schema != expected_schema:
+        raise ReadinessError(f"{label} evidence schema mismatch")
     evidence = value.get("evidence")
-    if not isinstance(evidence, dict) or not evidence:
-        raise ReadinessError(f"{label} evidence payload is missing")
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != {"schema_version", "kind", "result", "producer_receipt_sha256"}
+        or evidence.get("schema_version") != 1
+        or evidence.get("kind") != expected_schema
+        or evidence.get("result") != "passed"
+    ):
+        raise ReadinessError(f"{label} evidence payload is not producer-schema bound")
+    producer_receipt_sha256 = _sha(
+        evidence.get("producer_receipt_sha256"),
+        f"{label} producer receipt digest",
+    )
     if value.get("observed_at") != observed_at:
         raise ReadinessError(f"{label} observation mismatch")
     _utc(value.get("observed_at"), f"{label}.observed_at")
@@ -422,7 +567,137 @@ def _validate_provenance_object(
         "sha256": meta["sha256"],
         "owner_uid": meta["owner_uid"],
         "file_identity": _identity_binding(meta),
+        "producer": producer,
+        "evidence_schema": evidence_schema,
+        "evidence_sha256": _sha256_json(evidence),
+        "producer_receipt_sha256": producer_receipt_sha256,
     }
+
+
+def _validate_provenance_attestation(
+    *,
+    provenance: dict[str, Any],
+    attestation_path_value: Any,
+    attestation_digest_value: Any,
+    label: str,
+    expected_kind: str,
+    requirement: dict[str, Any],
+    expected_schema: str,
+    source_revision: str,
+    recovery_contract_sha256: str,
+    observed_at: str,
+    policy: dict[str, Any],
+    expected_owner_uid: int,
+    runner=None,
+) -> dict[str, Any]:
+    if not isinstance(attestation_path_value, str):
+        raise ReadinessError(f"{label} path must be canonical and absolute")
+    bundle_path = _canonical_absolute(Path(attestation_path_value), label)
+    expected_digest = _sha(attestation_digest_value, f"{label} digest")
+    bundle_payload, bundle_meta = _read_regular(
+        bundle_path,
+        label=label,
+        max_bytes=MAX_ATTESTATION_BYTES,
+        private=True,
+        expected_owner_uid=expected_owner_uid,
+    )
+    if bundle_meta["sha256"] != expected_digest:
+        raise ReadinessError(f"{label} digest mismatch")
+    argv = _attestation_verify_argv(
+        Path(provenance["path"]),
+        bundle_path,
+        source_revision=source_revision,
+        policy=policy,
+    )
+    run_command = _run_attestation_verifier if runner is None else runner
+    try:
+        result = run_command(argv)
+    except ReadinessError:
+        raise
+    except Exception as exc:
+        raise ReadinessError(f"{label} verifier failed") from exc
+    stdout = getattr(result, "stdout", None)
+    if isinstance(stdout, bytes):
+        output_text = stdout.decode("utf-8", "strict")
+    elif isinstance(stdout, str):
+        output_text = stdout
+    else:
+        raise ReadinessError(f"{label} verifier returned invalid output")
+    try:
+        output = json.loads(output_text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReadinessError(f"{label} verifier returned invalid JSON") from exc
+    if not isinstance(output, list) or len(output) != 1 or not isinstance(output[0], dict):
+        raise ReadinessError(f"{label} verifier returned no unique attestation")
+    verification_result = output[0].get("verificationResult")
+    statement = verification_result.get("statement") if isinstance(verification_result, dict) else None
+    predicate = statement.get("predicate") if isinstance(statement, dict) else None
+    expected_predicate_keys = {
+        "schema_version",
+        "kind",
+        "provenance_kind",
+        "provenance_sha256",
+        "producer",
+        "evidence_id",
+        "evidence_scope",
+        "evidence_schema",
+        "evidence_sha256",
+        "producer_receipt_sha256",
+        "source_revision",
+        "recovery_contract_sha256",
+        "observed_at",
+        "production_effects_authorized",
+    }
+    if not isinstance(predicate, dict) or set(predicate) != expected_predicate_keys:
+        raise ReadinessError(f"{label} predicate is invalid")
+    if (
+        predicate.get("schema_version") != 1
+        or predicate.get("kind") != RECOVERY_ATTESTATION_KIND
+        or predicate.get("provenance_kind") != expected_kind
+        or predicate.get("provenance_sha256") != provenance["sha256"]
+        or predicate.get("producer") != requirement["producer"]
+        or predicate.get("evidence_id") != requirement["id"]
+        or predicate.get("evidence_scope") != requirement["scope"]
+        or predicate.get("evidence_schema") != expected_schema
+        or predicate.get("evidence_sha256") != provenance["evidence_sha256"]
+        or predicate.get("producer_receipt_sha256") != provenance["producer_receipt_sha256"]
+        or predicate.get("source_revision") != source_revision
+        or predicate.get("recovery_contract_sha256") != recovery_contract_sha256
+        or predicate.get("observed_at") != observed_at
+        or predicate.get("production_effects_authorized") is not False
+    ):
+        raise ReadinessError(f"{label} predicate does not bind reviewed provenance")
+
+    _, subject_after = _read_regular(
+        Path(provenance["path"]),
+        label=f"{label} subject recheck",
+        max_bytes=MAX_PROVENANCE_BYTES,
+        private=True,
+        expected_owner_uid=expected_owner_uid,
+    )
+    _, bundle_after = _read_regular(
+        bundle_path,
+        label=f"{label} bundle recheck",
+        max_bytes=MAX_ATTESTATION_BYTES,
+        private=True,
+        expected_owner_uid=expected_owner_uid,
+    )
+    if (
+        subject_after["sha256"] != provenance["sha256"]
+        or _identity_binding(subject_after) != provenance["file_identity"]
+        or bundle_after["sha256"] != bundle_meta["sha256"]
+        or _identity_binding(bundle_after) != _identity_binding(bundle_meta)
+    ):
+        raise ReadinessError(f"{label} changed during external verification")
+    return {
+        "path": bundle_meta["path"],
+        "sha256": bundle_meta["sha256"],
+        "owner_uid": bundle_meta["owner_uid"],
+        "file_identity": _identity_binding(bundle_meta),
+        "verifier_argv_sha256": _sha256_json(argv),
+        "predicate_sha256": _sha256_json(predicate),
+    }
+
 
 def _validate_receipt(
     value: dict[str, Any],
@@ -435,6 +710,8 @@ def _validate_receipt(
     max_age_seconds: int,
     future_skew_seconds: int,
     expected_owner_uid: int,
+    attestation_policy: dict[str, Any],
+    attestation_verifier=None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     evidence_id = requirement["id"]
     if value.get("schema_version") != 1 or value.get("kind") != RECOVERY_RECEIPT_KIND:
@@ -474,6 +751,23 @@ def _validate_receipt(
         recovery_contract_sha256=recovery_contract_sha256,
         observed_at=value["observed_at"],
         expected_owner_uid=expected_owner_uid,
+        expected_producer=requirement["producer"],
+        expected_schema=requirement["evidence_schema"],
+    )
+    evidence_provenance["external_attestation"] = _validate_provenance_attestation(
+        provenance=evidence_provenance,
+        attestation_path_value=value.get("evidence_attestation_path"),
+        attestation_digest_value=value.get("evidence_attestation_sha256"),
+        label=f"recovery receipt {evidence_id} evidence attestation",
+        expected_kind=RECOVERY_EVIDENCE_PROVENANCE_KIND,
+        requirement=requirement,
+        expected_schema=requirement["evidence_schema"],
+        source_revision=source_revision,
+        recovery_contract_sha256=recovery_contract_sha256,
+        observed_at=value["observed_at"],
+        policy=attestation_policy,
+        expected_owner_uid=expected_owner_uid,
+        runner=attestation_verifier,
     )
 
     restore_test = value.get("restore_test")
@@ -484,6 +778,8 @@ def _validate_receipt(
             "observed_at",
             "evidence_provenance_path",
             "evidence_provenance_sha256",
+            "evidence_attestation_path",
+            "evidence_attestation_sha256",
         }:
             raise ReadinessError(
                 f"recovery receipt {evidence_id} required restore test is missing or malformed"
@@ -512,6 +808,23 @@ def _validate_receipt(
             recovery_contract_sha256=recovery_contract_sha256,
             observed_at=restore_test["observed_at"],
             expected_owner_uid=expected_owner_uid,
+            expected_producer=requirement["producer"],
+            expected_schema=requirement["restore_test_schema"],
+        )
+        restore_provenance["external_attestation"] = _validate_provenance_attestation(
+            provenance=restore_provenance,
+            attestation_path_value=restore_test.get("evidence_attestation_path"),
+            attestation_digest_value=restore_test.get("evidence_attestation_sha256"),
+            label=f"recovery receipt {evidence_id} restore-test attestation",
+            expected_kind=RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
+            requirement=requirement,
+            expected_schema=requirement["restore_test_schema"],
+            source_revision=source_revision,
+            recovery_contract_sha256=recovery_contract_sha256,
+            observed_at=restore_test["observed_at"],
+            policy=attestation_policy,
+            expected_owner_uid=expected_owner_uid,
+            runner=attestation_verifier,
         )
         restore_observed_at = restore_test["observed_at"]
         restore_status = "passed"
@@ -542,6 +855,7 @@ def validate_readiness(
     lifecycle_contract_path: Path,
     now: datetime | None = None,
     expected_snapshot: dict[str, Any] | None = None,
+    attestation_verifier=None,
 ) -> dict[str, Any]:
     source_revision = _revision(source_revision, "source_revision")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -552,7 +866,7 @@ def validate_readiness(
     lifecycle_contract, lifecycle_meta = _load_contract(
         lifecycle_contract_path, label="Nix lifecycle contract"
     )
-    requirements, max_age, skew = _recovery_policy(recovery_contract)
+    requirements, max_age, skew, attestation_policy = _recovery_policy(recovery_contract)
     required_ids = [item["id"] for item in requirements]
     _validate_lifecycle_contract(lifecycle_contract)
 
@@ -666,16 +980,21 @@ def validate_readiness(
             max_age_seconds=max_age,
             future_skew_seconds=skew,
             expected_owner_uid=meta["owner_uid"],
+            attestation_policy=attestation_policy,
+            attestation_verifier=attestation_verifier,
         )
         for provenance in (evidence_provenance, restore_provenance):
             if provenance is None:
                 continue
-            provenance_path = provenance["path"]
-            if provenance_path in seen_paths:
-                raise ReadinessError(
-                    f"recovery receipt {evidence_id} reuses a bound evidence path"
-                )
-            seen_paths.add(provenance_path)
+            for bound_path in (
+                provenance["path"],
+                provenance["external_attestation"]["path"],
+            ):
+                if bound_path in seen_paths:
+                    raise ReadinessError(
+                        f"recovery receipt {evidence_id} reuses a bound evidence path"
+                    )
+                seen_paths.add(bound_path)
         normalized_receipts.append({
             "evidence_id": evidence_id,
             "path": binding["path"],
@@ -719,6 +1038,7 @@ def revalidate_readiness(
     recovery_contract_path: Path,
     lifecycle_contract_path: Path,
     now: datetime | None = None,
+    attestation_verifier=None,
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or snapshot.get("kind") != VERIFICATION_KIND:
         raise ReadinessError("reviewed pre-cutover readiness snapshot is missing")
@@ -729,4 +1049,5 @@ def revalidate_readiness(
         lifecycle_contract_path=lifecycle_contract_path,
         now=now,
         expected_snapshot=snapshot,
+        attestation_verifier=attestation_verifier,
     )
