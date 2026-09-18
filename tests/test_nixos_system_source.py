@@ -343,11 +343,15 @@ class T(unittest.TestCase):
         self.assertTrue(receipt_contract["required_restore_test_attestation_sha256_bound"])
         self.assertFalse(receipt_contract["production_effects_authorized"])
         for item in recovery["required_evidence"]:
+            suffix = item["id"].replace("-", "_")
             self.assertEqual(
                 item["producer"],
-                "heim_pc.github_attested_recovery_evidence.v1",
+                f"heim_pc.external_recovery_producer.{suffix}.v1",
             )
-            self.assertTrue(item["evidence_schema"].startswith("heim_pc.recovery."))
+            self.assertEqual(
+                item["evidence_schema"],
+                f"heim_pc.recovery.{suffix}.v1",
+            )
             if item["requires_restore_test"]:
                 self.assertEqual(
                     item["restore_test_schema"],
@@ -356,18 +360,27 @@ class T(unittest.TestCase):
             else:
                 self.assertIsNone(item["restore_test_schema"])
         attestation = recovery["evidence_attestation"]
-        self.assertEqual(attestation["repository"], "heimgewebe/heim-pc")
-        self.assertEqual(
-            attestation["signer_workflow"],
-            "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml",
-        )
-        self.assertEqual(attestation["source_ref"], "refs/heads/main")
+        self.assertEqual(attestation["status"], "unprovisioned")
+        self.assertEqual(attestation["trust_model"], "github-artifact-attestation")
+        for key in (
+            "repository",
+            "signer_workflow",
+            "signer_digest",
+            "source_digest",
+            "source_ref",
+        ):
+            self.assertIsNone(attestation[key])
         self.assertEqual(
             attestation["predicate_type"],
             "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
         )
         self.assertTrue(attestation["deny_self_hosted_runners"])
-        self.assertTrue(attestation["signer_revision_must_equal_source_revision"])
+        self.assertTrue(attestation["attestation_predicate_source_revision_bound"])
+        self.assertTrue(attestation["producer_receipt_digest_bound"])
+        self.assertEqual(attestation["provisioning_authority"], "later-cutover-process")
+        self.assertFalse(
+            (ROOT / ".github/workflows/nixos-recovery-evidence-attest.yml").exists()
+        )
         restore_required = [
             item for item in recovery["required_evidence"] if item["requires_restore_test"]
         ]
@@ -384,44 +397,6 @@ class T(unittest.TestCase):
         self.assertFalse(recovery["readiness_bundle"]["production_effects_authorized"])
         self.assertIn("heim-pc/recovery-contract.json", backup_module)
         self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
-
-    def test_recovery_evidence_attestation_workflow_is_external_and_pinned(self):
-        workflow = (
-            ROOT / ".github/workflows/nixos-recovery-evidence-attest.yml"
-        ).read_text()
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("pull_request:", workflow)
-        self.assertIn("runs-on: ubuntu-latest", workflow)
-        self.assertNotIn("runs-on: self-hosted", workflow)
-        self.assertIn("contents: read", workflow)
-        self.assertIn("id-token: write", workflow)
-        self.assertIn("attestations: write", workflow)
-        self.assertIn(
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            workflow,
-        )
-        self.assertIn(
-            "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
-            workflow,
-        )
-        self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-            workflow,
-        )
-        self.assertIn('test "$GITHUB_REPOSITORY" = "heimgewebe/heim-pc"', workflow)
-        self.assertIn('test "$GITHUB_REF" = "refs/heads/main"', workflow)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', workflow)
-        self.assertIn(
-            "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
-            workflow,
-        )
-        self.assertIn('"source_revision": revision', workflow)
-        self.assertIn('"recovery_contract_sha256": contract_sha256', workflow)
-        self.assertIn('"producer_receipt_sha256"', workflow)
-        self.assertIn(
-            "path: ${{ runner.temp }}/recovery-provenance.attestation.json",
-            workflow,
-        )
 
     def test_managed_root_entrypoint_exists(self):
         flake = (SOURCE / "flake.nix").read_text()

@@ -288,7 +288,6 @@ def _attestation_verify_argv(
     subject_path: Path,
     bundle_path: Path,
     *,
-    source_revision: str,
     policy: dict[str, Any],
 ) -> list[str]:
     subject_path = _canonical_absolute(subject_path, "recovery provenance subject")
@@ -305,9 +304,9 @@ def _attestation_verify_argv(
         "--signer-workflow",
         policy["signer_workflow"],
         "--signer-digest",
-        source_revision,
+        policy["signer_digest"],
         "--source-digest",
-        source_revision,
+        policy["source_digest"],
         "--source-ref",
         policy["source_ref"],
         "--predicate-type",
@@ -347,6 +346,12 @@ def _recovery_policy(
         producer = item.get("producer")
         evidence_schema = item.get("evidence_schema")
         restore_test_schema = item.get("restore_test_schema")
+        producer_suffix = evidence_id.replace("-", "_")
+        expected_producer = f"heim_pc.external_recovery_producer.{producer_suffix}.v1"
+        expected_evidence_schema = f"heim_pc.recovery.{producer_suffix}.v1"
+        expected_restore_schema = (
+            expected_evidence_schema + ".restore_test" if requires_restore_test else None
+        )
         if (
             not isinstance(evidence_id, str)
             or not evidence_id
@@ -354,15 +359,9 @@ def _recovery_policy(
             or not isinstance(scope, str)
             or not scope
             or type(requires_restore_test) is not bool
-            or not isinstance(producer, str)
-            or not producer
-            or not isinstance(evidence_schema, str)
-            or not evidence_schema
-            or (
-                requires_restore_test
-                and (not isinstance(restore_test_schema, str) or not restore_test_schema)
-            )
-            or (not requires_restore_test and restore_test_schema is not None)
+            or producer != expected_producer
+            or evidence_schema != expected_evidence_schema
+            or restore_test_schema != expected_restore_schema
         ):
             raise ReadinessError("recovery contract evidence requirement is invalid")
         ids.add(evidence_id)
@@ -376,26 +375,64 @@ def _recovery_policy(
         })
 
     attestation_policy = contract.get("evidence_attestation")
+    expected_attestation_keys = {
+        "status",
+        "trust_model",
+        "repository",
+        "signer_workflow",
+        "signer_digest",
+        "source_digest",
+        "source_ref",
+        "predicate_type",
+        "deny_self_hosted_runners",
+        "attestation_predicate_source_revision_bound",
+        "producer_receipt_digest_bound",
+        "provisioning_authority",
+    }
     if (
         not isinstance(attestation_policy, dict)
-        or set(attestation_policy) != {
-            "repository",
-            "signer_workflow",
-            "source_ref",
-            "predicate_type",
-            "deny_self_hosted_runners",
-            "signer_revision_must_equal_source_revision",
-        }
-        or attestation_policy.get("repository") != "heimgewebe/heim-pc"
-        or attestation_policy.get("signer_workflow")
-        != "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml"
-        or attestation_policy.get("source_ref") != "refs/heads/main"
+        or set(attestation_policy) != expected_attestation_keys
+        or attestation_policy.get("trust_model") != "github-artifact-attestation"
         or attestation_policy.get("predicate_type")
         != "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1"
         or attestation_policy.get("deny_self_hosted_runners") is not True
-        or attestation_policy.get("signer_revision_must_equal_source_revision") is not True
+        or attestation_policy.get("attestation_predicate_source_revision_bound") is not True
+        or attestation_policy.get("producer_receipt_digest_bound") is not True
+        or attestation_policy.get("provisioning_authority") != "later-cutover-process"
     ):
         raise ReadinessError("recovery attestation policy is not fail-closed")
+
+    attestation_status = attestation_policy.get("status")
+    trust_root_fields = (
+        "repository",
+        "signer_workflow",
+        "signer_digest",
+        "source_digest",
+        "source_ref",
+    )
+    if attestation_status == "unprovisioned":
+        if any(attestation_policy.get(key) is not None for key in trust_root_fields):
+            raise ReadinessError("unprovisioned recovery attestation policy carries trust roots")
+    elif attestation_status == "provisioned":
+        repository = attestation_policy.get("repository")
+        signer_workflow = attestation_policy.get("signer_workflow")
+        if (
+            not isinstance(repository, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
+            or repository == "heimgewebe/heim-pc"
+            or not isinstance(signer_workflow, str)
+            or not signer_workflow.startswith(repository + "/.github/workflows/")
+            or not signer_workflow.endswith((".yml", ".yaml"))
+        ):
+            raise ReadinessError(
+                "recovery attestation trust root is not an independent exact producer"
+            )
+        _revision(attestation_policy.get("signer_digest"), "recovery attestation signer digest")
+        _revision(attestation_policy.get("source_digest"), "recovery attestation source digest")
+        if attestation_policy.get("source_ref") != "refs/heads/main":
+            raise ReadinessError("recovery attestation source ref is not fail-closed")
+    else:
+        raise ReadinessError("recovery attestation policy status is invalid")
 
     receipt_contract = contract.get("evidence_receipt")
     if (
@@ -606,7 +643,6 @@ def _validate_provenance_attestation(
     argv = _attestation_verify_argv(
         Path(provenance["path"]),
         bundle_path,
-        source_revision=source_revision,
         policy=policy,
     )
     run_command = _run_attestation_verifier if runner is None else runner
@@ -869,6 +905,8 @@ def validate_readiness(
     requirements, max_age, skew, attestation_policy = _recovery_policy(recovery_contract)
     required_ids = [item["id"] for item in requirements]
     _validate_lifecycle_contract(lifecycle_contract)
+    if attestation_policy["status"] != "provisioned":
+        raise ReadinessError("recovery attestation trust root is not provisioned")
 
     expected_bundle_owner = None
     expected_receipt_owners: dict[str, int] = {}

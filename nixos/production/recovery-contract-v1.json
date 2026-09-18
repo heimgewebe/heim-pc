@@ -10,7 +10,7 @@
       "id": "off-host-home-restore",
       "scope": "critical-user-data",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.off_host_home_restore.v1",
       "evidence_schema": "heim_pc.recovery.off_host_home_restore.v1",
       "restore_test_schema": "heim_pc.recovery.off_host_home_restore.v1.restore_test"
     },
@@ -18,7 +18,7 @@
       "id": "offline-secret-recovery",
       "scope": "recovery-identity",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.offline_secret_recovery.v1",
       "evidence_schema": "heim_pc.recovery.offline_secret_recovery.v1",
       "restore_test_schema": "heim_pc.recovery.offline_secret_recovery.v1.restore_test"
     },
@@ -26,7 +26,7 @@
       "id": "luks-header-metadata-backup",
       "scope": "storage-recovery-material",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.luks_header_metadata_backup.v1",
       "evidence_schema": "heim_pc.recovery.luks_header_metadata_backup.v1",
       "restore_test_schema": "heim_pc.recovery.luks_header_metadata_backup.v1.restore_test"
     },
@@ -34,7 +34,7 @@
       "id": "bootable-recovery-media",
       "scope": "host-independent-boot",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.bootable_recovery_media.v1",
       "evidence_schema": "heim_pc.recovery.bootable_recovery_media.v1",
       "restore_test_schema": "heim_pc.recovery.bootable_recovery_media.v1.restore_test"
     },
@@ -42,7 +42,7 @@
       "id": "offline-host-control-closure",
       "scope": "known-good-host-and-control-closure",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.offline_host_control_closure.v1",
       "evidence_schema": "heim_pc.recovery.offline_host_control_closure.v1",
       "restore_test_schema": "heim_pc.recovery.offline_host_control_closure.v1.restore_test"
     },
@@ -50,7 +50,7 @@
       "id": "network-off-reconstruction-boot",
       "scope": "replacement-or-isolated-target",
       "requires_restore_test": true,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.network_off_reconstruction_boot.v1",
       "evidence_schema": "heim_pc.recovery.network_off_reconstruction_boot.v1",
       "restore_test_schema": "heim_pc.recovery.network_off_reconstruction_boot.v1.restore_test"
     },
@@ -58,7 +58,7 @@
       "id": "rpo-rto-record",
       "scope": "representative-recovery",
       "requires_restore_test": false,
-      "producer": "heim_pc.github_attested_recovery_evidence.v1",
+      "producer": "heim_pc.external_recovery_producer.rpo_rto_record.v1",
       "evidence_schema": "heim_pc.recovery.rpo_rto_record.v1",
       "restore_test_schema": null
     }
@@ -120,11 +120,17 @@
     "production_effects_authorized": false
   },
   "evidence_attestation": {
-    "repository": "heimgewebe/heim-pc",
-    "signer_workflow": "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml",
-    "source_ref": "refs/heads/main",
+    "status": "unprovisioned",
+    "trust_model": "github-artifact-attestation",
+    "repository": null,
+    "signer_workflow": null,
+    "signer_digest": null,
+    "source_digest": null,
+    "source_ref": null,
     "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
     "deny_self_hosted_runners": true,
-    "signer_revision_must_equal_source_revision": true
+    "attestation_predicate_source_revision_bound": true,
+    "producer_receipt_digest_bound": true,
+    "provisioning_authority": "later-cutover-process"
   }
 }

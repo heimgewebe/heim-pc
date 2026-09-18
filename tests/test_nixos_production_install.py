@@ -46,6 +46,23 @@ MANAGED_POLICY_SHA256 = "c" * 64
 SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
 _READINESS_TEST_ROOT = tempfile.TemporaryDirectory(prefix="heim-pc-precutover-readiness-tests-")
 
+TEST_ATTESTATION_POLICY = {
+    "status": "provisioned",
+    "trust_model": "github-artifact-attestation",
+    "repository": "heimgewebe/recovery-evidence-authority",
+    "signer_workflow": (
+        "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml"
+    ),
+    "signer_digest": "1" * 40,
+    "source_digest": "2" * 40,
+    "source_ref": "refs/heads/main",
+    "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+    "deny_self_hosted_runners": True,
+    "attestation_predicate_source_revision_bound": True,
+    "producer_receipt_digest_bound": True,
+    "provisioning_authority": "later-cutover-process",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolated_production_apply_lock(monkeypatch, tmp_path):
@@ -53,6 +70,14 @@ def _isolated_production_apply_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", tmp_path / "production-apply-locks")
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", owner.st_uid)
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", owner.st_gid)
+
+    original_policy = prod.pre_cutover_readiness._recovery_policy
+
+    def test_policy(contract):
+        requirements, max_age, skew, _policy = original_policy(contract)
+        return requirements, max_age, skew, dict(TEST_ATTESTATION_POLICY)
+
+    monkeypatch.setattr(prod.pre_cutover_readiness, "_recovery_policy", test_policy)
     monkeypatch.setattr(
         prod.pre_cutover_readiness,
         "_run_attestation_verifier",
@@ -261,7 +286,6 @@ def synthetic_readiness_path(
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
-
         evidence_provenance_path = root / f"evidence-provenance-{index}.json"
         evidence_payload = {
             "schema_version": 1,
@@ -289,7 +313,7 @@ def synthetic_readiness_path(
         evidence_provenance_path.chmod(0o600)
         evidence_attestation_path = root / f"evidence-attestation-{index}.json"
         evidence_attestation_path.write_text(
-            json.dumps({"synthetic_sigstore_bundle": item["id"]}, sort_keys=True) + "\n",
+            json.dumps({"synthetic_external_bundle": item["id"]}, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         evidence_attestation_path.chmod(0o600)
@@ -323,7 +347,7 @@ def synthetic_readiness_path(
             restore_attestation_path = root / f"restore-attestation-{index}.json"
             restore_attestation_path.write_text(
                 json.dumps(
-                    {"synthetic_sigstore_bundle": item["id"] + "-restore"},
+                    {"synthetic_external_bundle": item["id"] + "-restore"},
                     sort_keys=True,
                 )
                 + "\n",

@@ -18,6 +18,23 @@ spec.loader.exec_module(ready)
 REVISION = "a" * 40
 NOW = datetime(2026, 9, 18, 10, 0, 0, tzinfo=timezone.utc)
 
+TEST_ATTESTATION_POLICY = {
+    "status": "provisioned",
+    "trust_model": "github-artifact-attestation",
+    "repository": "heimgewebe/recovery-evidence-authority",
+    "signer_workflow": (
+        "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml"
+    ),
+    "signer_digest": "1" * 40,
+    "source_digest": "2" * 40,
+    "source_ref": "refs/heads/main",
+    "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+    "deny_self_hosted_runners": True,
+    "attestation_predicate_source_revision_bound": True,
+    "producer_receipt_digest_bound": True,
+    "provisioning_authority": "later-cutover-process",
+}
+
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -62,9 +79,11 @@ def _synthetic_attestation_verifier(argv: list[str]) -> subprocess.CompletedProc
     return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
 
 
-def _contracts(tmp_path: Path) -> tuple[Path, Path]:
+def _contracts(tmp_path: Path, *, provisioned: bool = True) -> tuple[Path, Path]:
     recovery = json.loads((ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text())
     lifecycle = json.loads((ROOT / "nixos" / "production" / "nix-lifecycle-contract-v1.json").read_text())
+    if provisioned:
+        recovery["evidence_attestation"] = dict(TEST_ATTESTATION_POLICY)
     recovery_path = tmp_path / "recovery-contract.json"
     lifecycle_path = tmp_path / "lifecycle-contract.json"
     recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
@@ -104,9 +123,9 @@ def _provenance(
     }
 
 
-def _fixture(tmp_path: Path):
+def _fixture(tmp_path: Path, *, provisioned: bool = True):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    recovery_path, lifecycle_path = _contracts(tmp_path)
+    recovery_path, lifecycle_path = _contracts(tmp_path, provisioned=provisioned)
     recovery = json.loads(recovery_path.read_text())
     recovery_sha = _sha(recovery_path)
     receipts = []
@@ -207,6 +226,33 @@ def _validate(fx, *, verifier=_synthetic_attestation_verifier):
         attestation_verifier=verifier,
     )
 
+
+def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
+    fx = _fixture(tmp_path, provisioned=False)
+    with pytest.raises(
+        ready.ReadinessError,
+        match="attestation trust root is not provisioned",
+    ):
+        _validate(fx)
+
+
+def test_same_repository_attestation_is_not_independent(tmp_path):
+    fx = _fixture(tmp_path)
+    recovery = json.loads(fx[1].read_text())
+    policy = dict(recovery["evidence_attestation"])
+    policy["repository"] = "heimgewebe/heim-pc"
+    policy["signer_workflow"] = (
+        "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml"
+    )
+    recovery["evidence_attestation"] = policy
+    fx[1].write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(
+        ready.ReadinessError,
+        match="not an independent exact producer",
+    ):
+        _validate(fx)
+
+
 def test_valid_private_readiness_bundle_binds_all_receipts(tmp_path):
     fx = _fixture(tmp_path)
     result = _validate(fx)
@@ -297,7 +343,6 @@ def test_bound_receipt_file_must_exist(tmp_path):
     next(iter(fx[3].values())).unlink()
     with pytest.raises(ready.ReadinessError, match="cannot be opened safely"):
         _validate(fx)
-
 
 def test_duplicate_evidence_id_is_rejected(tmp_path):
     fx = _fixture(tmp_path)
@@ -585,20 +630,25 @@ def test_attestation_verifier_argv_pins_external_trust_boundary(tmp_path):
     assert calls
     for argv in calls:
         assert argv[:3] == [ready.GH_BIN, "attestation", "verify"]
-        assert argv[argv.index("--repo") + 1] == "heimgewebe/heim-pc"
+        assert argv[argv.index("--repo") + 1] == TEST_ATTESTATION_POLICY["repository"]
         assert (
             argv[argv.index("--signer-workflow") + 1]
-            == "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml"
+            == TEST_ATTESTATION_POLICY["signer_workflow"]
         )
-        assert argv[argv.index("--signer-digest") + 1] == REVISION
-        assert argv[argv.index("--source-digest") + 1] == REVISION
-        assert argv[argv.index("--source-ref") + 1] == "refs/heads/main"
+        assert (
+            argv[argv.index("--signer-digest") + 1]
+            == TEST_ATTESTATION_POLICY["signer_digest"]
+        )
+        assert (
+            argv[argv.index("--source-digest") + 1]
+            == TEST_ATTESTATION_POLICY["source_digest"]
+        )
+        assert argv[argv.index("--source-ref") + 1] == TEST_ATTESTATION_POLICY["source_ref"]
         assert (
             argv[argv.index("--predicate-type") + 1]
             == "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1"
         )
         assert "--deny-self-hosted-runners" in argv
-
 
 def test_same_bytes_attestation_replacement_is_plan_drift(tmp_path):
     fx = _fixture(tmp_path)
