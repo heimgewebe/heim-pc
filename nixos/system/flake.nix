@@ -436,6 +436,7 @@
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.timers;
           assert !contract.automatic_gc;
           assert !contract.budget.automatic_reclaim_authorized;
+          assert contract.protected_generations.last_known_good_must_be_enumerated_gc_root;
           pkgs.runCommand "heim-pc-nix-lifecycle-contract" { } ''
             mkdir -p "$out"
             cp ${../production/nix-lifecycle-contract-v1.json} "$out/nix-lifecycle-contract-v1.json"

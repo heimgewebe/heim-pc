@@ -37,14 +37,44 @@ let
       else
         root_count=0
       fi
+
+      root_target_is_enumerated() {
+        local target="$1"
+        printf '%s\n' "$roots" | awk -v target="$target" '
+          {
+            suffix = " -> " target
+            if (length($0) > length(suffix)
+                && substr($0, length($0) - length(suffix) + 1) == suffix) {
+              found = 1
+            }
+          }
+          END { exit found ? 0 : 1 }
+        '
+      }
+
       store_bytes="$(du -sb /nix/store | awk '{print $1}')"
 
       readiness=ready
       [ -n "$running" ] || readiness=blocked-missing-running-system
       [ -n "$boot_default" ] || readiness=blocked-missing-boot-default
-      [ -n "$last_known_good" ] || readiness=blocked-missing-last-known-good
-      if [ -n "$last_known_good" ] && [ ! -e "$last_known_good" ]; then
-        readiness=blocked-invalid-last-known-good
+      last_known_good_gc_rooted=false
+      if [ -z "$last_known_good" ]; then
+        readiness=blocked-missing-last-known-good
+      else
+        case "$last_known_good" in
+          /nix/store/*)
+            if [ ! -e "$last_known_good" ]; then
+              readiness=blocked-invalid-last-known-good
+            elif root_target_is_enumerated "$last_known_good"; then
+              last_known_good_gc_rooted=true
+            else
+              readiness=blocked-unrooted-last-known-good
+            fi
+            ;;
+          *)
+            readiness=blocked-invalid-last-known-good
+            ;;
+        esac
       fi
 
       tmp="$(mktemp "$state_dir/.latest.XXXXXX")"
@@ -57,6 +87,7 @@ let
         --arg last_known_good "$last_known_good" \
         --arg readiness "$readiness" \
         --argjson gc_root_count "$root_count" \
+        --argjson last_known_good_gc_rooted "$last_known_good_gc_rooted" \
         --argjson store_bytes "$store_bytes" \
         '{
           schema_version: 1,
@@ -66,6 +97,7 @@ let
           boot_default_system: $boot_default,
           last_known_good_system: $last_known_good,
           gc_root_count: $gc_root_count,
+          last_known_good_gc_rooted: $last_known_good_gc_rooted,
           store_bytes: $store_bytes,
           automatic_gc_authorized: false,
           readiness: $readiness
@@ -90,7 +122,8 @@ in
       assertion =
         !contract.automatic_gc
         && !contract.delete_older_than_allowed
-        && !contract.budget.automatic_reclaim_authorized;
+        && !contract.budget.automatic_reclaim_authorized
+        && contract.protected_generations.last_known_good_must_be_enumerated_gc_root;
       message = "Nix lifecycle must remain non-destructive until retention evidence exists";
     }
   ];

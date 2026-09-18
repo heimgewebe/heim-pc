@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "896f28b1e71a80ccdff93b991ae2b4fd0e015b6a21092a033669df482ed0bb3a"
+SOURCE_SNAPSHOT_SHA256 = "89c8c5a7184b9e30e291396e6f9c97fea7f9b2af5c4abe3b40a55b923fd5f3fc"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -228,7 +228,13 @@ class T(unittest.TestCase):
         self.assertFalse(lifecycle["admission"]["initial_cutover_requires_live_audit"])
         self.assertTrue(lifecycle["admission"]["automatic_gc_requires_fresh_audit"])
         self.assertTrue(lifecycle["admission"]["automatic_gc_requires_separate_reviewed_enablement"])
+        self.assertTrue(
+            lifecycle["protected_generations"]["last_known_good_must_be_enumerated_gc_root"]
+        )
         self.assertIn("nix.gc.automatic = lib.mkForce false;", lifecycle_module)
+        self.assertIn("root_target_is_enumerated", lifecycle_module)
+        self.assertIn("blocked-unrooted-last-known-good", lifecycle_module)
+        self.assertIn("last_known_good_gc_rooted", lifecycle_module)
         self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
         self.assertIn("../../modules/nix-lifecycle.nix", host)

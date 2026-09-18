@@ -17,6 +17,7 @@
       "last-known-good-system"
     ],
     "last_known_good_marker": "/persist/heim-pc/nix-lifecycle/last-known-good-system",
+    "last_known_good_must_be_enumerated_gc_root": true,
     "missing_role_blocks_gc": true
   },
   "budget": {
