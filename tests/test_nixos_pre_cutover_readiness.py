@@ -236,13 +236,17 @@ def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
         _validate(fx)
 
 
-def test_same_repository_attestation_is_not_independent(tmp_path):
+@pytest.mark.parametrize(
+    "repository",
+    ["heimgewebe/heim-pc", "HEIMGEWEBE/HEIM-PC"],
+)
+def test_same_repository_attestation_is_not_independent(tmp_path, repository):
     fx = _fixture(tmp_path)
     recovery = json.loads(fx[1].read_text())
     policy = dict(recovery["evidence_attestation"])
-    policy["repository"] = "heimgewebe/heim-pc"
+    policy["repository"] = repository
     policy["signer_workflow"] = (
-        "heimgewebe/heim-pc/.github/workflows/nixos-recovery-evidence-attest.yml"
+        repository + "/.github/workflows/nixos-recovery-evidence-attest.yml"
     )
     recovery["evidence_attestation"] = policy
     fx[1].write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
@@ -251,6 +255,18 @@ def test_same_repository_attestation_is_not_independent(tmp_path):
         match="not an independent exact producer",
     ):
         _validate(fx)
+
+
+def test_non_string_recovery_evidence_id_is_rejected_cleanly():
+    recovery = json.loads(
+        (ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text()
+    )
+    recovery["required_evidence"][0]["id"] = 7
+    with pytest.raises(
+        ready.ReadinessError,
+        match="evidence requirement is invalid",
+    ):
+        ready._recovery_policy(recovery)
 
 
 def test_valid_private_readiness_bundle_binds_all_receipts(tmp_path):

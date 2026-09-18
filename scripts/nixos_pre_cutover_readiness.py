@@ -346,12 +346,6 @@ def _recovery_policy(
         producer = item.get("producer")
         evidence_schema = item.get("evidence_schema")
         restore_test_schema = item.get("restore_test_schema")
-        producer_suffix = evidence_id.replace("-", "_")
-        expected_producer = f"heim_pc.external_recovery_producer.{producer_suffix}.v1"
-        expected_evidence_schema = f"heim_pc.recovery.{producer_suffix}.v1"
-        expected_restore_schema = (
-            expected_evidence_schema + ".restore_test" if requires_restore_test else None
-        )
         if (
             not isinstance(evidence_id, str)
             or not evidence_id
@@ -359,7 +353,16 @@ def _recovery_policy(
             or not isinstance(scope, str)
             or not scope
             or type(requires_restore_test) is not bool
-            or producer != expected_producer
+        ):
+            raise ReadinessError("recovery contract evidence requirement is invalid")
+        producer_suffix = evidence_id.replace("-", "_")
+        expected_producer = f"heim_pc.external_recovery_producer.{producer_suffix}.v1"
+        expected_evidence_schema = f"heim_pc.recovery.{producer_suffix}.v1"
+        expected_restore_schema = (
+            expected_evidence_schema + ".restore_test" if requires_restore_test else None
+        )
+        if (
+            producer != expected_producer
             or evidence_schema != expected_evidence_schema
             or restore_test_schema != expected_restore_schema
         ):
@@ -419,7 +422,7 @@ def _recovery_policy(
         if (
             not isinstance(repository, str)
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
-            or repository == "heimgewebe/heim-pc"
+            or repository.casefold() == "heimgewebe/heim-pc"
             or not isinstance(signer_workflow, str)
             or not signer_workflow.startswith(repository + "/.github/workflows/")
             or not signer_workflow.endswith((".yml", ".yaml"))
