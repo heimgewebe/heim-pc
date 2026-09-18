@@ -412,6 +412,13 @@
         supply-chain-trust =
           let
             contract = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
+            lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+            rootNode = builtins.getAttr lock.root lock.nodes;
+            rootNixpkgsNode = builtins.getAttr contract.inputs.root_nixpkgs.lock_node lock.nodes;
+            microvmNode = builtins.getAttr contract.inputs.microvm.lock_node lock.nodes;
+            nixerNode = builtins.getAttr contract.inputs.nixer.lock_node lock.nodes;
+            nixerRuntimeNixpkgsNode =
+              builtins.getAttr contract.inputs.nixer.runtime_nixpkgs_lock_node lock.nodes;
             target = self.nixosConfigurations.heim-pc-storage-target.config;
           in
           assert target.nix.settings.substituters == contract.nix.substituters;
@@ -421,6 +428,19 @@
           assert target.nix.settings.require-sigs == contract.nix.require_sigs;
           assert target.nix.settings.accept-flake-config == contract.nix.accept_flake_config;
           assert target.nix.settings.experimental-features == contract.nix.experimental_features;
+          assert rootNode.inputs.nixpkgs == contract.inputs.root_nixpkgs.lock_node;
+          assert rootNixpkgsNode.locked.rev == contract.inputs.root_nixpkgs.required_revision;
+          assert rootNixpkgsNode.original.ref == contract.inputs.root_nixpkgs.required_ref;
+          assert rootNode.inputs.microvm == contract.inputs.microvm.lock_node;
+          assert microvmNode.locked.rev == contract.inputs.microvm.required_revision;
+          assert contract.inputs.microvm.nixpkgs_follows_root;
+          assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
+          assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
+          assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert contract.inputs.nixer.owns_runtime_nixpkgs;
+          assert nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node;
+          assert nixerRuntimeNixpkgsNode.locked.rev
+            == contract.inputs.nixer.runtime_nixpkgs_required_revision;
           pkgs.runCommand "heim-pc-supply-chain-trust-contract" { } ''
             mkdir -p "$out"
             cp ${../production/trust-contract-v1.json} "$out/trust-contract-v1.json"

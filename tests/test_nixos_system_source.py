@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "89c8c5a7184b9e30e291396e6f9c97fea7f9b2af5c4abe3b40a55b923fd5f3fc"
+SOURCE_SNAPSHOT_SHA256 = "ee411b264d21e19dffe7c71d5e8c2717cd1864b7b07b62bf31c148b547f7b8a8"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -220,6 +220,25 @@ class T(unittest.TestCase):
         self.assertIn("trusted-users = lib.mkForce", trust_module)
         self.assertIn("experimental-features = lib.mkForce", trust_module)
         self.assertIn("../../modules/nix-trust.nix", host)
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn("builtins.readFile ../../flake.lock", flake)
+        self.assertIn(
+            "rootNixpkgsNode.locked.rev == contract.inputs.root_nixpkgs.required_revision",
+            flake,
+        )
+        self.assertIn(
+            "rootNixpkgsNode.original.ref == contract.inputs.root_nixpkgs.required_ref",
+            flake,
+        )
+        self.assertIn('microvmNode.inputs.nixpkgs == [ "nixpkgs" ]', flake)
+        self.assertIn(
+            "nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node",
+            flake,
+        )
+        self.assertIn(
+            "contract.inputs.nixer.runtime_nixpkgs_required_revision",
+            flake,
+        )
 
         self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")
         self.assertFalse(lifecycle["automatic_gc"])
@@ -235,6 +254,15 @@ class T(unittest.TestCase):
         self.assertIn("root_target_is_enumerated", lifecycle_module)
         self.assertIn("blocked-unrooted-last-known-good", lifecycle_module)
         self.assertIn("last_known_good_gc_rooted", lifecycle_module)
+        self.assertIn("gc_root_readback_ok=false", lifecycle_module)
+        self.assertIn("blocked-gc-root-enumeration-failed", lifecycle_module)
+        self.assertNotIn("--print-roots 2>/dev/null || true", lifecycle_module)
+        self.assertIn("target_is_system_profile_generation", lifecycle_module)
+        self.assertIn("/nix/var/nix/profiles/system-*-link", lifecycle_module)
+        self.assertIn("blocked-last-known-good-not-system-generation", lifecycle_module)
+        self.assertIn("last_known_good_is_system_generation", lifecycle_module)
+        self.assertIn('"d /persist/heim-pc 0700 root root -"', lifecycle_module)
+        self.assertIn('"d /persist/heim-pc/nix-lifecycle 0700 root root -"', lifecycle_module)
         self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
         self.assertIn("../../modules/nix-lifecycle.nix", host)

@@ -201,10 +201,14 @@ def observation():
     }
 
 
-def synthetic_readiness_path() -> Path:
+def synthetic_readiness_path(
+    *,
+    recovery_path: Path | None = None,
+    lifecycle_path: Path | None = None,
+) -> Path:
     root = Path(tempfile.mkdtemp(prefix="case-", dir=_READINESS_TEST_ROOT.name))
-    recovery_path = prod.RECOVERY_CONTRACT_PATH
-    lifecycle_path = prod.NIX_LIFECYCLE_CONTRACT_PATH
+    recovery_path = recovery_path or prod.RECOVERY_CONTRACT_PATH
+    lifecycle_path = lifecycle_path or prod.NIX_LIFECYCLE_CONTRACT_PATH
     recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
     observed_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
@@ -246,26 +250,41 @@ def synthetic_readiness_path() -> Path:
     return bundle_path
 
 
-def plan(obs=None, artifact=None, receipt=None, readiness_path=None):
+def plan(
+    obs=None,
+    artifact=None,
+    receipt=None,
+    readiness_path=None,
+    flake_source=None,
+):
     selected_artifact = artifact or ARTIFACT
     selected_receipt = receipt or managed_receipt(selected_artifact)
+    selected_flake_source = flake_source or str(prod.FLAKE_SOURCE)
     verification = (
         managed_attestation_verification(selected_artifact, selected_receipt)
         if selected_artifact["source_authority"] == "merged-main" else None
     )
+    selected_readiness_path = readiness_path
+    if (
+        selected_readiness_path is None
+        and selected_artifact["source_authority"] == "merged-main"
+    ):
+        recovery_path, lifecycle_path = prod.readiness_contract_paths_for_source(
+            selected_flake_source
+        )
+        selected_readiness_path = synthetic_readiness_path(
+            recovery_path=recovery_path,
+            lifecycle_path=lifecycle_path,
+        )
     return prod.compile_plan(
         obs or observation(),
         install_artifact=selected_artifact,
         install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
         managed_build_receipt=selected_receipt,
         managed_policy_sha256=MANAGED_POLICY_SHA256,
-        flake_source="/srv/exact-source",
+        flake_source=selected_flake_source,
         contract=CONTRACT,
-        pre_cutover_readiness_path=(
-            readiness_path
-            if readiness_path is not None
-            else (synthetic_readiness_path() if selected_artifact["source_authority"] == "merged-main" else None)
-        ),
+        pre_cutover_readiness_path=selected_readiness_path,
         managed_build_attestation_verification=verification,
     )
 
@@ -4973,7 +4992,7 @@ def test_merged_main_plan_requires_readiness_and_independent_attestation():
             install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source="/srv/exact-source", contract=CONTRACT,
+            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
             managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
         )
     readiness_path = synthetic_readiness_path()
@@ -4983,7 +5002,7 @@ def test_merged_main_plan_requires_readiness_and_independent_attestation():
             install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source="/srv/exact-source", contract=CONTRACT,
+            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
             pre_cutover_readiness_path=readiness_path,
         )
     compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
@@ -5390,6 +5409,46 @@ def test_merged_main_summary_never_leaks_private_readiness_paths():
     )
 
 
+def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
+    source_root = tmp_path / "historical"
+    flake_source = source_root / "nixos" / "system"
+    production_root = source_root / "nixos" / "production"
+    production_root.mkdir(parents=True)
+    flake_source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source_root)], check=True)
+
+    recovery_path = production_root / "recovery-contract-v1.json"
+    lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
+    expected_paths = (recovery_path, lifecycle_path)
+    assert prod.readiness_contract_paths_for_source(str(source_root)) == expected_paths
+    assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
+    recovery = json.loads(prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8"))
+    lifecycle = json.loads(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    recovery["source_fixture_marker"] = "historical"
+    lifecycle["source_fixture_marker"] = "historical"
+    recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
+    lifecycle_path.write_text(json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8")
+    recovery_path.chmod(0o644)
+    lifecycle_path.chmod(0o644)
+
+    readiness_path = synthetic_readiness_path(
+        recovery_path=recovery_path,
+        lifecycle_path=lifecycle_path,
+    )
+    compiled = plan(
+        artifact=MERGED_ARTIFACT,
+        readiness_path=readiness_path,
+        flake_source=str(flake_source),
+    )
+    readiness = compiled["pre_cutover_readiness"]
+    recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
+    lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    assert readiness["recovery_contract_sha256"] == recovery_sha
+    assert readiness["nix_lifecycle_contract_sha256"] == lifecycle_sha
+    assert recovery_sha != hashlib.sha256(prod.RECOVERY_CONTRACT_PATH.read_bytes()).hexdigest()
+    assert lifecycle_sha != hashlib.sha256(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes()).hexdigest()
+
+
 @pytest.mark.parametrize("tamper_target", [
     "bundle",
     "receipt",
@@ -5399,17 +5458,27 @@ def test_merged_main_summary_never_leaks_private_readiness_paths():
 def test_apply_readiness_tamper_is_explicitly_pre_mutation(
     monkeypatch, tmp_path, tamper_target
 ):
-    recovery_path = tmp_path / "recovery-contract.json"
-    lifecycle_path = tmp_path / "lifecycle-contract.json"
+    flake_source = tmp_path / "nixos" / "system"
+    production_root = tmp_path / "nixos" / "production"
+    production_root.mkdir(parents=True)
+    flake_source.mkdir()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    recovery_path = production_root / "recovery-contract-v1.json"
+    lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
     recovery_path.write_bytes(prod.RECOVERY_CONTRACT_PATH.read_bytes())
     lifecycle_path.write_bytes(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes())
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
-    monkeypatch.setattr(prod, "RECOVERY_CONTRACT_PATH", recovery_path)
-    monkeypatch.setattr(prod, "NIX_LIFECYCLE_CONTRACT_PATH", lifecycle_path)
 
-    readiness_path = synthetic_readiness_path()
-    compiled = plan(artifact=MERGED_ARTIFACT, readiness_path=readiness_path)
+    readiness_path = synthetic_readiness_path(
+        recovery_path=recovery_path,
+        lifecycle_path=lifecycle_path,
+    )
+    compiled = plan(
+        artifact=MERGED_ARTIFACT,
+        readiness_path=readiness_path,
+        flake_source=str(flake_source),
+    )
 
     if tamper_target == "bundle":
         value = json.loads(readiness_path.read_text(encoding="utf-8"))

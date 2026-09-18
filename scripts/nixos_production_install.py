@@ -369,6 +369,29 @@ def managed_build_receipt_path(artifact_path: Path) -> Path:
     return Path(str(artifact_path) + MANAGED_BUILD_RECEIPT_SUFFIX)
 
 
+def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path]:
+    source = Path(flake_source)
+    if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
+        raise ProductionInstallError("flake source must be a canonical absolute path")
+    result = _run(["git", "-C", str(source), "rev-parse", "--show-toplevel"])
+    try:
+        root_text = result.stdout.decode("utf-8", "strict").strip()
+    except UnicodeDecodeError as exc:
+        raise ProductionInstallError("readiness source root is not UTF-8") from exc
+    root = Path(root_text)
+    if not root.is_absolute() or os.path.normpath(str(root)) != str(root):
+        raise ProductionInstallError("readiness source root is not canonical")
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise ProductionInstallError("flake source is outside its verified Git root") from exc
+    production_root = root / "nixos" / "production"
+    return (
+        production_root / "recovery-contract-v1.json",
+        production_root / "nix-lifecycle-contract-v1.json",
+    )
+
+
 def managed_policy_sha256_for_source(flake_source: str) -> str:
     result = _run(["git", "-C", flake_source, "rev-parse", "--show-toplevel"])
     try:
@@ -1594,12 +1617,15 @@ def compile_plan(
     source_revision = artifact["source_revision"]
     readiness_verification = None
     if pre_cutover_readiness_path is not None:
+        recovery_contract_path, lifecycle_contract_path = readiness_contract_paths_for_source(
+            flake_source
+        )
         try:
             readiness_verification = pre_cutover_readiness.validate_readiness(
                 Path(pre_cutover_readiness_path),
                 source_revision=source_revision,
-                recovery_contract_path=RECOVERY_CONTRACT_PATH,
-                lifecycle_contract_path=NIX_LIFECYCLE_CONTRACT_PATH,
+                recovery_contract_path=recovery_contract_path,
+                lifecycle_contract_path=lifecycle_contract_path,
             )
         except pre_cutover_readiness.ReadinessError as exc:
             raise ProductionInstallError("pre-cutover readiness rejected") from exc
@@ -4650,8 +4676,12 @@ def execute_plan(
                         pre_cutover_readiness.revalidate_readiness(
                             readiness_snapshot,
                             source_revision=jit_source_revision,
-                            recovery_contract_path=RECOVERY_CONTRACT_PATH,
-                            lifecycle_contract_path=NIX_LIFECYCLE_CONTRACT_PATH,
+                            recovery_contract_path=Path(
+                                readiness_snapshot["recovery_contract_path"]
+                            ),
+                            lifecycle_contract_path=Path(
+                                readiness_snapshot["nix_lifecycle_contract_path"]
+                            ),
                         )
                     except (
                         ProductionInstallError,

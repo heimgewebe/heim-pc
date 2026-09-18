@@ -31,13 +31,20 @@ let
         last_known_good="$(head -n 1 -- "$marker")"
       fi
 
-      roots="$(${pkgs.nix}/bin/nix-store --gc --print-roots 2>/dev/null || true)"
-      if [ -n "$roots" ]; then
-        root_count="$(printf '%s\n' "$roots" | awk 'NF { count += 1 } END { print count + 0 }')"
+      gc_root_readback_ok=true
+      if roots="$(${pkgs.nix}/bin/nix-store --gc --print-roots 2>/dev/null)"; then
+        if [ -n "$roots" ]; then
+          root_count="$(printf '%s\n' "$roots" | awk 'NF { count += 1 } END { print count + 0 }')"
+        else
+          root_count=0
+        fi
       else
+        # Never reinterpret a failed or partial enumeration as trustworthy
+        # evidence. Discard any partial stdout and publish a blocked audit.
+        roots=""
         root_count=0
+        gc_root_readback_ok=false
       fi
-
       root_target_is_enumerated() {
         local target="$1"
         printf '%s\n' "$roots" | awk -v target="$target" '
@@ -52,12 +59,25 @@ let
         '
       }
 
+      target_is_system_profile_generation() {
+        local target="$1"
+        local generation resolved
+        for generation in /nix/var/nix/profiles/system-*-link; do
+          [ -L "$generation" ] || continue
+          if resolved="$(readlink -f -- "$generation" 2>/dev/null)" \
+              && [ "$resolved" = "$target" ]; then
+            return 0
+          fi
+        done
+        return 1
+      }
       store_bytes="$(du -sb /nix/store | awk '{print $1}')"
 
       readiness=ready
       [ -n "$running" ] || readiness=blocked-missing-running-system
       [ -n "$boot_default" ] || readiness=blocked-missing-boot-default
       last_known_good_gc_rooted=false
+      last_known_good_is_system_generation=false
       if [ -z "$last_known_good" ]; then
         readiness=blocked-missing-last-known-good
       else
@@ -65,10 +85,15 @@ let
           /nix/store/*)
             if [ ! -e "$last_known_good" ]; then
               readiness=blocked-invalid-last-known-good
-            elif root_target_is_enumerated "$last_known_good"; then
-              last_known_good_gc_rooted=true
+            elif ! target_is_system_profile_generation "$last_known_good"; then
+              readiness=blocked-last-known-good-not-system-generation
             else
-              readiness=blocked-unrooted-last-known-good
+              last_known_good_is_system_generation=true
+              if root_target_is_enumerated "$last_known_good"; then
+                last_known_good_gc_rooted=true
+              else
+                readiness=blocked-unrooted-last-known-good
+              fi
             fi
             ;;
           *)
@@ -76,7 +101,9 @@ let
             ;;
         esac
       fi
-
+      if [ "$gc_root_readback_ok" != true ]; then
+        readiness=blocked-gc-root-enumeration-failed
+      fi
       tmp="$(mktemp "$state_dir/.latest.XXXXXX")"
       trap 'rm -f -- "$tmp"' EXIT
       jq -n \
@@ -87,7 +114,9 @@ let
         --arg last_known_good "$last_known_good" \
         --arg readiness "$readiness" \
         --argjson gc_root_count "$root_count" \
+        --argjson gc_root_readback_ok "$gc_root_readback_ok" \
         --argjson last_known_good_gc_rooted "$last_known_good_gc_rooted" \
+        --argjson last_known_good_is_system_generation "$last_known_good_is_system_generation" \
         --argjson store_bytes "$store_bytes" \
         '{
           schema_version: 1,
@@ -97,7 +126,9 @@ let
           boot_default_system: $boot_default,
           last_known_good_system: $last_known_good,
           gc_root_count: $gc_root_count,
+          gc_root_readback_ok: $gc_root_readback_ok,
           last_known_good_gc_rooted: $last_known_good_gc_rooted,
+          last_known_good_is_system_generation: $last_known_good_is_system_generation,
           store_bytes: $store_bytes,
           automatic_gc_authorized: false,
           readiness: $readiness
@@ -135,6 +166,9 @@ in
 
   systemd.tmpfiles.rules = [
     "d /var/lib/heim-pc-nix-lifecycle 0700 root root -"
+    # This namespace is shared with the fail-closed credential bootstrap.
+    # Declare the parent explicitly so tmpfiles never synthesizes it as 0755.
+    "d /persist/heim-pc 0700 root root -"
     "d /persist/heim-pc/nix-lifecycle 0700 root root -"
   ];
 
