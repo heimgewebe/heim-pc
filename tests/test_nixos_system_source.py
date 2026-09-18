@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "1ca8985bd20f8a86f5d239dc547a11a9e706db3c2a5551895efb542053375694"
+SOURCE_SNAPSHOT_SHA256 = "896f28b1e71a80ccdff93b991ae2b4fd0e015b6a21092a033669df482ed0bb3a"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -210,6 +210,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["trusted_users"], ["root"])
         self.assertTrue(trust["nix"]["require_sigs"])
         self.assertFalse(trust["nix"]["accept_flake_config"])
+        self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
             "2e457e533517c379395e11d8ab3d4e6687c4c6e2",
@@ -217,6 +218,7 @@ class T(unittest.TestCase):
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
         self.assertIn("trusted-users = lib.mkForce", trust_module)
+        self.assertIn("experimental-features = lib.mkForce", trust_module)
         self.assertIn("../../modules/nix-trust.nix", host)
 
         self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")

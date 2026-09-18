@@ -15,7 +15,8 @@ in
         contract.nix.additional_substituters_policy == "deny-unless-reviewed-in-contract"
         && contract.nix.trusted_users == [ "root" ]
         && contract.nix.require_sigs
-        && !contract.nix.accept_flake_config;
+        && !contract.nix.accept_flake_config
+        && contract.nix.experimental_features == [ "nix-command" "flakes" ];
       message = "Nix trust contract must remain fail-closed and root-only";
     }
   ];
@@ -27,6 +28,7 @@ in
     trusted-users = lib.mkForce contract.nix.trusted_users;
     require-sigs = lib.mkForce contract.nix.require_sigs;
     accept-flake-config = lib.mkForce contract.nix.accept_flake_config;
+    experimental-features = lib.mkForce contract.nix.experimental_features;
   };
 
   environment.etc."heim-pc/nix-trust-contract.json".source =

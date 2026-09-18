@@ -420,6 +420,7 @@
           assert target.nix.settings.trusted-users == contract.nix.trusted_users;
           assert target.nix.settings.require-sigs == contract.nix.require_sigs;
           assert target.nix.settings.accept-flake-config == contract.nix.accept_flake_config;
+          assert target.nix.settings.experimental-features == contract.nix.experimental_features;
           pkgs.runCommand "heim-pc-supply-chain-trust-contract" { } ''
             mkdir -p "$out"
             cp ${../production/trust-contract-v1.json} "$out/trust-contract-v1.json"
