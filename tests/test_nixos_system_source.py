@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "1c482c1fd2e9f16fdb9ef7c6f89b539f2f0cd49d202ac4ab9ee2b5e30f4101fc"
+SOURCE_SNAPSHOT_SHA256 = "1ca8985bd20f8a86f5d239dc547a11a9e706db3c2a5551895efb542053375694"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -222,6 +222,10 @@ class T(unittest.TestCase):
         self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")
         self.assertFalse(lifecycle["automatic_gc"])
         self.assertFalse(lifecycle["budget"]["automatic_reclaim_authorized"])
+        self.assertTrue(lifecycle["admission"]["initial_cutover_requires_contract"])
+        self.assertFalse(lifecycle["admission"]["initial_cutover_requires_live_audit"])
+        self.assertTrue(lifecycle["admission"]["automatic_gc_requires_fresh_audit"])
+        self.assertTrue(lifecycle["admission"]["automatic_gc_requires_separate_reviewed_enablement"])
         self.assertIn("nix.gc.automatic = lib.mkForce false;", lifecycle_module)
         self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
@@ -233,6 +237,19 @@ class T(unittest.TestCase):
             recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"]
         )
         self.assertFalse(recovery["same_disk_recovery_partition_is_off_host_backup"])
+        self.assertEqual(recovery["evidence_freshness"]["maximum_age_seconds"], 604800)
+        self.assertEqual(recovery["evidence_freshness"]["future_skew_seconds"], 5)
+        self.assertEqual(
+            recovery["evidence_receipt"]["kind"],
+            "heim_pc.nixos_recovery_evidence_receipt",
+        )
+        self.assertFalse(recovery["evidence_receipt"]["production_effects_authorized"])
+        self.assertEqual(
+            recovery["readiness_bundle"]["kind"],
+            "heim_pc.nixos_pre_cutover_readiness",
+        )
+        self.assertTrue(recovery["readiness_bundle"]["evidence_freshness_bound"])
+        self.assertFalse(recovery["readiness_bundle"]["production_effects_authorized"])
         self.assertIn("heim-pc/recovery-contract.json", backup_module)
         self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 

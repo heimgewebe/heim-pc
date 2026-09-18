@@ -27,13 +27,15 @@
     "requires_effect_receipt": true
   },
   "admission": {
-    "production_cutover_requires_fresh_audit": true,
+    "initial_cutover_requires_contract": true,
+    "initial_cutover_requires_live_audit": false,
+    "automatic_gc_requires_fresh_audit": true,
     "automatic_gc_requires_separate_reviewed_enablement": true
   },
   "does_not_establish": [
     "a current last-known-good generation",
     "a safe garbage-collection candidate set",
     "permission to delete Nix store paths",
-    "production cutover readiness"
+    "automatic garbage-collection readiness"
   ]
 }

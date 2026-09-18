@@ -28,6 +28,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "nixos" / "production" / "contract-v1.json"
+RECOVERY_CONTRACT_PATH = ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+NIX_LIFECYCLE_CONTRACT_PATH = ROOT / "nixos" / "production" / "nix-lifecycle-contract-v1.json"
 FLAKE_SOURCE = ROOT / "nixos" / "system"
 MOUNT_ROOT = "/mnt/heim-pc-nixos-production"
 BTRFS_STAGE_ROOT = "/mnt/heim-pc-nixos-production-btrfs-stage"
@@ -141,9 +143,24 @@ if _HISTORICAL_REPRO_SPEC is None or _HISTORICAL_REPRO_SPEC.loader is None:
 historical_reproducibility = importlib.util.module_from_spec(_HISTORICAL_REPRO_SPEC)
 _HISTORICAL_REPRO_SPEC.loader.exec_module(historical_reproducibility)
 
+_READINESS_SPEC = importlib.util.spec_from_file_location(
+    "nixos_pre_cutover_readiness",
+    Path(__file__).with_name("nixos_pre_cutover_readiness.py"),
+)
+if _READINESS_SPEC is None or _READINESS_SPEC.loader is None:
+    raise RuntimeError("cannot load pre-cutover readiness verifier")
+pre_cutover_readiness = importlib.util.module_from_spec(_READINESS_SPEC)
+_READINESS_SPEC.loader.exec_module(pre_cutover_readiness)
+
 
 class ProductionInstallError(RuntimeError):
     pass
+
+
+class PreMutationReadinessError(ProductionInstallError):
+    """Readiness drift blocked before the first destructive storage attempt."""
+
+    mutation_attempted = False
 
 
 def historical_reproducibility_acceptance_path(source_revision: str) -> Path:
@@ -1564,6 +1581,7 @@ def compile_plan(
     managed_policy_sha256: str,
     flake_source: str,
     contract: dict[str, Any],
+    pre_cutover_readiness_path: Path | None = None,
     managed_build_attestation_verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact = validate_install_artifact(install_artifact)
@@ -1574,8 +1592,21 @@ def compile_plan(
         managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
     )
     source_revision = artifact["source_revision"]
+    readiness_verification = None
+    if pre_cutover_readiness_path is not None:
+        try:
+            readiness_verification = pre_cutover_readiness.validate_readiness(
+                Path(pre_cutover_readiness_path),
+                source_revision=source_revision,
+                recovery_contract_path=RECOVERY_CONTRACT_PATH,
+                lifecycle_contract_path=NIX_LIFECYCLE_CONTRACT_PATH,
+            )
+        except pre_cutover_readiness.ReadinessError as exc:
+            raise ProductionInstallError("pre-cutover readiness rejected") from exc
     attestation_verification = None
     if artifact["source_authority"] == "merged-main":
+        if readiness_verification is None:
+            raise ProductionInstallError("merged-main artifact requires validated pre-cutover readiness")
         if managed_build_attestation_verification is None:
             raise ProductionInstallError("merged-main artifact requires independent managed-build attestation")
         attestation_verification = validate_managed_build_attestation_summary(
@@ -1671,6 +1702,9 @@ def compile_plan(
         "managed_build_attestation_verification": attestation_verification,
         "source_revision": source_revision,
         "source_authority": artifact["source_authority"],
+        "pre_cutover_readiness_required": artifact["source_authority"] == "merged-main",
+        "pre_cutover_readiness": readiness_verification,
+        "readiness_bundle_authorizes_production": False,
         "flake_source": flake,
         "system_path": artifact["system_path"],
         "sealed_nix_image": str(sealed_paths["image"]),
@@ -1694,12 +1728,21 @@ def compile_plan(
 
 
 def plan_summary(_plan: dict[str, Any]) -> dict[str, Any]:
+    readiness = _plan.get("pre_cutover_readiness")
+    validated = isinstance(readiness, dict)
+    evidence = readiness.get("evidence_summary") if validated else None
     return {
         "schema_version": 1,
         "kind": "heim_pc.nixos_production_install_plan_summary",
         "execution_authorized": False,
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
+        "pre_cutover_readiness_validated": validated,
+        "readiness_bundle_authorizes_production": False,
+        "readiness_bundle_sha256": readiness.get("bundle_sha256") if validated else None,
+        "recovery_contract_sha256": readiness.get("recovery_contract_sha256") if validated else None,
+        "nix_lifecycle_contract_sha256": readiness.get("nix_lifecycle_contract_sha256") if validated else None,
+        "recovery_evidence_count": len(evidence) if isinstance(evidence, list) else 0,
     }
 
 
@@ -4443,6 +4486,11 @@ def execute_plan(
         raise ProductionInstallError(
             "production apply requires a merged-main install artifact"
         )
+    readiness_snapshot = plan.get("pre_cutover_readiness")
+    if plan.get("pre_cutover_readiness_required") is not True or not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("production apply lacks validated pre-cutover readiness")
+    if plan.get("readiness_bundle_authorizes_production") is not False:
+        raise ProductionInstallError("readiness bundle must not carry production authority")
     attestation = plan.get("managed_build_attestation_verification")
     if not isinstance(attestation, dict):
         raise ProductionInstallError("production apply lacks independent attestation authority")
@@ -4581,11 +4629,38 @@ def execute_plan(
         if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
             raise ProductionInstallError("protected WD changed after interactive authorization")
         nvram_before = efi_nvram_digest()
+        readiness_jit_complete = False
 
         try:
             for command in plan["commands"]:
                 verify_docker_quiesced()
                 verify_sealed_nix_structure(artifact, seal)
+                if not readiness_jit_complete:
+                    # Last fail-closed gate. It runs after the final read-only
+                    # in-loop guards and directly before the first planned
+                    # storage effect can set mutation_attempted.
+                    try:
+                        jit_source_revision = verify_source(
+                            plan["flake_source"], artifact["source_revision"]
+                        )
+                        if jit_source_revision != source_revision:
+                            raise ProductionInstallError(
+                                "source revision changed before storage mutation"
+                            )
+                        pre_cutover_readiness.revalidate_readiness(
+                            readiness_snapshot,
+                            source_revision=jit_source_revision,
+                            recovery_contract_path=RECOVERY_CONTRACT_PATH,
+                            lifecycle_contract_path=NIX_LIFECYCLE_CONTRACT_PATH,
+                        )
+                    except (
+                        ProductionInstallError,
+                        pre_cutover_readiness.ReadinessError,
+                    ) as exc:
+                        raise PreMutationReadinessError(
+                            "pre-cutover source/readiness changed before storage mutation"
+                        ) from exc
+                    readiness_jit_complete = True
                 if command["effect"] == "nixos-install":
                     stage_private_storage_identity(mount_root=MOUNT_ROOT, contract=contract)
                     private_storage_identity_staged = True
@@ -4616,6 +4691,8 @@ def execute_plan(
                 hash_bytes=hash_bytes,
             )
             credential_staged = True
+        except PreMutationReadinessError:
+            raise
         except BaseException as exc:
             failure = exc
         finally:
@@ -4756,6 +4833,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--flake-source", default=str(FLAKE_SOURCE))
     parser.add_argument("--install-artifact", type=Path, required=True)
     parser.add_argument("--identity-contract", type=Path, required=True)
+    parser.add_argument("--pre-cutover-readiness", type=Path)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--credential-hash-file", type=Path)
@@ -4795,6 +4873,10 @@ def main(argv: list[str] | None = None) -> int:
             managed_policy_sha256=managed_policy_sha256,
             flake_source=args.flake_source,
             contract=contract,
+            pre_cutover_readiness_path=(
+                Path(os.path.abspath(str(args.pre_cutover_readiness)))
+                if args.pre_cutover_readiness is not None else None
+            ),
             managed_build_attestation_verification=managed_attestation_verification,
         )
         if not args.apply:

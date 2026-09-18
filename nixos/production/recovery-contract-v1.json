@@ -42,6 +42,10 @@
       "requires_restore_test": false
     }
   ],
+  "evidence_freshness": {
+    "maximum_age_seconds": 604800,
+    "future_skew_seconds": 5
+  },
   "admission": {
     "all_required_evidence_must_be_fresh": true,
     "point_of_no_return_blocked_without_complete_evidence": true,
@@ -53,5 +57,23 @@
     "fresh recovery media",
     "permission to mutate production storage",
     "permission to cross the point of no return"
-  ]
+  ],
+  "evidence_receipt": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_recovery_evidence_receipt",
+    "source_revision_bound": true,
+    "recovery_contract_sha256_bound": true,
+    "status": "passed",
+    "production_effects_authorized": false
+  },
+  "readiness_bundle": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_pre_cutover_readiness",
+    "private_local_input": true,
+    "source_revision_bound": true,
+    "recovery_contract_sha256_bound": true,
+    "nix_lifecycle_contract_sha256_bound": true,
+    "evidence_freshness_bound": true,
+    "production_effects_authorized": false
+  }
 }
