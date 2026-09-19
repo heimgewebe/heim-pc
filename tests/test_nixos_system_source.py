@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "a4f8cf0b4ff5abbfb0af2760119fb862337cf3999e361d53a858d26ce5c9556d"
+SOURCE_SNAPSHOT_SHA256 = "ba7b3fb000ee53db8a6acfb0671361879920c1c46e4d064b5f8a1fa70f560381"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -211,6 +211,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["trusted_users"], ["root"])
         self.assertTrue(trust["nix"]["require_sigs"])
         self.assertFalse(trust["nix"]["accept_flake_config"])
+        self.assertFalse(trust["nix"]["trust_tarballs_from_git_forges"])
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
@@ -220,9 +221,11 @@ class T(unittest.TestCase):
         self.assertIn("nix.settings", trust_module)
         self.assertIn("trusted-users = lib.mkForce", trust_module)
         self.assertIn("experimental-features = lib.mkForce", trust_module)
+        self.assertIn("trust-tarballs-from-git-forges = lib.mkForce", trust_module)
         self.assertIn("../../modules/nix-trust.nix", host)
         flake = (SOURCE / "flake.nix").read_text()
         self.assertIn("builtins.readFile ../../flake.lock", flake)
+        self.assertIn("target.nix.settings.trust-tarballs-from-git-forges", flake)
         self.assertIn(
             "rootNixpkgsNode.locked.rev == contract.inputs.root_nixpkgs.required_revision",
             flake,
