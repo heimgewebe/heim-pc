@@ -429,6 +429,8 @@
           assert target.nix.settings.require-sigs == contract.nix.require_sigs;
           assert target.nix.settings.accept-flake-config == contract.nix.accept_flake_config;
           assert target.nix.settings.experimental-features == contract.nix.experimental_features;
+          assert target.nix.settings.trust-tarballs-from-git-forges
+            == contract.nix.trust_tarballs_from_git_forges;
           assert rootNode.inputs.nixpkgs == contract.inputs.root_nixpkgs.lock_node;
           assert rootNixpkgsNode.locked.rev == contract.inputs.root_nixpkgs.required_revision;
           assert rootNixpkgsNode.original.ref == contract.inputs.root_nixpkgs.required_ref;
