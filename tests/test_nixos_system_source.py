@@ -8,10 +8,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "6f3a107ab644c7ebfd7fe05dbbd24bb8575a4f45df31a63c5fb360f26f5fd446"
+SOURCE_SNAPSHOT_SHA256 = "a4f8cf0b4ff5abbfb0af2760119fb862337cf3999e361d53a858d26ce5c9556d"
 ROOT_LOCK_SHA256 = "d29ee260f283eadb1b6930dcddf7d95153a044eebcb8cffbfab9bc0329956ad9"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -54,6 +55,16 @@ class T(unittest.TestCase):
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
         self.assertIn("nix flake check --no-build --no-update-lock-file", workflow)
         self.assertIn(".#checks.x86_64-linux.profile-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.supply-chain-trust", workflow)
+        self.assertIn(".#checks.x86_64-linux.nix-lifecycle-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.recovery-readiness-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.intentional-break-rejected", workflow)
+        self.assertIn(".#checks.x86_64-linux.agent-zone-contract", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-proprietary-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-open-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-proprietary-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-open-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.agent-vsock-proof-microvm", workflow)
         self.assertIn(".#checks.x86_64-linux.firstboot-credentials", workflow)
 
     def test_firstboot_vm_proof_is_exact_source_headless_and_input_free(self):
@@ -168,7 +179,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 25)
+        self.assertEqual(len(files), 27)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -178,12 +189,214 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
+
+    def test_pre_cutover_contracts_are_machine_readable_and_fail_closed(self):
+        trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
+        lifecycle = json.loads((ROOT / "nixos/production/nix-lifecycle-contract-v1.json").read_text())
+        recovery = json.loads((ROOT / "nixos/production/recovery-contract-v1.json").read_text())
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        trust_module = (SOURCE / "modules/nix-trust.nix").read_text()
+        lifecycle_module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        backup_module = (SOURCE / "modules/backup.nix").read_text()
+        validate_workflow = (ROOT / ".github/workflows/heim-pc-validate.yml").read_text()
+
+        self.assertEqual(trust["kind"], "heim_pc.nixos_supply_chain_trust_contract")
+        self.assertEqual(trust["nix"]["trusted_users"], ["root"])
+        self.assertTrue(trust["nix"]["require_sigs"])
+        self.assertFalse(trust["nix"]["accept_flake_config"])
+        self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
+        self.assertEqual(
+            trust["inputs"]["nixer"]["required_revision"],
+            "2e457e533517c379395e11d8ab3d4e6687c4c6e2",
+        )
+        self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
+        self.assertIn("nix.settings", trust_module)
+        self.assertIn("trusted-users = lib.mkForce", trust_module)
+        self.assertIn("experimental-features = lib.mkForce", trust_module)
+        self.assertIn("../../modules/nix-trust.nix", host)
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn("builtins.readFile ../../flake.lock", flake)
+        self.assertIn(
+            "rootNixpkgsNode.locked.rev == contract.inputs.root_nixpkgs.required_revision",
+            flake,
+        )
+        self.assertIn(
+            "rootNixpkgsNode.original.ref == contract.inputs.root_nixpkgs.required_ref",
+            flake,
+        )
+        self.assertIn('microvmNode.inputs.nixpkgs == [ "nixpkgs" ]', flake)
+        self.assertIn(
+            "nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node",
+            flake,
+        )
+        self.assertIn(
+            "contract.inputs.nixer.runtime_nixpkgs_required_revision",
+            flake,
+        )
+        from scripts.ci import check_pinned_nix_find_contract as verifier_check
+
+        verifier = trust["managed_nix_verifier"]
+        self.assertEqual(
+            verifier_check.verify_managed_nix_verifier_contract(
+                ROOT / "nixos/production/trust-contract-v1.json"
+            ),
+            {
+                "image_id": verifier["image_id"],
+                "image_tag": verifier["image_tag"],
+                "image_ref": verifier["image_ref"],
+            },
+        )
+        mismatches = {
+            "image_id": "sha256:" + ("0" * 64),
+            "image_tag": "nixos/nix:0.0.0",
+            "image_ref": "nixos/nix@sha256:" + ("0" * 64),
+        }
+        for field, value in mismatches.items():
+            mutated = json.loads(json.dumps(trust))
+            mutated["managed_nix_verifier"][field] = value
+            with self.subTest(verifier_pin=field), tempfile.TemporaryDirectory() as tmp:
+                contract_path = Path(tmp) / "trust-contract.json"
+                contract_path.write_text(json.dumps(mutated), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, field):
+                    verifier_check.verify_managed_nix_verifier_contract(contract_path)
+        with mock.patch.object(
+            verifier_check.installer,
+            "PINNED_NIX_CONTAINERD_IMAGE_REF",
+            "docker.io/nixos/nix:0.0.0",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "containerd Nix image reference"):
+                verifier_check.verify_managed_nix_verifier_contract(
+                    ROOT / "nixos/production/trust-contract-v1.json"
+                )
+        self.assertIn("check_pinned_nix_find_contract.py", flake)
+        self.assertIn("--trust-contract-only", flake)
+        self.assertNotIn("pythonAssignment", flake)
+
+        self.assertEqual(lifecycle["kind"], "heim_pc.nixos_store_lifecycle_contract")
+        self.assertFalse(lifecycle["automatic_gc"])
+        self.assertFalse(lifecycle["budget"]["automatic_reclaim_authorized"])
+        self.assertTrue(lifecycle["admission"]["initial_cutover_requires_contract"])
+        self.assertFalse(lifecycle["admission"]["initial_cutover_requires_live_audit"])
+        self.assertTrue(lifecycle["admission"]["automatic_gc_requires_fresh_audit"])
+        self.assertTrue(lifecycle["admission"]["automatic_gc_requires_separate_reviewed_enablement"])
+        self.assertTrue(
+            lifecycle["protected_generations"]["last_known_good_must_be_enumerated_gc_root"]
+        )
+        self.assertIn("nix.gc.automatic = lib.mkForce false;", lifecycle_module)
+        self.assertIn("root_target_is_enumerated", lifecycle_module)
+        self.assertIn("blocked-unrooted-last-known-good", lifecycle_module)
+        self.assertIn("last_known_good_gc_rooted", lifecycle_module)
+        self.assertIn("gc_root_readback_ok=false", lifecycle_module)
+        self.assertIn("blocked-gc-root-enumeration-failed", lifecycle_module)
+        self.assertNotIn("--print-roots 2>/dev/null || true", lifecycle_module)
+        self.assertIn("target_is_system_profile_generation", lifecycle_module)
+        self.assertIn("/nix/var/nix/profiles/system-*-link", lifecycle_module)
+        self.assertIn("blocked-last-known-good-not-system-generation", lifecycle_module)
+        self.assertIn("last_known_good_is_system_generation", lifecycle_module)
+        self.assertIn('"d /persist/heim-pc 0700 root root -"', lifecycle_module)
+        self.assertIn('"d /persist/heim-pc/nix-lifecycle 0700 root root -"', lifecycle_module)
+        self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
+        self.assertNotIn("nix-collect-garbage", lifecycle_module)
+        self.assertIn("../../modules/nix-lifecycle.nix", host)
+
+        self.assertEqual(recovery["status"], "external-evidence-required")
+        self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
+        self.assertTrue(
+            recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"]
+        )
+        self.assertFalse(recovery["same_disk_recovery_partition_is_off_host_backup"])
+        self.assertEqual(recovery["evidence_freshness"]["maximum_age_seconds"], 604800)
+        self.assertEqual(recovery["evidence_freshness"]["future_skew_seconds"], 5)
+        self.assertEqual(
+            recovery["evidence_receipt"]["kind"],
+            "heim_pc.nixos_recovery_evidence_receipt",
+        )
+        receipt_contract = recovery["evidence_receipt"]
+        self.assertTrue(receipt_contract["evidence_scope_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_path_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_sha256_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_object_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_contract_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_producer_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_schema_bound"])
+        self.assertTrue(receipt_contract["evidence_provenance_external_attestation_required"])
+        self.assertTrue(receipt_contract["evidence_attestation_path_bound"])
+        self.assertTrue(receipt_contract["evidence_attestation_sha256_bound"])
+        self.assertTrue(receipt_contract["restore_test_requirement_bound"])
+        self.assertEqual(receipt_contract["required_restore_test_status"], "passed")
+        self.assertTrue(receipt_contract["required_restore_test_freshness_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_path_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_sha256_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_object_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_contract_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_producer_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_provenance_schema_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_external_attestation_required"])
+        self.assertTrue(receipt_contract["required_restore_test_attestation_path_bound"])
+        self.assertTrue(receipt_contract["required_restore_test_attestation_sha256_bound"])
+        self.assertFalse(receipt_contract["production_effects_authorized"])
+        for item in recovery["required_evidence"]:
+            suffix = item["id"].replace("-", "_")
+            self.assertEqual(
+                item["producer"],
+                f"heim_pc.external_recovery_producer.{suffix}.v1",
+            )
+            self.assertEqual(
+                item["evidence_schema"],
+                f"heim_pc.recovery.{suffix}.v1",
+            )
+            if item["requires_restore_test"]:
+                self.assertEqual(
+                    item["restore_test_schema"],
+                    item["evidence_schema"] + ".restore_test",
+                )
+            else:
+                self.assertIsNone(item["restore_test_schema"])
+        attestation = recovery["evidence_attestation"]
+        self.assertEqual(attestation["status"], "unprovisioned")
+        self.assertEqual(attestation["trust_model"], "github-artifact-attestation")
+        for key in (
+            "repository",
+            "signer_workflow",
+            "signer_digest",
+            "source_digest",
+            "source_ref",
+        ):
+            self.assertIsNone(attestation[key])
+        self.assertEqual(
+            attestation["predicate_type"],
+            "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+        )
+        self.assertTrue(attestation["deny_self_hosted_runners"])
+        self.assertTrue(attestation["attestation_predicate_source_revision_bound"])
+        self.assertTrue(attestation["producer_receipt_digest_bound"])
+        self.assertEqual(attestation["provisioning_authority"], "later-cutover-process")
+        self.assertFalse(
+            (ROOT / ".github/workflows/nixos-recovery-evidence-attest.yml").exists()
+        )
+        restore_required = [
+            item for item in recovery["required_evidence"] if item["requires_restore_test"]
+        ]
+        self.assertEqual(len(restore_required), 6)
+        self.assertEqual(
+            [item["id"] for item in recovery["required_evidence"] if not item["requires_restore_test"]],
+            ["rpo-rto-record"],
+        )
+        self.assertEqual(
+            recovery["readiness_bundle"]["kind"],
+            "heim_pc.nixos_pre_cutover_readiness",
+        )
+        self.assertTrue(recovery["readiness_bundle"]["evidence_freshness_bound"])
+        self.assertFalse(recovery["readiness_bundle"]["production_effects_authorized"])
+        self.assertIn("heim-pc/recovery-contract.json", backup_module)
+        self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 
     def test_managed_root_entrypoint_exists(self):
         flake = (SOURCE / "flake.nix").read_text()

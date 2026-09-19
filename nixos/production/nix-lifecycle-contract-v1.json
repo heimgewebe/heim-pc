@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_store_lifecycle_contract",
+  "profile": "nixos-executor-2026",
+  "automatic_gc": false,
+  "delete_older_than_allowed": false,
+  "read_only_audit": {
+    "service": "heim-pc-nix-lifecycle-audit.service",
+    "timer": "heim-pc-nix-lifecycle-audit.timer",
+    "evidence_path": "/var/lib/heim-pc-nix-lifecycle/latest.json",
+    "minimum_interval": "daily"
+  },
+  "protected_generations": {
+    "required_roles": [
+      "running-system",
+      "boot-default-system",
+      "last-known-good-system"
+    ],
+    "last_known_good_marker": "/persist/heim-pc/nix-lifecycle/last-known-good-system",
+    "last_known_good_must_be_enumerated_gc_root": true,
+    "missing_role_blocks_gc": true
+  },
+  "budget": {
+    "status": "baseline-required-before-gc",
+    "automatic_reclaim_authorized": false,
+    "requires_pre_post_free_space_readback": true,
+    "requires_gc_root_readback": true,
+    "requires_effect_receipt": true
+  },
+  "admission": {
+    "initial_cutover_requires_contract": true,
+    "initial_cutover_requires_live_audit": false,
+    "automatic_gc_requires_fresh_audit": true,
+    "automatic_gc_requires_separate_reviewed_enablement": true
+  },
+  "does_not_establish": [
+    "a current last-known-good generation",
+    "a safe garbage-collection candidate set",
+    "permission to delete Nix store paths",
+    "automatic garbage-collection readiness"
+  ]
+}

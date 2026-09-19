@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_supply_chain_trust_contract",
+  "profile": "nixos-executor-2026",
+  "nix": {
+    "substituters": [
+      "https://cache.nixos.org/"
+    ],
+    "trusted_substituters": [
+      "https://cache.nixos.org/"
+    ],
+    "trusted_public_keys": [
+      "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    ],
+    "trusted_users": [
+      "root"
+    ],
+    "require_sigs": true,
+    "accept_flake_config": false,
+    "experimental_features": [
+      "nix-command",
+      "flakes"
+    ],
+    "trust_tarballs_from_git_forges": false,
+    "additional_substituters_policy": "deny-unless-reviewed-in-contract"
+  },
+  "inputs": {
+    "root_nixpkgs": {
+      "lock_node": "nixpkgs_2",
+      "required_ref": "nixos-26.05",
+      "required_revision": "c5c4a43b0e8056328ec4529f735cabdb8f1942bb"
+    },
+    "microvm": {
+      "lock_node": "microvm",
+      "required_revision": "174e28de151e069a95d03c86dd174c3b71bdfba7",
+      "nixpkgs_follows_root": true
+    },
+    "nixer": {
+      "lock_node": "nixer",
+      "required_revision": "2e457e533517c379395e11d8ab3d4e6687c4c6e2",
+      "owns_runtime_nixpkgs": true,
+      "runtime_nixpkgs_lock_node": "nixpkgs",
+      "runtime_nixpkgs_required_revision": "ef34387ddd751e1ab8857adf4676492d32eb24ec"
+    }
+  },
+  "managed_nix_verifier": {
+    "image_id": "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f",
+    "image_tag": "nixos/nix:2.35.2",
+    "image_ref": "nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c"
+  },
+  "ci": {
+    "repository": "heimgewebe/heim-pc",
+    "attestation_workflow": ".github/workflows/nixos-production-build-attest.yml",
+    "protected_source_ref": "refs/heads/main",
+    "self_hosted_attestation_forbidden": true
+  },
+  "does_not_establish": [
+    "hardware acceptance",
+    "recovery readiness",
+    "off-host restore readiness",
+    "permission to mutate production storage",
+    "permission to cross the point of no return"
+  ]
+}

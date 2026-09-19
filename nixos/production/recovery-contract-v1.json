@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_recovery_readiness_contract",
+  "profile": "nixos-executor-2026",
+  "status": "external-evidence-required",
+  "same_disk_recovery_partition_is_off_host_backup": false,
+  "secrets_in_repository_forbidden": true,
+  "required_evidence": [
+    {
+      "id": "off-host-home-restore",
+      "scope": "critical-user-data",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.off_host_home_restore.v1",
+      "evidence_schema": "heim_pc.recovery.off_host_home_restore.v1",
+      "restore_test_schema": "heim_pc.recovery.off_host_home_restore.v1.restore_test"
+    },
+    {
+      "id": "offline-secret-recovery",
+      "scope": "recovery-identity",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.offline_secret_recovery.v1",
+      "evidence_schema": "heim_pc.recovery.offline_secret_recovery.v1",
+      "restore_test_schema": "heim_pc.recovery.offline_secret_recovery.v1.restore_test"
+    },
+    {
+      "id": "luks-header-metadata-backup",
+      "scope": "storage-recovery-material",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.luks_header_metadata_backup.v1",
+      "evidence_schema": "heim_pc.recovery.luks_header_metadata_backup.v1",
+      "restore_test_schema": "heim_pc.recovery.luks_header_metadata_backup.v1.restore_test"
+    },
+    {
+      "id": "bootable-recovery-media",
+      "scope": "host-independent-boot",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.bootable_recovery_media.v1",
+      "evidence_schema": "heim_pc.recovery.bootable_recovery_media.v1",
+      "restore_test_schema": "heim_pc.recovery.bootable_recovery_media.v1.restore_test"
+    },
+    {
+      "id": "offline-host-control-closure",
+      "scope": "known-good-host-and-control-closure",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.offline_host_control_closure.v1",
+      "evidence_schema": "heim_pc.recovery.offline_host_control_closure.v1",
+      "restore_test_schema": "heim_pc.recovery.offline_host_control_closure.v1.restore_test"
+    },
+    {
+      "id": "network-off-reconstruction-boot",
+      "scope": "replacement-or-isolated-target",
+      "requires_restore_test": true,
+      "producer": "heim_pc.external_recovery_producer.network_off_reconstruction_boot.v1",
+      "evidence_schema": "heim_pc.recovery.network_off_reconstruction_boot.v1",
+      "restore_test_schema": "heim_pc.recovery.network_off_reconstruction_boot.v1.restore_test"
+    },
+    {
+      "id": "rpo-rto-record",
+      "scope": "representative-recovery",
+      "requires_restore_test": false,
+      "producer": "heim_pc.external_recovery_producer.rpo_rto_record.v1",
+      "evidence_schema": "heim_pc.recovery.rpo_rto_record.v1",
+      "restore_test_schema": null
+    }
+  ],
+  "evidence_freshness": {
+    "maximum_age_seconds": 604800,
+    "future_skew_seconds": 5
+  },
+  "admission": {
+    "all_required_evidence_must_be_fresh": true,
+    "point_of_no_return_blocked_without_complete_evidence": true,
+    "production_storage_mutation_blocked_without_complete_evidence": true
+  },
+  "does_not_establish": [
+    "existence of any off-host backup",
+    "successful restore",
+    "fresh recovery media",
+    "permission to mutate production storage",
+    "permission to cross the point of no return"
+  ],
+  "evidence_receipt": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_recovery_evidence_receipt",
+    "source_revision_bound": true,
+    "recovery_contract_sha256_bound": true,
+    "evidence_scope_bound": true,
+    "evidence_provenance_path_bound": true,
+    "evidence_provenance_sha256_bound": true,
+    "evidence_provenance_object_bound": true,
+    "evidence_provenance_contract_bound": true,
+    "restore_test_requirement_bound": true,
+    "required_restore_test_status": "passed",
+    "required_restore_test_freshness_bound": true,
+    "required_restore_test_provenance_path_bound": true,
+    "required_restore_test_provenance_sha256_bound": true,
+    "required_restore_test_provenance_object_bound": true,
+    "required_restore_test_provenance_contract_bound": true,
+    "status": "passed",
+    "production_effects_authorized": false,
+    "evidence_provenance_producer_bound": true,
+    "evidence_provenance_schema_bound": true,
+    "evidence_provenance_external_attestation_required": true,
+    "evidence_attestation_path_bound": true,
+    "evidence_attestation_sha256_bound": true,
+    "required_restore_test_provenance_producer_bound": true,
+    "required_restore_test_provenance_schema_bound": true,
+    "required_restore_test_external_attestation_required": true,
+    "required_restore_test_attestation_path_bound": true,
+    "required_restore_test_attestation_sha256_bound": true
+  },
+  "readiness_bundle": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_pre_cutover_readiness",
+    "private_local_input": true,
+    "source_revision_bound": true,
+    "recovery_contract_sha256_bound": true,
+    "nix_lifecycle_contract_sha256_bound": true,
+    "evidence_freshness_bound": true,
+    "production_effects_authorized": false
+  },
+  "evidence_attestation": {
+    "status": "unprovisioned",
+    "trust_model": "github-artifact-attestation",
+    "repository": null,
+    "signer_workflow": null,
+    "signer_digest": null,
+    "source_digest": null,
+    "source_ref": null,
+    "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+    "deny_self_hosted_runners": true,
+    "attestation_predicate_source_revision_bound": true,
+    "producer_receipt_digest_bound": true,
+    "provisioning_authority": "later-cutover-process"
+  }
+}

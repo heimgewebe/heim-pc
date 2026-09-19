@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from scripts import nixos_production_install as installer  # noqa: E402
 PULL_TIMEOUT_SECONDS = 300
 COMMAND_TIMEOUT_SECONDS = 60
 MISSING_DESCENDANT = "/subject/heim-pc-pinned-find-contract-missing"
+TRUST_CONTRACT_PATH = ROOT / "nixos" / "production" / "trust-contract-v1.json"
 
 
 def _run(argv: Sequence[str], *, timeout_seconds: int) -> subprocess.CompletedProcess[bytes]:
@@ -46,9 +48,72 @@ def _require_success(result: subprocess.CompletedProcess[bytes], operation: str)
         raise RuntimeError(f"{operation} failed with exit {result.returncode}: {_detail(result)}")
 
 
+def verify_managed_nix_verifier_contract(path: Path = TRUST_CONTRACT_PATH) -> dict[str, str]:
+    try:
+        contract = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("managed Nix verifier trust contract cannot be read") from exc
+    if (
+        not isinstance(contract, dict)
+        or contract.get("schema_version") != 1
+        or contract.get("kind") != "heim_pc.nixos_supply_chain_trust_contract"
+    ):
+        raise RuntimeError("managed Nix verifier trust contract identity mismatch")
+    verifier = contract.get("managed_nix_verifier")
+    if not isinstance(verifier, dict):
+        raise RuntimeError("managed Nix verifier trust contract section is missing")
+
+    runtime = {
+        "image_id": installer.PINNED_NIX_IMAGE,
+        "image_tag": installer.PINNED_NIX_IMAGE_TAG,
+        "image_ref": installer.PINNED_NIX_IMAGE_REF,
+    }
+    for field, value in runtime.items():
+        contract_value = verifier.get(field)
+        if not isinstance(contract_value, str) or contract_value != value:
+            raise RuntimeError(
+                f"managed Nix verifier {field} diverged from trust contract: "
+                f"runtime={value!r}, contract={contract_value!r}"
+            )
+    if managed_build.PINNED_NIX_IMAGE != runtime["image_id"]:
+        raise RuntimeError("managed-build Nix image ID diverged from trust contract")
+    expected_containerd_ref = f"docker.io/{runtime['image_tag']}"
+    if installer.PINNED_NIX_CONTAINERD_IMAGE_REF != expected_containerd_ref:
+        raise RuntimeError("production installer containerd Nix image reference diverged from trust contract")
+    return runtime
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--trust-contract",
+        type=Path,
+        default=TRUST_CONTRACT_PATH,
+        help="canonical managed-Nix verifier trust contract",
+    )
+    parser.add_argument(
+        "--trust-contract-only",
+        action="store_true",
+        help="verify only the semantic trust-contract binding; do not invoke Docker",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
-    if managed_build.PINNED_NIX_IMAGE != installer.PINNED_NIX_IMAGE:
-        raise RuntimeError("managed-build and production installer Nix image IDs diverged")
+    args = _parse_args()
+    verifier = verify_managed_nix_verifier_contract(args.trust_contract)
+    if args.trust_contract_only:
+        print(
+            json.dumps(
+                {
+                    "kind": "heim_pc.managed_nix_verifier_contract_binding",
+                    "managed_nix_verifier": verifier,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
 
     docker = managed_build._docker_executable()
     pull = _run(

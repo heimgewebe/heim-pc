@@ -5,6 +5,8 @@ import tarfile
 import importlib.util
 import json
 import stat
+import tempfile
+from datetime import datetime, timezone
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +44,24 @@ ARTIFACT = {
 MERGED_ARTIFACT = dict(ARTIFACT, source_authority="merged-main")
 MANAGED_POLICY_SHA256 = "c" * 64
 SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
+_READINESS_TEST_ROOT = tempfile.TemporaryDirectory(prefix="heim-pc-precutover-readiness-tests-")
+
+TEST_ATTESTATION_POLICY = {
+    "status": "provisioned",
+    "trust_model": "github-artifact-attestation",
+    "repository": "heimgewebe/recovery-evidence-authority",
+    "signer_workflow": (
+        "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml"
+    ),
+    "signer_digest": "1" * 40,
+    "source_digest": "2" * 40,
+    "source_ref": "refs/heads/main",
+    "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+    "deny_self_hosted_runners": True,
+    "attestation_predicate_source_revision_bound": True,
+    "producer_receipt_digest_bound": True,
+    "provisioning_authority": "later-cutover-process",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +70,19 @@ def _isolated_production_apply_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", tmp_path / "production-apply-locks")
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", owner.st_uid)
     monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", owner.st_gid)
+
+    original_policy = prod.pre_cutover_readiness._recovery_policy
+
+    def test_policy(contract):
+        requirements, max_age, skew, _policy = original_policy(contract)
+        return requirements, max_age, skew, dict(TEST_ATTESTATION_POLICY)
+
+    monkeypatch.setattr(prod.pre_cutover_readiness, "_recovery_policy", test_policy)
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness,
+        "_run_attestation_verifier",
+        _synthetic_recovery_attestation_verifier,
+    )
 
 
 def managed_receipt(artifact):
@@ -198,21 +231,224 @@ def observation():
     }
 
 
-def plan(obs=None, artifact=None, receipt=None):
+def _recovery_evidence_sha(value: dict) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _synthetic_recovery_attestation_verifier(
+    argv: list[str],
+) -> subprocess.CompletedProcess:
+    assert argv[:3] == [
+        prod.pre_cutover_readiness.GH_BIN,
+        "attestation",
+        "verify",
+    ]
+    subject_path = Path(argv[3])
+    bundle_path = Path(argv[argv.index("--bundle") + 1])
+    assert bundle_path.is_file()
+    subject = json.loads(subject_path.read_text(encoding="utf-8"))
+    evidence = subject["evidence"]
+    predicate = {
+        "schema_version": 1,
+        "kind": prod.pre_cutover_readiness.RECOVERY_ATTESTATION_KIND,
+        "provenance_kind": subject["kind"],
+        "provenance_sha256": hashlib.sha256(subject_path.read_bytes()).hexdigest(),
+        "producer": subject["producer"],
+        "evidence_id": subject["evidence_id"],
+        "evidence_scope": subject["evidence_scope"],
+        "evidence_schema": subject["evidence_schema"],
+        "evidence_sha256": _recovery_evidence_sha(evidence),
+        "producer_receipt_sha256": evidence["producer_receipt_sha256"],
+        "source_revision": subject["source_revision"],
+        "recovery_contract_sha256": subject["recovery_contract_sha256"],
+        "observed_at": subject["observed_at"],
+        "production_effects_authorized": False,
+    }
+    stdout = json.dumps([
+        {"verificationResult": {"statement": {"predicate": predicate}}}
+    ]).encode("utf-8")
+    return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+
+
+def synthetic_readiness_path(
+    *,
+    recovery_path: Path | None = None,
+    lifecycle_path: Path | None = None,
+) -> Path:
+    root = Path(tempfile.mkdtemp(prefix="case-", dir=_READINESS_TEST_ROOT.name))
+    recovery_path = recovery_path or prod.RECOVERY_CONTRACT_PATH
+    lifecycle_path = lifecycle_path or prod.NIX_LIFECYCLE_CONTRACT_PATH
+    recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+    observed_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
+    lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    bindings = []
+    for index, item in enumerate(recovery["required_evidence"]):
+        receipt_path = root / f"receipt-{index}.json"
+        evidence_provenance_path = root / f"evidence-provenance-{index}.json"
+        evidence_payload = {
+            "schema_version": 1,
+            "kind": item["evidence_schema"],
+            "result": "passed",
+            "producer_receipt_sha256": "a" * 64,
+        }
+        evidence_provenance = {
+            "schema_version": 1,
+            "kind": prod.pre_cutover_readiness.RECOVERY_EVIDENCE_PROVENANCE_KIND,
+            "evidence_id": item["id"],
+            "evidence_scope": item["scope"],
+            "source_revision": REVISION,
+            "recovery_contract_sha256": recovery_sha,
+            "status": "passed",
+            "observed_at": observed_at,
+            "producer": item["producer"],
+            "evidence_schema": item["evidence_schema"],
+            "evidence": evidence_payload,
+            "production_effects_authorized": False,
+        }
+        evidence_provenance_path.write_text(
+            json.dumps(evidence_provenance, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        evidence_provenance_path.chmod(0o600)
+        evidence_attestation_path = root / f"evidence-attestation-{index}.json"
+        evidence_attestation_path.write_text(
+            json.dumps({"synthetic_external_bundle": item["id"]}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        evidence_attestation_path.chmod(0o600)
+
+        if item["requires_restore_test"]:
+            restore_provenance_path = root / f"restore-provenance-{index}.json"
+            restore_payload = {
+                "schema_version": 1,
+                "kind": item["restore_test_schema"],
+                "result": "passed",
+                "producer_receipt_sha256": "b" * 64,
+            }
+            restore_provenance = {
+                "schema_version": 1,
+                "kind": prod.pre_cutover_readiness.RECOVERY_RESTORE_TEST_PROVENANCE_KIND,
+                "evidence_id": item["id"],
+                "evidence_scope": item["scope"],
+                "source_revision": REVISION,
+                "recovery_contract_sha256": recovery_sha,
+                "status": "passed",
+                "observed_at": observed_at,
+                "producer": item["producer"],
+                "evidence_schema": item["restore_test_schema"],
+                "evidence": restore_payload,
+                "production_effects_authorized": False,
+            }
+            restore_provenance_path.write_text(
+                json.dumps(restore_provenance, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            restore_provenance_path.chmod(0o600)
+            restore_attestation_path = root / f"restore-attestation-{index}.json"
+            restore_attestation_path.write_text(
+                json.dumps(
+                    {"synthetic_external_bundle": item["id"] + "-restore"},
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            restore_attestation_path.chmod(0o600)
+            restore_test = {
+                "status": "passed",
+                "observed_at": observed_at,
+                "evidence_provenance_path": str(restore_provenance_path),
+                "evidence_provenance_sha256": hashlib.sha256(
+                    restore_provenance_path.read_bytes()
+                ).hexdigest(),
+                "evidence_attestation_path": str(restore_attestation_path),
+                "evidence_attestation_sha256": hashlib.sha256(
+                    restore_attestation_path.read_bytes()
+                ).hexdigest(),
+            }
+        else:
+            restore_test = {"status": "not-required"}
+
+        receipt = {
+            "schema_version": 1,
+            "kind": prod.pre_cutover_readiness.RECOVERY_RECEIPT_KIND,
+            "evidence_id": item["id"],
+            "evidence_scope": item["scope"],
+            "requires_restore_test": item["requires_restore_test"],
+            "evidence_provenance_path": str(evidence_provenance_path),
+            "evidence_provenance_sha256": hashlib.sha256(
+                evidence_provenance_path.read_bytes()
+            ).hexdigest(),
+            "evidence_attestation_path": str(evidence_attestation_path),
+            "evidence_attestation_sha256": hashlib.sha256(
+                evidence_attestation_path.read_bytes()
+            ).hexdigest(),
+            "restore_test": restore_test,
+            "status": "passed",
+            "source_revision": REVISION,
+            "recovery_contract_sha256": recovery_sha,
+            "observed_at": observed_at,
+            "production_effects_authorized": False,
+        }
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+        receipt_path.chmod(0o600)
+        bindings.append({
+            "evidence_id": item["id"],
+            "path": str(receipt_path),
+            "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        })
+
+    bundle_path = root / "readiness.json"
+    bundle = {
+        "schema_version": 1,
+        "kind": prod.pre_cutover_readiness.READINESS_KIND,
+        "source_revision": REVISION,
+        "recovery_contract_sha256": recovery_sha,
+        "nix_lifecycle_contract_sha256": lifecycle_sha,
+        "recovery_evidence_receipts": bindings,
+        "observed_at": observed_at,
+        "freshness_seconds": recovery["evidence_freshness"]["maximum_age_seconds"],
+        "production_effects_authorized": False,
+    }
+    bundle_path.write_text(json.dumps(bundle, sort_keys=True) + "\n", encoding="utf-8")
+    bundle_path.chmod(0o600)
+    return bundle_path
+
+def plan(
+    obs=None,
+    artifact=None,
+    receipt=None,
+    readiness_path=None,
+    flake_source=None,
+):
     selected_artifact = artifact or ARTIFACT
     selected_receipt = receipt or managed_receipt(selected_artifact)
+    selected_flake_source = flake_source or str(prod.FLAKE_SOURCE)
     verification = (
         managed_attestation_verification(selected_artifact, selected_receipt)
         if selected_artifact["source_authority"] == "merged-main" else None
     )
+    selected_readiness_path = readiness_path
+    if (
+        selected_readiness_path is None
+        and selected_artifact["source_authority"] == "merged-main"
+    ):
+        recovery_path, lifecycle_path = prod.readiness_contract_paths_for_source(
+            selected_flake_source
+        )
+        selected_readiness_path = synthetic_readiness_path(
+            recovery_path=recovery_path,
+            lifecycle_path=lifecycle_path,
+        )
     return prod.compile_plan(
         obs or observation(),
         install_artifact=selected_artifact,
         install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
         managed_build_receipt=selected_receipt,
         managed_policy_sha256=MANAGED_POLICY_SHA256,
-        flake_source="/srv/exact-source",
+        flake_source=selected_flake_source,
         contract=CONTRACT,
+        pre_cutover_readiness_path=selected_readiness_path,
         managed_build_attestation_verification=verification,
     )
 
@@ -895,6 +1131,12 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
         "execution_authorized": False,
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
+        "pre_cutover_readiness_validated": False,
+        "readiness_bundle_authorizes_production": False,
+        "readiness_bundle_sha256": None,
+        "recovery_contract_sha256": None,
+        "nix_lifecycle_contract_sha256": None,
+        "recovery_evidence_count": 0,
     }
     assert "super-secret-material" not in json.dumps(summary)
     assert "hidden" not in json.dumps(summary)
@@ -3943,7 +4185,7 @@ def test_root_only_containerd_verifier_argv_is_readonly_and_plan_bounded():
     assert "--read-only" in argv
     assert "type=bind,src=/nix,dst=/subject/nix,options=rbind:ro" in argv
     assert "type=tmpfs,dst=/tmp,options=nosuid:nodev:mode=1777" in argv
-    assert "docker.io/nixos/nix:2.35.2" in argv
+    assert prod.PINNED_NIX_CONTAINERD_IMAGE_REF in argv
     assert "/nix/var/nix/profiles/default/bin/nix" in argv
     assert prod.READONLY_NIX_STORE in argv
     assert "--net-host" not in argv
@@ -4906,15 +5148,26 @@ def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_
     assert result["historical_reproducibility_verification"] == evidence
 
 
-def test_merged_main_plan_requires_independent_attestation():
+def test_merged_main_plan_requires_readiness_and_independent_attestation():
     receipt = managed_receipt(MERGED_ARTIFACT)
+    with pytest.raises(prod.ProductionInstallError, match="requires validated pre-cutover readiness"):
+        prod.compile_plan(
+            observation(), install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
+            managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
+        )
+    readiness_path = synthetic_readiness_path()
     with pytest.raises(prod.ProductionInstallError, match="requires independent managed-build attestation"):
         prod.compile_plan(
             observation(), install_artifact=MERGED_ARTIFACT,
             install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source="/srv/exact-source", contract=CONTRACT,
+            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
+            pre_cutover_readiness_path=readiness_path,
         )
     compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
     assert compiled["managed_build_attestation_required"] is True
@@ -5276,6 +5529,208 @@ def test_private_plan_is_explicit_create_only_and_stdout_summary_is_redacted(tmp
     assert SEAGATE not in summary
     assert WD not in summary
     assert prod.plan_summary(compiled)["private_hardware_identity_redacted"] is True
+
+
+def test_proof_only_readiness_bundle_cannot_create_production_authority(monkeypatch, tmp_path):
+    readiness_path = synthetic_readiness_path()
+    compiled = plan(artifact=ARTIFACT, readiness_path=readiness_path)
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["pre_cutover_readiness"]["production_effects_authorized"] is False
+    assert compiled["readiness_bundle_authorizes_production"] is False
+    assert compiled["execution_authorized"] is False
+
+    touched = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding",
+        lambda *args, **kwargs: compiled["managed_build_receipt"],
+    )
+    monkeypatch.setattr(prod, "_run", lambda *args, **kwargs: touched.append(args))
+    with pytest.raises(prod.ProductionInstallError, match="merged-main"):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+        )
+    assert touched == []
+
+
+def test_merged_main_summary_never_leaks_private_readiness_paths():
+    readiness_path = synthetic_readiness_path()
+    compiled = plan(artifact=MERGED_ARTIFACT, readiness_path=readiness_path)
+    summary = json.dumps(prod.plan_summary(compiled), sort_keys=True)
+    private_paths = [
+        compiled["pre_cutover_readiness"]["bundle_path"],
+        *[item["path"] for item in compiled["pre_cutover_readiness"]["receipts"]],
+    ]
+    assert all(path not in summary for path in private_paths)
+    assert str(readiness_path.parent) not in summary
+    assert prod.plan_summary(compiled)["pre_cutover_readiness_validated"] is True
+    assert prod.plan_summary(compiled)["readiness_bundle_authorizes_production"] is False
+    assert prod.plan_summary(compiled)["recovery_evidence_count"] == len(
+        compiled["pre_cutover_readiness"]["receipts"]
+    )
+
+
+def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
+    source_root = tmp_path / "historical"
+    flake_source = source_root / "nixos" / "system"
+    production_root = source_root / "nixos" / "production"
+    production_root.mkdir(parents=True)
+    flake_source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source_root)], check=True)
+
+    recovery_path = production_root / "recovery-contract-v1.json"
+    lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
+    expected_paths = (recovery_path, lifecycle_path)
+    assert prod.readiness_contract_paths_for_source(str(source_root)) == expected_paths
+    assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
+    recovery = json.loads(prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8"))
+    lifecycle = json.loads(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    recovery["source_fixture_marker"] = "historical"
+    lifecycle["source_fixture_marker"] = "historical"
+    recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
+    lifecycle_path.write_text(json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8")
+    recovery_path.chmod(0o644)
+    lifecycle_path.chmod(0o644)
+
+    readiness_path = synthetic_readiness_path(
+        recovery_path=recovery_path,
+        lifecycle_path=lifecycle_path,
+    )
+    compiled = plan(
+        artifact=MERGED_ARTIFACT,
+        readiness_path=readiness_path,
+        flake_source=str(flake_source),
+    )
+    readiness = compiled["pre_cutover_readiness"]
+    recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
+    lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    assert readiness["recovery_contract_sha256"] == recovery_sha
+    assert readiness["nix_lifecycle_contract_sha256"] == lifecycle_sha
+    assert recovery_sha != hashlib.sha256(prod.RECOVERY_CONTRACT_PATH.read_bytes()).hexdigest()
+    assert lifecycle_sha != hashlib.sha256(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("tamper_target", [
+    "bundle",
+    "receipt",
+    "recovery-contract",
+    "lifecycle-contract",
+])
+def test_apply_readiness_tamper_is_explicitly_pre_mutation(
+    monkeypatch, tmp_path, tamper_target
+):
+    flake_source = tmp_path / "nixos" / "system"
+    production_root = tmp_path / "nixos" / "production"
+    production_root.mkdir(parents=True)
+    flake_source.mkdir()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    recovery_path = production_root / "recovery-contract-v1.json"
+    lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
+    recovery_path.write_bytes(prod.RECOVERY_CONTRACT_PATH.read_bytes())
+    lifecycle_path.write_bytes(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes())
+    recovery_path.chmod(0o644)
+    lifecycle_path.chmod(0o644)
+
+    readiness_path = synthetic_readiness_path(
+        recovery_path=recovery_path,
+        lifecycle_path=lifecycle_path,
+    )
+    compiled = plan(
+        artifact=MERGED_ARTIFACT,
+        readiness_path=readiness_path,
+        flake_source=str(flake_source),
+    )
+
+    if tamper_target == "bundle":
+        value = json.loads(readiness_path.read_text(encoding="utf-8"))
+        value["tamper_marker"] = True
+        readiness_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        readiness_path.chmod(0o600)
+    elif tamper_target == "receipt":
+        receipt_path = Path(compiled["pre_cutover_readiness"]["receipts"][0]["path"])
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+        value["tamper_marker"] = True
+        receipt_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        receipt_path.chmod(0o600)
+    elif tamper_target == "recovery-contract":
+        value = json.loads(recovery_path.read_text(encoding="utf-8"))
+        value["tamper_marker"] = True
+        recovery_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        value = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+        value["tamper_marker"] = True
+        lifecycle_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    mutation_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **kwargs: mutation_commands.append(argv) or Result(),
+    )
+
+    with pytest.raises(prod.PreMutationReadinessError) as exc:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert exc.value.mutation_attempted is False
+    assert mutation_commands == []
+
+
+def test_apply_source_drift_at_jit_is_explicitly_pre_mutation(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    source_checks = {"count": 0}
+
+    def verify_source(*_args, **_kwargs):
+        source_checks["count"] += 1
+        if source_checks["count"] == 1:
+            return REVISION
+        raise prod.ProductionInstallError("source moved after planning")
+
+    monkeypatch.setattr(prod, "verify_source", verify_source)
+    mutation_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **kwargs: mutation_commands.append(argv) or Result(),
+    )
+    with pytest.raises(prod.PreMutationReadinessError) as exc:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert source_checks["count"] == 2
+    assert exc.value.mutation_attempted is False
+    assert mutation_commands == []
 
 
 def test_managed_store_root_accepts_any_canonical_home_but_not_arbitrary_paths():
