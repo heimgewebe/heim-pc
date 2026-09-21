@@ -126,7 +126,11 @@ _SUPPORTED_PERSISTENT_PROMOTION_ROLLBACK_FIELDS = frozenset(
         "schema_version",
         "kind",
         "target",
+        "promotion_receipt_sha256",
+        "promoted_closure",
         "system_closure",
+        "readback_evidence_sha256",
+        "authority_sha256",
         "prior_persistent_state_sha256",
         "recovery_path",
         "source_reevaluation_allowed",
@@ -624,6 +628,8 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
             "requires_control_release_digest",
             "requires_prior_persistent_state",
             "requires_independent_live_closure_readback",
+            "requires_exact_promotion_receipt",
+            "requires_current_promoted_closure",
             "source_reevaluation_allowed",
             "branch_resolution_allowed",
             "lock_resolution_allowed",
@@ -676,6 +682,8 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
         "requires_control_release_digest",
         "requires_prior_persistent_state",
         "requires_independent_live_closure_readback",
+        "requires_exact_promotion_receipt",
+        "requires_current_promoted_closure",
         "runtime_proof_separate",
     ):
         if _contract_bool(root.get(key), f"persistent promotion.{key}") is not True:
@@ -872,9 +880,9 @@ def _validate_authority_window(issued_at: Any, expires_at: Any) -> tuple[str, st
     issued = _parse_time(issued_text, "issued_at")
     expires = _parse_time(expires_text, "expires_at")
     if expires <= issued:
-        raise ManagedNixError("activation authority expires_at must be after issued_at")
+        raise ManagedNixError("authority expires_at must be after issued_at")
     if (expires - issued).total_seconds() > MAX_AUTHORITY_LIFETIME_SECONDS:
-        raise ManagedNixError("activation authority lifetime exceeds the contract maximum")
+        raise ManagedNixError("authority lifetime exceeds the contract maximum")
     return issued_text, expires_text, issued, expires
 
 
@@ -1761,25 +1769,60 @@ def validate_persistent_promotion_receipt(value: Mapping[str, Any]) -> dict[str,
 
 
 def persistent_promotion_rollback_plan(
-    promotion_plan: Mapping[str, Any],
+    promotion_receipt: Mapping[str, Any],
+    *,
+    expected_current_promotion_receipt_sha256: str,
+    expected_current_closure: str,
 ) -> dict[str, Any]:
-    plan = validate_persistent_promotion_plan(promotion_plan)
+    """Build rollback authority only from the successful receipt still current now."""
+    receipt = validate_persistent_promotion_receipt(promotion_receipt)
+    receipt_sha256 = sha256_json(receipt)
+    expected_receipt_sha256 = _require_sha256(
+        expected_current_promotion_receipt_sha256,
+        "expected_current_promotion_receipt_sha256",
+    )
+    current_closure = _require_closure(
+        expected_current_closure,
+        "expected_current_closure",
+    )
+    if receipt_sha256 != expected_receipt_sha256:
+        raise ManagedNixError(
+            "persistent promotion rollback receipt is stale relative to current promotion"
+        )
+    if receipt["live_closure"] != current_closure:
+        raise ManagedNixError(
+            "persistent promotion rollback promoted closure is stale relative to current state"
+        )
+
+    rollback = {
+        "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
+        "kind": PERSISTENT_PROMOTION_ROLLBACK_KIND,
+        "target": receipt["target"],
+        "promotion_receipt_sha256": receipt_sha256,
+        "promoted_closure": receipt["system_closure"],
+        "system_closure": receipt["prior_closure"],
+        "readback_evidence_sha256": receipt["readback_evidence_sha256"],
+        "authority_sha256": receipt["authority_sha256"],
+        "prior_persistent_state_sha256": receipt["prior_persistent_state_sha256"],
+        "recovery_path": receipt["recovery_path"],
+        "source_reevaluation_allowed": False,
+    }
     return validate_persistent_promotion_rollback_plan(
-        {
-            "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
-            "kind": PERSISTENT_PROMOTION_ROLLBACK_KIND,
-            "target": plan["target"],
-            "system_closure": plan["prior_closure"],
-            "prior_persistent_state_sha256": plan["prior_persistent_state_sha256"],
-            "recovery_path": plan["recovery_path"],
-            "source_reevaluation_allowed": False,
-        }
+        rollback,
+        promotion_receipt=receipt,
+        expected_current_promotion_receipt_sha256=expected_receipt_sha256,
+        expected_current_closure=current_closure,
     )
 
 
 def validate_persistent_promotion_rollback_plan(
     value: Mapping[str, Any],
+    *,
+    promotion_receipt: Mapping[str, Any],
+    expected_current_promotion_receipt_sha256: str,
+    expected_current_closure: str,
 ) -> dict[str, Any]:
+    """Validate rollback against the successful receipt and fresh persistent state."""
     if not isinstance(value, Mapping):
         raise ManagedNixError("persistent promotion rollback plan must be an object")
     _require_exact_keys(
@@ -1794,11 +1837,47 @@ def validate_persistent_promotion_rollback_plan(
         raise ManagedNixError(
             "persistent promotion rollback plan must forbid source reevaluation"
         )
-    return {
+
+    receipt = validate_persistent_promotion_receipt(promotion_receipt)
+    receipt_sha256 = sha256_json(receipt)
+    expected_receipt_sha256 = _require_sha256(
+        expected_current_promotion_receipt_sha256,
+        "expected_current_promotion_receipt_sha256",
+    )
+    current_closure = _require_closure(
+        expected_current_closure,
+        "expected_current_closure",
+    )
+    if receipt_sha256 != expected_receipt_sha256:
+        raise ManagedNixError(
+            "persistent promotion rollback receipt is stale relative to current promotion"
+        )
+    if receipt["live_closure"] != current_closure:
+        raise ManagedNixError(
+            "persistent promotion rollback promoted closure is stale relative to current state"
+        )
+
+    plan = {
         "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
         "kind": PERSISTENT_PROMOTION_ROLLBACK_KIND,
         "target": _require_canonical_string(value.get("target"), "target"),
+        "promotion_receipt_sha256": _require_sha256(
+            value.get("promotion_receipt_sha256"),
+            "promotion_receipt_sha256",
+        ),
+        "promoted_closure": _require_closure(
+            value.get("promoted_closure"),
+            "promoted_closure",
+        ),
         "system_closure": _require_closure(value.get("system_closure")),
+        "readback_evidence_sha256": _require_sha256(
+            value.get("readback_evidence_sha256"),
+            "readback_evidence_sha256",
+        ),
+        "authority_sha256": _require_sha256(
+            value.get("authority_sha256"),
+            "authority_sha256",
+        ),
         "prior_persistent_state_sha256": _require_sha256(
             value.get("prior_persistent_state_sha256"),
             "prior_persistent_state_sha256",
@@ -1809,6 +1888,34 @@ def validate_persistent_promotion_rollback_plan(
         "source_reevaluation_allowed": False,
     }
 
+    expected_from_receipt = {
+        "target": receipt["target"],
+        "promotion_receipt_sha256": receipt_sha256,
+        "promoted_closure": receipt["system_closure"],
+        "system_closure": receipt["prior_closure"],
+        "readback_evidence_sha256": receipt["readback_evidence_sha256"],
+        "authority_sha256": receipt["authority_sha256"],
+        "prior_persistent_state_sha256": receipt["prior_persistent_state_sha256"],
+        "recovery_path": receipt["recovery_path"],
+    }
+    for key, expected in expected_from_receipt.items():
+        if plan[key] != expected:
+            raise ManagedNixError(
+                f"persistent promotion rollback plan {key} does not match promotion receipt"
+            )
+    if plan["promotion_receipt_sha256"] != expected_receipt_sha256:
+        raise ManagedNixError(
+            "persistent promotion rollback plan is stale relative to current promotion receipt"
+        )
+    if plan["promoted_closure"] != current_closure:
+        raise ManagedNixError(
+            "persistent promotion rollback plan is stale relative to current promoted closure"
+        )
+    if plan["system_closure"] == plan["promoted_closure"]:
+        raise ManagedNixError(
+            "persistent promotion rollback target must differ from promoted closure"
+        )
+    return plan
 
 def _load(path: Path) -> dict[str, Any]:
     try:
@@ -1858,13 +1965,32 @@ def build_parser() -> argparse.ArgumentParser:
     promotion.add_argument("--expected-prior-persistent-state-sha256", required=True)
     promotion.add_argument("--now", required=True)
 
+    promotion_authorize = sub.add_parser("authorize-persistent-promotion-execution")
+    promotion_authorize.add_argument("build_receipt", type=Path)
+    promotion_authorize.add_argument("authority", type=Path)
+    promotion_authorize.add_argument("plan", type=Path)
+    promotion_authorize.add_argument("--expected-authority-sha256", required=True)
+    promotion_authorize.add_argument("--expected-target", required=True)
+    promotion_authorize.add_argument("--expected-source-artifact-sha256", required=True)
+    promotion_authorize.add_argument("--expected-prior-closure", required=True)
+    promotion_authorize.add_argument(
+        "--expected-prior-persistent-state-sha256",
+        required=True,
+    )
+    promotion_authorize.add_argument("--now", required=True)
+
     promotion_receipt = sub.add_parser("make-persistent-promotion-receipt")
     promotion_receipt.add_argument("plan", type=Path)
     promotion_receipt.add_argument("--live-closure", required=True)
     promotion_receipt.add_argument("--readback-evidence-sha256", required=True)
 
     promotion_rollback = sub.add_parser("persistent-promotion-rollback-plan")
-    promotion_rollback.add_argument("plan", type=Path)
+    promotion_rollback.add_argument("receipt", type=Path)
+    promotion_rollback.add_argument(
+        "--expected-current-promotion-receipt-sha256",
+        required=True,
+    )
+    promotion_rollback.add_argument("--expected-current-closure", required=True)
     return parser
 
 
@@ -1903,14 +2029,36 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 now=args.now,
             )
+        elif args.command == "authorize-persistent-promotion-execution":
+            result = authorize_persistent_promotion_execution(
+                _load(args.build_receipt),
+                _load(args.authority),
+                _load(args.plan),
+                expected_authority_sha256=args.expected_authority_sha256,
+                expected_target=args.expected_target,
+                expected_source_artifact_sha256=args.expected_source_artifact_sha256,
+                expected_prior_closure=args.expected_prior_closure,
+                expected_prior_persistent_state_sha256=(
+                    args.expected_prior_persistent_state_sha256
+                ),
+                now=args.now,
+            )
         elif args.command == "make-persistent-promotion-receipt":
             result = make_persistent_promotion_receipt(
                 _load(args.plan),
                 live_closure=args.live_closure,
                 readback_evidence_sha256=args.readback_evidence_sha256,
             )
+        elif args.command == "persistent-promotion-rollback-plan":
+            result = persistent_promotion_rollback_plan(
+                _load(args.receipt),
+                expected_current_promotion_receipt_sha256=(
+                    args.expected_current_promotion_receipt_sha256
+                ),
+                expected_current_closure=args.expected_current_closure,
+            )
         else:
-            result = persistent_promotion_rollback_plan(_load(args.plan))
+            parser.error("unsupported command")
     except ManagedNixError as exc:
         print(f"managed-nix validation error: {exc}", file=sys.stderr)
         return 1
