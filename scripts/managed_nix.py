@@ -1753,6 +1753,19 @@ def authorize_persistent_promotion_execution(
     return plan
 
 
+def _require_persistent_state_freshness_seconds(
+    value: Any,
+    name: str,
+) -> int:
+    if (
+        type(value) is not int
+        or value <= 0
+        or value > PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS
+    ):
+        raise ManagedNixError(f"{name} is invalid")
+    return value
+
+
 def validate_persistent_state_observation(
     value: Mapping[str, Any],
     *,
@@ -1775,15 +1788,10 @@ def validate_persistent_state_observation(
         "persistent state observation observed_at",
     )
     observed_text = observed.isoformat().replace("+00:00", "Z")
-    freshness_seconds = value.get("freshness_seconds")
-    if (
-        type(freshness_seconds) is not int
-        or freshness_seconds <= 0
-        or freshness_seconds > PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS
-    ):
-        raise ManagedNixError(
-            "persistent state observation freshness_seconds is invalid"
-        )
+    freshness_seconds = _require_persistent_state_freshness_seconds(
+        value.get("freshness_seconds"),
+        "persistent state observation freshness_seconds",
+    )
     if now is not None:
         current = _parse_time(now, "now")
         age = (current - observed).total_seconds()
@@ -2203,8 +2211,11 @@ def validate_persistent_promotion_rollback_plan(
             value.get("current_persistent_state_observed_at"),
             "current_persistent_state_observed_at",
         ),
-        "current_persistent_state_freshness_seconds": value.get(
-            "current_persistent_state_freshness_seconds"
+        "current_persistent_state_freshness_seconds": (
+            _require_persistent_state_freshness_seconds(
+                value.get("current_persistent_state_freshness_seconds"),
+                "persistent promotion rollback plan current observation freshness_seconds",
+            )
         ),
         "system_closure": _require_closure(value.get("system_closure")),
         "readback_evidence_sha256": _require_sha256(

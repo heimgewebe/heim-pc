@@ -1365,6 +1365,35 @@ def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
             now=PROMOTION_NOW,
         )
 
+    one_second_current = current_state_observation(freshness_seconds=1)
+    one_second_rollback = persistent_promotion_rollback_plan(
+        good,
+        current_persistent_state_observation=one_second_current,
+        expected_current_promotion_receipt_sha256=sha256_json(good),
+        expected_current_closure=CLOSURE,
+        expected_current_persistent_state_observation_sha256=sha256_json(
+            one_second_current
+        ),
+        now=CURRENT_OBSERVED_AT,
+    )
+    forged_boolean_freshness = dict(one_second_rollback)
+    forged_boolean_freshness["current_persistent_state_freshness_seconds"] = True
+    with pytest.raises(
+        ManagedNixError,
+        match="current observation freshness_seconds",
+    ):
+        validate_persistent_promotion_rollback_plan(
+            forged_boolean_freshness,
+            promotion_receipt=good,
+            current_persistent_state_observation=one_second_current,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                one_second_current
+            ),
+            now=CURRENT_OBSERVED_AT,
+        )
+
     forged = dict(rollback)
     forged["source_reevaluation_allowed"] = True
     with pytest.raises(ManagedNixError, match="forbid source reevaluation"):
