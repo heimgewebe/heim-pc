@@ -46,30 +46,21 @@ jobs:
           .#checks.x86_64-linux.intentional-break-rejected
           .#checks.x86_64-linux.agent-zone-contract
 
-      - name: Build storage, VM and physical-gate closures
+      # Keep every expensive realization in one Nix client/store. Nix can plan
+      # the union graph without serial GitHub step barriers while deduplicating
+      # shared derivations. Every previous installable remains a hard gate.
+      - name: Build complete exact-head Nix gate union
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
           .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel
           .#packages.x86_64-linux.physical-gate-proprietary-system
           .#packages.x86_64-linux.physical-gate-open-system
-
-      - name: Build both live-gate ISOs
-        run: >-
-          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#packages.x86_64-linux.physical-gate-live-proprietary-iso
           .#packages.x86_64-linux.physical-gate-live-open-iso
-
-      - name: Build no-IP agent-zone closures
-        run: >-
-          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#packages.x86_64-linux.agent-microvm
           .#packages.x86_64-linux.agent-vsock-proof-microvm
           .#packages.x86_64-linux.trust-zone-host-system
-
-      - name: Run scoped VM checks
-        run: >-
-          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#checks.x86_64-linux.integration
           .#checks.x86_64-linux.firstboot-credentials
           .#checks.x86_64-linux.trust-zones
