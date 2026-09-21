@@ -79,7 +79,7 @@ The success marker is deliberately **create-if-absent**, not replace-on-success.
 
 Recovery is separate authority. A trusted recovery boot may unlock the encrypted target, acquire the bootstrap lock, inspect the exact shadow/secret/marker state, restore administrative access with `passwd alex` if needed, and reconcile the marker only after independently verifying the intended account state. Normal boot never clears the marker or silently restages credentials. `users.mutableUsers = true` is an explicit host-wide policy (and the NixOS default), not an `alex`-only switch; whenever the first-boot bootstrap is active, Nix evaluation asserts that `alex` has none of `password`, `hashedPassword`, `hashedPasswordFile`, `initialPassword`, or `initialHashedPassword`, and the account UID is pinned to the current persistent identity `1000`. A separately authorized disposable installation must still prove real graphical login and administrative recovery before bare-metal login readiness can be claimed; source tests and VM console autologin are explicitly not substitutes for that proof.
 
-Managed activation v1 supports only `test` and `next-boot`. Receipt-bound persistent promotion is separate v2 work tracked as `HEIM-PC-NIXOS-MIGRATION-V1-PERSISTENT-V2`.
+Managed activation v1 supports only `test` and `next-boot`. Persistent-promotion v2 now has a validation-only contract that binds the exact build/source/closure plus pre- and post-effect persistent-state observations; the runtime executor and runtime proof remain separate successor work.
 
 ## Agent-zone contract
 
