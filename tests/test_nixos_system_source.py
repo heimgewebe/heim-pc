@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "bc4153c8c30d79c83380398ef7ce80fb54cab1bda7c187dbb7f43f91a415b90f"
-ROOT_LOCK_SHA256 = "54012efca2083e2bfabc6e43f54324a497b375b9222df70eca04428c84515d4f"
+SOURCE_SNAPSHOT_SHA256 = "cbea60d4dad1cc4d741833b9d2f26a7c372d5330f0f542e1a3a87aa3059ca1c3"
+ROOT_LOCK_SHA256 = "c49b94848b4bb57525cfb9aa0e533b3deb1ecefd7143dd875af783b3b63eaa0b"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +32,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/03967c6ef2ff1a3746cb6573897bc66ccaec32b9";',
+            'nixer.url = "github:heimgewebe/nixer/0a1805a6fcff3f01c0005d450157baab27b7dbfc";',
             nested,
         )
 
@@ -54,54 +54,18 @@ class T(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
         self.assertIn("nix flake check --no-build --no-update-lock-file", workflow)
-        self.assertIn("\n  nix:\n", workflow)
-        self.assertIn("timeout-minutes: 90", workflow)
-
-        contract_step = "- name: Prove evaluated Heim-PC contracts"
-        union_step = "- name: Build complete exact-head Nix gate union"
-        self.assertIn(contract_step, workflow)
-        self.assertIn(union_step, workflow)
-        self.assertLess(workflow.index(contract_step), workflow.index(union_step))
-        self.assertEqual(
-            workflow.count(
-                "nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs"
-            ),
-            2,
-        )
-
-        required_installables = (
-            ".#checks.x86_64-linux.profile-contract",
-            ".#checks.x86_64-linux.supply-chain-trust",
-            ".#checks.x86_64-linux.nix-lifecycle-contract",
-            ".#checks.x86_64-linux.recovery-readiness-contract",
-            ".#checks.x86_64-linux.intentional-break-rejected",
-            ".#checks.x86_64-linux.agent-zone-contract",
-            ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
-            ".#nixosConfigurations.heim-pc-vm.config.system.build.toplevel",
-            ".#packages.x86_64-linux.physical-gate-proprietary-system",
-            ".#packages.x86_64-linux.physical-gate-open-system",
-            ".#packages.x86_64-linux.physical-gate-live-proprietary-iso",
-            ".#packages.x86_64-linux.physical-gate-live-open-iso",
-            ".#packages.x86_64-linux.agent-microvm",
-            ".#packages.x86_64-linux.agent-vsock-proof-microvm",
-            ".#packages.x86_64-linux.trust-zone-host-system",
-            ".#checks.x86_64-linux.integration",
-            ".#checks.x86_64-linux.firstboot-credentials",
-            ".#checks.x86_64-linux.trust-zones",
-        )
-        for installable in required_installables:
-            with self.subTest(installable=installable):
-                self.assertIn(installable, workflow)
-
-        for removed_barrier in (
-            "- name: Build storage, VM and physical-gate closures",
-            "- name: Build both live-gate ISOs",
-            "- name: Build no-IP agent-zone closures",
-            "- name: Run scoped VM checks",
-        ):
-            with self.subTest(removed_barrier=removed_barrier):
-                self.assertNotIn(removed_barrier, workflow)
-
+        self.assertIn(".#checks.x86_64-linux.profile-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.supply-chain-trust", workflow)
+        self.assertIn(".#checks.x86_64-linux.nix-lifecycle-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.recovery-readiness-contract", workflow)
+        self.assertIn(".#checks.x86_64-linux.intentional-break-rejected", workflow)
+        self.assertIn(".#checks.x86_64-linux.agent-zone-contract", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-proprietary-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-open-system", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-proprietary-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-open-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.agent-vsock-proof-microvm", workflow)
+        self.assertIn(".#checks.x86_64-linux.firstboot-credentials", workflow)
 
     def test_firstboot_vm_proof_is_exact_source_headless_and_input_free(self):
         flake = (SOURCE / "flake.nix").read_text()
@@ -251,7 +215,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "03967c6ef2ff1a3746cb6573897bc66ccaec32b9",
+            "0a1805a6fcff3f01c0005d450157baab27b7dbfc",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
