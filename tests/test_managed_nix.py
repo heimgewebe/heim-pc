@@ -24,6 +24,7 @@ from scripts.managed_nix import (
     NORMAL_EFFECTS,
     PERSISTENT_PROMOTION_AUTHORITY_KIND,
     PERSISTENT_PROMOTION_CONTRACT,
+    PERSISTENT_STATE_OBSERVATION_KIND,
     ManagedNixError,
     authorize_activation_plan_execution,
     authorize_persistent_promotion_execution,
@@ -42,6 +43,7 @@ from scripts.managed_nix import (
     validate_persistent_promotion_plan,
     validate_persistent_promotion_receipt,
     validate_persistent_promotion_rollback_plan,
+    validate_persistent_state_observation,
     validate_rollback_plan,
     validate_build_receipt,
     validate_build_request,
@@ -56,6 +58,17 @@ PRIOR = "/nix/store/11111111111111111111111111111111-nixos-system-heim-pc-25.11"
 SOURCE_ARTIFACT_DIGEST = "d" * 64
 PRIOR_STATE_DIGEST = "e" * 64
 READBACK_DIGEST = "f" * 64
+PROMOTED_STATE_DIGEST = "3" * 64
+PERSISTENT_STATE_READBACK_DIGEST = "4" * 64
+OBSERVATION_FRESHNESS_SECONDS = 300
+PROMOTION_OBSERVED_AT = "2026-09-04T08:00:10Z"
+PROMOTION_NOW = "2026-09-04T08:00:20Z"
+CURRENT_OBSERVED_AT = "2026-09-04T08:00:30Z"
+ROLLBACK_NOW = "2026-09-04T08:00:40Z"
+PROMOTION_B_OBSERVED_AT = "2026-09-04T08:01:10Z"
+PROMOTION_B_NOW = "2026-09-04T08:01:20Z"
+CURRENT_B_OBSERVED_AT = "2026-09-04T08:01:30Z"
+ROLLBACK_B_NOW = "2026-09-04T08:01:40Z"
 PERSISTENT_TARGET = "production:heim-pc-persistent"
 
 
@@ -179,6 +192,44 @@ def validate_persistent_authority(
         expected_prior_closure=expected_prior_closure,
         expected_prior_persistent_state_sha256=expected_prior_persistent_state_sha256,
         now=now,
+    )
+
+
+def state_observation(
+    *,
+    target=PERSISTENT_TARGET,
+    system_closure=CLOSURE,
+    state_sha256=PROMOTED_STATE_DIGEST,
+    evidence_sha256=PERSISTENT_STATE_READBACK_DIGEST,
+    observed_at=PROMOTION_OBSERVED_AT,
+    freshness_seconds=OBSERVATION_FRESHNESS_SECONDS,
+):
+    return {
+        "schema_version": 2,
+        "kind": PERSISTENT_STATE_OBSERVATION_KIND,
+        "target": target,
+        "system_closure": system_closure,
+        "persistent_state_sha256": state_sha256,
+        "readback_evidence_sha256": evidence_sha256,
+        "observed_at": observed_at,
+        "freshness_seconds": freshness_seconds,
+    }
+
+
+def current_state_observation(
+    *,
+    system_closure=CLOSURE,
+    state_sha256=PROMOTED_STATE_DIGEST,
+    evidence_sha256="7" * 64,
+    observed_at=CURRENT_OBSERVED_AT,
+    freshness_seconds=OBSERVATION_FRESHNESS_SECONDS,
+):
+    return state_observation(
+        system_closure=system_closure,
+        state_sha256=state_sha256,
+        evidence_sha256=evidence_sha256,
+        observed_at=observed_at,
+        freshness_seconds=freshness_seconds,
     )
 
 
@@ -948,6 +999,7 @@ def test_every_advertised_v1_activation_mode_is_reachable(mode: str) -> None:
     )
     assert validate_activation_receipt(result)["mode"] == mode
 
+
 def test_persistent_promotion_v2_is_additive_and_v1_modes_remain_unchanged() -> None:
     assert MANAGED_DEPLOYMENT_CONTRACT["activation"]["allowed_modes"] == [
         "test",
@@ -959,13 +1011,47 @@ def test_persistent_promotion_v2_is_additive_and_v1_modes_remain_unchanged() -> 
     assert PERSISTENT_PROMOTION_CONTRACT["runtime_proof_separate"] is True
     assert PERSISTENT_PROMOTION_CONTRACT["requires_exact_promotion_receipt"] is True
     assert PERSISTENT_PROMOTION_CONTRACT["requires_current_promoted_closure"] is True
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT["persistent_state_observation_max_age_seconds"]
+        == 300
+    )
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT[
+            "persistent_state_observation_future_skew_seconds"
+        ]
+        == 60
+    )
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT[
+            "requires_exact_current_persistent_state_observation"
+        ]
+        is True
+    )
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT[
+            "requires_current_observation_strictly_newer_than_promotion"
+        ]
+        is True
+    )
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT[
+            "requires_independent_promoted_persistent_state_readback"
+        ]
+        is True
+    )
+    assert (
+        PERSISTENT_PROMOTION_CONTRACT["requires_current_promoted_persistent_state"]
+        is True
+    )
     assert PERSISTENT_PROMOTION_CONTRACT["source_reevaluation_allowed"] is False
     assert PERSISTENT_PROMOTION_CONTRACT["branch_resolution_allowed"] is False
     assert PERSISTENT_PROMOTION_CONTRACT["lock_resolution_allowed"] is False
     assert PERSISTENT_PROMOTION_CONTRACT["remote_input_resolution_allowed"] is False
 
 
-def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback() -> None:
+def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback() -> (
+    None
+):
     built = receipt()
     candidate = persistent_authority(built)
     plan = validate_persistent_authority(built, candidate)
@@ -983,24 +1069,47 @@ def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback()
     assert plan["remote_input_resolution_allowed"] is False
     assert validate_persistent_promotion_plan(plan) == plan
 
-    assert authorize_persistent_promotion_execution(
-        built,
-        candidate,
-        plan,
-        expected_authority_sha256=sha256_json(candidate),
-        expected_target=PERSISTENT_TARGET,
-        expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
-        expected_prior_closure=PRIOR,
-        expected_prior_persistent_state_sha256=PRIOR_STATE_DIGEST,
-        now="2026-09-04T08:00:00Z",
-    ) == plan
+    assert (
+        authorize_persistent_promotion_execution(
+            built,
+            candidate,
+            plan,
+            expected_authority_sha256=sha256_json(candidate),
+            expected_target=PERSISTENT_TARGET,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            expected_prior_closure=PRIOR,
+            expected_prior_persistent_state_sha256=PRIOR_STATE_DIGEST,
+            now="2026-09-04T08:00:00Z",
+        )
+        == plan
+    )
 
+    promoted_observation = state_observation()
+    assert (
+        validate_persistent_state_observation(promoted_observation, now=PROMOTION_NOW)
+        == promoted_observation
+    )
     result = make_persistent_promotion_receipt(
         plan,
+        persistent_state_observation=promoted_observation,
         live_closure=CLOSURE,
         readback_evidence_sha256=READBACK_DIGEST,
+        now=PROMOTION_NOW,
     )
     assert result["live_closure"] == result["system_closure"] == CLOSURE
+    assert result["promoted_persistent_state_sha256"] == PROMOTED_STATE_DIGEST
+    assert result["promoted_persistent_state_observation_sha256"] == sha256_json(
+        promoted_observation
+    )
+    assert (
+        result["persistent_state_readback_evidence_sha256"]
+        == PERSISTENT_STATE_READBACK_DIGEST
+    )
+    assert result["promoted_persistent_state_observed_at"] == PROMOTION_OBSERVED_AT
+    assert (
+        result["promoted_persistent_state_freshness_seconds"]
+        == OBSERVATION_FRESHNESS_SECONDS
+    )
     assert result["source_reevaluation_used"] is False
     assert validate_persistent_promotion_receipt(result) == result
 
@@ -1008,11 +1117,21 @@ def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback()
         result,
         expected_current_promotion_receipt_sha256=sha256_json(result),
         expected_current_closure=CLOSURE,
+        current_persistent_state_observation=current_state_observation(),
+        expected_current_persistent_state_observation_sha256=sha256_json(
+            current_state_observation()
+        ),
+        now=ROLLBACK_NOW,
     )
     assert rollback["promotion_receipt_sha256"] == sha256_json(result)
     assert rollback["promoted_closure"] == CLOSURE
+    assert rollback["promoted_persistent_state_sha256"] == PROMOTED_STATE_DIGEST
     assert rollback["system_closure"] == PRIOR
     assert rollback["readback_evidence_sha256"] == READBACK_DIGEST
+    assert (
+        rollback["persistent_state_readback_evidence_sha256"]
+        == PERSISTENT_STATE_READBACK_DIGEST
+    )
     assert rollback["authority_sha256"] == plan["authority_sha256"]
     assert rollback["prior_persistent_state_sha256"] == PRIOR_STATE_DIGEST
     assert rollback["source_reevaluation_allowed"] is False
@@ -1022,6 +1141,11 @@ def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback()
             promotion_receipt=result,
             expected_current_promotion_receipt_sha256=sha256_json(result),
             expected_current_closure=CLOSURE,
+            current_persistent_state_observation=current_state_observation(),
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                current_state_observation()
+            ),
+            now=ROLLBACK_NOW,
         )
         == rollback
     )
@@ -1118,13 +1242,40 @@ def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
         make_persistent_promotion_receipt(
             plan,
             live_closure=PRIOR,
+            persistent_state_observation=state_observation(),
             readback_evidence_sha256=READBACK_DIGEST,
+            now=PROMOTION_NOW,
+        )
+
+    with pytest.raises(ManagedNixError, match="persistent state"):
+        make_persistent_promotion_receipt(
+            plan,
+            live_closure=CLOSURE,
+            persistent_state_observation=state_observation(
+                state_sha256=PRIOR_STATE_DIGEST
+            ),
+            readback_evidence_sha256=READBACK_DIGEST,
+            now=PROMOTION_NOW,
+        )
+
+    with pytest.raises(ManagedNixError, match="observation closure"):
+        make_persistent_promotion_receipt(
+            plan,
+            persistent_state_observation=state_observation(
+                system_closure=PRIOR,
+                state_sha256="a" * 64,
+            ),
+            live_closure=CLOSURE,
+            readback_evidence_sha256=READBACK_DIGEST,
+            now=PROMOTION_NOW,
         )
 
     good = make_persistent_promotion_receipt(
         plan,
         live_closure=CLOSURE,
+        persistent_state_observation=state_observation(),
         readback_evidence_sha256=READBACK_DIGEST,
+        now=PROMOTION_NOW,
     )
     reevaluated = dict(good)
     reevaluated["source_reevaluation_used"] = True
@@ -1135,7 +1286,114 @@ def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
         good,
         expected_current_promotion_receipt_sha256=sha256_json(good),
         expected_current_closure=CLOSURE,
+        current_persistent_state_observation=current_state_observation(),
+        expected_current_persistent_state_observation_sha256=sha256_json(
+            current_state_observation()
+        ),
+        now=ROLLBACK_NOW,
     )
+    with pytest.raises(ManagedNixError, match="persistent state"):
+        persistent_promotion_rollback_plan(
+            good,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            current_persistent_state_observation=current_state_observation(
+                state_sha256="a" * 64
+            ),
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                current_state_observation(state_sha256="a" * 64)
+            ),
+            now=ROLLBACK_NOW,
+        )
+
+    with pytest.raises(ManagedNixError, match="strictly newer"):
+        persistent_promotion_rollback_plan(
+            good,
+            current_persistent_state_observation=state_observation(),
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                state_observation()
+            ),
+            now=ROLLBACK_NOW,
+        )
+
+    stale_current = current_state_observation(observed_at="2026-09-04T07:50:00Z")
+    with pytest.raises(ManagedNixError, match="stale"):
+        persistent_promotion_rollback_plan(
+            good,
+            current_persistent_state_observation=stale_current,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                stale_current
+            ),
+            now=ROLLBACK_NOW,
+        )
+
+    future_current = current_state_observation(observed_at="2026-09-04T08:02:00Z")
+    with pytest.raises(ManagedNixError, match="future"):
+        persistent_promotion_rollback_plan(
+            good,
+            current_persistent_state_observation=future_current,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                future_current
+            ),
+            now=ROLLBACK_NOW,
+        )
+
+    with pytest.raises(ManagedNixError, match="externally bound current observation"):
+        persistent_promotion_rollback_plan(
+            good,
+            current_persistent_state_observation=current_state_observation(),
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256="8" * 64,
+            now=ROLLBACK_NOW,
+        )
+
+    with pytest.raises(ManagedNixError, match="freshness_seconds"):
+        make_persistent_promotion_receipt(
+            plan,
+            persistent_state_observation=state_observation(
+                freshness_seconds=OBSERVATION_FRESHNESS_SECONDS + 1
+            ),
+            live_closure=CLOSURE,
+            readback_evidence_sha256=READBACK_DIGEST,
+            now=PROMOTION_NOW,
+        )
+
+    one_second_current = current_state_observation(freshness_seconds=1)
+    one_second_rollback = persistent_promotion_rollback_plan(
+        good,
+        current_persistent_state_observation=one_second_current,
+        expected_current_promotion_receipt_sha256=sha256_json(good),
+        expected_current_closure=CLOSURE,
+        expected_current_persistent_state_observation_sha256=sha256_json(
+            one_second_current
+        ),
+        now=CURRENT_OBSERVED_AT,
+    )
+    forged_boolean_freshness = dict(one_second_rollback)
+    forged_boolean_freshness["current_persistent_state_freshness_seconds"] = True
+    with pytest.raises(
+        ManagedNixError,
+        match="current observation freshness_seconds",
+    ):
+        validate_persistent_promotion_rollback_plan(
+            forged_boolean_freshness,
+            promotion_receipt=good,
+            current_persistent_state_observation=one_second_current,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                one_second_current
+            ),
+            now=CURRENT_OBSERVED_AT,
+        )
+
     forged = dict(rollback)
     forged["source_reevaluation_allowed"] = True
     with pytest.raises(ManagedNixError, match="forbid source reevaluation"):
@@ -1144,6 +1402,11 @@ def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
             promotion_receipt=good,
             expected_current_promotion_receipt_sha256=sha256_json(good),
             expected_current_closure=CLOSURE,
+            current_persistent_state_observation=current_state_observation(),
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                current_state_observation()
+            ),
+            now=ROLLBACK_NOW,
         )
 
     forged_binding = dict(rollback)
@@ -1154,24 +1417,34 @@ def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
             promotion_receipt=good,
             expected_current_promotion_receipt_sha256=sha256_json(good),
             expected_current_closure=CLOSURE,
+            current_persistent_state_observation=current_state_observation(),
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                current_state_observation()
+            ),
+            now=ROLLBACK_NOW,
         )
 
 
-def test_persistent_promotion_v2_rejects_rollback_from_stale_receipt_after_later_promotion() -> None:
+def test_persistent_promotion_v2_rejects_rollback_from_stale_receipt_after_later_promotion() -> (
+    None
+):
     built_a = receipt()
     plan_a = validate_persistent_authority(built_a, persistent_authority(built_a))
     receipt_a = make_persistent_promotion_receipt(
         plan_a,
         live_closure=CLOSURE,
+        persistent_state_observation=state_observation(),
         readback_evidence_sha256=READBACK_DIGEST,
+        now=PROMOTION_NOW,
     )
 
     closure_b = (
-        "/nix/store/22222222222222222222222222222222-"
-        "nixos-system-heim-pc-26.05-b"
+        "/nix/store/22222222222222222222222222222222-nixos-system-heim-pc-26.05-b"
     )
-    state_b = "1" * 64
+    state_b = PROMOTED_STATE_DIGEST
+    promoted_state_b = "5" * 64
     readback_b = "2" * 64
+    persistent_readback_b = "6" * 64
     built_b = make_receipt(system_closure=closure_b)
     authority_b = persistent_authority(
         built_b,
@@ -1188,7 +1461,14 @@ def test_persistent_promotion_v2_rejects_rollback_from_stale_receipt_after_later
     receipt_b = make_persistent_promotion_receipt(
         plan_b,
         live_closure=closure_b,
+        persistent_state_observation=state_observation(
+            system_closure=closure_b,
+            state_sha256=promoted_state_b,
+            evidence_sha256=persistent_readback_b,
+            observed_at=PROMOTION_B_OBSERVED_AT,
+        ),
         readback_evidence_sha256=readback_b,
+        now=PROMOTION_B_NOW,
     )
 
     with pytest.raises(ManagedNixError, match="stale relative to current promotion"):
@@ -1196,14 +1476,45 @@ def test_persistent_promotion_v2_rejects_rollback_from_stale_receipt_after_later
             receipt_a,
             expected_current_promotion_receipt_sha256=sha256_json(receipt_b),
             expected_current_closure=closure_b,
+            current_persistent_state_observation=current_state_observation(
+                system_closure=closure_b,
+                state_sha256=promoted_state_b,
+                evidence_sha256="7" * 64,
+                observed_at=CURRENT_B_OBSERVED_AT,
+            ),
+            expected_current_persistent_state_observation_sha256=sha256_json(
+                current_state_observation(
+                    system_closure=closure_b,
+                    state_sha256=promoted_state_b,
+                    evidence_sha256="7" * 64,
+                    observed_at=CURRENT_B_OBSERVED_AT,
+                )
+            ),
+            now=ROLLBACK_B_NOW,
         )
 
     rollback_b = persistent_promotion_rollback_plan(
         receipt_b,
         expected_current_promotion_receipt_sha256=sha256_json(receipt_b),
         expected_current_closure=closure_b,
+        current_persistent_state_observation=current_state_observation(
+            system_closure=closure_b,
+            state_sha256=promoted_state_b,
+            evidence_sha256="7" * 64,
+            observed_at=CURRENT_B_OBSERVED_AT,
+        ),
+        expected_current_persistent_state_observation_sha256=sha256_json(
+            current_state_observation(
+                system_closure=closure_b,
+                state_sha256=promoted_state_b,
+                evidence_sha256="7" * 64,
+                observed_at=CURRENT_B_OBSERVED_AT,
+            )
+        ),
+        now=ROLLBACK_B_NOW,
     )
     assert rollback_b["promoted_closure"] == closure_b
+    assert rollback_b["promoted_persistent_state_sha256"] == promoted_state_b
     assert rollback_b["system_closure"] == CLOSURE
     assert rollback_b["promotion_receipt_sha256"] == sha256_json(receipt_b)
 
@@ -1234,6 +1545,39 @@ def test_persistent_promotion_contract_loader_rejects_semantic_drift(
     rollback_binding_drift["requires_exact_promotion_receipt"] = False
     contract_path.write_text(json.dumps(rollback_binding_drift), encoding="utf-8")
     with pytest.raises(RuntimeError, match="requires_exact_promotion_receipt"):
+        managed_nix._load_persistent_promotion_contract()
+
+    persistent_readback_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    persistent_readback_drift[
+        "requires_independent_promoted_persistent_state_readback"
+    ] = False
+    contract_path.write_text(json.dumps(persistent_readback_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="persistent_state_readback"):
+        managed_nix._load_persistent_promotion_contract()
+    typed_observation_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    typed_observation_drift["requires_typed_persistent_state_observation"] = False
+    contract_path.write_text(json.dumps(typed_observation_drift), encoding="utf-8")
+    with pytest.raises(
+        RuntimeError, match="requires_typed_persistent_state_observation"
+    ):
+        managed_nix._load_persistent_promotion_contract()
+
+    observation_field_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    observation_field_drift["persistent_state_observation_fields"].append("git_ref")
+    contract_path.write_text(json.dumps(observation_field_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="persistent_state_observation_fields"):
+        managed_nix._load_persistent_promotion_contract()
+
+    freshness_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    freshness_drift["persistent_state_observation_max_age_seconds"] = 301
+    contract_path.write_text(json.dumps(freshness_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="observation max age"):
+        managed_nix._load_persistent_promotion_contract()
+
+    exact_current_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    exact_current_drift["requires_exact_current_persistent_state_observation"] = False
+    contract_path.write_text(json.dumps(exact_current_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="requires_exact_current"):
         managed_nix._load_persistent_promotion_contract()
 
 
@@ -1284,6 +1628,47 @@ def test_persistent_promotion_cli_compiles_only_receipt_bound_closure(
     assert "nix_inputs" not in result
 
 
+def test_persistent_promotion_cli_receipt_binds_post_effect_persistent_state(
+    tmp_path: Path,
+) -> None:
+    built = receipt()
+    candidate = persistent_authority(built)
+    plan = validate_persistent_authority(built, candidate)
+    plan_path = tmp_path / "promotion-plan.json"
+    observation_path = tmp_path / "persistent-state-observation.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    observation_path.write_text(json.dumps(state_observation()), encoding="utf-8")
+
+    script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--canonical-json",
+            "make-persistent-promotion-receipt",
+            str(plan_path),
+            str(observation_path),
+            "--live-closure",
+            CLOSURE,
+            "--readback-evidence-sha256",
+            READBACK_DIGEST,
+            "--now",
+            PROMOTION_NOW,
+        ],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["promoted_persistent_state_sha256"] == PROMOTED_STATE_DIGEST
+    assert (
+        result["persistent_state_readback_evidence_sha256"]
+        == PERSISTENT_STATE_READBACK_DIGEST
+    )
+
+
 def test_persistent_promotion_cli_authorizes_exact_plan_and_builds_receipt_bound_rollback(
     tmp_path: Path,
 ) -> None:
@@ -1293,17 +1678,24 @@ def test_persistent_promotion_cli_authorizes_exact_plan_and_builds_receipt_bound
     promotion_receipt = make_persistent_promotion_receipt(
         plan,
         live_closure=CLOSURE,
+        persistent_state_observation=state_observation(),
         readback_evidence_sha256=READBACK_DIGEST,
+        now=PROMOTION_NOW,
     )
 
     build_path = tmp_path / "build-receipt.json"
     authority_path = tmp_path / "promotion-authority.json"
     plan_path = tmp_path / "promotion-plan.json"
     promotion_receipt_path = tmp_path / "promotion-receipt.json"
+    current_observation_path = tmp_path / "current-persistent-state-observation.json"
     build_path.write_text(json.dumps(built), encoding="utf-8")
     authority_path.write_text(json.dumps(candidate), encoding="utf-8")
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
     promotion_receipt_path.write_text(json.dumps(promotion_receipt), encoding="utf-8")
+    current_observation_path.write_text(
+        json.dumps(current_state_observation()),
+        encoding="utf-8",
+    )
 
     script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
     authorize = subprocess.run(
@@ -1343,10 +1735,15 @@ def test_persistent_promotion_cli_authorizes_exact_plan_and_builds_receipt_bound
             "--canonical-json",
             "persistent-promotion-rollback-plan",
             str(promotion_receipt_path),
+            str(current_observation_path),
             "--expected-current-promotion-receipt-sha256",
             sha256_json(promotion_receipt),
             "--expected-current-closure",
             CLOSURE,
+            "--expected-current-persistent-state-observation-sha256",
+            sha256_json(current_state_observation()),
+            "--now",
+            ROLLBACK_NOW,
         ],
         cwd=Path(__file__).parents[1],
         text=True,
@@ -1360,16 +1757,25 @@ def test_persistent_promotion_cli_authorizes_exact_plan_and_builds_receipt_bound
     assert rollback_result["system_closure"] == PRIOR
 
 
-def test_persistent_promotion_cli_rejects_stale_rollback_observation(tmp_path: Path) -> None:
+def test_persistent_promotion_cli_rejects_stale_rollback_observation(
+    tmp_path: Path,
+) -> None:
     built = receipt()
     plan = validate_persistent_authority(built, persistent_authority(built))
     promotion_receipt = make_persistent_promotion_receipt(
         plan,
         live_closure=CLOSURE,
+        persistent_state_observation=state_observation(),
         readback_evidence_sha256=READBACK_DIGEST,
+        now=PROMOTION_NOW,
     )
     promotion_receipt_path = tmp_path / "promotion-receipt.json"
+    current_observation_path = tmp_path / "current-persistent-state-observation.json"
     promotion_receipt_path.write_text(json.dumps(promotion_receipt), encoding="utf-8")
+    current_observation_path.write_text(
+        json.dumps(current_state_observation()),
+        encoding="utf-8",
+    )
 
     script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
     completed = subprocess.run(
@@ -1378,10 +1784,15 @@ def test_persistent_promotion_cli_rejects_stale_rollback_observation(tmp_path: P
             str(script),
             "persistent-promotion-rollback-plan",
             str(promotion_receipt_path),
+            str(current_observation_path),
             "--expected-current-promotion-receipt-sha256",
             "9" * 64,
             "--expected-current-closure",
             CLOSURE,
+            "--expected-current-persistent-state-observation-sha256",
+            sha256_json(current_state_observation()),
+            "--now",
+            ROLLBACK_NOW,
         ],
         cwd=Path(__file__).parents[1],
         text=True,
