@@ -37,7 +37,7 @@
     },
     "nixer": {
       "lock_node": "nixer",
-      "required_revision": "2e457e533517c379395e11d8ab3d4e6687c4c6e2",
+      "required_revision": "03967c6ef2ff1a3746cb6573897bc66ccaec32b9",
       "owns_runtime_nixpkgs": true,
       "runtime_nixpkgs_lock_node": "nixpkgs",
       "runtime_nixpkgs_required_revision": "ef34387ddd751e1ab8857adf4676492d32eb24ec"
