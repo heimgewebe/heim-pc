@@ -22,17 +22,26 @@ from scripts.managed_nix import (
     MAX_AUTHORITY_LIFETIME_SECONDS,
     MINIMUM_MANAGED_BUILD_SCOPE,
     NORMAL_EFFECTS,
+    PERSISTENT_PROMOTION_AUTHORITY_KIND,
+    PERSISTENT_PROMOTION_CONTRACT,
     ManagedNixError,
     authorize_activation_plan_execution,
+    authorize_persistent_promotion_execution,
     canonical_build_request_payload,
     classify_effect,
     make_activation_receipt,
     make_build_receipt,
+    make_persistent_promotion_receipt,
+    persistent_promotion_rollback_plan,
     rollback_plan,
     sha256_json,
     validate_activation_authority,
     validate_activation_plan,
     validate_activation_receipt,
+    validate_persistent_promotion_authority,
+    validate_persistent_promotion_plan,
+    validate_persistent_promotion_receipt,
+    validate_persistent_promotion_rollback_plan,
     validate_rollback_plan,
     validate_build_receipt,
     validate_build_request,
@@ -44,6 +53,10 @@ CONTROL_DIGEST = "b" * 64
 LOCK_DIGEST = "c" * 64
 CLOSURE = "/nix/store/00000000000000000000000000000000-nixos-system-heim-pc-26.05"
 PRIOR = "/nix/store/11111111111111111111111111111111-nixos-system-heim-pc-25.11"
+SOURCE_ARTIFACT_DIGEST = "d" * 64
+PRIOR_STATE_DIGEST = "e" * 64
+READBACK_DIGEST = "f" * 64
+PERSISTENT_TARGET = "production:heim-pc-persistent"
 
 
 def request(**updates):
@@ -120,6 +133,51 @@ def validate_authority(
         candidate,
         expected_authority_sha256=authority_sha256 or sha256_json(candidate),
         expected_target=expected_target,
+        now=now,
+    )
+
+
+def persistent_authority(build_receipt=None, **updates):
+    build_receipt = build_receipt or receipt()
+    value = {
+        "schema_version": 2,
+        "kind": PERSISTENT_PROMOTION_AUTHORITY_KIND,
+        "effect_class": "persistent-promotion",
+        "source_revision": REVISION,
+        "source_artifact_sha256": SOURCE_ARTIFACT_DIGEST,
+        "system_closure": CLOSURE,
+        "target": PERSISTENT_TARGET,
+        "build_receipt_sha256": sha256_json(build_receipt),
+        "control_release_digest": CONTROL_DIGEST,
+        "prior_closure": PRIOR,
+        "prior_persistent_state_sha256": PRIOR_STATE_DIGEST,
+        "recovery_path": "known-generation-and-rescue-medium",
+        "issued_at": "2026-09-04T07:30:00Z",
+        "expires_at": "2026-09-04T09:00:00Z",
+    }
+    value.update(updates)
+    return value
+
+
+def validate_persistent_authority(
+    build_receipt,
+    candidate,
+    *,
+    expected_target=PERSISTENT_TARGET,
+    expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+    expected_prior_closure=PRIOR,
+    expected_prior_persistent_state_sha256=PRIOR_STATE_DIGEST,
+    now="2026-09-04T08:00:00Z",
+    authority_sha256=None,
+):
+    return validate_persistent_promotion_authority(
+        build_receipt,
+        candidate,
+        expected_authority_sha256=authority_sha256 or sha256_json(candidate),
+        expected_target=expected_target,
+        expected_source_artifact_sha256=expected_source_artifact_sha256,
+        expected_prior_closure=expected_prior_closure,
+        expected_prior_persistent_state_sha256=expected_prior_persistent_state_sha256,
         now=now,
     )
 
@@ -889,3 +947,446 @@ def test_every_advertised_v1_activation_mode_is_reachable(mode: str) -> None:
         plan, live_closure=CLOSURE, readback_evidence_sha256="f" * 64
     )
     assert validate_activation_receipt(result)["mode"] == mode
+
+def test_persistent_promotion_v2_is_additive_and_v1_modes_remain_unchanged() -> None:
+    assert MANAGED_DEPLOYMENT_CONTRACT["activation"]["allowed_modes"] == [
+        "test",
+        "next-boot",
+    ]
+    assert PERSISTENT_PROMOTION_CONTRACT["schema_version"] == 2
+    assert PERSISTENT_PROMOTION_CONTRACT["effect_class"] == "persistent-promotion"
+    assert PERSISTENT_PROMOTION_CONTRACT["runtime_executor_implemented_here"] is False
+    assert PERSISTENT_PROMOTION_CONTRACT["runtime_proof_separate"] is True
+    assert PERSISTENT_PROMOTION_CONTRACT["requires_exact_promotion_receipt"] is True
+    assert PERSISTENT_PROMOTION_CONTRACT["requires_current_promoted_closure"] is True
+    assert PERSISTENT_PROMOTION_CONTRACT["source_reevaluation_allowed"] is False
+    assert PERSISTENT_PROMOTION_CONTRACT["branch_resolution_allowed"] is False
+    assert PERSISTENT_PROMOTION_CONTRACT["lock_resolution_allowed"] is False
+    assert PERSISTENT_PROMOTION_CONTRACT["remote_input_resolution_allowed"] is False
+
+
+def test_persistent_promotion_v2_binds_exact_receipt_source_state_and_readback() -> None:
+    built = receipt()
+    candidate = persistent_authority(built)
+    plan = validate_persistent_authority(built, candidate)
+
+    assert plan["source_revision"] == REVISION
+    assert plan["source_artifact_sha256"] == SOURCE_ARTIFACT_DIGEST
+    assert plan["system_closure"] == CLOSURE
+    assert plan["build_receipt_sha256"] == sha256_json(built)
+    assert plan["control_release_digest"] == CONTROL_DIGEST
+    assert plan["prior_closure"] == PRIOR
+    assert plan["prior_persistent_state_sha256"] == PRIOR_STATE_DIGEST
+    assert plan["source_reevaluation_allowed"] is False
+    assert plan["branch_resolution_allowed"] is False
+    assert plan["lock_resolution_allowed"] is False
+    assert plan["remote_input_resolution_allowed"] is False
+    assert validate_persistent_promotion_plan(plan) == plan
+
+    assert authorize_persistent_promotion_execution(
+        built,
+        candidate,
+        plan,
+        expected_authority_sha256=sha256_json(candidate),
+        expected_target=PERSISTENT_TARGET,
+        expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+        expected_prior_closure=PRIOR,
+        expected_prior_persistent_state_sha256=PRIOR_STATE_DIGEST,
+        now="2026-09-04T08:00:00Z",
+    ) == plan
+
+    result = make_persistent_promotion_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256=READBACK_DIGEST,
+    )
+    assert result["live_closure"] == result["system_closure"] == CLOSURE
+    assert result["source_reevaluation_used"] is False
+    assert validate_persistent_promotion_receipt(result) == result
+
+    rollback = persistent_promotion_rollback_plan(
+        result,
+        expected_current_promotion_receipt_sha256=sha256_json(result),
+        expected_current_closure=CLOSURE,
+    )
+    assert rollback["promotion_receipt_sha256"] == sha256_json(result)
+    assert rollback["promoted_closure"] == CLOSURE
+    assert rollback["system_closure"] == PRIOR
+    assert rollback["readback_evidence_sha256"] == READBACK_DIGEST
+    assert rollback["authority_sha256"] == plan["authority_sha256"]
+    assert rollback["prior_persistent_state_sha256"] == PRIOR_STATE_DIGEST
+    assert rollback["source_reevaluation_allowed"] is False
+    assert (
+        validate_persistent_promotion_rollback_plan(
+            rollback,
+            promotion_receipt=result,
+            expected_current_promotion_receipt_sha256=sha256_json(result),
+            expected_current_closure=CLOSURE,
+        )
+        == rollback
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_update", "validator_update", "message"),
+    [
+        ({"source_revision": "d" * 40}, {}, "source revision"),
+        ({}, {"expected_source_artifact_sha256": "a" * 64}, "source artifact"),
+        (
+            {
+                "system_closure": (
+                    "/nix/store/22222222222222222222222222222222-"
+                    "nixos-system-heim-pc-other"
+                )
+            },
+            {},
+            "closure",
+        ),
+        ({"build_receipt_sha256": "a" * 64}, {}, "build receipt"),
+        ({"control_release_digest": "a" * 64}, {}, "control release"),
+        ({}, {"expected_target": "production:other"}, "target"),
+        (
+            {},
+            {
+                "expected_prior_closure": (
+                    "/nix/store/22222222222222222222222222222222-"
+                    "nixos-system-heim-pc-other"
+                )
+            },
+            "prior closure",
+        ),
+        (
+            {},
+            {"expected_prior_persistent_state_sha256": "a" * 64},
+            "prior persistent state",
+        ),
+    ],
+)
+def test_persistent_promotion_v2_rejects_mismatched_bindings_before_effect(
+    candidate_update: dict[str, str],
+    validator_update: dict[str, str],
+    message: str,
+) -> None:
+    built = receipt()
+    candidate = persistent_authority(built, **candidate_update)
+    with pytest.raises(ManagedNixError, match=message):
+        validate_persistent_authority(
+            built,
+            candidate,
+            authority_sha256=sha256_json(candidate),
+            **validator_update,
+        )
+
+
+def test_persistent_promotion_v2_rejects_stale_authority_and_drifted_plan() -> None:
+    built = receipt()
+    stale = persistent_authority(
+        built,
+        issued_at="2026-09-04T05:00:00Z",
+        expires_at="2026-09-04T06:00:00Z",
+    )
+    with pytest.raises(ManagedNixError, match="expired"):
+        validate_persistent_authority(
+            built,
+            stale,
+            authority_sha256=sha256_json(stale),
+        )
+
+    candidate = persistent_authority(built)
+    plan = validate_persistent_authority(built, candidate)
+    drifted = dict(plan)
+    drifted["source_artifact_sha256"] = "a" * 64
+    with pytest.raises(ManagedNixError, match="fresh externally bound authority"):
+        authorize_persistent_promotion_execution(
+            built,
+            candidate,
+            drifted,
+            expected_authority_sha256=sha256_json(candidate),
+            expected_target=PERSISTENT_TARGET,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            expected_prior_closure=PRIOR,
+            expected_prior_persistent_state_sha256=PRIOR_STATE_DIGEST,
+            now="2026-09-04T08:00:00Z",
+        )
+
+
+def test_persistent_promotion_v2_receipt_and_rollback_fail_closed() -> None:
+    built = receipt()
+    plan = validate_persistent_authority(built, persistent_authority(built))
+
+    with pytest.raises(ManagedNixError, match="live closure"):
+        make_persistent_promotion_receipt(
+            plan,
+            live_closure=PRIOR,
+            readback_evidence_sha256=READBACK_DIGEST,
+        )
+
+    good = make_persistent_promotion_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256=READBACK_DIGEST,
+    )
+    reevaluated = dict(good)
+    reevaluated["source_reevaluation_used"] = True
+    with pytest.raises(ManagedNixError, match="reevaluation"):
+        validate_persistent_promotion_receipt(reevaluated)
+
+    rollback = persistent_promotion_rollback_plan(
+        good,
+        expected_current_promotion_receipt_sha256=sha256_json(good),
+        expected_current_closure=CLOSURE,
+    )
+    forged = dict(rollback)
+    forged["source_reevaluation_allowed"] = True
+    with pytest.raises(ManagedNixError, match="forbid source reevaluation"):
+        validate_persistent_promotion_rollback_plan(
+            forged,
+            promotion_receipt=good,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+        )
+
+    forged_binding = dict(rollback)
+    forged_binding["readback_evidence_sha256"] = "a" * 64
+    with pytest.raises(ManagedNixError, match="readback_evidence_sha256"):
+        validate_persistent_promotion_rollback_plan(
+            forged_binding,
+            promotion_receipt=good,
+            expected_current_promotion_receipt_sha256=sha256_json(good),
+            expected_current_closure=CLOSURE,
+        )
+
+
+def test_persistent_promotion_v2_rejects_rollback_from_stale_receipt_after_later_promotion() -> None:
+    built_a = receipt()
+    plan_a = validate_persistent_authority(built_a, persistent_authority(built_a))
+    receipt_a = make_persistent_promotion_receipt(
+        plan_a,
+        live_closure=CLOSURE,
+        readback_evidence_sha256=READBACK_DIGEST,
+    )
+
+    closure_b = (
+        "/nix/store/22222222222222222222222222222222-"
+        "nixos-system-heim-pc-26.05-b"
+    )
+    state_b = "1" * 64
+    readback_b = "2" * 64
+    built_b = make_receipt(system_closure=closure_b)
+    authority_b = persistent_authority(
+        built_b,
+        system_closure=closure_b,
+        prior_closure=CLOSURE,
+        prior_persistent_state_sha256=state_b,
+    )
+    plan_b = validate_persistent_authority(
+        built_b,
+        authority_b,
+        expected_prior_closure=CLOSURE,
+        expected_prior_persistent_state_sha256=state_b,
+    )
+    receipt_b = make_persistent_promotion_receipt(
+        plan_b,
+        live_closure=closure_b,
+        readback_evidence_sha256=readback_b,
+    )
+
+    with pytest.raises(ManagedNixError, match="stale relative to current promotion"):
+        persistent_promotion_rollback_plan(
+            receipt_a,
+            expected_current_promotion_receipt_sha256=sha256_json(receipt_b),
+            expected_current_closure=closure_b,
+        )
+
+    rollback_b = persistent_promotion_rollback_plan(
+        receipt_b,
+        expected_current_promotion_receipt_sha256=sha256_json(receipt_b),
+        expected_current_closure=closure_b,
+    )
+    assert rollback_b["promoted_closure"] == closure_b
+    assert rollback_b["system_closure"] == CLOSURE
+    assert rollback_b["promotion_receipt_sha256"] == sha256_json(receipt_b)
+
+
+def test_persistent_promotion_contract_loader_rejects_semantic_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_path = tmp_path / "persistent-promotion-v2.json"
+    monkeypatch.setattr(
+        managed_nix,
+        "_PERSISTENT_PROMOTION_CONTRACT_PATH",
+        contract_path,
+    )
+
+    drifted = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    drifted["source_reevaluation_allowed"] = True
+    contract_path.write_text(json.dumps(drifted), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="source_reevaluation_allowed"):
+        managed_nix._load_persistent_promotion_contract()
+
+    field_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    field_drift["plan_fields"].append("git_ref")
+    contract_path.write_text(json.dumps(field_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="plan_fields"):
+        managed_nix._load_persistent_promotion_contract()
+
+    rollback_binding_drift = copy.deepcopy(PERSISTENT_PROMOTION_CONTRACT)
+    rollback_binding_drift["requires_exact_promotion_receipt"] = False
+    contract_path.write_text(json.dumps(rollback_binding_drift), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="requires_exact_promotion_receipt"):
+        managed_nix._load_persistent_promotion_contract()
+
+
+def test_persistent_promotion_cli_compiles_only_receipt_bound_closure(
+    tmp_path: Path,
+) -> None:
+    built = receipt()
+    candidate = persistent_authority(built)
+    receipt_path = tmp_path / "build-receipt.json"
+    authority_path = tmp_path / "promotion-authority.json"
+    receipt_path.write_text(json.dumps(built), encoding="utf-8")
+    authority_path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--canonical-json",
+            "compile-persistent-promotion",
+            str(receipt_path),
+            str(authority_path),
+            "--expected-authority-sha256",
+            sha256_json(candidate),
+            "--expected-target",
+            PERSISTENT_TARGET,
+            "--expected-source-artifact-sha256",
+            SOURCE_ARTIFACT_DIGEST,
+            "--expected-prior-closure",
+            PRIOR,
+            "--expected-prior-persistent-state-sha256",
+            PRIOR_STATE_DIGEST,
+            "--now",
+            "2026-09-04T08:00:00Z",
+        ],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    result = json.loads(completed.stdout)
+    assert result == validate_persistent_authority(built, candidate)
+    assert result["system_closure"] == CLOSURE
+    assert result["source_reevaluation_allowed"] is False
+    assert "repository" not in result
+    assert "nix_inputs" not in result
+
+
+def test_persistent_promotion_cli_authorizes_exact_plan_and_builds_receipt_bound_rollback(
+    tmp_path: Path,
+) -> None:
+    built = receipt()
+    candidate = persistent_authority(built)
+    plan = validate_persistent_authority(built, candidate)
+    promotion_receipt = make_persistent_promotion_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256=READBACK_DIGEST,
+    )
+
+    build_path = tmp_path / "build-receipt.json"
+    authority_path = tmp_path / "promotion-authority.json"
+    plan_path = tmp_path / "promotion-plan.json"
+    promotion_receipt_path = tmp_path / "promotion-receipt.json"
+    build_path.write_text(json.dumps(built), encoding="utf-8")
+    authority_path.write_text(json.dumps(candidate), encoding="utf-8")
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    promotion_receipt_path.write_text(json.dumps(promotion_receipt), encoding="utf-8")
+
+    script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
+    authorize = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--canonical-json",
+            "authorize-persistent-promotion-execution",
+            str(build_path),
+            str(authority_path),
+            str(plan_path),
+            "--expected-authority-sha256",
+            sha256_json(candidate),
+            "--expected-target",
+            PERSISTENT_TARGET,
+            "--expected-source-artifact-sha256",
+            SOURCE_ARTIFACT_DIGEST,
+            "--expected-prior-closure",
+            PRIOR,
+            "--expected-prior-persistent-state-sha256",
+            PRIOR_STATE_DIGEST,
+            "--now",
+            "2026-09-04T08:00:00Z",
+        ],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert authorize.returncode == 0, authorize.stderr
+    assert json.loads(authorize.stdout) == plan
+
+    rollback = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--canonical-json",
+            "persistent-promotion-rollback-plan",
+            str(promotion_receipt_path),
+            "--expected-current-promotion-receipt-sha256",
+            sha256_json(promotion_receipt),
+            "--expected-current-closure",
+            CLOSURE,
+        ],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rollback.returncode == 0, rollback.stderr
+    rollback_result = json.loads(rollback.stdout)
+    assert rollback_result["promotion_receipt_sha256"] == sha256_json(promotion_receipt)
+    assert rollback_result["promoted_closure"] == CLOSURE
+    assert rollback_result["system_closure"] == PRIOR
+
+
+def test_persistent_promotion_cli_rejects_stale_rollback_observation(tmp_path: Path) -> None:
+    built = receipt()
+    plan = validate_persistent_authority(built, persistent_authority(built))
+    promotion_receipt = make_persistent_promotion_receipt(
+        plan,
+        live_closure=CLOSURE,
+        readback_evidence_sha256=READBACK_DIGEST,
+    )
+    promotion_receipt_path = tmp_path / "promotion-receipt.json"
+    promotion_receipt_path.write_text(json.dumps(promotion_receipt), encoding="utf-8")
+
+    script = Path(__file__).parents[1] / "scripts" / "managed_nix.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "persistent-promotion-rollback-plan",
+            str(promotion_receipt_path),
+            "--expected-current-promotion-receipt-sha256",
+            "9" * 64,
+            "--expected-current-closure",
+            CLOSURE,
+        ],
+        cwd=Path(__file__).parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "stale relative to current promotion" in completed.stderr
