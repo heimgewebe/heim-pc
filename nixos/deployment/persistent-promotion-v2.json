@@ -9,7 +9,9 @@
     "target",
     "system_closure",
     "persistent_state_sha256",
-    "readback_evidence_sha256"
+    "readback_evidence_sha256",
+    "observed_at",
+    "freshness_seconds"
   ],
   "authority_kind": "heim_pc.nixos_persistent_promotion_authority_v2",
   "authority_fields": [
@@ -64,6 +66,8 @@
     "live_closure",
     "promoted_persistent_state_sha256",
     "promoted_persistent_state_observation_sha256",
+    "promoted_persistent_state_observed_at",
+    "promoted_persistent_state_freshness_seconds",
     "build_receipt_sha256",
     "control_release_digest",
     "authority_sha256",
@@ -84,6 +88,8 @@
     "promoted_persistent_state_sha256",
     "promoted_persistent_state_observation_sha256",
     "current_persistent_state_observation_sha256",
+    "current_persistent_state_observed_at",
+    "current_persistent_state_freshness_seconds",
     "system_closure",
     "readback_evidence_sha256",
     "persistent_state_readback_evidence_sha256",
@@ -110,5 +116,9 @@
   "remote_input_resolution_allowed": false,
   "runtime_executor_implemented_here": false,
   "runtime_proof_separate": true,
-  "requires_typed_persistent_state_observation": true
+  "requires_typed_persistent_state_observation": true,
+  "persistent_state_observation_max_age_seconds": 300,
+  "persistent_state_observation_future_skew_seconds": 60,
+  "requires_exact_current_persistent_state_observation": true,
+  "requires_current_observation_strictly_newer_than_promotion": true
 }

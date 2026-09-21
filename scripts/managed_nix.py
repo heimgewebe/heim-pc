@@ -35,7 +35,9 @@ class ManagedNixContractError(RuntimeError):
 
 CONTRACT_VERSION = 1
 _CONTRACT_KIND = "heim_pc.nixos_managed_deployment_contract"
-_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "nixos" / "deployment" / "contract-v1.json"
+_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[1] / "nixos" / "deployment" / "contract-v1.json"
+)
 _PERSISTENT_PROMOTION_CONTRACT_PATH = (
     Path(__file__).resolve().parents[1]
     / "nixos"
@@ -45,7 +47,11 @@ _PERSISTENT_PROMOTION_CONTRACT_PATH = (
 _PERSISTENT_PROMOTION_CONTRACT_VERSION = 2
 _PERSISTENT_PROMOTION_CONTRACT_KIND = "heim_pc.nixos_persistent_promotion_contract"
 _SUPPORTED_PERSISTENT_PROMOTION_EFFECT_CLASS = "persistent-promotion"
-_SUPPORTED_PERSISTENT_STATE_OBSERVATION_KIND = "heim_pc.nixos_persistent_state_observation_v2"
+_SUPPORTED_PERSISTENT_STATE_OBSERVATION_KIND = (
+    "heim_pc.nixos_persistent_state_observation_v2"
+)
+_SUPPORTED_PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS = 300
+_SUPPORTED_PERSISTENT_STATE_OBSERVATION_FUTURE_SKEW_SECONDS = 60
 _SUPPORTED_PERSISTENT_STATE_OBSERVATION_FIELDS = frozenset(
     {
         "schema_version",
@@ -54,6 +60,8 @@ _SUPPORTED_PERSISTENT_STATE_OBSERVATION_FIELDS = frozenset(
         "system_closure",
         "persistent_state_sha256",
         "readback_evidence_sha256",
+        "observed_at",
+        "freshness_seconds",
     }
 )
 _SUPPORTED_PERSISTENT_PROMOTION_AUTHORITY_KIND = (
@@ -124,6 +132,8 @@ _SUPPORTED_PERSISTENT_PROMOTION_RECEIPT_FIELDS = frozenset(
         "live_closure",
         "promoted_persistent_state_sha256",
         "promoted_persistent_state_observation_sha256",
+        "promoted_persistent_state_observed_at",
+        "promoted_persistent_state_freshness_seconds",
         "build_receipt_sha256",
         "control_release_digest",
         "authority_sha256",
@@ -145,6 +155,8 @@ _SUPPORTED_PERSISTENT_PROMOTION_ROLLBACK_FIELDS = frozenset(
         "promoted_persistent_state_sha256",
         "promoted_persistent_state_observation_sha256",
         "current_persistent_state_observation_sha256",
+        "current_persistent_state_observed_at",
+        "current_persistent_state_freshness_seconds",
         "system_closure",
         "readback_evidence_sha256",
         "persistent_state_readback_evidence_sha256",
@@ -642,6 +654,8 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
             "rollback_plan_fields",
             "executor_authority",
             "max_authority_lifetime_seconds",
+            "persistent_state_observation_max_age_seconds",
+            "persistent_state_observation_future_skew_seconds",
             "requires_exact_build_receipt",
             "requires_exact_source_artifact",
             "requires_exact_system_closure",
@@ -650,6 +664,8 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
             "requires_independent_live_closure_readback",
             "requires_independent_promoted_persistent_state_readback",
             "requires_typed_persistent_state_observation",
+            "requires_exact_current_persistent_state_observation",
+            "requires_current_observation_strictly_newer_than_promotion",
             "requires_exact_promotion_receipt",
             "requires_current_promoted_closure",
             "requires_current_promoted_persistent_state",
@@ -661,7 +677,9 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
             "runtime_proof_separate",
         }
     )
-    root = _require_contract_object(value, "persistent promotion v2 contract", keys=keys)
+    root = _require_contract_object(
+        value, "persistent promotion v2 contract", keys=keys
+    )
     if (
         type(root.get("schema_version")) is not int
         or root.get("schema_version") != _PERSISTENT_PROMOTION_CONTRACT_VERSION
@@ -690,8 +708,13 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
         "rollback_plan_fields": _SUPPORTED_PERSISTENT_PROMOTION_ROLLBACK_FIELDS,
     }
     for key, expected in expected_fields.items():
-        if set(_contract_strings(root.get(key), f"persistent promotion.{key}")) != expected:
-            raise _contract_error(f"persistent promotion.{key} contain unsupported schema drift")
+        if (
+            set(_contract_strings(root.get(key), f"persistent promotion.{key}"))
+            != expected
+        ):
+            raise _contract_error(
+                f"persistent promotion.{key} contain unsupported schema drift"
+            )
 
     lifetime = _contract_int(
         root.get("max_authority_lifetime_seconds"),
@@ -699,6 +722,24 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
     )
     if lifetime != _SUPPORTED_MAX_AUTHORITY_LIFETIME_SECONDS:
         raise _contract_error("persistent promotion authority lifetime is unsupported")
+
+    observation_max_age = _contract_int(
+        root.get("persistent_state_observation_max_age_seconds"),
+        "persistent promotion.persistent_state_observation_max_age_seconds",
+    )
+    if observation_max_age != _SUPPORTED_PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS:
+        raise _contract_error("persistent promotion observation max age is unsupported")
+    observation_future_skew = _contract_int(
+        root.get("persistent_state_observation_future_skew_seconds"),
+        "persistent promotion.persistent_state_observation_future_skew_seconds",
+    )
+    if (
+        observation_future_skew
+        != _SUPPORTED_PERSISTENT_STATE_OBSERVATION_FUTURE_SKEW_SECONDS
+    ):
+        raise _contract_error(
+            "persistent promotion observation future skew is unsupported"
+        )
 
     for key in (
         "requires_exact_build_receipt",
@@ -709,6 +750,8 @@ def _load_persistent_promotion_contract() -> dict[str, Any]:
         "requires_independent_live_closure_readback",
         "requires_independent_promoted_persistent_state_readback",
         "requires_typed_persistent_state_observation",
+        "requires_exact_current_persistent_state_observation",
+        "requires_current_observation_strictly_newer_than_promotion",
         "requires_exact_promotion_receipt",
         "requires_current_promoted_closure",
         "requires_current_promoted_persistent_state",
@@ -757,14 +800,24 @@ BOOT_CRITICAL_EFFECTS = frozenset(_EFFECT_CONTRACT["boot_critical_effects"])
 NORMAL_EFFECTS = frozenset(_EFFECT_CONTRACT["normal_effects"])
 MINIMUM_MANAGED_BUILD_SCOPE = str(_EFFECT_CONTRACT["minimum_managed_build_scope"])
 ALLOWED_ACTIVATION_MODES = frozenset(_ACTIVATION_CONTRACT["allowed_modes"])
-MAX_AUTHORITY_LIFETIME_SECONDS = int(_ACTIVATION_CONTRACT["max_authority_lifetime_seconds"])
+MAX_AUTHORITY_LIFETIME_SECONDS = int(
+    _ACTIVATION_CONTRACT["max_authority_lifetime_seconds"]
+)
 ACTIVATION_EXECUTOR_AUTHORITY = str(_ACTIVATION_CONTRACT["executor_authority"])
 CANONICAL_BUILD_ENTRYPOINT = tuple(_BUILD_CONTRACT["canonical_entrypoint"])
 
 PERSISTENT_STATE_OBSERVATION_KIND = str(
     PERSISTENT_PROMOTION_CONTRACT["persistent_state_observation_kind"]
 )
-PERSISTENT_PROMOTION_AUTHORITY_KIND = str(PERSISTENT_PROMOTION_CONTRACT["authority_kind"])
+PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS = int(
+    PERSISTENT_PROMOTION_CONTRACT["persistent_state_observation_max_age_seconds"]
+)
+PERSISTENT_STATE_OBSERVATION_FUTURE_SKEW_SECONDS = int(
+    PERSISTENT_PROMOTION_CONTRACT["persistent_state_observation_future_skew_seconds"]
+)
+PERSISTENT_PROMOTION_AUTHORITY_KIND = str(
+    PERSISTENT_PROMOTION_CONTRACT["authority_kind"]
+)
 PERSISTENT_PROMOTION_PLAN_KIND = str(PERSISTENT_PROMOTION_CONTRACT["plan_kind"])
 PERSISTENT_PROMOTION_RECEIPT_KIND = str(PERSISTENT_PROMOTION_CONTRACT["receipt_kind"])
 PERSISTENT_PROMOTION_ROLLBACK_KIND = str(
@@ -1700,8 +1753,12 @@ def authorize_persistent_promotion_execution(
     return plan
 
 
-def validate_persistent_state_observation(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize one successor-observed persistent boot-state binding."""
+def validate_persistent_state_observation(
+    value: Mapping[str, Any],
+    *,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Normalize and optionally freshness-check one persistent-state observation."""
     if not isinstance(value, Mapping):
         raise ManagedNixError("persistent state observation must be an object")
     _require_exact_keys(
@@ -1712,6 +1769,31 @@ def validate_persistent_state_observation(value: Mapping[str, Any]) -> dict[str,
     _require_persistent_promotion_version(value.get("schema_version"))
     if value.get("kind") != PERSISTENT_STATE_OBSERVATION_KIND:
         raise ManagedNixError("unsupported persistent state observation")
+
+    observed = _parse_time(
+        value.get("observed_at"),
+        "persistent state observation observed_at",
+    )
+    observed_text = observed.isoformat().replace("+00:00", "Z")
+    freshness_seconds = value.get("freshness_seconds")
+    if (
+        type(freshness_seconds) is not int
+        or freshness_seconds <= 0
+        or freshness_seconds > PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS
+    ):
+        raise ManagedNixError(
+            "persistent state observation freshness_seconds is invalid"
+        )
+    if now is not None:
+        current = _parse_time(now, "now")
+        age = (current - observed).total_seconds()
+        if age < -PERSISTENT_STATE_OBSERVATION_FUTURE_SKEW_SECONDS:
+            raise ManagedNixError(
+                "persistent state observation time is materially in the future"
+            )
+        if age > freshness_seconds:
+            raise ManagedNixError("persistent state observation is stale")
+
     return {
         "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
         "kind": PERSISTENT_STATE_OBSERVATION_KIND,
@@ -1728,6 +1810,8 @@ def validate_persistent_state_observation(value: Mapping[str, Any]) -> dict[str,
             value.get("readback_evidence_sha256"),
             "persistent state readback_evidence_sha256",
         ),
+        "observed_at": observed_text,
+        "freshness_seconds": freshness_seconds,
     }
 
 
@@ -1737,8 +1821,9 @@ def make_persistent_promotion_receipt(
     *,
     live_closure: str,
     readback_evidence_sha256: str,
+    now: str,
 ) -> dict[str, Any]:
-    """Bind independent post-effect closure and typed persistent-state readback."""
+    """Bind fresh post-effect closure and typed persistent-state readback."""
     plan = validate_persistent_promotion_plan(promotion_plan)
     live = _require_closure(live_closure, "live_closure")
     if live != plan["system_closure"]:
@@ -1746,7 +1831,10 @@ def make_persistent_promotion_receipt(
             "persistent promotion live closure does not match approved closure"
         )
 
-    observation = validate_persistent_state_observation(persistent_state_observation)
+    observation = validate_persistent_state_observation(
+        persistent_state_observation,
+        now=now,
+    )
     if observation["target"] != plan["target"]:
         raise ManagedNixError(
             "persistent promotion persistent state observation target does not match approved target"
@@ -1774,6 +1862,8 @@ def make_persistent_promotion_receipt(
         "live_closure": live,
         "promoted_persistent_state_sha256": promoted_state,
         "promoted_persistent_state_observation_sha256": observation_sha256,
+        "promoted_persistent_state_observed_at": observation["observed_at"],
+        "promoted_persistent_state_freshness_seconds": observation["freshness_seconds"],
         "build_receipt_sha256": plan["build_receipt_sha256"],
         "control_release_digest": plan["control_release_digest"],
         "authority_sha256": plan["authority_sha256"],
@@ -1824,30 +1914,31 @@ def validate_persistent_promotion_receipt(value: Mapping[str, Any]) -> dict[str,
         value.get("prior_persistent_state_sha256"),
         "prior_persistent_state_sha256",
     )
-    promoted_state = _require_sha256(
-        value.get("promoted_persistent_state_sha256"),
-        "promoted_persistent_state_sha256",
+    observation = validate_persistent_state_observation(
+        {
+            "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
+            "kind": PERSISTENT_STATE_OBSERVATION_KIND,
+            "target": target,
+            "system_closure": system_closure,
+            "persistent_state_sha256": value.get("promoted_persistent_state_sha256"),
+            "readback_evidence_sha256": value.get(
+                "persistent_state_readback_evidence_sha256"
+            ),
+            "observed_at": value.get("promoted_persistent_state_observed_at"),
+            "freshness_seconds": value.get(
+                "promoted_persistent_state_freshness_seconds"
+            ),
+        }
     )
+    promoted_state = observation["persistent_state_sha256"]
     if promoted_state == prior_state:
         raise ManagedNixError(
             "persistent promotion receipt promoted persistent state must differ from prior persistent state"
         )
-    persistent_evidence = _require_sha256(
-        value.get("persistent_state_readback_evidence_sha256"),
-        "persistent_state_readback_evidence_sha256",
-    )
     observation_sha256 = _require_sha256(
         value.get("promoted_persistent_state_observation_sha256"),
         "promoted_persistent_state_observation_sha256",
     )
-    observation = {
-        "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
-        "kind": PERSISTENT_STATE_OBSERVATION_KIND,
-        "target": target,
-        "system_closure": system_closure,
-        "persistent_state_sha256": promoted_state,
-        "readback_evidence_sha256": persistent_evidence,
-    }
     if sha256_json(observation) != observation_sha256:
         raise ManagedNixError(
             "persistent promotion receipt is not bound to its persistent state observation"
@@ -1871,6 +1962,8 @@ def validate_persistent_promotion_receipt(value: Mapping[str, Any]) -> dict[str,
         "live_closure": live_closure,
         "promoted_persistent_state_sha256": promoted_state,
         "promoted_persistent_state_observation_sha256": observation_sha256,
+        "promoted_persistent_state_observed_at": observation["observed_at"],
+        "promoted_persistent_state_freshness_seconds": observation["freshness_seconds"],
         "build_receipt_sha256": _require_sha256(
             value.get("build_receipt_sha256"), "build_receipt_sha256"
         ),
@@ -1883,7 +1976,9 @@ def validate_persistent_promotion_receipt(value: Mapping[str, Any]) -> dict[str,
         "readback_evidence_sha256": _require_sha256(
             value.get("readback_evidence_sha256"), "readback_evidence_sha256"
         ),
-        "persistent_state_readback_evidence_sha256": persistent_evidence,
+        "persistent_state_readback_evidence_sha256": observation[
+            "readback_evidence_sha256"
+        ],
         "prior_closure": prior_closure,
         "prior_persistent_state_sha256": prior_state,
         "recovery_path": _require_canonical_string(
@@ -1893,36 +1988,39 @@ def validate_persistent_promotion_receipt(value: Mapping[str, Any]) -> dict[str,
     }
 
 
-def persistent_promotion_rollback_plan(
-    promotion_receipt: Mapping[str, Any],
-    current_persistent_state_observation: Mapping[str, Any],
+def _validate_current_persistent_state_observation(
     *,
-    expected_current_promotion_receipt_sha256: str,
-    expected_current_closure: str,
-) -> dict[str, Any]:
-    """Build rollback authority from the successful receipt still current now."""
-    receipt = validate_persistent_promotion_receipt(promotion_receipt)
-    receipt_sha256 = sha256_json(receipt)
-    expected_receipt_sha256 = _require_sha256(
-        expected_current_promotion_receipt_sha256,
-        "expected_current_promotion_receipt_sha256",
-    )
-    current_closure = _require_closure(
-        expected_current_closure,
-        "expected_current_closure",
-    )
+    receipt: Mapping[str, Any],
+    current_persistent_state_observation: Mapping[str, Any],
+    expected_current_persistent_state_observation_sha256: str,
+    current_closure: str,
+    now: str,
+) -> tuple[dict[str, Any], str]:
     current_observation = validate_persistent_state_observation(
-        current_persistent_state_observation
+        current_persistent_state_observation,
+        now=now,
     )
     current_observation_sha256 = sha256_json(current_observation)
-
-    if receipt_sha256 != expected_receipt_sha256:
+    expected_observation_sha256 = _require_sha256(
+        expected_current_persistent_state_observation_sha256,
+        "expected_current_persistent_state_observation_sha256",
+    )
+    if current_observation_sha256 != expected_observation_sha256:
         raise ManagedNixError(
-            "persistent promotion rollback receipt is stale relative to current promotion"
+            "persistent promotion rollback current persistent state observation does not match externally bound current observation"
         )
-    if receipt["live_closure"] != current_closure:
+
+    promoted_observed = _parse_time(
+        receipt["promoted_persistent_state_observed_at"],
+        "promoted_persistent_state_observed_at",
+    )
+    current_observed = _parse_time(
+        current_observation["observed_at"],
+        "current persistent state observed_at",
+    )
+    if current_observed <= promoted_observed:
         raise ManagedNixError(
-            "persistent promotion rollback promoted closure is stale relative to current state"
+            "persistent promotion rollback current persistent state observation must be strictly newer than promotion observation"
         )
     if current_observation["target"] != receipt["target"]:
         raise ManagedNixError(
@@ -1939,6 +2037,49 @@ def persistent_promotion_rollback_plan(
         raise ManagedNixError(
             "persistent promotion rollback promoted persistent state is stale relative to current persistent state"
         )
+    return current_observation, current_observation_sha256
+
+
+def persistent_promotion_rollback_plan(
+    promotion_receipt: Mapping[str, Any],
+    current_persistent_state_observation: Mapping[str, Any],
+    *,
+    expected_current_promotion_receipt_sha256: str,
+    expected_current_closure: str,
+    expected_current_persistent_state_observation_sha256: str,
+    now: str,
+) -> dict[str, Any]:
+    """Build rollback authority from exact current receipt and fresh state observation."""
+    receipt = validate_persistent_promotion_receipt(promotion_receipt)
+    receipt_sha256 = sha256_json(receipt)
+    expected_receipt_sha256 = _require_sha256(
+        expected_current_promotion_receipt_sha256,
+        "expected_current_promotion_receipt_sha256",
+    )
+    current_closure = _require_closure(
+        expected_current_closure,
+        "expected_current_closure",
+    )
+
+    if receipt_sha256 != expected_receipt_sha256:
+        raise ManagedNixError(
+            "persistent promotion rollback receipt is stale relative to current promotion"
+        )
+    if receipt["live_closure"] != current_closure:
+        raise ManagedNixError(
+            "persistent promotion rollback promoted closure is stale relative to current state"
+        )
+    current_observation, current_observation_sha256 = (
+        _validate_current_persistent_state_observation(
+            receipt=receipt,
+            current_persistent_state_observation=current_persistent_state_observation,
+            expected_current_persistent_state_observation_sha256=(
+                expected_current_persistent_state_observation_sha256
+            ),
+            current_closure=current_closure,
+            now=now,
+        )
+    )
 
     rollback = {
         "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
@@ -1946,13 +2087,15 @@ def persistent_promotion_rollback_plan(
         "target": receipt["target"],
         "promotion_receipt_sha256": receipt_sha256,
         "promoted_closure": receipt["system_closure"],
-        "promoted_persistent_state_sha256": receipt[
-            "promoted_persistent_state_sha256"
-        ],
+        "promoted_persistent_state_sha256": receipt["promoted_persistent_state_sha256"],
         "promoted_persistent_state_observation_sha256": receipt[
             "promoted_persistent_state_observation_sha256"
         ],
         "current_persistent_state_observation_sha256": current_observation_sha256,
+        "current_persistent_state_observed_at": current_observation["observed_at"],
+        "current_persistent_state_freshness_seconds": current_observation[
+            "freshness_seconds"
+        ],
         "system_closure": receipt["prior_closure"],
         "readback_evidence_sha256": receipt["readback_evidence_sha256"],
         "persistent_state_readback_evidence_sha256": receipt[
@@ -1969,6 +2112,10 @@ def persistent_promotion_rollback_plan(
         current_persistent_state_observation=current_observation,
         expected_current_promotion_receipt_sha256=expected_receipt_sha256,
         expected_current_closure=current_closure,
+        expected_current_persistent_state_observation_sha256=(
+            current_observation_sha256
+        ),
+        now=now,
     )
 
 
@@ -1979,8 +2126,10 @@ def validate_persistent_promotion_rollback_plan(
     current_persistent_state_observation: Mapping[str, Any],
     expected_current_promotion_receipt_sha256: str,
     expected_current_closure: str,
+    expected_current_persistent_state_observation_sha256: str,
+    now: str,
 ) -> dict[str, Any]:
-    """Validate rollback against receipt plus fresh typed persistent-state readback."""
+    """Validate rollback against exact receipt plus fresh exact current observation."""
     if not isinstance(value, Mapping):
         raise ManagedNixError("persistent promotion rollback plan must be an object")
     _require_exact_keys(
@@ -2006,11 +2155,6 @@ def validate_persistent_promotion_rollback_plan(
         expected_current_closure,
         "expected_current_closure",
     )
-    current_observation = validate_persistent_state_observation(
-        current_persistent_state_observation
-    )
-    current_observation_sha256 = sha256_json(current_observation)
-
     if receipt_sha256 != expected_receipt_sha256:
         raise ManagedNixError(
             "persistent promotion rollback receipt is stale relative to current promotion"
@@ -2019,21 +2163,17 @@ def validate_persistent_promotion_rollback_plan(
         raise ManagedNixError(
             "persistent promotion rollback promoted closure is stale relative to current state"
         )
-    if current_observation["target"] != receipt["target"]:
-        raise ManagedNixError(
-            "persistent promotion rollback current persistent state target is stale"
+    current_observation, current_observation_sha256 = (
+        _validate_current_persistent_state_observation(
+            receipt=receipt,
+            current_persistent_state_observation=current_persistent_state_observation,
+            expected_current_persistent_state_observation_sha256=(
+                expected_current_persistent_state_observation_sha256
+            ),
+            current_closure=current_closure,
+            now=now,
         )
-    if current_observation["system_closure"] != current_closure:
-        raise ManagedNixError(
-            "persistent promotion rollback current persistent state closure is stale"
-        )
-    if (
-        current_observation["persistent_state_sha256"]
-        != receipt["promoted_persistent_state_sha256"]
-    ):
-        raise ManagedNixError(
-            "persistent promotion rollback promoted persistent state is stale relative to current persistent state"
-        )
+    )
 
     plan = {
         "schema_version": _PERSISTENT_PROMOTION_CONTRACT_VERSION,
@@ -2058,6 +2198,13 @@ def validate_persistent_promotion_rollback_plan(
         "current_persistent_state_observation_sha256": _require_sha256(
             value.get("current_persistent_state_observation_sha256"),
             "current_persistent_state_observation_sha256",
+        ),
+        "current_persistent_state_observed_at": _require_canonical_string(
+            value.get("current_persistent_state_observed_at"),
+            "current_persistent_state_observed_at",
+        ),
+        "current_persistent_state_freshness_seconds": value.get(
+            "current_persistent_state_freshness_seconds"
         ),
         "system_closure": _require_closure(value.get("system_closure")),
         "readback_evidence_sha256": _require_sha256(
@@ -2127,6 +2274,20 @@ def validate_persistent_promotion_rollback_plan(
     ):
         raise ManagedNixError(
             "persistent promotion rollback plan is stale relative to current persistent state observation"
+        )
+    if (
+        plan["current_persistent_state_observed_at"]
+        != current_observation["observed_at"]
+    ):
+        raise ManagedNixError(
+            "persistent promotion rollback plan current observation time does not match current observation"
+        )
+    if (
+        plan["current_persistent_state_freshness_seconds"]
+        != current_observation["freshness_seconds"]
+    ):
+        raise ManagedNixError(
+            "persistent promotion rollback plan current observation freshness does not match current observation"
         )
     if plan["system_closure"] == plan["promoted_closure"]:
         raise ManagedNixError(
@@ -2202,6 +2363,7 @@ def build_parser() -> argparse.ArgumentParser:
     promotion_receipt.add_argument("persistent_state_observation", type=Path)
     promotion_receipt.add_argument("--live-closure", required=True)
     promotion_receipt.add_argument("--readback-evidence-sha256", required=True)
+    promotion_receipt.add_argument("--now", required=True)
 
     promotion_rollback = sub.add_parser("persistent-promotion-rollback-plan")
     promotion_rollback.add_argument("receipt", type=Path)
@@ -2211,6 +2373,11 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     promotion_rollback.add_argument("--expected-current-closure", required=True)
+    promotion_rollback.add_argument(
+        "--expected-current-persistent-state-observation-sha256",
+        required=True,
+    )
+    promotion_rollback.add_argument("--now", required=True)
     return parser
 
 
@@ -2269,6 +2436,7 @@ def main(argv: list[str] | None = None) -> int:
                 _load(args.persistent_state_observation),
                 live_closure=args.live_closure,
                 readback_evidence_sha256=args.readback_evidence_sha256,
+                now=args.now,
             )
         elif args.command == "persistent-promotion-rollback-plan":
             result = persistent_promotion_rollback_plan(
@@ -2278,6 +2446,10 @@ def main(argv: list[str] | None = None) -> int:
                     args.expected_current_promotion_receipt_sha256
                 ),
                 expected_current_closure=args.expected_current_closure,
+                expected_current_persistent_state_observation_sha256=(
+                    args.expected_current_persistent_state_observation_sha256
+                ),
+                now=args.now,
             )
         else:
             parser.error("unsupported command")
