@@ -1,6 +1,14 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.heimPc.physicalGates;
+  # CUDA 12.8+ defaults nvcc fatbin compression to `speed`; llama.cpp
+  # overrides that to `size`. Keep the exact CUDA backend/kernel set and SM
+  # target, but prefer compile speed for this CI-dominant physical-gate build.
+  ollamaCuda = pkgs.ollama-cuda.overrideAttrs (old: {
+    cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+      "-DGGML_CUDA_COMPRESSION_MODE=speed"
+    ];
+  });
   llamaCuda = pkgs.llama-cpp.override { cudaSupport = true; };
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
 
@@ -14,7 +22,7 @@ let
     ])
     ++ lib.optionals cfg.modelRuntime [
       pkgs.curl
-      pkgs.ollama-cuda
+      ollamaCuda
       llamaCuda
     ];
 
@@ -312,7 +320,7 @@ in
 
     services.ollama = lib.mkIf cfg.modelRuntime {
       enable = true;
-      package = pkgs.ollama-cuda;
+      package = ollamaCuda;
       host = "127.0.0.1";
       port = 11434;
       openFirewall = false;
