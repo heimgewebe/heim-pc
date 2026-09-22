@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2887666f38e7cf3ca27cf1fe6f15fa04ff5296e0217361c1e2f11e6663577894"
+SOURCE_SNAPSHOT_SHA256 = "60217fd94141888835b6ad5634e3d313eea3ab42d2813e37ad922a465668dd70"
 ROOT_LOCK_SHA256 = "50198c51fe97134f718a97a5df8cb32752bd26c1b9807663a8ad27fc3f1b6b28"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -491,6 +491,16 @@ class T(unittest.TestCase):
         self.assertIn("lib.optional cfg.modelRuntime llamaCuda", gates)
         self.assertIn("services.ollama = lib.mkIf cfg.modelRuntime", gates)
         self.assertNotIn("mesa-demos", live)
+
+    def test_gate_a_ollama_cpu_fallback_is_single_host_compatible_variant(self):
+        gates = (SOURCE / "modules/physical-gates.nix").read_text()
+        self.assertIn("ollamaCuda = pkgs.ollama-cuda.overrideAttrs", gates)
+        self.assertIn("-DGGML_CPU_ALL_VARIANTS=OFF", gates)
+        for flag in ("SSE42", "AVX", "AVX2", "BMI2", "FMA", "F16C"):
+            self.assertIn(f"-DGGML_{flag}=ON", gates)
+        self.assertIn("ollamaCuda\n      llamaCuda", gates)
+        self.assertIn("package = ollamaCuda;", gates)
+        self.assertIn('nixpkgs.config.cudaCapabilities = [ "8.9" ];', gates)
 
     def test_declarative_nixos_system_source_remains_non_destructive(self):
         content = "\n".join(

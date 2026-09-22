@@ -1,6 +1,21 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.heimPc.physicalGates;
+  # Gate A targets the physical Heim-PC CPU (Ryzen 9 5900XT / Zen 3).
+  # Ollama's local runner otherwise compiles every x86 CPU backend variant in
+  # addition to the CUDA runner. Keep one host-compatible AVX2/FMA/BMI2
+  # fallback while preserving the separately scoped CUDA SM 8.9 backend.
+  ollamaCuda = pkgs.ollama-cuda.overrideAttrs (old: {
+    cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+      "-DGGML_CPU_ALL_VARIANTS=OFF"
+      "-DGGML_SSE42=ON"
+      "-DGGML_AVX=ON"
+      "-DGGML_AVX2=ON"
+      "-DGGML_BMI2=ON"
+      "-DGGML_FMA=ON"
+      "-DGGML_F16C=ON"
+    ];
+  });
   llamaCuda = pkgs.llama-cpp.override { cudaSupport = true; };
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
 
@@ -14,7 +29,7 @@ let
     ])
     ++ lib.optionals cfg.modelRuntime [
       pkgs.curl
-      pkgs.ollama-cuda
+      ollamaCuda
       llamaCuda
     ];
 
@@ -312,7 +327,7 @@ in
 
     services.ollama = lib.mkIf cfg.modelRuntime {
       enable = true;
-      package = pkgs.ollama-cuda;
+      package = ollamaCuda;
       host = "127.0.0.1";
       port = 11434;
       openFirewall = false;
