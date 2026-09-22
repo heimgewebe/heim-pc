@@ -7,7 +7,7 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/0a1805a6fcff3f01c0005d450157baab27b7dbfc";
+    nixer.url = "github:heimgewebe/nixer/78fdc55a5f37cd11f51052c42e64c9074cbb167b";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
