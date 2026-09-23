@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2887666f38e7cf3ca27cf1fe6f15fa04ff5296e0217361c1e2f11e6663577894"
-ROOT_LOCK_SHA256 = "50198c51fe97134f718a97a5df8cb32752bd26c1b9807663a8ad27fc3f1b6b28"
+SOURCE_SNAPSHOT_SHA256 = "7d6e4b5955971046bd983bc5b9626067509b82ba8f32745a51a359e4d909793f"
+ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +32,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/78fdc55a5f37cd11f51052c42e64c9074cbb167b";',
+            'nixer.url = "github:heimgewebe/nixer/c0b75cfd580c221f8a5095fbf802c4f6386a017e";',
             nested,
         )
 
@@ -215,7 +215,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "78fdc55a5f37cd11f51052c42e64c9074cbb167b",
+            "c0b75cfd580c221f8a5095fbf802c4f6386a017e",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
