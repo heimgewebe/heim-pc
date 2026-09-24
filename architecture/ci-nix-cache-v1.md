@@ -54,10 +54,15 @@ existing cache objects.
   ordinary source build.
 - Invalid or untrusted signature: `require-sigs=true` prevents acceptance.
   The consumer workflow runs an independent ephemeral **HTTP substituter**
-  probe. It locally builds a reference-free derivation, publishes it under an
-  untrusted test key, removes the output, disables local builds, and requires
-  Nix to reject that HTTP substitute. Direct `nix copy --from` is deliberately
-  not used as signature-trust evidence.
+  probe. It locally builds an ordinary input-addressed reference-free
+  derivation, publishes it under an untrusted test key, verifies the narinfo is
+  not content-addressed and carries exactly that signature, removes the output,
+  disables local builds, and requires the specific Nix "not signed by any of the keys in
+  trusted-public-keys" diagnostic while the output remains absent. A positive control
+  then trusts only the ephemeral test public key in addition to the official
+  key and must substitute the same output successfully with local builds still
+  disabled. Direct `nix copy --from` is deliberately not used as
+  signature-trust evidence.
 - Publisher failure: the existing `heim-pc-nix` gates remain authoritative;
   no gate is removed, renamed, skipped, or made optional.
 

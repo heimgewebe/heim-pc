@@ -74,10 +74,12 @@ jobs:
           test "${#ollama_drvs[@]}" -eq 1
           test "${#llama_drvs[@]}" -eq 1
 
-          ollama_drv="${ollama_drvs[0]}"
-          llama_drv="${llama_drvs[0]}"
-          ollama_path="$(jq -r --arg drv "$ollama_drv" '.derivations[$drv].outputs.out.path' "$graph")"
-          llama_path="$(jq -r --arg drv "$llama_drv" '.derivations[$drv].outputs.out.path' "$graph")"
+          ollama_drv_key="${ollama_drvs[0]}"
+          llama_drv_key="${llama_drvs[0]}"
+          ollama_path="$(jq -r --arg drv "$ollama_drv_key" '.derivations[$drv].outputs.out.path' "$graph")"
+          llama_path="$(jq -r --arg drv "$llama_drv_key" '.derivations[$drv].outputs.out.path' "$graph")"
+          case "$ollama_drv_key" in /*) ollama_drv="$ollama_drv_key" ;; *) ollama_drv="/nix/store/$ollama_drv_key" ;; esac
+          case "$llama_drv_key" in /*) llama_drv="$llama_drv_key" ;; *) llama_drv="/nix/store/$llama_drv_key" ;; esac
           case "$ollama_path" in /*) ;; *) ollama_path="/nix/store/$ollama_path" ;; esac
           case "$llama_path" in /*) ;; *) llama_path="/nix/store/$llama_path" ;; esac
 

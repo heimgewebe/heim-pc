@@ -58,6 +58,10 @@ def test_publisher_resolves_exact_heavy_derivations_and_signs_before_upload():
     assert "-llama-cpp-9190.drv" in workflow
     assert "nix copy --no-recursive" not in workflow
     assert "nix copy \\" in workflow
+    assert 'ollama_drv_key="${ollama_drvs[0]}"' in workflow
+    assert 'llama_drv_key="${llama_drvs[0]}"' in workflow
+    assert 'ollama_drv="/nix/store/$ollama_drv_key"' in workflow
+    assert 'llama_drv="/nix/store/$llama_drv_key"' in workflow
     assert "?secret-key=$signing_key" in workflow
     assert "rsync -r --ignore-existing" in workflow
     assert "StrictHostKeyChecking=yes" in workflow
@@ -101,5 +105,14 @@ def test_consumer_keeps_all_existing_nix_gates_and_invalid_signature_probe():
     assert "max-jobs = 0" in probe
     assert 'nix-store --realise "$drv"' in probe
     assert "INVALID_SIGNATURE_REJECTED=true" in probe
+    assert "TRUSTED_SIGNATURE_ACCEPTED=true" in probe
+    assert 'grep -Fq "not signed by any of the keys in"' in probe
+    assert 'grep -Fq "trusted-public-keys"' in probe
+    assert 'test ! -e "$out"' in probe
+    assert 'grep -q "^CA:" "$narinfo"' in probe
+    assert 'grep -q "^Sig: heim-pc-ci-cache-untrusted-probe-1:" "$narinfo"' in probe
+    assert 'test "$(grep -c "^Sig:" "$narinfo")" -eq 1' in probe
+    assert 'test_key="$(cat /probe/untrusted.pub)"' in probe
     assert "nix copy --no-recursive --from" not in probe
     assert "require-sigs = false" not in probe
+    assert 'grep -Eiq "signature|trusted key|trusted public key|not signed"' not in probe
