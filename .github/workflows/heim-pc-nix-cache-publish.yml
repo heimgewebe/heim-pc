@@ -1,0 +1,153 @@
+name: heim-pc-nix-cache-publish
+
+on:
+  workflow_run:
+    workflows: [ heim-pc-nix ]
+    types: [ completed ]
+
+permissions:
+  contents: read
+
+env:
+  CI_NIX_CACHE_URL: https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+  CI_NIX_CACHE_PUBLIC_KEY: heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+  CI_NIX_CACHE_KEY_NAME: heim-pc-ci-cache-20260923-1
+  CI_NIX_CACHE_SSH_HOST: 94.16.121.119
+  CI_NIX_CACHE_SSH_HOST_KEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICcrOqnr1Ew+KxDibsZi9Vyk9Itdtb4g7XiIvM2GzvFV
+  EXPECTED_OLLAMA_DRV_SUFFIX: -ollama-0.32.3.drv
+  EXPECTED_LLAMA_CPP_DRV_SUFFIX: -llama-cpp-9190.drv
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ci-cache-publisher
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+      SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+    steps:
+      - name: Checkout exact successful Main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Verify publisher source identity
+        run: |
+          set -euo pipefail
+          test "$SOURCE_EVENT" = "push"
+          test "$SOURCE_BRANCH" = "main"
+          test "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+          printf 'PUBLISH_SOURCE_REVISION=%s\n' "$EXPECTED_SOURCE_REVISION"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            require-sigs = true
+            fallback = true
+            extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+            extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+
+      - name: Resolve exact heavy derivations from Main graph
+        id: heavy
+        run: |
+          set -euo pipefail
+          graph="$RUNNER_TEMP/physical-gate-derivations.json"
+          nix derivation show --recursive             .#packages.x86_64-linux.physical-gate-proprietary-system > "$graph"
+
+          mapfile -t ollama_drvs < <(
+            jq -r --arg suffix "$EXPECTED_OLLAMA_DRV_SUFFIX"               '.derivations | keys[] | select(endswith($suffix))' "$graph"
+          )
+          mapfile -t llama_drvs < <(
+            jq -r --arg suffix "$EXPECTED_LLAMA_CPP_DRV_SUFFIX"               '.derivations | keys[] | select(endswith($suffix))' "$graph"
+          )
+          test "${#ollama_drvs[@]}" -eq 1
+          test "${#llama_drvs[@]}" -eq 1
+
+          ollama_drv="${ollama_drvs[0]}"
+          llama_drv="${llama_drvs[0]}"
+          ollama_path="$(jq -r --arg drv "$ollama_drv" '.derivations[$drv].outputs.out.path' "$graph")"
+          llama_path="$(jq -r --arg drv "$llama_drv" '.derivations[$drv].outputs.out.path' "$graph")"
+          case "$ollama_path" in /*) ;; *) ollama_path="/nix/store/$ollama_path" ;; esac
+          case "$llama_path" in /*) ;; *) llama_path="/nix/store/$llama_path" ;; esac
+
+          nix build --no-link --no-update-lock-file --print-build-logs             "$ollama_drv^out" "$llama_drv^out"
+
+          test -e "$ollama_path"
+          test -e "$llama_path"
+          printf 'OLLAMA_DRV=%s\n' "$ollama_drv"
+          printf 'OLLAMA_PATH=%s\n' "$ollama_path"
+          printf 'LLAMA_CPP_DRV=%s\n' "$llama_drv"
+          printf 'LLAMA_CPP_PATH=%s\n' "$llama_path"
+          printf 'ollama_path=%s\n' "$ollama_path" >> "$GITHUB_OUTPUT"
+          printf 'llama_path=%s\n' "$llama_path" >> "$GITHUB_OUTPUT"
+
+      - name: Create signed append-only cache payload
+        env:
+          SIGNING_KEY_B64: ${{ secrets.CI_CACHE_NIX_SIGNING_KEY_B64 }}
+          OLLAMA_PATH: ${{ steps.heavy.outputs.ollama_path }}
+          LLAMA_CPP_PATH: ${{ steps.heavy.outputs.llama_path }}
+        run: |
+          set -euo pipefail
+          cache_dir="$RUNNER_TEMP/ci-nix-cache"
+          signing_key="$RUNNER_TEMP/ci-nix-cache-signing-key"
+          trap 'rm -f "$signing_key"' EXIT
+          mkdir -p "$cache_dir"
+          printf '%s' "$SIGNING_KEY_B64" | base64 --decode > "$signing_key"
+          chmod 600 "$signing_key"
+
+          nix copy \
+            --to "file://$cache_dir?secret-key=$signing_key" \
+            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+
+          test -f "$cache_dir/nix-cache-info"
+          for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
+            base="$(basename "$store_path")"
+            hash="${base%%-*}"
+            narinfo="$cache_dir/$hash.narinfo"
+            test -f "$narinfo"
+            grep -Fqx "StorePath: $store_path" "$narinfo"
+            grep -q "^Sig: $CI_NIX_CACHE_KEY_NAME:" "$narinfo"
+          done
+
+      - name: Upload cache through restricted publisher key
+        env:
+          UPLOAD_KEY_B64: ${{ secrets.CI_CACHE_UPLOAD_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          cache_dir="$RUNNER_TEMP/ci-nix-cache"
+          upload_key="$RUNNER_TEMP/ci-nix-cache-upload-key"
+          known_hosts="$RUNNER_TEMP/ci-nix-cache-known-hosts"
+          trap 'rm -f "$upload_key" "$known_hosts"' EXIT
+          printf '%s' "$UPLOAD_KEY_B64" | base64 --decode > "$upload_key"
+          chmod 600 "$upload_key"
+          printf '%s %s\n' "$CI_NIX_CACHE_SSH_HOST" "$CI_NIX_CACHE_SSH_HOST_KEY" > "$known_hosts"
+          chmod 600 "$known_hosts"
+
+          rsync -r --ignore-existing             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
+
+      - name: Verify public signed-cache readback
+        env:
+          OLLAMA_PATH: ${{ steps.heavy.outputs.ollama_path }}
+          LLAMA_CPP_PATH: ${{ steps.heavy.outputs.llama_path }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$CI_NIX_CACHE_URL/nix-cache-info" >/dev/null
+          for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
+            base="$(basename "$store_path")"
+            hash="${base%%-*}"
+            narinfo="$(curl --fail --silent --show-error "$CI_NIX_CACHE_URL/$hash.narinfo")"
+            grep -Fqx "StorePath: $store_path" <<< "$narinfo"
+            grep -q "^Sig: $CI_NIX_CACHE_KEY_NAME:" <<< "$narinfo"
+            printf 'PUBLISHED_SIGNED_PATH=%s\n' "$store_path"
+          done

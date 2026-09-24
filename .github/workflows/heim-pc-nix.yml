@@ -4,9 +4,14 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  CI_NIX_CACHE_URL: https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+  CI_NIX_CACHE_PUBLIC_KEY: heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
 
 jobs:
   nix:
@@ -32,6 +37,23 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            require-sigs = true
+            fallback = true
+            extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+            extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+
+      - name: Report CI-only signed-cache trust
+        run: |
+          set -euo pipefail
+          nix --version
+          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback) ='
+          if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "$CI_NIX_CACHE_URL/health.txt" >/dev/null; then
+            printf 'CI_NIX_CACHE_HEALTH=available\n'
+          else
+            printf 'CI_NIX_CACHE_HEALTH=unavailable; fallback=true keeps the local build path authoritative\n'
+          fi
 
       - name: Evaluate complete flake without building checks
         run: nix flake check --no-build --no-update-lock-file --print-build-logs
@@ -45,6 +67,12 @@ jobs:
           .#checks.x86_64-linux.recovery-readiness-contract
           .#checks.x86_64-linux.intentional-break-rejected
           .#checks.x86_64-linux.agent-zone-contract
+
+      - name: Record heavy-derivation substitution plan
+        run: |
+          set -o pipefail
+          nix build --dry-run --no-link --no-update-lock-file             .#packages.x86_64-linux.physical-gate-proprietary-system             2>&1 | tee "$RUNNER_TEMP/heim-pc-ci-cache-dry-run.log"
+          grep -E 'ollama-0\.32\.3|llama-cpp-9190'             "$RUNNER_TEMP/heim-pc-ci-cache-dry-run.log" || true
 
       - name: Build storage, VM and physical-gate closures
         run: >-
@@ -73,3 +101,6 @@ jobs:
           .#checks.x86_64-linux.integration
           .#checks.x86_64-linux.firstboot-credentials
           .#checks.x86_64-linux.trust-zones
+
+      - name: Prove untrusted signatures are rejected by substitution
+        run: bash scripts/ci/check_nix_cache_signature_rejection.sh
