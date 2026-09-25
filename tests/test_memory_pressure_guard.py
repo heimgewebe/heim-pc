@@ -30,6 +30,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         *,
         now: int = 100,
         pid: int = 123,
+        starttime_ticks: int = 100,
         rss_anon: int = 10 * 1024**3,
         mem_available: int = 32 * 1024**3,
     ) -> guard.Observation:
@@ -38,6 +39,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             pid=pid,
             active_state="active",
             control_group="/system.slice/grabowski-operator.service",
+            process_starttime_ticks=starttime_ticks,
             rss_anon_bytes=rss_anon,
             rss_bytes=rss_anon + 16 * 1024**2,
             swap_bytes=256 * 1024**2,
@@ -639,6 +641,48 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertEqual(final["restart_history_unix"], [100])
             self.assertEqual(final["last_pid"], 456)
 
+    def test_stale_restart_observation_does_not_mutate_or_consume_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+            show_count = 0
+            mutations: list[str] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                nonlocal show_count
+                if argv[1] == "show":
+                    show_count += 1
+                    return self.active_show(
+                        argv,
+                        pid=123 if show_count <= 2 else 456,
+                    )
+                if argv[1] == "restart":
+                    mutations.append("restart")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            result = guard.run_once(
+                self.policy,
+                base / "state",
+                runner=fake_runner,
+                proc_root=proc,
+                cgroup_root=cgroup,
+                allow_actions=True,
+                now_unix=100,
+            )
+
+            self.assertEqual(mutations, [])
+            self.assertEqual(result["result"], "restart-aborted-stale-observation")
+            self.assertFalse(result["readback"]["systemctl_attempted"])
+            self.assertFalse(result["readback"]["precondition_match"])
+            self.assertEqual(result["readback"]["pre_pid"], 456)
+            final = json.loads((base / "state/state.json").read_text())
+            self.assertEqual(final["last_pid"], 456)
+            self.assertEqual(final["consecutive_over_limit"], 0)
+            self.assertEqual(final["restart_history_unix"], [])
+            self.assertFalse(final["circuit_open"])
+            self.assertIsNone(final["pending_action"])
+
     def test_pending_restart_reentry_stops_instead_of_restarting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -740,20 +784,28 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 guard._run(["/usr/bin/systemctl", "show", "x"], timeout_seconds=1)
 
     def test_nonzero_restart_returncode_is_not_success(self) -> None:
-        def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
-            if argv[1] == "restart":
-                return subprocess.CompletedProcess(argv, 1, "", "failed")
-            if argv[1] == "show":
-                return self.active_show(argv, pid=456)
-            raise AssertionError(argv)
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _cgroup = self._fake_proc(Path(temporary))
+            restarted = False
 
-        with patch.object(guard.time, "sleep", return_value=None):
-            success, readback = guard._verified_restart(
-                self.policy,
-                123,
-                fake_runner,
-            )
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                nonlocal restarted
+                if argv[1] == "restart":
+                    restarted = True
+                    return subprocess.CompletedProcess(argv, 1, "", "failed")
+                if argv[1] == "show":
+                    return self.active_show(argv, pid=456 if restarted else 123)
+                raise AssertionError(argv)
+
+            with patch.object(guard.time, "sleep", return_value=None):
+                success, readback = guard._verified_restart(
+                    self.policy,
+                    self.observation(pid=123, starttime_ticks=100),
+                    fake_runner,
+                    proc_root=proc,
+                )
         self.assertFalse(success)
+        self.assertTrue(readback["systemctl_attempted"])
         self.assertEqual(readback["systemctl_returncode"], 1)
         self.assertEqual(readback["post_pid"], 456)
 
@@ -1012,25 +1064,84 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             fsync_directory.assert_called_once_with(path.parent)
 
     def test_verified_restart_requires_new_active_pid(self) -> None:
-        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _cgroup = self._fake_proc(Path(temporary))
+            calls: list[list[str]] = []
+            restarted = False
 
-        def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
-            calls.append(argv)
-            if argv[1] == "restart":
-                return subprocess.CompletedProcess(argv, 0, "", "")
-            if argv[1] == "show":
-                return self.active_show(argv, pid=456)
-            raise AssertionError(argv)
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                nonlocal restarted
+                calls.append(argv)
+                if argv[1] == "restart":
+                    restarted = True
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[1] == "show":
+                    return self.active_show(argv, pid=456 if restarted else 123)
+                raise AssertionError(argv)
 
-        with patch.object(guard.time, "sleep", return_value=None):
+            with patch.object(guard.time, "sleep", return_value=None):
+                success, readback = guard._verified_restart(
+                    self.policy,
+                    self.observation(pid=123, starttime_ticks=100),
+                    fake_runner,
+                    proc_root=proc,
+                )
+        self.assertTrue(success)
+        self.assertTrue(readback["precondition_match"])
+        self.assertTrue(readback["systemctl_attempted"])
+        self.assertEqual(readback["post_pid"], 456)
+        self.assertEqual(calls[0][1], "show")
+        self.assertEqual(calls[1][1], "restart")
+
+    def test_verified_restart_aborts_if_pid_changes_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _cgroup = self._fake_proc(Path(temporary))
+            calls: list[list[str]] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(argv)
+                if argv[1] == "show":
+                    return self.active_show(argv, pid=456)
+                if argv[1] == "restart":
+                    self.fail("restart must not run for a stale observation")
+                raise AssertionError(argv)
+
             success, readback = guard._verified_restart(
                 self.policy,
-                123,
+                self.observation(pid=123, starttime_ticks=100),
                 fake_runner,
+                proc_root=proc,
             )
-        self.assertTrue(success)
-        self.assertEqual(readback["post_pid"], 456)
-        self.assertEqual(calls[0][1], "restart")
+        self.assertFalse(success)
+        self.assertFalse(readback["precondition_match"])
+        self.assertFalse(readback["systemctl_attempted"])
+        self.assertEqual(readback["pre_pid"], 456)
+        self.assertEqual([call[1] for call in calls], ["show"])
+
+    def test_verified_restart_aborts_if_starttime_changes_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _cgroup = self._fake_proc(Path(temporary))
+            calls: list[list[str]] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(argv)
+                if argv[1] == "show":
+                    return self.active_show(argv, pid=123)
+                if argv[1] == "restart":
+                    self.fail("restart must not run for PID reuse")
+                raise AssertionError(argv)
+
+            success, readback = guard._verified_restart(
+                self.policy,
+                self.observation(pid=123, starttime_ticks=99),
+                fake_runner,
+                proc_root=proc,
+            )
+        self.assertFalse(success)
+        self.assertFalse(readback["precondition_match"])
+        self.assertFalse(readback["systemctl_attempted"])
+        self.assertEqual(readback["pre_process_starttime_ticks"], 100)
+        self.assertEqual([call[1] for call in calls], ["show"])
 
 
 if __name__ == "__main__":

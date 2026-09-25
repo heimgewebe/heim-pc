@@ -40,6 +40,7 @@ class Observation:
     pid: int
     active_state: str
     control_group: str
+    process_starttime_ticks: int
     rss_anon_bytes: int
     rss_bytes: int
     swap_bytes: int
@@ -345,6 +346,7 @@ def observe(
         pid=pid,
         active_state=unit_after["active_state"],
         control_group=unit_after["control_group"],
+        process_starttime_ticks=starttime_after,
         rss_anon_bytes=status["rss_anon_bytes"],
         rss_bytes=status["rss_bytes"],
         swap_bytes=status["swap_bytes"],
@@ -868,27 +870,82 @@ def _event(observation: Observation | None, *, action: str, reason: str, result:
     return value
 
 
-def _verified_restart(policy: dict[str, Any], old_pid: int, runner: Runner) -> tuple[bool, dict[str, Any]]:
+def _verified_restart(
+    policy: dict[str, Any],
+    observation: Observation,
+    runner: Runner,
+    *,
+    proc_root: Path = PROC_ROOT,
+) -> tuple[bool, dict[str, Any]]:
+    pre = read_unit_state(policy, runner)
+    pre_process_starttime_ticks: int | None = None
+    pre_process_control_group: str | None = None
+    precondition_error: str | None = None
+    if (
+        pre["active_state"] == "active"
+        and pre["pid"] == observation.pid
+        and pre["control_group"] == observation.control_group
+    ):
+        try:
+            pre_process_starttime_ticks = _read_process_starttime(
+                observation.pid,
+                proc_root,
+            )
+            pre_process_control_group = _read_process_cgroup(
+                observation.pid,
+                proc_root,
+            )
+        except GuardError as exc:
+            precondition_error = str(exc)
+
+    precondition_match = (
+        precondition_error is None
+        and pre["active_state"] == "active"
+        and pre["pid"] == observation.pid
+        and pre["control_group"] == observation.control_group
+        and pre_process_starttime_ticks == observation.process_starttime_ticks
+        and pre_process_control_group == observation.control_group
+    )
+    readback: dict[str, Any] = {
+        "systemctl_attempted": False,
+        "precondition_match": precondition_match,
+        "pre_active_state": pre["active_state"],
+        "pre_pid": pre["pid"],
+        "pre_control_group": pre["control_group"],
+        "pre_process_starttime_ticks": pre_process_starttime_ticks,
+        "pre_process_control_group": pre_process_control_group,
+        "observed_pid": observation.pid,
+        "observed_process_starttime_ticks": observation.process_starttime_ticks,
+    }
+    if precondition_error is not None:
+        readback["precondition_error"] = precondition_error
+    if not precondition_match:
+        return False, readback
+
     completed = _call_runner(
         runner,
         [SYSTEMCTL, "restart", policy["target_unit"]],
         timeout_seconds=SYSTEMCTL_RESTART_TIMEOUT_SECONDS,
     )
+    readback["systemctl_attempted"] = True
+    readback["systemctl_returncode"] = completed.returncode
     time.sleep(policy["post_restart_wait_seconds"])
     post = read_unit_state(policy, runner)
     success = (
         completed.returncode == 0
         and post["active_state"] == "active"
         and post["pid"] > 0
-        and post["pid"] != old_pid
+        and post["pid"] != observation.pid
         and post["control_group"] == policy["expected_control_group"]
     )
-    return success, {
-        "systemctl_returncode": completed.returncode,
-        "post_active_state": post["active_state"],
-        "post_pid": post["pid"],
-        "post_control_group": post["control_group"],
-    }
+    readback.update(
+        {
+            "post_active_state": post["active_state"],
+            "post_pid": post["pid"],
+            "post_control_group": post["control_group"],
+        }
+    )
+    return success, readback
 
 
 def _verified_stop(policy: dict[str, Any], runner: Runner) -> tuple[bool, dict[str, Any]]:
@@ -1065,8 +1122,41 @@ def _run_once_locked(
         prepared_state = next_state
 
     if action == "restart":
-        success, readback = _verified_restart(policy, observation.pid, runner)
+        success, readback = _verified_restart(
+            policy,
+            observation,
+            runner,
+            proc_root=proc_root,
+        )
         event["readback"] = readback
+        if readback["systemctl_attempted"] is False:
+            current_pid = int(readback["pre_pid"])
+            safe_last_pid = (
+                current_pid
+                if (
+                    current_pid > 0
+                    and readback["pre_active_state"] == "active"
+                    and readback["pre_control_group"] == policy["expected_control_group"]
+                )
+                else 0
+            )
+            aborted_state = {
+                **next_state,
+                "last_pid": safe_last_pid,
+                "consecutive_over_limit": 0,
+                "circuit_open": state["circuit_open"],
+                "pending_action": None,
+            }
+            _atomic_json_at(state_dir_fd, "state.json", aborted_state)
+            event["result"] = "restart-aborted-stale-observation"
+            _atomic_json_at(state_dir_fd, "latest.json", event)
+            _append_event_at(
+                state_dir_fd,
+                "events.jsonl",
+                event,
+                max_bytes=policy["event_segment_max_bytes"],
+            )
+            return event
         if success:
             completed_at = max(
                 observation.observed_at_unix,

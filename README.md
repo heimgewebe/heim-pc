@@ -136,9 +136,13 @@ kann einen laufenden Tick daher nicht umlenken. Ein ungültiger State, offener C
 fail-closed.
 
 Vor jeder Guard-Mutation wird `pending_action` samt Restart-Budget und offenem
-Circuit atomar persistiert und der Directory-Eintrag gefsync't. Daemon-Tick,
-Preflight und Circuit-Reset serialisieren sich über denselben State-Directory-
-`flock`. `systemctl`-Reads und -Mutationen sind zeitbegrenzt; nonzero
+Circuit atomar persistiert und der Directory-Eintrag gefsync't. Direkt vor
+einem Operator-Restart wird der zuvor gemessene MainPID zusätzlich über
+ControlGroup, Prozess-Cgroup und `/proc/<pid>/stat`-Startzeit erneut gebunden.
+Hat sich die Prozessidentität seit dem Memory-Sample geändert, wird der Restart
+ohne Budgetverbrauch abgebrochen und erst der nächste Tick darf neu entscheiden.
+Daemon-Tick, Preflight und Circuit-Reset serialisieren sich über denselben State-
+Directory-`flock`. `systemctl`-Reads und -Mutationen sind zeitbegrenzt; nonzero
 Returncodes zählen niemals als Erfolg. Bei `--start` wird eine bereits laufende
 Guard-Instanz ausdrücklich neu gestartet und anschließend über
 `/proc/<pid>/cmdline` an den exakten inhaltsadressierten Release-Pfad gebunden.

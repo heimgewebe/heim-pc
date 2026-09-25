@@ -137,11 +137,16 @@ den Operator kontrolliert.
 
 Vor jedem `restart` oder `stop-circuit` schreibt der Guard die beabsichtigte
 Aktion, das Restart-Budget und `circuit_open=true` atomar und `fsync`-gebunden
-als `pending_action` in den persistenten State. Erst danach darf `systemctl`
-den Operator mutieren. Stirbt der Guard zwischen State-Write und Mutation oder
-bleibt der neue PID-/Cgroup-Zustand unklar, bleibt der vorbereitete Circuit
-offen; beim Wiederanlauf wird nicht erneut restartet, sondern fail-closed in den
-Stop-/Recovery-Pfad gewechselt.
+als `pending_action` in den persistenten State. Unmittelbar vor einem Restart
+wird die beim Memory-Sample gebundene Prozessidentität erneut gegen Unit-MainPID,
+ControlGroup, `/proc/<pid>/stat`-Startzeit und Prozess-Cgroup geprüft. Ist die
+Identität inzwischen abgewichen, wird `systemctl restart` nicht aufgerufen; die
+vorbereitete Restart-Buchhaltung wird ohne Budgetverbrauch zurückgenommen und
+der nächste Tick muss frisch messen. Erst bei unveränderter Identität darf
+`systemctl` den Operator mutieren. Stirbt der Guard zwischen State-Write und
+Mutation oder bleibt ein tatsächlich versuchter Restart im Ergebnis unklar,
+bleibt der vorbereitete Circuit offen; beim Wiederanlauf wird nicht erneut
+restartet, sondern fail-closed in den Stop-/Recovery-Pfad gewechselt.
 
 Ein erfolgreicher, eindeutig verifizierter Restart finalisiert den State erst
 danach auf den neuen PID, ersetzt den vorläufigen Restart-Zeitstempel durch den
