@@ -1,0 +1,32 @@
+[Unit]
+Description=Protect Heim-PC from runaway Grabowski memory growth
+After=local-fs.target grabowski-operator.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @SYSTEM_RELEASE_ROOT@/scripts/grabowski_memory_guard.py --policy @SYSTEM_RELEASE_ROOT@/config/memory-pressure-guard.v1.json --state-dir /var/lib/heim-pc/grabowski-memory-guard --loop
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+StateDirectory=heim-pc/grabowski-memory-guard
+StateDirectoryMode=0700
+MemoryMax=128M
+CPUQuota=10%
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target

@@ -105,6 +105,47 @@ ab, ersetzt nur die vorhandene `health.listen_addr`-Zeile atomar und liest den
 Zielwert anschließend zurück. Sie startet keinen Dienst; `tunnel-client doctor`
 und die systemd-Laufzeitprüfung bleiben getrennte Abschlussbelege.
 
+## Schutz vor globaler Speichererschöpfung
+
+Der belegte globale OOM vom 25.09.2026 wird durch einen unabhängigen
+systemweiten Guard abgesichert:
+
+* `heim-pc-grabowski-memory-guard.service` läuft außerhalb der
+  `grabowski-operator.service`-Cgroup und bewertet alle 15 Sekunden den
+  `RssAnon`-Wert des exakten Grabowski-`MainPID` plus `MemAvailable` des
+  Hosts.
+* Ab 24 GiB `RssAnon` in zwei aufeinanderfolgenden Messungen wird der ganze
+  Operator kontrolliert neu gestartet. Bei höchstens 8 GiB `MemAvailable`
+  und mindestens 12 GiB Grabowski-`RssAnon` greift der Notfallpfad sofort.
+* 18 GiB sind nur Warnschwelle. Ein 10-Minuten-Cooldown und maximal drei
+  Restarts pro Stunde verhindern Restart-Schleifen; danach stoppt ein
+  Circuit Breaker nur den Operator. Der Rechner wird niemals automatisch
+  rebootet.
+
+Vor dem produktiven Start führt der Installer denselben Guard einmal mit
+`--observe-only` gegen den realen Operator aus. Ein bereits anstehender
+Restart oder Circuit-Breaker blockiert die automatische Aktivierung.
+
+Auf dem Host läuft zusätzlich bereits
+`heim-pc-memory-pressure-snapshot.timer` als unabhängige passive
+Root-Telemetrie für RAM, Swap, PSI, Top-Prozesse und Cgroups. Diese vorhandene
+Wache wird von diesem Änderungspaket bewusst nicht dupliziert oder verändert.
+
+Ein `MemoryMax` von ungefähr 32 GiB plus `MemoryOOMGroup=yes` bleibt ein
+möglicher späterer Kernel-Airbag und wird in dieser ersten Aktivierung nicht
+gesetzt.
+
+Installation:
+
+```bash
+sudo python3 scripts/install_memory_pressure_guard.py \
+  --apply --enable --start --expected-head <commit>
+```
+
+Der Installer installiert keine zusätzliche OOM-Killer-Software. Details,
+Schwellen und Circuit-Breaker-Regeln stehen in
+`architecture/runaway-guard.md`.
+
 ## Host-Health- und Log-Remediation
 
 `config/host-health-remediation.v1.json` bindet die schmale persistente

@@ -2,86 +2,231 @@
 id: runaway-guard
 role: norm
 status: canonical
-last_reviewed: 2026-07-27
+last_reviewed: 2026-09-25
 depends_on:
   - security
 verifies_with:
   - tests/test_run_bounded_background.py
   - tests/test_install_docker_log_policy.py
+  - tests/test_memory_pressure_guard.py
+  - tests/test_install_memory_pressure_guard.py
 ---
 
-# Minimaler Schutz gegen Runaway-Prozesse
+# Schutz gegen Runaway-Prozesse und globalen Speicherkollaps
 
 ## Ziel
 
-Der Heim-PC begrenzt zwei häufige Schadenspfade mit vorhandenen Betriebssystemmechanismen:
+Der Heim-PC begrenzt vier getrennte Schadenspfade:
 
-1. bewusst als riskant eingestufte Hintergrundbefehle laufen in einer begrenzten transienten User-systemd-Unit;
-2. neue Docker-Container erhalten standardmäßig größenbegrenzte rotierende Logs.
+1. bewusst als riskant eingestufte Hintergrundbefehle laufen in einer begrenzten
+   transienten User-systemd-Unit;
+2. neue Docker-Container erhalten standardmäßig größenbegrenzte rotierende Logs;
+3. ein unabhängiger systemweiter Grabowski-Memory-Guard beendet einen belegten
+   Grabowski-Speicherrunaway kontrolliert, bevor er den ganzen Host in einen
+   globalen OOM zieht;
+4. eine passive, begrenzte Telemetrie hält Prozess-, Cgroup-, PSI-, RAM- und
+   Swap-Evidenz für spätere Attribution fest.
 
-Diese Schicht ist kein allgemeiner Prozesswächter und versucht nicht, Endlosschleifen heuristisch zu erkennen.
+Auslöser für die Erweiterung ist der belegte globale OOM vom 25.09.2026. Der
+Grabowski-Hauptprozess erreichte unmittelbar vor dem Kollaps ungefähr 47 GiB RSS
+und zusätzlich rund 13 GiB Swap. Gleichzeitig fiel MemAvailable auf 0 MiB und
+der Swap war praktisch vollständig belegt. Kleine Kubernetes-Prozesse wurden
+zuerst vom Kernel-OOM-Killer entfernt, ohne den Speicherdruck zu lösen.
+
+Die vorherige Annahme, nur bewusst gekapselte Hintergrundjobs müssten begrenzt
+werden, ist damit widerlegt.
 
 ## Bewusst ausgeschlossene Komplexität
 
 Nicht Bestandteil dieses Vertrags sind:
 
-* globale CPU-, Speicher- oder Dateigrößenlimits für die gesamte Benutzersitzung;
-* ein permanenter Prozessscanner;
-* automatische Prozessklassifikation oder ein CPU-Prozesskiller;
-* `systemd-oomd`-Einführung;
+* ein harter globaler MemoryMax für die gesamte Benutzersitzung;
+* MemoryHigh=18G, MemoryMax=24G oder MemorySwapMax=4G auf
+  grabowski-operator.service;
+* automatischer Rechner-Reboot;
+* regelmäßiges kill -9 einzelner Python-PIDs;
+* earlyoom oder systemd-oomd als konkurrierende hostweite Opferwahl;
+* automatische CPU- oder Endlosschleifenklassifikation;
 * automatische Löschung gewachsener Dateien;
-* automatische Neuerstellung bestehender Docker-Container.
+* automatische Neuerstellung bestehender Docker-Container;
+* die Behauptung, die Guard-Reaktion behebe bereits die interne
+  Grabowski-Leak-Ursache.
 
-Damit bleiben gewöhnliche Desktopprogramme, Builds, Backups und Echtzeit-Audiopfade unverändert.
+Damit bleiben gewöhnliche Desktopprogramme, Audio, Remotezugriff, Builds und
+Backups ohne pauschales Session-Limit.
 
 ## Begrenzter Hintergrundstart
 
 Der kanonische Starter ist:
 
-```text
-python3 scripts/run_bounded_background.py --name <name> -- <programm> <argumente...>
-```
+    python3 scripts/run_bounded_background.py --name <name> -- <programm> <argumente...>
 
-Er verwendet ausschließlich argv und keine Shellauswertung. Die Standardgrenzen stehen in `config/runaway-guard.v1.json`:
+Er verwendet ausschließlich argv und keine Shellauswertung. Die Standardgrenzen
+stehen in config/runaway-guard.v1.json:
 
 * maximale Laufzeit: 2 Stunden;
 * maximales RAM: 8 GiB;
 * höchstens 256 Prozesse oder Threads in der Unit;
 * maximale Größe einer einzelnen selbst geschriebenen regulären Datei: 1 GiB;
 * reduzierte CPU- und IO-Gewichtung;
-* Standardinput `/dev/null`;
+* Standardinput /dev/null;
 * Ausgabe ausschließlich ins Journal;
 * unit-spezifische Ausgaberatenbegrenzung;
-* `KillMode=control-group`, damit beim Stoppen die gesamte Prozessgruppe endet.
+* KillMode=control-group, damit beim Stoppen die gesamte Prozessgruppe endet.
 
-Die Grenzen können pro bewusstem Start enger gesetzt werden. Unbegrenzte Nullwerte werden abgelehnt.
+Die Grenzen können pro bewusstem Start enger gesetzt werden. Unbegrenzte
+Nullwerte werden abgelehnt.
 
-Interaktive Programme, die ein Terminal benötigen, gehören nicht in diesen Hintergrundpfad. Insbesondere ist `/dev/null` keine Reparatur für Programme, die EOF fehlerhaft als Aufforderung zur erneuten Ausgabe behandeln; die Ressourcen- und Journalgrenzen begrenzen in diesem Fall nur den Schaden.
+Interaktive Programme, die ein Terminal benötigen, gehören nicht in diesen
+Hintergrundpfad.
+
+## Unabhängiger Grabowski-Memory-Guard
+
+heim-pc-grabowski-memory-guard.service ist ein eigener root-systemd-Dienst in
+system.slice. Er ist weder Kindprozess noch PartOf von
+grabowski-operator.service.
+
+Damit bleibt die Rettungsinstanz funktionsfähig, wenn der Operator selbst
+Speicher verliert oder nicht mehr antwortet.
+
+Die Policy steht in config/memory-pressure-guard.v1.json. Alle 15 Sekunden
+werden ausschließlich folgende Entscheidungsdaten frisch gelesen:
+
+* MainPID, ActiveState und ControlGroup von grabowski-operator.service;
+* RssAnon, VmRSS und VmSwap des exakten MainPID;
+* MemAvailable des Hosts;
+* memory.current und memory.swap.current der Operator-Cgroup.
+
+Vor jeder Bewertung muss sowohl systemd als auch /proc/<pid>/cgroup exakt
+/system.slice/grabowski-operator.service bestätigen. PID-Reuse oder eine
+abweichende Cgroup führen nicht zu einer Mutation.
+
+### Startschwellen
+
+Die konservative Anfangspolicy lautet:
+
+* ab 18 GiB RssAnon: Warnereignis, keine Mutation;
+* ab 24 GiB RssAnon in zwei aufeinanderfolgenden Stichproben:
+  kontrollierter systemctl restart grabowski-operator.service;
+* bei höchstens 8 GiB MemAvailable und mindestens 12 GiB Grabowski-RssAnon:
+  sofortiger kontrollierter Restart.
+
+Die Entscheidung verwendet absichtlich RssAnon des Hauptprozesses und nicht
+allein MemoryCurrent der Cgroup. MemoryCurrent enthält auch reclaimbaren
+Dateicache, Slab und andere Cgroup-Anteile; der aktuelle gesunde Betrieb hat
+bereits gezeigt, dass dadurch ein niedriger Hardcap zu früh auslösen könnte.
+
+### Restart- und Circuit-Breaker-Regeln
+
+Ein erfolgreicher Restart muss anschließend durch alle folgenden Readbacks
+bestätigt werden:
+
+* Unit wieder active;
+* neuer MainPID größer 0;
+* neuer PID unterscheidet sich vom vorherigen;
+* ControlGroup weiterhin exakt die erwartete Operator-Cgroup.
+
+Es gilt ein Restart-Cooldown von 10 Minuten und maximal drei Restarts in einer
+Stunde. Tritt während des Cooldowns erneut die Host-Notfallschwelle ein oder ist
+das Stundenbudget ausgeschöpft, öffnet der Guard den Circuit Breaker und stoppt
+den Operator kontrolliert. Der Rechner wird niemals automatisch rebootet.
+
+Ein offener Circuit bleibt absichtlich fail-closed, bis er nach Ursachenprüfung
+manuell zurückgesetzt wird.
+
+### Unabhängigkeit des Guards
+
+Der Guard selbst erhält:
+
+* eigenes systemd-Service-Cgroup;
+* MemoryMax=128M;
+* OOMScoreAdjust=-900;
+* einen root-eigenen State-Pfad unter
+  /var/lib/heim-pc/grabowski-memory-guard;
+* keinen Schreibzugriff auf die Grabowski-State-Verzeichnisse.
+
+Damit hängt die Rettungslogik weder vom Grabowski-Prozess noch von dessen Audit-
+oder Receipt-Locks ab. Tailscale und SSH bleiben zusätzliche manuelle
+Rettungswege außerhalb der Operator-Cgroup.
+
+## Optionaler Kernel-Airbag
+
+Ein großzügiger Hardcap mit MemoryMax=32G und MemoryOOMGroup=yes kann nach
+separater Lastverifikation als letzte Barriere ergänzt werden. Er ist nicht Teil
+dieser ersten Aktivierung.
+
+Vorher muss nachgewiesen werden, dass legitime synchrone Kindprozesse und der
+beobachtete Normalbetrieb genügend Abstand zu 32 GiB haben. Ein Hardcap ersetzt
+den externen Guard nicht, sondern wäre nur dessen nachgelagerter Airbag.
+
+## Bestehende passive Speichertelemetrie
+
+Auf dem Live-Host läuft bereits der unabhängige systemweite Timer
+`heim-pc-memory-pressure-snapshot.timer`. Sein Root-One-shot erfasst alle
+30 Sekunden unter anderem:
+
+* `MemAvailable`, Swap-Belegung und PSI;
+* die größten Prozesse mit PID, Name, RSS, Swap und Cgroup;
+* die größten Cgroups mit `memory.current`, `memory.swap.current` und
+  OOM-Ereignissen.
+
+Die Evidenz liegt begrenzt unter `/var/lib/heim-pc/memory-pressure/`. Dieser
+Snapshot ist passiv und führt keine Prozessmutation aus.
+
+Diese bestehende Laufzeittelemetrie wird von diesem Änderungspaket bewusst
+**nicht dupliziert**. Ihre derzeit fehlende Verankerung im Heim-PC-Repo ist ein
+separater Konvergenzpunkt; der neue Grabowski-Guard hängt für seine Entscheidung
+nicht von diesem Snapshot ab, sondern liest systemd, `/proc` und die
+Operator-Cgroup jeweils frisch.
 
 ## Docker-Loggrenze
 
-`config/runaway-guard.v1.json` setzt für neue Container:
+config/runaway-guard.v1.json setzt für neue Container den lokalen,
+größenbegrenzten Logging-Treiber mit 50 MiB Segmentgröße und drei Segmenten.
 
-```json
-{
-  "log-driver": "local",
-  "log-opts": {
-    "max-size": "50m",
-    "max-file": "3"
-  }
-}
-```
+scripts/install_docker_log_policy.py ergänzt diese Werte konfliktvermeidend in
+/etc/docker/daemon.json und bewahrt alle anderen Daemon-Einstellungen.
+Bereits vorhandene abweichende Logwerte blockieren die Installation statt still
+überschrieben zu werden.
 
-`scripts/install_docker_log_policy.py` ergänzt diese Werte konfliktvermeidend in `/etc/docker/daemon.json` und bewahrt alle anderen Daemon-Einstellungen. Bereits vorhandene abweichende Logwerte blockieren die Installation statt still überschrieben zu werden. Vor einer Änderung wird die exakte Vorgängerversion hashgebunden gesichert.
+## Installation und Sicherheitsgrenze
 
-Eine geänderte Daemon-Konfiguration erfordert einen Docker-Neustart. Bereits laufende Container behalten ihren bei der Erstellung gewählten Logging-Treiber und müssen nur im normalen Lebenszyklus neu erstellt werden; eine pauschale disruptive Neuerstellung ist ausdrücklich nicht Teil dieses Vertrags.
+scripts/install_memory_pressure_guard.py installiert ausschließlich
+commitgebundene Blobs.
 
-## Sicherheitsgrenze
+Der Installer publiziert Guard-Skript und Policy unter
 
-Der Schutz gilt nur für:
+    /usr/local/lib/heim-pc/memory-pressure-guard/releases/<commit>/
 
-* Befehle, die über den begrenzten Starter ausgeführt werden;
-* Docker-Container, die nach Aktivierung der Daemon-Vorgabe neu erstellt werden;
-* Grabowski-Aufgaben, soweit deren bestehende systemd-Kapsel eigene Laufzeit- und Speichergrenzen setzt.
+und installiert ausschließlich
 
-Direkt in einer Shell gestartete Programme und beliebige Dateiumleitungen werden dadurch nicht global verändert. Diese begrenzte Reichweite ist beabsichtigt: Sie vermeidet einen zusätzlichen Host-Daemon und Fehlalarme bei legitimer Hochlast.
+    /etc/systemd/system/heim-pc-grabowski-memory-guard.service
+
+Es wird kein zusätzliches OOM-Killer-Paket installiert.
+
+Der Installer trennt Installation, Enable und Start. Ein produktiver Start ist
+nur nach Commit, exakter --expected-head-Bindung und erfolgreichem
+systemd-Readback zulässig.
+
+Vor einem produktiven Start führt der Installer den commitgebundenen Guard
+einmal im `--observe-only`-Modus gegen den realen Operator aus. Eine bereits
+anstehende Restart- oder Circuit-Breaker-Entscheidung blockiert die automatische
+Aktivierung.
+
+Beispiel:
+
+    sudo python3 scripts/install_memory_pressure_guard.py \
+      --apply --enable --start --expected-head <commit>
+
+Der Schutz gilt damit für:
+
+* explizit begrenzte Hintergrundbefehle;
+* Docker-Logwachstum nach Aktivierung der bestehenden Docker-Policy;
+* den konkret belegten Grabowski-Hauptprozess-Runaway.
+
+Die bereits vorhandene passive Root-Telemetrie bleibt eine getrennte
+Beobachtungsschicht und wird hier nicht als installierter Effekt beansprucht.
+
+Direkt gestartete andere Programme erhalten weiterhin kein pauschales
+Cgroup-Limit. Ein weiterer globaler OOM mit einem anderen dominanten
+Verursacher würde deshalb eine neue Evidenzbewertung erfordern.
