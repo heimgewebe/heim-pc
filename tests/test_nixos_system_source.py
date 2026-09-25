@@ -57,18 +57,44 @@ class T(unittest.TestCase):
             "BASE_SOURCE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}",
             workflow,
         )
-        self.assertIn("python3 scripts/ci/nix_changed.py", workflow)
-        self.assertIn("Validate detector output", workflow)
+        self.assertIn("Detect Nix CI control-plane changes independently", workflow)
+        self.assertIn(
+            "control_changed: ${{ steps.control.outputs.control_changed }}",
+            workflow,
+        )
+        self.assertIn(
+            ".github/workflows/heim-pc-nix.yml scripts/ci/nix_changed.py",
+            workflow,
+        )
+        self.assertIn(
+            "if: steps.control.outputs.control_changed == 'false'",
+            workflow,
+        )
+        self.assertIn(
+            'git show "${BASE_SOURCE_REVISION}:scripts/ci/nix_changed.py"',
+            workflow,
+        )
+        self.assertIn('python3 "$detector"', workflow)
+        self.assertIn("Validate detector outputs", workflow)
+        self.assertIn(
+            "CONTROL_CHANGED: ${{ steps.control.outputs.control_changed }}",
+            workflow,
+        )
         self.assertIn(
             "NIX_CHANGED: ${{ steps.changes.outputs.nix_changed }}",
             workflow,
         )
+        self.assertIn('case "$CONTROL_CHANGED" in', workflow)
         self.assertIn('case "$NIX_CHANGED" in', workflow)
         self.assertIn("true|false) ;;", workflow)
         self.assertIn("needs: detect", workflow)
+        self.assertIn("needs.detect.result != 'success'", workflow)
         self.assertIn(
-            "if: always() && (needs.detect.result != 'success' || "
-            "needs.detect.outputs.nix_changed != 'false')",
+            "needs.detect.outputs.control_changed != 'false'",
+            workflow,
+        )
+        self.assertIn(
+            "needs.detect.outputs.nix_changed != 'false'",
             workflow,
         )
         self.assertNotIn("if: needs.detect.outputs.nix_changed == 'true'", workflow)
