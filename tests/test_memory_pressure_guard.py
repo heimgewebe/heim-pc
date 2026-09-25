@@ -317,6 +317,81 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ):
                 self.assertEqual(guard.main(), 1)
 
+    def test_cli_preflight_rejects_symlinked_state_dir_ancestor_before_systemctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            real_parent.mkdir()
+            linked_parent = base / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+            state_dir = linked_parent / "state"
+            argv = [
+                "grabowski_memory_guard.py",
+                "--policy",
+                str(ROOT / "config/memory-pressure-guard.v1.json"),
+                "--state-dir",
+                str(state_dir),
+                "--preflight-only",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(
+                    guard,
+                    "_run",
+                    side_effect=AssertionError("systemctl must not run"),
+                ),
+            ):
+                self.assertEqual(guard.main(), 1)
+            self.assertFalse((real_parent / "state").exists())
+
+    def test_preflight_rejects_state_directory_with_symlinked_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            real_parent.mkdir()
+            linked_parent = base / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+            state_dir = linked_parent / "state"
+
+            with (
+                patch.object(
+                    guard,
+                    "_run",
+                    side_effect=AssertionError("systemctl must not run"),
+                ),
+                self.assertRaisesRegex(
+                    guard.GuardError,
+                    "unsafe guard state directory",
+                ),
+            ):
+                guard.preflight(self.policy, state_dir)
+
+            self.assertFalse((real_parent / "state").exists())
+
+    def test_run_once_rejects_state_directory_with_symlinked_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            real_parent.mkdir()
+            linked_parent = base / "linked-parent"
+            linked_parent.symlink_to(real_parent, target_is_directory=True)
+            state_dir = linked_parent / "state"
+
+            with (
+                patch.object(
+                    guard,
+                    "_run",
+                    side_effect=AssertionError("systemctl must not run"),
+                ),
+                self.assertRaisesRegex(
+                    guard.GuardError,
+                    "unsafe guard state directory",
+                ),
+            ):
+                guard.run_once(self.policy, state_dir)
+
+            self.assertFalse((real_parent / "state").exists())
+
     def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
         cases = (
             ("last_pid", True, "last_pid"),

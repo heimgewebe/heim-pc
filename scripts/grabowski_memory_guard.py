@@ -515,16 +515,71 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
     return next_state, "restart", reason
 
 
-def _safe_state_dir(path: Path) -> None:
-    if path.is_symlink():
+def _open_state_directory_fd(path: Path, *, create: bool) -> int | None:
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    anchor = absolute.anchor or os.sep
+    parts = absolute.parts[1:] if absolute.is_absolute() else absolute.parts
+    if not parts:
         raise GuardError(f"unsafe guard state directory: {path}")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.lstat()
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise GuardError(f"unsafe guard state directory: {path}")
-    if stat.S_IMODE(metadata.st_mode) != 0o700:
-        os.chmod(path, 0o700)
 
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    current_fd = os.open(anchor, flags)
+    try:
+        for index, part in enumerate(parts):
+            final = index == len(parts) - 1
+            try:
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
+                mode = 0o700 if final else 0o755
+                try:
+                    os.mkdir(part, mode=mode, dir_fd=current_fd)
+                    os.fsync(current_fd)
+                except FileExistsError:
+                    # A concurrent creator won the race; the no-follow open
+                    # below decides whether it created a trusted directory.
+                    pass
+                try:
+                    child_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise GuardError(f"unsafe guard state directory: {path}") from exc
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise GuardError(f"unsafe guard state directory: {path}") from exc
+                raise
+
+            try:
+                metadata = os.fstat(child_fd)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise GuardError(f"unsafe guard state directory: {path}")
+            except BaseException:
+                os.close(child_fd)
+                raise
+
+            os.close(current_fd)
+            current_fd = child_fd
+
+        metadata = os.fstat(current_fd)
+        if metadata.st_uid != os.getuid():
+            raise GuardError(f"guard state directory has unexpected owner: {path}")
+        if create and stat.S_IMODE(metadata.st_mode) != 0o700:
+            os.fchmod(current_fd, 0o700)
+        return current_fd
+    except BaseException:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+        raise
 
 def _fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY
@@ -559,42 +614,11 @@ def _state_lock(
     exclusive: bool,
     create: bool,
 ) -> Iterator[None]:
-    if create:
-        _safe_state_dir(path)
-    else:
-        # A dangling directory symlink also reports exists()==False. Reject it
-        # before the absent-directory fast path so read-only preflight cannot
-        # bypass the state-directory trust boundary.
-        if path.is_symlink():
-            raise GuardError(f"unsafe guard state directory: {path}")
-        if not path.exists():
-            yield
-            return
-
-    metadata = path.lstat()
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-        raise GuardError(f"unsafe guard state directory: {path}")
-    if metadata.st_uid != os.getuid():
-        raise GuardError(f"guard state directory has unexpected owner: {path}")
-
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-
-    fd = os.open(path, flags)
+    fd = _open_state_directory_fd(path, create=create)
+    if fd is None:
+        yield
+        return
     try:
-        opened = os.fstat(fd)
-        if (
-            not stat.S_ISDIR(opened.st_mode)
-            or opened.st_uid != os.getuid()
-            or opened.st_dev != metadata.st_dev
-            or opened.st_ino != metadata.st_ino
-        ):
-            raise GuardError("guard state directory changed during lock acquisition")
         _acquire_flock(fd, exclusive=exclusive)
         try:
             yield
