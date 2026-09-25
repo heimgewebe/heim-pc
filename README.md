@@ -126,7 +126,12 @@ Jeder Live-`--apply` verlangt zwingend `--expected-head`. Bevor eine
 bereits aktivierte **oder nur manuell aktive** Guard-Unit ersetzt, enabled oder
 gestartet werden darf, führt der **neue commitgebundene Guard selbst**
 `--preflight-only` aus. Dieser Pfad liest den echten persistenten State und den
-realen Operator read-only; ein ungültiger State, offener Circuit,
+realen Operator read-only; der StateDirectory-Pfad bleibt dabei lexikalisch
+erhalten und jeder bereits existierende Pfadbestandteil muss ein echtes
+Verzeichnis statt eines Symlinks sein. Nach erfolgreichem Öffnen bleiben Lock,
+State-Read, atomare State-Replaces und Event-Appends an denselben verifizierten
+Directory-FD gebunden; ein späterer Rename oder Austausch des sichtbaren Pfads
+kann einen laufenden Tick daher nicht umlenken. Ein ungültiger State, offener Circuit,
 `pending_action` oder eine aktuelle Restart-/Stop-Entscheidung blockiert
 fail-closed.
 

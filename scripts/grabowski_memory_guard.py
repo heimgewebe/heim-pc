@@ -373,22 +373,7 @@ def _state_nonnegative_int(value: Any, *, name: str) -> int:
     return value
 
 
-def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
-    # Path.exists() follows symlinks and returns False for a dangling target.
-    # Reject symlinks first so an unsafe persistent state cannot masquerade as
-    # an absent state during validation or activation preflight.
-    if path.is_symlink():
-        raise GuardError(f"unsafe guard state file: {path}")
-    if not path.exists():
-        return default_state(policy)
-    if not path.is_file():
-        raise GuardError(f"unsafe guard state file: {path}")
-    try:
-        if path.stat().st_size > 64 * 1024:
-            raise GuardError("guard state file is oversized")
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GuardError(f"cannot read guard state: {exc}") from exc
+def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GuardError("guard state must be an object")
     legacy_fields = {
@@ -463,8 +448,91 @@ def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
             raise GuardError("guard pending action reason is invalid")
         if value["circuit_open"] is not True:
             raise GuardError("guard pending action requires an open circuit")
-
     return value
+
+
+def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
+    # Path.exists() follows symlinks and returns False for a dangling target.
+    # Reject symlinks first so an unsafe persistent state cannot masquerade as
+    # an absent state during validation or activation preflight.
+    if path.is_symlink():
+        raise GuardError(f"unsafe guard state file: {path}")
+    if not path.exists():
+        return default_state(policy)
+    if not path.is_file():
+        raise GuardError(f"unsafe guard state file: {path}")
+    try:
+        if path.stat().st_size > 64 * 1024:
+            raise GuardError("guard state file is oversized")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GuardError(f"cannot read guard state: {exc}") from exc
+    return _validate_state_value(value, policy)
+
+
+def _state_entry_metadata_at(dir_fd: int, name: str) -> os.stat_result | None:
+    if not name or name in {".", ".."} or "/" in name:
+        raise GuardError(f"unsafe guard state entry name: {name!r}")
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _state_file_present_at(dir_fd: int, name: str) -> bool:
+    metadata = _state_entry_metadata_at(dir_fd, name)
+    if metadata is None:
+        return False
+    if not stat.S_ISREG(metadata.st_mode):
+        raise GuardError(f"unsafe guard state file: {name}")
+    return True
+
+
+def _load_state_at(dir_fd: int, name: str, policy: dict[str, Any]) -> dict[str, Any]:
+    metadata = _state_entry_metadata_at(dir_fd, name)
+    if metadata is None:
+        return default_state(policy)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise GuardError(f"unsafe guard state file: {name}")
+    if metadata.st_size > 64 * 1024:
+        raise GuardError("guard state file is oversized")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        raise GuardError(f"cannot read guard state: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+            or opened.st_size > 64 * 1024
+        ):
+            raise GuardError("guard state file changed during read")
+        chunks: list[bytes] = []
+        remaining = 64 * 1024 + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 16 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > 64 * 1024:
+            raise GuardError("guard state file is oversized")
+        try:
+            value = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GuardError(f"cannot read guard state: {exc}") from exc
+    finally:
+        os.close(fd)
+    return _validate_state_value(value, policy)
 
 
 def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observation) -> tuple[dict[str, Any], str, str]:
@@ -613,15 +681,15 @@ def _state_lock(
     *,
     exclusive: bool,
     create: bool,
-) -> Iterator[None]:
+) -> Iterator[int | None]:
     fd = _open_state_directory_fd(path, create=create)
     if fd is None:
-        yield
+        yield None
         return
     try:
         _acquire_flock(fd, exclusive=exclusive)
         try:
-            yield
+            yield fd
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
@@ -672,6 +740,110 @@ def _append_event(path: Path, event: dict[str, Any], *, max_bytes: int) -> None:
         os.close(fd)
     if directory_changed:
         _fsync_directory(path.parent)
+
+
+def _atomic_json_at(dir_fd: int, name: str, value: dict[str, Any]) -> None:
+    metadata = _state_entry_metadata_at(dir_fd, name)
+    if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+        raise GuardError(f"unsafe guard state target: {name}")
+    data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+    temporary = ""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for attempt in range(100):
+        candidate = f".{name}.{os.getpid()}.{time.time_ns()}.{attempt}"
+        try:
+            fd = os.open(candidate, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            continue
+        temporary = candidate
+        break
+    else:
+        raise GuardError(f"cannot allocate temporary guard state file for {name}")
+
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise GuardError(f"short write while persisting guard state: {name}")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+        )
+        temporary = ""
+        os.fsync(dir_fd)
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _append_event_at(
+    dir_fd: int,
+    name: str,
+    event: dict[str, Any],
+    *,
+    max_bytes: int,
+) -> None:
+    line = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(line) > max_bytes:
+        raise GuardError("one guard event exceeds event segment limit")
+    previous = name + ".previous"
+
+    current = _state_entry_metadata_at(dir_fd, name)
+    previous_metadata = _state_entry_metadata_at(dir_fd, previous)
+    for candidate, metadata in ((name, current), (previous, previous_metadata)):
+        if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+            raise GuardError(f"unsafe guard event file: {candidate}")
+
+    directory_changed = current is None
+    if current is not None and current.st_size + len(line) > max_bytes:
+        try:
+            os.unlink(previous, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        os.replace(name, previous, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        directory_changed = True
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    except OSError as exc:
+        raise GuardError(f"cannot append guard event: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise GuardError(f"unsafe guard event file: {name}")
+        view = memoryview(line)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise GuardError("short write while appending guard event")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if directory_changed:
+        os.fsync(dir_fd)
 
 
 def _event(observation: Observation | None, *, action: str, reason: str, result: str) -> dict[str, Any]:
@@ -740,22 +912,18 @@ def _verified_stop(policy: dict[str, Any], runner: Runner) -> tuple[bool, dict[s
 
 def _preflight_locked(
     policy: dict[str, Any],
-    state_dir: Path,
+    state_dir_fd: int | None,
     *,
     runner: Runner = _run,
     proc_root: Path = PROC_ROOT,
     cgroup_root: Path = CGROUP_ROOT,
     now_unix: int | None = None,
 ) -> dict[str, Any]:
-    if state_dir.exists():
-        metadata = state_dir.lstat()
-        if (
-            state_dir.is_symlink()
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-        ):
-            raise GuardError(f"unsafe guard state directory: {state_dir}")
-    state = load_state(state_dir / "state.json", policy)
+    state = (
+        default_state(policy)
+        if state_dir_fd is None
+        else _load_state_at(state_dir_fd, "state.json", policy)
+    )
     observation = observe(
         policy,
         runner=runner,
@@ -797,10 +965,10 @@ def preflight(
     cgroup_root: Path = CGROUP_ROOT,
     now_unix: int | None = None,
 ) -> dict[str, Any]:
-    with _state_lock(state_dir, exclusive=False, create=False):
+    with _state_lock(state_dir, exclusive=False, create=False) as state_dir_fd:
         return _preflight_locked(
             policy,
-            state_dir,
+            state_dir_fd,
             runner=runner,
             proc_root=proc_root,
             cgroup_root=cgroup_root,
@@ -838,7 +1006,7 @@ def _prepared_action_state(
 
 def _run_once_locked(
     policy: dict[str, Any],
-    state_dir: Path,
+    state_dir_fd: int,
     *,
     runner: Runner = _run,
     proc_root: Path = PROC_ROOT,
@@ -846,10 +1014,8 @@ def _run_once_locked(
     allow_actions: bool = True,
     now_unix: int | None = None,
 ) -> dict[str, Any]:
-    state_path = state_dir / "state.json"
-    latest_path = state_dir / "latest.json"
-    event_path = state_dir / "events.jsonl"
-    state = load_state(state_path, policy)
+    state_present = _state_file_present_at(state_dir_fd, "state.json")
+    state = _load_state_at(state_dir_fd, "state.json", policy)
     observation = observe(
         policy,
         runner=runner,
@@ -863,10 +1029,10 @@ def _run_once_locked(
             "last_pid": 0,
             "consecutive_over_limit": 0,
         }
-        if next_state != state or not state_path.exists():
-            _atomic_json(state_path, next_state)
+        if next_state != state or not state_present:
+            _atomic_json_at(state_dir_fd, "state.json", next_state)
         event = _event(None, action="none", reason="target_not_active", result="observed")
-        _atomic_json(latest_path, event)
+        _atomic_json_at(state_dir_fd, "latest.json", event)
         return event
 
     next_state, action, reason = evaluate(policy, state, observation)
@@ -874,10 +1040,15 @@ def _run_once_locked(
 
     if action in {"restart", "stop-circuit"} and not allow_actions:
         event["result"] = "observe-only"
-        if next_state != state or not state_path.exists():
-            _atomic_json(state_path, next_state)
-        _atomic_json(latest_path, event)
-        _append_event(event_path, event, max_bytes=policy["event_segment_max_bytes"])
+        if next_state != state or not state_present:
+            _atomic_json_at(state_dir_fd, "state.json", next_state)
+        _atomic_json_at(state_dir_fd, "latest.json", event)
+        _append_event_at(
+            state_dir_fd,
+            "events.jsonl",
+            event,
+            max_bytes=policy["event_segment_max_bytes"],
+        )
         return event
 
     if action in {"restart", "stop-circuit"}:
@@ -887,10 +1058,9 @@ def _run_once_locked(
             action=action,
             reason=reason,
         )
-        # The fail-closed action intent and accounting must be durable before
-        # systemctl can mutate the target. If this write fails, no target
-        # mutation has happened.
-        _atomic_json(state_path, prepared_state)
+        # Keep the fail-closed action intent on the same verified directory FD
+        # that owns the flock. A renamed/replaced ancestor cannot redirect it.
+        _atomic_json_at(state_dir_fd, "state.json", prepared_state)
     else:
         prepared_state = next_state
 
@@ -913,16 +1083,18 @@ def _run_once_locked(
                 "circuit_open": False,
                 "pending_action": None,
             }
-            # Finalize state before publishing event evidence. If this fails,
-            # the already durable prepared state remains circuit-open and the
-            # guard cannot repeat the restart on its next iteration.
-            _atomic_json(state_path, final_state)
+            _atomic_json_at(state_dir_fd, "state.json", final_state)
             event["result"] = "restarted-verified"
             next_state = final_state
         else:
             event["result"] = "restart-outcome-unverified-circuit-open"
-            _atomic_json(latest_path, event)
-            _append_event(event_path, event, max_bytes=policy["event_segment_max_bytes"])
+            _atomic_json_at(state_dir_fd, "latest.json", event)
+            _append_event_at(
+                state_dir_fd,
+                "events.jsonl",
+                event,
+                max_bytes=policy["event_segment_max_bytes"],
+            )
             raise GuardError("restart outcome could not be verified; circuit remains open")
 
     elif action == "stop-circuit":
@@ -936,22 +1108,32 @@ def _run_once_locked(
                 "circuit_open": True,
                 "pending_action": None,
             }
-            _atomic_json(state_path, final_state)
+            _atomic_json_at(state_dir_fd, "state.json", final_state)
             event["result"] = "stopped-circuit-open"
             next_state = final_state
         else:
             event["result"] = "stop-outcome-unverified-circuit-open"
-            _atomic_json(latest_path, event)
-            _append_event(event_path, event, max_bytes=policy["event_segment_max_bytes"])
+            _atomic_json_at(state_dir_fd, "latest.json", event)
+            _append_event_at(
+                state_dir_fd,
+                "events.jsonl",
+                event,
+                max_bytes=policy["event_segment_max_bytes"],
+            )
             raise GuardError("circuit-breaker stop outcome could not be verified; circuit remains open")
 
     else:
-        if next_state != state or not state_path.exists():
-            _atomic_json(state_path, next_state)
+        if next_state != state or not state_present:
+            _atomic_json_at(state_dir_fd, "state.json", next_state)
 
-    _atomic_json(latest_path, event)
+    _atomic_json_at(state_dir_fd, "latest.json", event)
     if action != "none":
-        _append_event(event_path, event, max_bytes=policy["event_segment_max_bytes"])
+        _append_event_at(
+            state_dir_fd,
+            "events.jsonl",
+            event,
+            max_bytes=policy["event_segment_max_bytes"],
+        )
     return event
 
 
@@ -965,10 +1147,12 @@ def run_once(
     allow_actions: bool = True,
     now_unix: int | None = None,
 ) -> dict[str, Any]:
-    with _state_lock(state_dir, exclusive=True, create=True):
+    with _state_lock(state_dir, exclusive=True, create=True) as state_dir_fd:
+        if state_dir_fd is None:
+            raise GuardError("guard state directory was not created")
         return _run_once_locked(
             policy,
-            state_dir,
+            state_dir_fd,
             runner=runner,
             proc_root=proc_root,
             cgroup_root=cgroup_root,
@@ -979,20 +1163,20 @@ def run_once(
 
 def _reset_circuit_locked(
     policy: dict[str, Any],
-    state_dir: Path,
+    state_dir_fd: int,
     *,
     runner: Runner = _run,
 ) -> dict[str, Any]:
     unit = read_unit_state(policy, runner)
     if unit["active_state"] == "active" or unit["pid"] > 0:
         raise GuardError("circuit reset requires the target operator to be inactive")
-    state = load_state(state_dir / "state.json", policy)
+    state = _load_state_at(state_dir_fd, "state.json", policy)
     state["last_pid"] = 0
     state["consecutive_over_limit"] = 0
     state["restart_history_unix"] = []
     state["circuit_open"] = False
     state["pending_action"] = None
-    _atomic_json(state_dir / "state.json", state)
+    _atomic_json_at(state_dir_fd, "state.json", state)
     event = {
         "schema_version": 1,
         "kind": "heim_pc_grabowski_memory_guard_event",
@@ -1001,9 +1185,10 @@ def _reset_circuit_locked(
         "reason": "explicit_operator_recovery",
         "result": "reset",
     }
-    _atomic_json(state_dir / "latest.json", event)
-    _append_event(
-        state_dir / "events.jsonl",
+    _atomic_json_at(state_dir_fd, "latest.json", event)
+    _append_event_at(
+        state_dir_fd,
+        "events.jsonl",
         event,
         max_bytes=policy["event_segment_max_bytes"],
     )
@@ -1016,33 +1201,35 @@ def reset_circuit(
     *,
     runner: Runner = _run,
 ) -> dict[str, Any]:
-    with _state_lock(state_dir, exclusive=True, create=True):
+    with _state_lock(state_dir, exclusive=True, create=True) as state_dir_fd:
+        if state_dir_fd is None:
+            raise GuardError("guard state directory was not created")
         return _reset_circuit_locked(
             policy,
-            state_dir,
+            state_dir_fd,
             runner=runner,
         )
 
 
 def _validate_persistent_state_locked(
     policy: dict[str, Any],
-    state_dir: Path,
+    state_dir_fd: int | None,
 ) -> dict[str, Any]:
-    if state_dir.exists():
-        metadata = state_dir.lstat()
-        if (
-            state_dir.is_symlink()
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-        ):
-            raise GuardError(f"unsafe guard state directory: {state_dir}")
-    state_path = state_dir / "state.json"
-    state = load_state(state_path, policy)
+    state_present = (
+        False
+        if state_dir_fd is None
+        else _state_file_present_at(state_dir_fd, "state.json")
+    )
+    state = (
+        default_state(policy)
+        if state_dir_fd is None
+        else _load_state_at(state_dir_fd, "state.json", policy)
+    )
     return {
         "schema_version": 1,
         "kind": "heim_pc_grabowski_memory_guard_state_validation",
         "status": "valid",
-        "state_present": state_path.exists(),
+        "state_present": state_present,
         "circuit_open": state["circuit_open"],
         "target_unit": state["target_unit"],
         "restart_history_count": len(state["restart_history_unix"]),
@@ -1056,8 +1243,8 @@ def validate_persistent_state(
     policy: dict[str, Any],
     state_dir: Path,
 ) -> dict[str, Any]:
-    with _state_lock(state_dir, exclusive=False, create=False):
-        return _validate_persistent_state_locked(policy, state_dir)
+    with _state_lock(state_dir, exclusive=False, create=False) as state_dir_fd:
+        return _validate_persistent_state_locked(policy, state_dir_fd)
 
 
 def _lexical_absolute_path(path: Path) -> Path:

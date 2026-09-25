@@ -151,8 +151,13 @@ Guard-Restart gelten.
 
 Alle State-Mutationen des Daemons und `--reset-circuit` sind über denselben
 exklusiven Directory-`flock` serialisiert; Preflight und reine State-Validierung
-verwenden denselben Lock read-only. Damit kann ein überlappender Guard-Tick einen
-manuellen Circuit-Reset nicht mit einem veralteten State zurücküberschreiben.
+verwenden denselben Lock read-only. Der StateDirectory-Pfad wird komponentenweise
+mit `O_NOFOLLOW` geöffnet; nach erfolgreicher Verifikation bleiben Lock,
+State-Reads, atomare State-Replaces sowie Event-Appends an genau diesem
+Directory-FD gebunden. Ein späterer Rename oder Austausch eines sichtbaren
+Pfadbestandteils kann den laufenden Tick damit nicht auf einen anderen State
+umlenken. Zugleich kann ein überlappender Guard-Tick einen manuellen Circuit-Reset
+nicht mit einem veralteten State zurücküberschreiben.
 
 `systemctl show` ist auf 10 Sekunden, `restart` auf 45 Sekunden und `stop`
 auf 25 Sekunden begrenzt. Timeout wird als `GuardError` behandelt und lässt

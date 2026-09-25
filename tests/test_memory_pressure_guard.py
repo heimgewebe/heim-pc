@@ -899,6 +899,70 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertEqual(event["reason"], "sustained_grabowski_rss")
             self.assertEqual(event["result"], "preflight")
 
+    def test_locked_state_fd_survives_visible_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(
+                base,
+                rss_anon_kib=13 * 1024**2,
+                mem_available_kib=7 * 1024**2,
+            )
+            state_dir = base / "state"
+            moved_state_dir = base / "state-locked"
+            replacement_created = False
+            mutations: list[str] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                nonlocal replacement_created
+                if argv[1] == "show":
+                    if not replacement_created:
+                        state_dir.rename(moved_state_dir)
+                        state_dir.mkdir()
+                        sentinel = guard.default_state(self.policy)
+                        sentinel["last_pid"] = 999
+                        (state_dir / "state.json").write_text(json.dumps(sentinel))
+                        replacement_created = True
+                    pid = 456 if mutations else 123
+                    return self.active_show(argv, pid=pid)
+                if argv[1] == "restart":
+                    prepared = json.loads((moved_state_dir / "state.json").read_text())
+                    self.assertTrue(prepared["circuit_open"])
+                    self.assertEqual(prepared["pending_action"]["action"], "restart")
+                    self.assertEqual(prepared["pending_action"]["pid"], 123)
+                    replacement = json.loads((state_dir / "state.json").read_text())
+                    self.assertEqual(replacement["last_pid"], 999)
+                    mutations.append("restart")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            with (
+                patch.object(guard.time, "sleep", return_value=None),
+                patch.object(guard.time, "time", return_value=100),
+            ):
+                result = guard.run_once(
+                    self.policy,
+                    state_dir,
+                    runner=fake_runner,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=100,
+                )
+
+            self.assertEqual(result["result"], "restarted-verified")
+            self.assertEqual(mutations, ["restart"])
+            final = json.loads((moved_state_dir / "state.json").read_text())
+            self.assertEqual(final["last_pid"], 456)
+            self.assertFalse(final["circuit_open"])
+            self.assertIsNone(final["pending_action"])
+            self.assertTrue((moved_state_dir / "latest.json").is_file())
+            self.assertTrue((moved_state_dir / "events.jsonl").is_file())
+
+            replacement = json.loads((state_dir / "state.json").read_text())
+            self.assertEqual(replacement["last_pid"], 999)
+            self.assertFalse((state_dir / "latest.json").exists())
+            self.assertFalse((state_dir / "events.jsonl").exists())
+
     def test_healthy_second_tick_does_not_rewrite_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -911,8 +975,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
 
             with patch.object(
                 guard,
-                "_atomic_json",
-                wraps=guard._atomic_json,
+                "_atomic_json_at",
+                wraps=guard._atomic_json_at,
             ) as atomic_json:
                 guard.run_once(
                     self.policy,
@@ -936,7 +1000,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             state_writes = [
                 call
                 for call in atomic_json.call_args_list
-                if call.args[0].name == "state.json"
+                if call.args[1] == "state.json"
             ]
             self.assertEqual(len(state_writes), 1)
 
