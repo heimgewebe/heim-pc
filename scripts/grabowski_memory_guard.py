@@ -1036,6 +1036,13 @@ def validate_persistent_state(
         return _validate_persistent_state_locked(policy, state_dir)
 
 
+def _lexical_absolute_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return Path(os.path.abspath(expanded))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
@@ -1049,6 +1056,7 @@ def main() -> int:
 
     try:
         policy = load_policy(args.policy.resolve())
+        state_dir = _lexical_absolute_path(args.state_dir)
         selected_modes = sum(
             bool(value)
             for value in (
@@ -1062,26 +1070,26 @@ def main() -> int:
         if args.preflight_only:
             if selected_modes != 1:
                 raise GuardError("--preflight-only cannot be combined with other modes")
-            event = preflight(policy, args.state_dir.resolve())
+            event = preflight(policy, state_dir)
             print(json.dumps(event, sort_keys=True), flush=True)
             return 0
         if args.validate_state_only:
             if selected_modes != 1:
                 raise GuardError("--validate-state-only cannot be combined with other modes")
-            validation = validate_persistent_state(policy, args.state_dir.resolve())
+            validation = validate_persistent_state(policy, state_dir)
             print(json.dumps(validation, sort_keys=True), flush=True)
             return 0
         if args.reset_circuit:
             if selected_modes != 1:
                 raise GuardError("--reset-circuit cannot be combined with other modes")
-            event = reset_circuit(policy, args.state_dir.resolve())
+            event = reset_circuit(policy, state_dir)
             print(json.dumps(event, sort_keys=True), flush=True)
             return 0
         while True:
             try:
                 event = run_once(
                     policy,
-                    args.state_dir.resolve(),
+                    state_dir,
                     allow_actions=not args.observe_only,
                 )
                 if not args.loop or event.get("action") != "none":

@@ -225,6 +225,36 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ):
                 guard.preflight(self.policy, state_dir)
 
+    def test_cli_preflight_preserves_state_directory_symlink_for_rejection(self) -> None:
+        for target_exists in (False, True):
+            with self.subTest(target_exists=target_exists):
+                with tempfile.TemporaryDirectory() as temporary:
+                    base = Path(temporary)
+                    target = base / "target-state"
+                    if target_exists:
+                        target.mkdir()
+                    state_dir = base / "state"
+                    state_dir.symlink_to(target, target_is_directory=True)
+
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(ROOT / "scripts/grabowski_memory_guard.py"),
+                            "--policy",
+                            str(ROOT / "config/memory-pressure-guard.v1.json"),
+                            "--state-dir",
+                            str(state_dir),
+                            "--preflight-only",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertIn("unsafe guard state directory", completed.stderr)
+                    self.assertTrue(state_dir.is_symlink())
+
     def test_run_once_rejects_dangling_state_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -238,6 +268,54 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 "unsafe guard state directory",
             ):
                 guard.run_once(self.policy, state_dir)
+
+    def test_cli_preflight_rejects_dangling_state_dir_symlink_before_systemctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            state_dir = base / "state"
+            state_dir.symlink_to(base / "missing-state-dir", target_is_directory=True)
+            argv = [
+                "grabowski_memory_guard.py",
+                "--policy",
+                str(ROOT / "config/memory-pressure-guard.v1.json"),
+                "--state-dir",
+                str(state_dir),
+                "--preflight-only",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(
+                    guard,
+                    "_run",
+                    side_effect=AssertionError("systemctl must not run"),
+                ),
+            ):
+                self.assertEqual(guard.main(), 1)
+
+    def test_cli_preflight_rejects_existing_state_dir_symlink_before_systemctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            target = base / "real-state"
+            target.mkdir()
+            state_dir = base / "state"
+            state_dir.symlink_to(target, target_is_directory=True)
+            argv = [
+                "grabowski_memory_guard.py",
+                "--policy",
+                str(ROOT / "config/memory-pressure-guard.v1.json"),
+                "--state-dir",
+                str(state_dir),
+                "--preflight-only",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(
+                    guard,
+                    "_run",
+                    side_effect=AssertionError("systemctl must not run"),
+                ),
+            ):
+                self.assertEqual(guard.main(), 1)
 
     def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
         cases = (
