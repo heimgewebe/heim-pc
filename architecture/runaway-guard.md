@@ -161,13 +161,28 @@ Budgetverbrauch oder künstliches Öffnen des Circuits. Der nächste Tick misst 
 Erst nach bestandener Restart-Precondition und vor jedem `restart` beziehungsweise
 `stop-circuit` schreibt der Guard die beabsichtigte Aktion, das Restart-Budget und
 `circuit_open=true` atomar und `fsync`-gebunden als `pending_action`.
-Schlägt diese Persistenz fehl, wird der Operator nicht mutiert. Stirbt der Guard
+Schlägt diese Persistenz fehl, wird der Operator nicht mutiert. Nach dem Intent-
+`fsync` wird dieselbe Restart-Identität unmittelbar vor `systemctl` erneut geprüft,
+weil das Target während der Storage-I/O gewechselt haben kann. Ein stale oder
+unlesbarer zweiter Check nimmt den vorläufigen Intent samt Budgeteintrag dauerhaft
+zurück und protokolliert den Abort. Schlägt diese Rücknahme fehl, bleibt der
+persistierte Intent fail-closed erhalten. Eine atomare Compare-and-Restart-Operation
+bietet systemd nicht; zwischen letzter Prüfung und Dispatch bleibt ein kleines
+unvermeidbares Race-Fenster, ohne eine dazwischenliegende State-I/O-Phase.
+Stirbt der Guard
 nach dem Intent-Write oder bleibt ein versuchter Eingriff unklar, bleibt der
 Circuit offen; Recovery versucht niemals blind einen zweiten Restart.
 
 SIGTERM/SIGINT werden während der begrenzten Transaktion bis einschließlich
 finalem State und Audit zurückgestellt und anschließend mit dem ursprünglichen
 Handler erneut zugestellt. Kindprozesse behalten ihre normalen Signalmasken.
+Die Unit setzt `KillMode=mixed`: systemd sendet das anfängliche Stop-Signal nur
+an den Guard-Hauptprozess, damit ein bereits wartender `systemctl`-Client seine
+Antwort liefern kann. Das abschließende SIGKILL bleibt mit `SendSIGKILL=yes`
+gruppenweit aktiv; es entstehen keine vom Service-Lifecycle abgekoppelten Kinder.
+Der Regressionstest verwendet einen echten Command-Kindprozess in einer
+isolierten Prozessgruppe und reproduziert auch den fehlerhaften früheren
+`control-group`-Signalweg. Der normale Abschluss wartet auf das Kind und reapet es.
 `TimeoutStopSec=150s` deckt die maximal konfigurierbaren systemctl-/Wartephasen
 ab. SIGKILL, Stromverlust oder dauerhaft blockierte Storage-I/O bleiben
 Crashfälle und konvergieren über den persistenten fail-closed Intent.

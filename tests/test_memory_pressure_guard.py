@@ -1192,8 +1192,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         self.assertTrue(readback["precondition_match"])
         self.assertTrue(readback["systemctl_attempted"])
         self.assertEqual(readback["post_pid"], 456)
-        self.assertEqual(calls[0][1], "show")
-        self.assertEqual(calls[1][1], "restart")
+        self.assertEqual([argv[1] for argv in calls], ["show", "show", "restart", "show"])
 
     def test_verified_restart_aborts_if_pid_changes_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1272,6 +1271,80 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertFalse(result["readback"]["systemctl_attempted"])
             self.assertIn("timeout", (base / "state/events.jsonl").read_text())
+
+    def test_target_changes_during_intent_persistence_abort_without_budget(self) -> None:
+        for fault in ("pid", "starttime", "cgroup", "show-timeout"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                proc, cgroup = self._fake_proc(base)
+                prepared = False
+                mutations = []
+                atomic_write = guard._atomic_json_at
+
+                def persist(fd, name, value):
+                    nonlocal prepared
+                    atomic_write(fd, name, value)
+                    if name == "state.json" and value["pending_action"]:
+                        prepared = True
+                        if fault == "starttime":
+                            stat = proc / "123/stat"
+                            stat.write_text(stat.read_text().rsplit(" ", 1)[0] + " 200\n")
+                        elif fault == "cgroup":
+                            (proc / "123/cgroup").write_text("0::/different.service\n")
+
+                def runner(argv):
+                    if argv[1] == "restart":
+                        mutations.append("restart")
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    if prepared and fault == "show-timeout":
+                        raise guard.GuardError("post-intent show timeout")
+                    return self.active_show(argv, pid=456 if prepared and fault == "pid" else 123)
+
+                with patch.object(guard, "_atomic_json_at", side_effect=persist), patch.object(guard.time, "sleep"):
+                    try:
+                        event = guard.run_once(self.policy, base / "state", runner=runner,
+                            proc_root=proc, cgroup_root=cgroup, now_unix=100)
+                    except guard.GuardError:
+                        event = None
+                self.assertTrue(prepared, "race must occur after the real durable intent")
+                self.assertEqual(mutations, [])
+                self.assertIsNotNone(event)
+                self.assertFalse(event["readback"]["systemctl_attempted"])
+                self.assertFalse(event["readback"]["precondition_match"])
+                state = json.loads((base / "state/state.json").read_text())
+                self.assertIsNone(state["pending_action"])
+                self.assertFalse(state["circuit_open"])
+                self.assertEqual(state["restart_history_unix"], [])
+                self.assertEqual(state["consecutive_over_limit"], 0)
+                self.assertIn("restart-aborted", (base / "state/events.jsonl").read_text())
+
+    def test_failed_post_intent_abort_persistence_retains_fail_closed_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+            prepared = False
+            atomic_write = guard._atomic_json_at
+            def persist(fd, name, value):
+                nonlocal prepared
+                if name == "state.json" and prepared and not value["pending_action"]:
+                    raise OSError("cannot persist abort")
+                atomic_write(fd, name, value)
+                if name == "state.json" and value["pending_action"]:
+                    prepared = True
+            def runner(argv):
+                self.assertEqual(argv[1], "show", "no target mutation after stale check")
+                return self.active_show(argv, pid=456 if prepared else 123)
+            with patch.object(guard, "_atomic_json_at", side_effect=persist):
+                with self.assertRaises(OSError):
+                    guard.run_once(self.policy, base / "state", runner=runner,
+                        proc_root=proc, cgroup_root=cgroup, now_unix=100)
+            state = json.loads((base / "state/state.json").read_text())
+            self.assertTrue(state["circuit_open"])
+            self.assertIsNotNone(state["pending_action"])
+            event = json.loads((base / "state/latest.json").read_text())
+            self.assertEqual(event["result"], "final-state-persistence-failed")
+            self.assertFalse(event["readback"]["systemctl_attempted"])
+            self.assertEqual(json.loads((base / "state/events.jsonl").read_text()), event)
 
     def test_mutation_timeouts_and_readback_errors_are_audited(self) -> None:
         for action, fault in (("restart", "command"), ("stop", "command"),
@@ -1404,11 +1477,18 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
 
     def test_termination_after_restart_is_deferred_through_final_state(self) -> None:
         import signal
-        # Only the disposable child receives a real signal; systemctl is fake.
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            with self.subTest(signum=signum), tempfile.TemporaryDirectory() as temporary:
+        service = (ROOT / "systemd/system/heim-pc-grabowski-memory-guard.service.in").read_text()
+        configured_mode = next((line.split("=", 1)[1] for line in service.splitlines()
+                                if line.startswith("KillMode=")), "control-group")
+        # Model systemd's initial delivery in a disposable process group. The
+        # command is a real child; only its target-unit observations are fake.
+        cases = ((configured_mode, signal.SIGTERM, False),
+                 (configured_mode, signal.SIGINT, False),
+                 ("control-group", signal.SIGTERM, True))
+        for mode, signum, ambiguous in cases:
+            with self.subTest(mode=mode, signum=signum), tempfile.TemporaryDirectory() as temporary:
                 program = """
-import importlib.util, os, signal, sys
+import importlib.util, json, os, signal, subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("guard_tests", sys.argv[1])
@@ -1419,27 +1499,70 @@ case.setUp()
 base = Path(sys.argv[2])
 proc, cgroup = case._fake_proc(base)
 attempted = False
+child_program = '''
+import os, signal, sys
+from pathlib import Path
+signum = int(sys.argv[2])
+signal.signal(signum, signal.SIG_DFL)
+if sys.argv[1] == "mixed":
+    os.kill(os.getppid(), signum)
+else:
+    os.killpg(os.getpgrp(), signum)
+Path(sys.argv[3]).write_text("command completed")
+'''
 def runner(argv):
     global attempted
     if argv[1] == "restart":
         attempted = True
-        os.kill(os.getpid(), int(sys.argv[3]))
-        return module.subprocess.CompletedProcess(argv, 0, "", "")
+        with subprocess.Popen([sys.executable, "-c", child_program,
+                sys.argv[4], sys.argv[3], str(base / "command-completed")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as child:
+            try:
+                stdout, stderr = child.communicate(timeout=3)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            (base / "child-result.json").write_text(json.dumps(
+                {"pid": child.pid, "returncode": child.returncode}))
+            return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
     return case.active_show(argv, pid=456 if attempted else 123)
 with patch.object(module.guard.time, "sleep"):
     module.guard.run_once(case.policy, base / "state", runner=runner,
         proc_root=proc, cgroup_root=cgroup, now_unix=100)
 """
-                completed = subprocess.run([sys.executable, "-c", program, __file__,
-                    temporary, str(int(signum))], capture_output=True, text=True, timeout=10)
-                self.assertEqual(completed.returncode, -signum, completed.stderr)
-                state = json.loads((Path(temporary) / "state/state.json").read_text())
-                self.assertIsNone(state["pending_action"])
-                self.assertFalse(state["circuit_open"])
-                self.assertEqual(state["last_pid"], 456)
-                event = json.loads((Path(temporary) / "state/latest.json").read_text())
-                self.assertEqual(event["result"], "restarted-verified")
-
+                # The fresh session makes group-wide delivery incapable of
+                # reaching pytest, the real operator or any existing service.
+                with subprocess.Popen([sys.executable, "-c", program, __file__,
+                        temporary, str(int(signum)), mode], start_new_session=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+                    try:
+                        _stdout, stderr = process.communicate(timeout=10)
+                    finally:
+                        if process.poll() is None:
+                            import os
+                            os.killpg(process.pid, signal.SIGKILL)
+                            process.wait()
+                self.assertEqual(process.returncode, -signum, stderr)
+                base = Path(temporary)
+                child = json.loads((base / "child-result.json").read_text())
+                self.assertFalse(Path(f"/proc/{child['pid']}").exists(), "command child not reaped")
+                self.assertEqual(child["returncode"], -signum if ambiguous else 0)
+                self.assertEqual((base / "command-completed").exists(), not ambiguous)
+                state = json.loads((base / "state/state.json").read_text())
+                event = json.loads((base / "state/latest.json").read_text())
+                if ambiguous:
+                    # The old control-group default kills the client after
+                    # dispatch. Preserve fail-closed accounting; never call it
+                    # success merely because the target has a new active PID.
+                    self.assertIsNotNone(state["pending_action"])
+                    self.assertTrue(state["circuit_open"])
+                    self.assertIn("unverified", event["result"])
+                else:
+                    self.assertIsNone(state["pending_action"])
+                    self.assertFalse(state["circuit_open"])
+                    self.assertEqual(state["last_pid"], 456)
+                    self.assertEqual(event["result"], "restarted-verified")
 
     def test_failed_intent_persistence_prevents_restart_and_stop(self) -> None:
         for circuit in (False, True):

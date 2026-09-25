@@ -849,18 +849,17 @@ def _event(observation: Observation | None, *, action: str, reason: str, result:
     return value
 
 
-def _verified_restart(
+def _restart_precondition(
     policy: dict[str, Any],
     observation: Observation,
     runner: Runner,
     *,
-    proc_root: Path = PROC_ROOT,
-    before_mutation: Callable[[], None],
-) -> tuple[bool, dict[str, Any]]:
+    proc_root: Path,
+) -> dict[str, Any]:
     try:
         pre = read_unit_state(policy, runner)
-    except GuardError as exc:
-        return False, {
+    except (GuardError, OSError) as exc:
+        return {
             "systemctl_attempted": False,
             "precondition_match": False,
             "precondition_error": str(exc),
@@ -909,10 +908,29 @@ def _verified_restart(
     }
     if precondition_error is not None:
         readback["precondition_error"] = precondition_error
-    if not precondition_match:
+    return readback
+
+
+def _verified_restart(
+    policy: dict[str, Any],
+    observation: Observation,
+    runner: Runner,
+    *,
+    proc_root: Path = PROC_ROOT,
+    before_mutation: Callable[[], None],
+) -> tuple[bool, dict[str, Any]]:
+    readback = _restart_precondition(policy, observation, runner, proc_root=proc_root)
+    readback["intent_persisted"] = False
+    if not readback["precondition_match"]:
         return False, readback
 
     before_mutation()
+    # Fsync may take time. Revalidate the same identity once more after the
+    # durable intent, immediately before dispatching a target mutation.
+    readback = _restart_precondition(policy, observation, runner, proc_root=proc_root)
+    readback["intent_persisted"] = True
+    if not readback["precondition_match"]:
+        return False, readback
     readback["systemctl_attempted"] = True
     completed = _call_runner(
         runner,
@@ -1175,7 +1193,8 @@ def _run_once_locked(
 
         event["readback"] = readback
         if action == "restart" and not readback["systemctl_attempted"]:
-            # No prepared write occurred. Reset confirmation, preserve budget.
+            # No target mutation occurred. Undo any tentative durable intent
+            # and accounting, reset confirmation, and preserve the old budget.
             current_pid = readback.get("pre_pid", 0)
             safe_pid = current_pid if (
                 current_pid > 0 and readback.get("pre_active_state") == "active"
