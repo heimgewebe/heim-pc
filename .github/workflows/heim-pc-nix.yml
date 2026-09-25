@@ -3,31 +3,46 @@ name: heim-pc-nix
 on:
   push:
     branches: [ main ]
-    paths:
-      - ".github/workflows/heim-pc-nix.yml"
-      - "flake.nix"
-      - "flake.lock"
-      - "nixos/**"
-      - "scripts/ci/check_pinned_nix_find_contract.py"
-      - "scripts/managed_build.py"
-      - "scripts/storage_inventory.py"
-      - "scripts/nixos_*.py"
   pull_request:
-    paths:
-      - ".github/workflows/heim-pc-nix.yml"
-      - "flake.nix"
-      - "flake.lock"
-      - "nixos/**"
-      - "scripts/ci/check_pinned_nix_find_contract.py"
-      - "scripts/managed_build.py"
-      - "scripts/storage_inventory.py"
-      - "scripts/nixos_*.py"
 
 permissions:
   contents: read
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nix_changed: ${{ steps.changes.outputs.nix_changed }}
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SOURCE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Checkout exact source revision for change detection
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify detector source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+
+      - name: Detect Nix-relevant changes from complete local Git history
+        id: changes
+        run: >-
+          python3 scripts/ci/nix_changed.py
+          --event-name "$EVENT_NAME"
+          --base "$BASE_SOURCE_REVISION"
+          --head "$EXPECTED_SOURCE_REVISION"
+          >> "$GITHUB_OUTPUT"
+
   nix:
+    needs: detect
+    if: needs.detect.outputs.nix_changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
