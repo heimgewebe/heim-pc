@@ -157,6 +157,38 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ("stop-circuit", "circuit_already_open"),
         )
 
+    def test_validate_persistent_state_accepts_absent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary) / "absent-state"
+            result = guard.validate_persistent_state(self.policy, state_dir)
+        self.assertEqual(result["status"], "valid")
+        self.assertFalse(result["state_present"])
+        self.assertFalse(result["circuit_open"])
+
+    def test_validate_persistent_state_rejects_invalid_full_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary) / "state"
+            state_dir.mkdir()
+            state = guard.default_state(self.policy)
+            state["restart_history_unix"] = ["invalid"]
+            (state_dir / "state.json").write_text(json.dumps(state))
+            with self.assertRaisesRegex(
+                guard.GuardError,
+                "restart history is invalid",
+            ):
+                guard.validate_persistent_state(self.policy, state_dir)
+
+    def test_validate_persistent_state_reports_open_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary) / "state"
+            state_dir.mkdir()
+            state = guard.default_state(self.policy)
+            state["circuit_open"] = True
+            (state_dir / "state.json").write_text(json.dumps(state))
+            result = guard.validate_persistent_state(self.policy, state_dir)
+        self.assertTrue(result["state_present"])
+        self.assertTrue(result["circuit_open"])
+
     def test_reset_circuit_requires_inactive_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"

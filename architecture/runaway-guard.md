@@ -207,16 +207,19 @@ und installiert ausschließlich
 
 Es wird kein zusätzliches OOM-Killer-Paket installiert.
 
-Der Installer trennt Installation, Enable und Start. Ein produktiver Start ist
-nur nach Commit, exakter --expected-head-Bindung und erfolgreichem
-systemd-Readback zulässig.
+Der Installer trennt Installation, Enable und Start. **Jeder** Live-`--apply`
+verlangt eine exakte `--expected-head`-Bindung; ein zufällig sauber
+ausgecheckter Commit reicht nicht als Deployment-Autorität.
 
 Für einen Live-Host werden zuerst nur die neuen inhaltsadressierten Release-
 Dateien publiziert. Bevor eine bereits boot-aktivierte Unit ersetzt, neu
-aktiviert oder gestartet werden darf, läuft der neue Guard einmal in einem
-isolierten temporären `--observe-only`-State gegen den realen Operator. Ein
-bereits persistierter offener Circuit sowie eine aktuelle Restart- oder
-Stop-Entscheidung blockieren fail-closed. Erst danach wird die Unit ersetzt.
+aktiviert oder gestartet werden darf, validiert der neue commitgebundene Guard
+mit `--validate-state-only` den vollständigen persistenten State einschließlich
+Schema, Ziel-Unit, Restart-Historie, Zähler und Circuit. Erst danach läuft
+derselbe Kandidat einmal in einem isolierten temporären `--observe-only`-State
+gegen den realen Operator. Ein ungültiger persistenter State, ein bereits
+geöffneter Circuit sowie eine aktuelle Restart- oder Stop-Entscheidung blockieren
+fail-closed. Erst danach wird die Unit ersetzt.
 
 `--start` verwendet absichtlich `systemctl restart`: Eine bereits aktive alte
 Guard-Instanz darf nach einem Update nicht mit dem vorherigen Release weiterlaufen.

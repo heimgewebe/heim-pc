@@ -204,25 +204,28 @@ def parse_json_stdout(
     return value
 
 
-def persistent_circuit_open() -> bool:
-    path = STATE_DIR / "state.json"
-    if not path.exists():
-        return False
-    if path.is_symlink() or not path.is_file():
-        raise InstallError(f"guard state must be a regular file: {path}")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise InstallError(f"cannot read guard state: {exc}") from exc
-    circuit_open = value.get("circuit_open")
-    if not isinstance(circuit_open, bool):
-        raise InstallError("guard state circuit_open is invalid")
-    return circuit_open
+def validate_persistent_state(release: Path) -> dict[str, Any]:
+    completed = run(
+        [
+            PYTHON,
+            str(release / "scripts/grabowski_memory_guard.py"),
+            "--policy",
+            str(release / "config/memory-pressure-guard.v1.json"),
+            "--state-dir",
+            str(STATE_DIR),
+            "--validate-state-only",
+        ]
+    )
+    value = parse_json_stdout(completed, label="guard persistent-state validation")
+    if value.get("status") != "valid":
+        raise InstallError("guard persistent-state validation did not report valid")
+    if value.get("circuit_open") is not False:
+        raise InstallError("guard preflight refused because the persistent circuit is open")
+    return value
 
 
 def observe_only_preflight(release: Path) -> dict[str, Any]:
-    if persistent_circuit_open():
-        raise InstallError("guard preflight refused because the persistent circuit is open")
+    persistent_state = validate_persistent_state(release)
     with tempfile.TemporaryDirectory(prefix="heim-pc-guard-preflight-") as temporary:
         completed = run(
             [
@@ -236,6 +239,7 @@ def observe_only_preflight(release: Path) -> dict[str, Any]:
             ]
         )
     value = parse_json_stdout(completed, label="guard observe-only preflight")
+    value["persistent_state"] = persistent_state
     action = value.get("action")
     result = value.get("result")
     if action not in {"none", "warn"} or result not in {"observed", "observe-only"}:
@@ -302,6 +306,8 @@ def install(
         raise InstallError("enable/start require apply")
     if apply and system_root == Path("/") and os.geteuid() != 0:
         raise InstallError("live system guard installation requires root")
+    if apply and system_root == Path("/") and expected_head is None:
+        raise InstallError("live system guard installation requires expected_head")
     if (enable or start) and system_root != Path("/"):
         raise InstallError("service control requires the live system root")
 

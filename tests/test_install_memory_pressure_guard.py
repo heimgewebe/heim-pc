@@ -110,6 +110,21 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                     start=False,
                 )
 
+    def test_live_apply_requires_expected_head(self) -> None:
+        with patch.object(installer.os, "geteuid", return_value=0):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "requires expected_head",
+            ):
+                installer.install(
+                    system_root=Path("/"),
+                    release_root=installer.DEFAULT_RELEASE_ROOT,
+                    apply=True,
+                    enable=False,
+                    start=False,
+                    expected_head=None,
+                )
+
     def test_staged_root_cannot_control_live_service(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(
@@ -157,7 +172,11 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             "",
         )
         with (
-            patch.object(installer, "persistent_circuit_open", return_value=False),
+            patch.object(
+                installer,
+                "validate_persistent_state",
+                return_value={"status": "valid", "circuit_open": False},
+            ),
             patch.object(installer, "run", return_value=completed),
         ):
             result = installer.observe_only_preflight(Path("/release"))
@@ -177,7 +196,11 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             "",
         )
         with (
-            patch.object(installer, "persistent_circuit_open", return_value=False),
+            patch.object(
+                installer,
+                "validate_persistent_state",
+                return_value={"status": "valid", "circuit_open": False},
+            ),
             patch.object(installer, "run", return_value=completed),
         ):
             with self.assertRaisesRegex(
@@ -186,13 +209,45 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ):
                 installer.observe_only_preflight(Path("/release"))
 
-    def test_observe_only_preflight_refuses_open_persistent_circuit(self) -> None:
-        with patch.object(installer, "persistent_circuit_open", return_value=True):
+    def test_validate_persistent_state_refuses_open_circuit(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["python"],
+            0,
+            json.dumps(
+                {
+                    "status": "valid",
+                    "circuit_open": True,
+                    "target_unit": "grabowski-operator.service",
+                }
+            ),
+            "",
+        )
+        with patch.object(installer, "run", return_value=completed):
             with self.assertRaisesRegex(
                 installer.InstallError,
                 "persistent circuit is open",
             ):
-                installer.observe_only_preflight(Path("/release"))
+                installer.validate_persistent_state(Path("/release"))
+
+    def test_validate_persistent_state_uses_candidate_guard(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["python"],
+            0,
+            json.dumps(
+                {
+                    "status": "valid",
+                    "circuit_open": False,
+                    "target_unit": "grabowski-operator.service",
+                }
+            ),
+            "",
+        )
+        with patch.object(installer, "run", return_value=completed) as mocked:
+            result = installer.validate_persistent_state(Path("/release"))
+        argv = mocked.call_args.args[0]
+        self.assertIn("--validate-state-only", argv)
+        self.assertIn(str(installer.STATE_DIR), argv)
+        self.assertFalse(result["circuit_open"])
 
     def test_activation_preflight_precedes_unit_install_enable_and_restart(self) -> None:
         head = "d" * 40

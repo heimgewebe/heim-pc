@@ -122,14 +122,17 @@ systemweiten Guard abgesichert:
   Circuit Breaker nur den Operator. Der Rechner wird niemals automatisch
   rebootet.
 
-Vor jedem Live-Enable oder Live-Start führt der Installer den neuen
-commitgebundenen Guard zuerst im `--observe-only`-Modus gegen den realen
-Operator aus. Die neue systemd-Unit wird erst nach erfolgreichem Preflight
-ersetzt oder aktiviert; ein offener Circuit oder eine bereits anstehende
-Restart-/Stop-Entscheidung blockiert fail-closed. Bei `--start` wird eine
-bereits laufende Guard-Instanz ausdrücklich neu gestartet. Der anschließende
-Readback prüft zusätzlich die tatsächliche `/proc/<pid>/cmdline` gegen den
-exakten inhaltsadressierten Release-Pfad.
+Jeder Live-`--apply` verlangt zwingend `--expected-head`. Vor jedem
+Live-Enable oder Live-Start validiert der **neue commitgebundene Guard selbst**
+den vollständigen persistenten State (Schema, Ziel-Unit, Zähler,
+Restart-Historie und Circuit) und läuft danach im isolierten
+`--observe-only`-Modus gegen den realen Operator. Die neue systemd-Unit wird
+erst nach erfolgreichem Preflight ersetzt oder aktiviert; ein ungültiger State,
+ein offener Circuit oder eine bereits anstehende Restart-/Stop-Entscheidung
+blockiert fail-closed. Bei `--start` wird eine bereits laufende Guard-Instanz
+ausdrücklich neu gestartet. Der anschließende Readback prüft zusätzlich die
+tatsächliche `/proc/<pid>/cmdline` gegen den exakten inhaltsadressierten
+Release-Pfad.
 
 Auf dem Host läuft zusätzlich bereits
 `heim-pc-memory-pressure-snapshot.timer` als unabhängige passive

@@ -567,6 +567,33 @@ def reset_circuit(
     return event
 
 
+def validate_persistent_state(
+    policy: dict[str, Any],
+    state_dir: Path,
+) -> dict[str, Any]:
+    if state_dir.exists():
+        metadata = state_dir.lstat()
+        if (
+            state_dir.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+        ):
+            raise GuardError(f"unsafe guard state directory: {state_dir}")
+    state_path = state_dir / "state.json"
+    state = load_state(state_path, policy)
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc_grabowski_memory_guard_state_validation",
+        "status": "valid",
+        "state_present": state_path.exists(),
+        "circuit_open": state["circuit_open"],
+        "target_unit": state["target_unit"],
+        "restart_history_count": len(state["restart_history_unix"]),
+        "consecutive_over_limit": state["consecutive_over_limit"],
+        "last_pid": state["last_pid"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
@@ -574,13 +601,24 @@ def main() -> int:
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--observe-only", action="store_true")
     parser.add_argument("--reset-circuit", action="store_true")
+    parser.add_argument("--validate-state-only", action="store_true")
     args = parser.parse_args()
 
     try:
         policy = load_policy(args.policy.resolve())
+        selected_modes = sum(
+            bool(value)
+            for value in (args.loop, args.observe_only, args.reset_circuit, args.validate_state_only)
+        )
+        if args.validate_state_only:
+            if selected_modes != 1:
+                raise GuardError("--validate-state-only cannot be combined with other modes")
+            validation = validate_persistent_state(policy, args.state_dir.resolve())
+            print(json.dumps(validation, sort_keys=True), flush=True)
+            return 0
         if args.reset_circuit:
-            if args.loop or args.observe_only:
-                raise GuardError("--reset-circuit cannot be combined with --loop/--observe-only")
+            if selected_modes != 1:
+                raise GuardError("--reset-circuit cannot be combined with other modes")
             event = reset_circuit(policy, args.state_dir.resolve())
             print(json.dumps(event, sort_keys=True), flush=True)
             return 0
