@@ -25,6 +25,10 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ROOT / "config/memory-pressure-guard.v1.json"
         )
 
+    def load_state(self, path, policy):
+        with guard._state_lock(path.parent, exclusive=False, create=False) as fd:
+            return guard._load_state_at(fd, path.name, policy)
+
     def observation(
         self,
         *,
@@ -53,6 +57,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         self.assertEqual(self.policy["restart_rss_anon_bytes"], 24 * 1024**3)
         self.assertEqual(self.policy["emergency_mem_available_bytes"], 8 * 1024**3)
         self.assertEqual(self.policy["emergency_rss_anon_bytes"], 12 * 1024**3)
+        self.assertEqual(self.policy["emergency_anon_pressure_bytes"], 24 * 1024**3)
         self.assertEqual(self.policy["confirm_samples"], 2)
         self.assertEqual(self.policy["max_restarts_per_window"], 3)
 
@@ -90,6 +95,56 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ("restart", "sustained_grabowski_rss"),
         )
         self.assertEqual(second["consecutive_over_limit"], 2)
+
+    def test_pid_reuse_resets_sustained_rss_confirmation(self) -> None:
+        state = guard.default_state(self.policy)
+        first, action1, reason1 = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                pid=123,
+                starttime_ticks=100,
+                rss_anon=24 * 1024**3,
+            ),
+        )
+        self.assertEqual(
+            (action1, reason1),
+            ("warn", "rss_restart_confirmation_pending"),
+        )
+        self.assertEqual(first["consecutive_over_limit"], 1)
+
+        reused, action2, reason2 = guard.evaluate(
+            self.policy,
+            first,
+            self.observation(
+                now=115,
+                pid=123,
+                starttime_ticks=200,
+                rss_anon=24 * 1024**3,
+            ),
+        )
+        self.assertEqual(
+            (action2, reason2),
+            ("warn", "rss_restart_confirmation_pending"),
+        )
+        self.assertEqual(reused["consecutive_over_limit"], 1)
+        self.assertEqual(reused["last_process_starttime_ticks"], 200)
+
+        confirmed, action3, reason3 = guard.evaluate(
+            self.policy,
+            reused,
+            self.observation(
+                now=130,
+                pid=123,
+                starttime_ticks=200,
+                rss_anon=24 * 1024**3,
+            ),
+        )
+        self.assertEqual(
+            (action3, reason3),
+            ("restart", "sustained_grabowski_rss"),
+        )
+        self.assertEqual(confirmed["consecutive_over_limit"], 2)
 
     def test_warn_threshold_does_not_restart(self) -> None:
         state = guard.default_state(self.policy)
@@ -170,10 +225,11 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
     def test_validate_persistent_state_rejects_invalid_full_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["restart_history_unix"] = ["invalid"]
             (state_dir / "state.json").write_text(json.dumps(state))
+            (state_dir / "state.json").chmod(0o600)
             with self.assertRaisesRegex(
                 guard.GuardError,
                 "restart history is invalid",
@@ -187,16 +243,38 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             state["consecutive_over_limit"] = 1
             state["restart_history_unix"] = [10, 20]
             state["circuit_open"] = True
+            state.pop("last_process_starttime_ticks")
             state.pop("pending_action")
             path = Path(temporary) / "state.json"
             path.write_text(json.dumps(state))
+            path.chmod(0o600)
 
-            migrated = guard.load_state(path, self.policy)
+            migrated = self.load_state(path, self.policy)
 
         self.assertEqual(migrated["last_pid"], 123)
+        self.assertEqual(migrated["last_process_starttime_ticks"], 0)
         self.assertEqual(migrated["consecutive_over_limit"], 1)
         self.assertEqual(migrated["restart_history_unix"], [10, 20])
         self.assertTrue(migrated["circuit_open"])
+        self.assertIsNone(migrated["pending_action"])
+
+    def test_load_state_migrates_pre_starttime_shape_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = guard.default_state(self.policy)
+            state["last_pid"] = 123
+            state["consecutive_over_limit"] = 1
+            state["restart_history_unix"] = [10, 20]
+            state.pop("last_process_starttime_ticks")
+            path = Path(temporary) / "state.json"
+            path.write_text(json.dumps(state))
+            path.chmod(0o600)
+
+            migrated = self.load_state(path, self.policy)
+
+        self.assertEqual(migrated["last_pid"], 123)
+        self.assertEqual(migrated["last_process_starttime_ticks"], 0)
+        self.assertEqual(migrated["consecutive_over_limit"], 1)
+        self.assertEqual(migrated["restart_history_unix"], [10, 20])
         self.assertIsNone(migrated["pending_action"])
 
     def test_load_state_rejects_dangling_state_symlink(self) -> None:
@@ -211,7 +289,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 guard.GuardError,
                 "unsafe guard state file",
             ):
-                guard.load_state(path, self.policy)
+                self.load_state(path, self.policy)
 
     def test_preflight_rejects_dangling_state_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -397,6 +475,16 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
     def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
         cases = (
             ("last_pid", True, "last_pid"),
+            (
+                "last_process_starttime_ticks",
+                True,
+                "last_process_starttime_ticks",
+            ),
+            (
+                "last_process_starttime_ticks",
+                -1,
+                "last_process_starttime_ticks",
+            ),
             ("consecutive_over_limit", -1, "consecutive_over_limit"),
             ("restart_history_unix", [20, 10], "restart history"),
             ("restart_history_unix", [True], "restart history"),
@@ -409,16 +497,18 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                     state[field] = value
                     path = state_dir / "state.json"
                     path.write_text(json.dumps(state))
+                    path.chmod(0o600)
                     with self.assertRaisesRegex(guard.GuardError, pattern):
-                        guard.load_state(path, self.policy)
+                        self.load_state(path, self.policy)
 
     def test_validate_persistent_state_reports_open_circuit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["circuit_open"] = True
             (state_dir / "state.json").write_text(json.dumps(state))
+            (state_dir / "state.json").chmod(0o600)
             result = guard.validate_persistent_state(self.policy, state_dir)
         self.assertTrue(result["state_present"])
         self.assertTrue(result["circuit_open"])
@@ -443,11 +533,12 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
     def test_reset_circuit_clears_persistent_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["circuit_open"] = True
             state["restart_history_unix"] = [10, 20, 30]
             (state_dir / "state.json").write_text(json.dumps(state))
+            (state_dir / "state.json").chmod(0o600)
 
             def inactive_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess(
@@ -640,6 +731,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertIsNone(final["pending_action"])
             self.assertEqual(final["restart_history_unix"], [100])
             self.assertEqual(final["last_pid"], 456)
+            self.assertEqual(final["last_process_starttime_ticks"], 0)
 
     def test_stale_restart_observation_does_not_mutate_or_consume_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -678,6 +770,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertEqual(result["readback"]["pre_pid"], 456)
             final = json.loads((base / "state/state.json").read_text())
             self.assertEqual(final["last_pid"], 456)
+            self.assertEqual(final["last_process_starttime_ticks"], 0)
             self.assertEqual(final["consecutive_over_limit"], 0)
             self.assertEqual(final["restart_history_unix"], [])
             self.assertFalse(final["circuit_open"])
@@ -692,7 +785,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 mem_available_kib=32 * 1024**2,
             )
             state_dir = base / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["last_pid"] = 123
             state["restart_history_unix"] = [100]
@@ -704,6 +797,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 "reason": "host_memory_emergency",
             }
             (state_dir / "state.json").write_text(json.dumps(state))
+            (state_dir / "state.json").chmod(0o600)
             mutations: list[str] = []
 
             def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -752,12 +846,13 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 mem_available_kib=32 * 1024**2,
             )
             state_dir = base / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["last_pid"] = 123
             state["consecutive_over_limit"] = 1
             raw = json.dumps(state, sort_keys=True) + "\n"
             (state_dir / "state.json").write_text(raw)
+            (state_dir / "state.json").chmod(0o600)
 
             event = guard.preflight(
                 self.policy,
@@ -803,6 +898,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                     self.observation(pid=123, starttime_ticks=100),
                     fake_runner,
                     proc_root=proc,
+                    before_mutation=lambda: None,
                 )
         self.assertFalse(success)
         self.assertTrue(readback["systemctl_attempted"])
@@ -932,11 +1028,13 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 mem_available_kib=32 * 1024**2,
             )
             state_dir = base / "state"
-            state_dir.mkdir()
+            state_dir.mkdir(mode=0o700)
             state = guard.default_state(self.policy)
             state["last_pid"] = 123
+            state["last_process_starttime_ticks"] = 100
             state["consecutive_over_limit"] = 1
             (state_dir / "state.json").write_text(json.dumps(state))
+            (state_dir / "state.json").chmod(0o600)
 
             event = guard.preflight(
                 self.policy,
@@ -969,10 +1067,11 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 if argv[1] == "show":
                     if not replacement_created:
                         state_dir.rename(moved_state_dir)
-                        state_dir.mkdir()
+                        state_dir.mkdir(mode=0o700)
                         sentinel = guard.default_state(self.policy)
                         sentinel["last_pid"] = 999
                         (state_dir / "state.json").write_text(json.dumps(sentinel))
+                        (state_dir / "state.json").chmod(0o600)
                         replacement_created = True
                     pid = 456 if mutations else 123
                     return self.active_show(argv, pid=pid)
@@ -1005,6 +1104,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertEqual(mutations, ["restart"])
             final = json.loads((moved_state_dir / "state.json").read_text())
             self.assertEqual(final["last_pid"], 456)
+            self.assertEqual(final["last_process_starttime_ticks"], 0)
             self.assertFalse(final["circuit_open"])
             self.assertIsNone(final["pending_action"])
             self.assertTrue((moved_state_dir / "latest.json").is_file())
@@ -1058,10 +1158,11 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
 
     def test_atomic_json_fsyncs_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "state.json"
-            with patch.object(guard, "_fsync_directory") as fsync_directory:
-                guard._atomic_json(path, {"ok": True})
-            fsync_directory.assert_called_once_with(path.parent)
+            with guard._state_lock(Path(temporary), exclusive=True, create=False) as fd:
+                with patch.object(guard.os, "fsync", wraps=guard.os.fsync) as synced:
+                    guard._atomic_json_at(fd, "state.json", {"ok": True})
+                self.assertEqual(synced.call_args_list[-1].args, (fd,))
+                self.assertGreaterEqual(synced.call_count, 2)
 
     def test_verified_restart_requires_new_active_pid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1085,6 +1186,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                     self.observation(pid=123, starttime_ticks=100),
                     fake_runner,
                     proc_root=proc,
+                    before_mutation=lambda: None,
                 )
         self.assertTrue(success)
         self.assertTrue(readback["precondition_match"])
@@ -1111,6 +1213,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 self.observation(pid=123, starttime_ticks=100),
                 fake_runner,
                 proc_root=proc,
+                    before_mutation=lambda: None,
             )
         self.assertFalse(success)
         self.assertFalse(readback["precondition_match"])
@@ -1136,12 +1239,304 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 self.observation(pid=123, starttime_ticks=99),
                 fake_runner,
                 proc_root=proc,
+                    before_mutation=lambda: None,
             )
         self.assertFalse(success)
         self.assertFalse(readback["precondition_match"])
         self.assertFalse(readback["systemctl_attempted"])
         self.assertEqual(readback["pre_process_starttime_ticks"], 100)
         self.assertEqual([call[1] for call in calls], ["show"])
+
+
+    def test_precondition_timeout_has_no_prepared_state_or_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+            shows = 0
+            def runner(argv):
+                nonlocal shows
+                self.assertEqual(argv[1], "show")
+                shows += 1
+                if shows == 3:
+                    raise guard.GuardError("precondition show timeout")
+                return self.active_show(argv)
+            try:
+                result = guard.run_once(self.policy, base / "state", runner=runner,
+                    proc_root=proc, cgroup_root=cgroup, now_unix=100)
+            except guard.GuardError:
+                result = None
+            state = json.loads((base / "state/state.json").read_text())
+            self.assertEqual(state["restart_history_unix"], [])
+            self.assertFalse(state["circuit_open"])
+            self.assertIsNone(state["pending_action"])
+            self.assertIsNotNone(result)
+            self.assertFalse(result["readback"]["systemctl_attempted"])
+            self.assertIn("timeout", (base / "state/events.jsonl").read_text())
+
+    def test_mutation_timeouts_and_readback_errors_are_audited(self) -> None:
+        for action, fault in (("restart", "command"), ("stop", "command"),
+                              ("restart", "readback"), ("stop", "readback")):
+            with self.subTest(action=action, fault=fault), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                proc, cgroup = self._fake_proc(base)
+                state_dir = base / "state"
+                state_dir.mkdir(mode=0o700)
+                state = guard.default_state(self.policy)
+                state["circuit_open"] = action == "stop"
+                with guard._state_lock(state_dir, exclusive=True, create=False) as fd:
+                    guard._atomic_json_at(fd, "state.json", state)
+                attempted = False
+                def runner(argv):
+                    nonlocal attempted
+                    if argv[1] == action:
+                        stored = json.loads((state_dir / "state.json").read_text())
+                        self.assertTrue(stored["circuit_open"])
+                        self.assertIsNotNone(stored["pending_action"])
+                        attempted = True
+                        if fault == "command":
+                            raise guard.GuardError("systemctl timeout")
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    if attempted:
+                        raise guard.GuardError("post-mutation readback failed")
+                    return self.active_show(argv)
+                with patch.object(guard.time, "sleep"), self.assertRaises(guard.GuardError):
+                    guard.run_once(self.policy, state_dir, runner=runner,
+                        proc_root=proc, cgroup_root=cgroup, now_unix=100)
+                stored = json.loads((state_dir / "state.json").read_text())
+                self.assertTrue(stored["circuit_open"])
+                self.assertIsNotNone(stored["pending_action"])
+                event = json.loads((state_dir / "latest.json").read_text())
+                self.assertIn("unverified", event["result"])
+                self.assertTrue(event["readback"]["systemctl_attempted"])
+                self.assertIn("error", event["readback"])
+                self.assertEqual(json.loads((state_dir / "events.jsonl").read_text()), event)
+
+    def test_pending_recovery_inactive_and_circuit_transitional_targets(self) -> None:
+        for pending in ("restart", "stop-circuit"):
+            for active in ("inactive", "failed", "activating", "reloading"):
+                with self.subTest(pending=pending, active=active), tempfile.TemporaryDirectory() as temporary:
+                    state_dir = Path(temporary)
+                    state = guard.default_state(self.policy)
+                    state.update(circuit_open=True, restart_history_unix=[100],
+                        pending_action={"action": pending, "pid": 123,
+                            "initiated_at_unix": 100, "reason": "recovery"})
+                    with guard._state_lock(state_dir, exclusive=True, create=False) as fd:
+                        guard._atomic_json_at(fd, "state.json", state)
+                    calls = []
+                    def runner(argv):
+                        if argv[1] == "stop":
+                            calls.append("stop")
+                            return subprocess.CompletedProcess(argv, 0, "", "")
+                        self.assertEqual(argv[1], "show")
+                        current = "inactive" if calls else active
+                        return subprocess.CompletedProcess(argv, 0,
+                            f"MainPID=0\nActiveState={current}\nSubState=dead\n"
+                            "ControlGroup=/system.slice/grabowski-operator.service\n", "")
+                    guard.run_once(self.policy, state_dir, runner=runner, now_unix=115)
+                    stored = json.loads((state_dir / "state.json").read_text())
+                    self.assertIsNone(stored["pending_action"])
+                    self.assertTrue(stored["circuit_open"])
+                    self.assertEqual(stored["restart_history_unix"], [100])
+                    self.assertEqual(calls, [] if active in {"inactive", "failed"} else ["stop"])
+                    self.assertTrue((state_dir / "events.jsonl").exists())
+                    calls.clear()
+                    # The converged inactive target must not receive another stop.
+                    guard.run_once(self.policy, state_dir,
+                        runner=lambda argv: subprocess.CompletedProcess(argv, 0,
+                            "MainPID=0\nActiveState=inactive\nSubState=dead\nControlGroup=\n", ""),
+                        now_unix=130)
+
+    def test_prepared_history_survives_backward_clock(self) -> None:
+        state = guard.default_state(self.policy)
+        state["restart_history_unix"] = [1000, 1500]
+        prepared = guard._prepared_action_state(state, self.observation(now=1498),
+            action="restart", reason="clock-test")
+        self.assertEqual(prepared["restart_history_unix"], [1000, 1500, 1500])
+        guard._validate_state_value(prepared, self.policy)
+
+    def test_reset_recovers_corrupt_values_but_preserves_evidence(self) -> None:
+        for data in ('{"broken": true}', '{broken json', '{"schema_version": 99}'):
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as temporary:
+                state_dir = Path(temporary)
+                path = state_dir / "state.json"
+                path.write_text(data)
+                path.chmod(0o600)
+                result = guard.reset_circuit(self.policy, state_dir,
+                    runner=lambda argv: subprocess.CompletedProcess(argv, 0,
+                        "MainPID=0\nActiveState=inactive\nSubState=dead\nControlGroup=\n", ""))
+                self.assertEqual(result["result"], "reset")
+                self.assertEqual(json.loads(path.read_text()), guard.default_state(self.policy))
+                archives = list(state_dir.glob("state.corrupt.*.json"))
+                self.assertEqual(len(archives), 1)
+                self.assertEqual(archives[0].read_text(), data)
+                self.assertIn(archives[0].name, (state_dir / "events.jsonl").read_text())
+
+    def test_zombie_without_rss_is_disappeared_observation(self) -> None:
+        for process_state in ("Z", "X"):
+            with self.subTest(process_state=process_state), tempfile.TemporaryDirectory() as temporary:
+                proc, cgroup = self._fake_proc(Path(temporary))
+                path = proc / "123/stat"
+                path.write_text(path.read_text().replace(") S ", f") {process_state} "))
+                (proc / "123/status").write_text("Name:\tpython\n")
+                self.assertIsNone(guard.observe(self.policy, runner=self.active_show,
+                    proc_root=proc, cgroup_root=cgroup, now_unix=100))
+
+    def test_readonly_and_mutating_state_paths_reject_unsafe_modes(self) -> None:
+        for create in (False, True):
+            with self.subTest(create=create), tempfile.TemporaryDirectory() as temporary:
+                state_dir = Path(temporary) / "state"
+                state_dir.mkdir(mode=0o777)
+                state_dir.chmod(0o777)
+                with self.assertRaises(guard.GuardError):
+                    guard._open_state_directory_fd(state_dir, create=create)
+                self.assertEqual(state_dir.stat().st_mode & 0o777, 0o777)
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            path = state_dir / "state.json"
+            path.write_text(json.dumps(guard.default_state(self.policy)))
+            path.chmod(0o666)
+            with self.assertRaises(guard.GuardError):
+                guard.validate_persistent_state(self.policy, state_dir)
+            with self.assertRaises(guard.GuardError):
+                guard.reset_circuit(self.policy, state_dir,
+                    runner=lambda argv: subprocess.CompletedProcess(argv, 0,
+                        "MainPID=0\nActiveState=inactive\nSubState=dead\nControlGroup=\n", ""))
+
+    def test_termination_after_restart_is_deferred_through_final_state(self) -> None:
+        import signal
+        # Only the disposable child receives a real signal; systemctl is fake.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signum=signum), tempfile.TemporaryDirectory() as temporary:
+                program = """
+import importlib.util, os, signal, sys
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("guard_tests", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+case = module.GrabowskiMemoryGuardTests()
+case.setUp()
+base = Path(sys.argv[2])
+proc, cgroup = case._fake_proc(base)
+attempted = False
+def runner(argv):
+    global attempted
+    if argv[1] == "restart":
+        attempted = True
+        os.kill(os.getpid(), int(sys.argv[3]))
+        return module.subprocess.CompletedProcess(argv, 0, "", "")
+    return case.active_show(argv, pid=456 if attempted else 123)
+with patch.object(module.guard.time, "sleep"):
+    module.guard.run_once(case.policy, base / "state", runner=runner,
+        proc_root=proc, cgroup_root=cgroup, now_unix=100)
+"""
+                completed = subprocess.run([sys.executable, "-c", program, __file__,
+                    temporary, str(int(signum))], capture_output=True, text=True, timeout=10)
+                self.assertEqual(completed.returncode, -signum, completed.stderr)
+                state = json.loads((Path(temporary) / "state/state.json").read_text())
+                self.assertIsNone(state["pending_action"])
+                self.assertFalse(state["circuit_open"])
+                self.assertEqual(state["last_pid"], 456)
+                event = json.loads((Path(temporary) / "state/latest.json").read_text())
+                self.assertEqual(event["result"], "restarted-verified")
+
+
+    def test_failed_intent_persistence_prevents_restart_and_stop(self) -> None:
+        for circuit in (False, True):
+            with self.subTest(circuit=circuit), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                proc, cgroup = self._fake_proc(base)
+                state_dir = base / "state"
+                state_dir.mkdir(mode=0o700)
+                state = guard.default_state(self.policy)
+                state["circuit_open"] = circuit
+                with guard._state_lock(state_dir, exclusive=True, create=False) as fd:
+                    guard._atomic_json_at(fd, "state.json", state)
+                real_write = guard._atomic_json_at
+                def fail_intent(fd, name, value):
+                    if name == "state.json":
+                        raise OSError("simulated storage failure")
+                    return real_write(fd, name, value)
+                def runner(argv):
+                    self.assertEqual(argv[1], "show", "target mutation before durable intent")
+                    return self.active_show(argv)
+                with patch.object(guard, "_atomic_json_at", side_effect=fail_intent):
+                    with self.assertRaises(OSError):
+                        guard.run_once(self.policy, state_dir, runner=runner,
+                            proc_root=proc, cgroup_root=cgroup, now_unix=100)
+                event = json.loads((state_dir / "latest.json").read_text())
+                self.assertFalse(event["readback"]["systemctl_attempted"])
+
+    def test_state_owner_checks_apply_to_opened_fds_and_reset(self) -> None:
+        import os
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary)
+            with patch.object(guard.os, "geteuid", return_value=os.geteuid() + 1):
+                for create in (False, True):
+                    with self.assertRaises(guard.GuardError):
+                        guard._open_state_directory_fd(state_dir, create=create)
+            path = state_dir / "state.json"
+            path.write_text('{"corrupt": true}')
+            path.chmod(0o600)
+            real_fstat = guard.os.fstat
+            inode = path.stat().st_ino
+            def wrong_owner(fd):
+                metadata = real_fstat(fd)
+                if metadata.st_ino != inode:
+                    return metadata
+                return SimpleNamespace(st_mode=metadata.st_mode, st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino, st_uid=os.geteuid()+1,
+                    st_nlink=metadata.st_nlink, st_size=metadata.st_size)
+            with patch.object(guard.os, "fstat", side_effect=wrong_owner):
+                with self.assertRaises(guard.GuardError):
+                    guard.validate_persistent_state(self.policy, state_dir)
+                with self.assertRaises(guard.GuardError):
+                    guard.reset_circuit(self.policy, state_dir,
+                        runner=lambda argv: subprocess.CompletedProcess(argv, 0,
+                            "MainPID=0\nActiveState=inactive\nSubState=dead\nControlGroup=\n", ""))
+            self.assertEqual(path.read_text(), '{"corrupt": true}')
+            self.assertEqual(list(state_dir.glob("state.corrupt.*.json")), [])
+
+    def test_reset_rejects_symlinks_even_when_target_state_is_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            outside = base / "outside"
+            outside.write_text("{broken")
+            outside.chmod(0o600)
+            state_dir = base / "state"
+            state_dir.mkdir(mode=0o700)
+            (state_dir / "state.json").symlink_to(outside)
+            with self.assertRaises(guard.GuardError):
+                guard.reset_circuit(self.policy, state_dir,
+                    runner=lambda argv: subprocess.CompletedProcess(argv, 0,
+                        "MainPID=0\nActiveState=inactive\nSubState=dead\nControlGroup=\n", ""))
+            self.assertEqual(outside.read_text(), "{broken")
+            self.assertTrue((state_dir / "state.json").is_symlink())
+
+    def test_swapped_anonymous_pressure_requires_host_pressure(self) -> None:
+        from dataclasses import replace
+        state = guard.default_state(self.policy)
+        sample = replace(self.observation(rss_anon=11 * 1024**3,
+            mem_available=512 * 1024**2), swap_bytes=22 * 1024**3)
+        _, action, reason = guard.evaluate(self.policy, state, sample)
+        self.assertEqual((action, reason), ("restart", "host_memory_emergency"))
+        healthy_host = replace(sample, mem_available_bytes=32 * 1024**3)
+        self.assertEqual(guard.evaluate(self.policy, state, healthy_host)[1], "none")
+        # Conservative RSS+Swap upper bound of all 240 historical healthy samples.
+        historical_upper_bound = replace(sample, rss_anon_bytes=11 * 1024**3,
+            swap_bytes=18_709_430_272 - 11 * 1024**3)
+        self.assertEqual(guard.evaluate(self.policy, state, historical_upper_bound)[1], "none")
+        threshold = replace(sample, swap_bytes=13 * 1024**3)
+        self.assertEqual(guard.evaluate(self.policy, state, threshold)[1], "restart")
+        self.assertEqual(guard.evaluate(self.policy, state,
+            replace(threshold, swap_bytes=threshold.swap_bytes - 1))[1], "none")
+
+    def test_cgroup_total_is_not_used_as_uncalibrated_child_anon_signal(self) -> None:
+        from dataclasses import replace
+        sample = replace(self.observation(rss_anon=4 * 1024**3,
+            mem_available=512 * 1024**2), cgroup_memory_current_bytes=50 * 1024**3)
+        self.assertEqual(guard.evaluate(self.policy, guard.default_state(self.policy), sample)[1], "none")
 
 
 if __name__ == "__main__":

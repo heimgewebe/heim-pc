@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -365,7 +367,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
         )
         self.assertEqual(
             receipt["systemd_state"],
-            "enabled+restarted-active-exact-release",
+            "enabled+exact-release-process-observed",
         )
         self.assertEqual(
             receipt["running_argv"],
@@ -521,14 +523,86 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             target = base / "a" / "b" / "payload"
-            with patch.object(installer, "_fsync_directory") as fsync_directory:
+            fsynced_paths: list[str] = []
+            real_fsync = os.fsync
+
+            def traced_fsync(fd: int) -> None:
+                fsynced_paths.append(os.readlink(f"/proc/self/fd/{fd}"))
+                real_fsync(fd)
+
+            with patch.object(installer.os, "fsync", side_effect=traced_fsync):
                 result = installer.atomic_install(target, b"payload", 0o600)
+
             self.assertEqual(result["action"], "installed")
             self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o755)
-            self.assertEqual(
-                [call.args[0] for call in fsync_directory.call_args_list],
-                [base, base / "a", base / "a" / "b"],
-            )
+            self.assertIn(str(base), fsynced_paths)
+            self.assertIn(str(base / "a"), fsynced_paths)
+            self.assertIn(str(base / "a" / "b"), fsynced_paths)
+
+    def test_atomic_install_rejects_symlinked_parent_ancestor_without_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            stage = base / "stage"
+            outside = base / "outside"
+            stage.mkdir()
+            (outside / "systemd/system").mkdir(parents=True)
+            (stage / "etc").symlink_to(outside, target_is_directory=True)
+            escaped_target = outside / "systemd/system/payload"
+
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "install parent ancestor is unsafe",
+            ):
+                installer.atomic_install(
+                    stage / "etc/systemd/system/payload",
+                    b"payload",
+                    0o600,
+                )
+
+            self.assertFalse(escaped_target.exists())
+
+    def test_cli_preserves_symlinked_system_root_for_fail_closed_rejection(self) -> None:
+        head = "a" * 40
+        blobs = self.blobs()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            outside = base / "outside"
+            outside.mkdir()
+            system_root = base / "stage"
+            system_root.symlink_to(outside, target_is_directory=True)
+            argv = [
+                "install_memory_pressure_guard.py",
+                "--system-root",
+                str(system_root),
+                "--apply",
+                "--expected-head",
+                head,
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(
+                    installer,
+                    "repository_identity",
+                    return_value=(head, False),
+                ),
+                patch.object(
+                    installer,
+                    "repository_blob",
+                    side_effect=lambda _root, *, head, relative_path: blobs[
+                        relative_path
+                    ],
+                ),
+                patch.object(
+                    installer,
+                    "verify_unit_data",
+                    return_value={"status": "verified", "returncode": 0},
+                ),
+            ):
+                self.assertEqual(installer.main(), 1)
+
+            self.assertTrue(system_root.is_symlink())
+            self.assertFalse((outside / "usr").exists())
+            self.assertFalse((outside / "etc").exists())
 
     def test_unit_state_probe_fails_closed_on_systemctl_error(self) -> None:
         with patch.object(
@@ -687,6 +761,48 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
         self.assertIn("OOMScoreAdjust=-900", service)
         self.assertIn("MemoryMax=128M", service)
         self.assertIn("MemorySwapMax=0", service)
+
+
+    def test_verify_rejects_basename_diagnostic_even_with_host_sigabrt(self) -> None:
+        path = Path("/tmp/verify") / f"{installer.UNIT_NAME}.service"
+        stderr = (f"{path.name}:14: Unknown key name 'Broken'\n"
+                  "Failed to allocate device monitor\nAssertion '*_head == _item' failed\n")
+        with patch.object(installer.subprocess, "run", return_value=
+                subprocess.CompletedProcess([], -installer.signal.SIGABRT, "", stderr)):
+            with self.assertRaisesRegex(installer.InstallError, "target diagnostics"):
+                installer.verify_unit_file(path)
+
+    def test_atomic_install_rejects_dangling_ancestor_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            stage = base / "stage"
+            stage.mkdir()
+            outside = base / "absent-outside"
+            (stage / "etc").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(installer.InstallError):
+                installer.atomic_install(stage / "etc/systemd/system/unit", b"unit", 0o644)
+            self.assertFalse(outside.exists())
+            self.assertEqual(list(stage.iterdir()), [stage / "etc"])
+
+    def test_install_parent_fd_survives_visible_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            stage = base / "stage"
+            stage.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            original = base / "original-stage"
+            real_open = installer._open_install_directory_fd
+            def swapped(path, *, create):
+                fd = real_open(path, create=create)
+                stage.rename(original)
+                stage.symlink_to(outside, target_is_directory=True)
+                return fd
+            with patch.object(installer, "_open_install_directory_fd", side_effect=swapped):
+                installer.atomic_install(stage / "unit", b"unit", 0o644)
+            self.assertEqual((original / "unit").read_bytes(), b"unit")
+            self.assertEqual(list(outside.iterdir()), [])
+
 
 
 if __name__ == "__main__":

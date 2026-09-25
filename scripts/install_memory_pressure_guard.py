@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -75,6 +76,7 @@ def systemd_path(path: Path, *, label: str) -> str:
     raw = str(path)
     if (
         not path.is_absolute()
+        or ".." in path.parts
         or any(ch.isspace() for ch in raw)
         or any(ch in {"%", "\\", '"', "'"} for ch in raw)
     ):
@@ -83,84 +85,228 @@ def systemd_path(path: Path, *, label: str) -> str:
 
 
 def rooted(system_root: Path, live_path: Path) -> Path:
-    if system_root == Path("/"):
-        return live_path
-    return system_root / live_path.relative_to("/")
+    if not system_root.is_absolute() or not live_path.is_absolute():
+        raise InstallError("system_root and live_path must be absolute")
+    root = Path(os.path.abspath(os.fspath(system_root)))
+    live = Path(os.path.abspath(os.fspath(live_path)))
+    if root == Path("/"):
+        return live
+    target = Path(
+        os.path.abspath(
+            os.fspath(root / live_path.relative_to("/"))
+        )
+    )
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise InstallError(
+            f"install target escapes declared system_root: {live_path}"
+        ) from exc
+    return target
 
 
-def _fsync_directory(path: Path) -> None:
+def _directory_open_flags() -> int:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
-    fd = os.open(path, flags)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _open_install_directory_fd(path: Path, *, create: bool) -> int:
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    anchor = absolute.anchor or os.sep
+    parts = absolute.parts[1:]
+    flags = _directory_open_flags()
+    current_fd = os.open(anchor, flags)
     try:
-        os.fsync(fd)
+        for part in parts:
+            if not part or part in {".", ".."} or "/" in part:
+                raise InstallError(f"unsafe install directory component: {part!r}")
+            created = False
+            try:
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise InstallError(f"install directory does not exist: {absolute}")
+                try:
+                    os.mkdir(part, mode=0o755, dir_fd=current_fd)
+                    os.fsync(current_fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                try:
+                    child_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    raise InstallError(
+                        f"install parent ancestor is unsafe: {absolute}"
+                    ) from exc
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise InstallError(
+                        f"install parent ancestor is unsafe: {absolute}"
+                    ) from exc
+                raise
+
+            try:
+                metadata = os.fstat(child_fd)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise InstallError(
+                        f"install parent ancestor is unsafe: {absolute}"
+                    )
+                if created:
+                    os.fchmod(child_fd, 0o755)
+                    os.fsync(child_fd)
+            except BaseException:
+                os.close(child_fd)
+                raise
+
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _install_entry_metadata_at(dir_fd: int, name: str) -> os.stat_result | None:
+    if not name or name in {".", ".."} or "/" in name:
+        raise InstallError(f"unsafe install target name: {name!r}")
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _read_install_entry_at(
+    dir_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+) -> tuple[bytes | None, int | None]:
+    metadata = _install_entry_metadata_at(dir_fd, name)
+    if metadata is None:
+        return None, None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise InstallError(f"install target must be regular or absent: {name}")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        raise InstallError(f"cannot open install target safely: {name}") from exc
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+        ):
+            raise InstallError(f"install target changed during read: {name}")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), stat.S_IMODE(opened.st_mode)
     finally:
         os.close(fd)
 
 
-def _ensure_parent_directories(path: Path) -> None:
-    missing: list[Path] = []
-    cursor = path
-    while not cursor.exists():
-        missing.append(cursor)
-        parent = cursor.parent
-        if parent == cursor:
-            raise InstallError(f"cannot resolve parent directory for {path}")
-        cursor = parent
-    if cursor.is_symlink() or not cursor.is_dir():
-        raise InstallError(f"install parent ancestor is unsafe: {cursor}")
-
-    path.mkdir(parents=True, exist_ok=True, mode=0o755)
-    for directory in reversed(missing):
-        metadata = directory.lstat()
-        if directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-            raise InstallError(f"created install directory is unsafe: {directory}")
-        os.chmod(directory, 0o755)
-        # Persist every newly created directory entry before any service unit
-        # can be pointed at this release tree.
-        _fsync_directory(directory.parent)
-
-
 def atomic_install(target: Path, data: bytes, mode: int) -> dict[str, Any]:
-    _ensure_parent_directories(target.parent)
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-        raise InstallError(f"install target must be regular or absent: {target}")
-    before = target.read_bytes() if target.exists() else None
-    before_mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-    action = "unchanged" if before == data and before_mode == mode else "installed"
-    if action == "installed":
-        fd, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        temporary = Path(name)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(temporary, mode)
-            os.replace(temporary, target)
-            _fsync_directory(target.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
-    else:
-        os.chmod(target, mode)
-    metadata = target.lstat()
-    if (
-        target.is_symlink()
-        or not stat.S_ISREG(metadata.st_mode)
-        or target.read_bytes() != data
-        or stat.S_IMODE(metadata.st_mode) != mode
-    ):
-        raise InstallError(f"installed target readback failed: {target}")
+    absolute = Path(os.path.abspath(os.fspath(target.expanduser())))
+    parent_fd = _open_install_directory_fd(absolute.parent, create=True)
+    name = absolute.name
+    try:
+        before, before_mode = _read_install_entry_at(
+            parent_fd,
+            name,
+            max_bytes=len(data),
+        )
+        action = "unchanged" if before == data and before_mode == mode else "installed"
+        if action == "installed":
+            temporary_name: str | None = None
+            temporary_fd: int | None = None
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            for attempt in range(32):
+                candidate = f".{name}.{os.getpid()}.{time.time_ns()}.{attempt}"
+                try:
+                    temporary_fd = os.open(
+                        candidate,
+                        flags,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            if temporary_fd is None or temporary_name is None:
+                raise InstallError(f"cannot allocate atomic install file for {absolute}")
+
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(temporary_fd, view)
+                    if written <= 0:
+                        raise InstallError(
+                            f"short write while installing {absolute}"
+                        )
+                    view = view[written:]
+                os.fchmod(temporary_fd, mode)
+                os.fsync(temporary_fd)
+            finally:
+                os.close(temporary_fd)
+
+            try:
+                os.replace(
+                    temporary_name,
+                    name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                os.fsync(parent_fd)
+                temporary_name = None
+            finally:
+                if temporary_name is not None:
+                    try:
+                        os.unlink(temporary_name, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+
+        installed, installed_mode = _read_install_entry_at(
+            parent_fd,
+            name,
+            max_bytes=len(data),
+        )
+        if installed != data or installed_mode != mode:
+            raise InstallError(f"installed target readback failed: {absolute}")
+    finally:
+        os.close(parent_fd)
+
     return {
-        "path": str(target),
+        "path": str(absolute),
         "action": action,
         "mode": format(mode, "04o"),
         "sha256": sha256(data),
     }
-
 
 def verify_unit_file(path: Path) -> dict[str, Any]:
     completed = subprocess.run(
@@ -170,7 +316,8 @@ def verify_unit_file(path: Path) -> dict[str, Any]:
         check=False,
     )
     target_diagnostics = [
-        line for line in completed.stderr.splitlines() if str(path) in line
+        line for line in completed.stderr.splitlines()
+        if str(path) in line or path.name in line
     ]
     if target_diagnostics:
         raise InstallError(
@@ -373,6 +520,13 @@ def install(
     start: bool,
     expected_head: str | None = None,
 ) -> dict[str, Any]:
+    system_root = system_root.expanduser()
+    if not system_root.is_absolute():
+        raise InstallError("system_root must be an absolute path")
+    # Collapse dot segments lexically without dereferencing symlinks. The
+    # descriptor-relative writer below owns symlink rejection through replace.
+    system_root = Path(os.path.abspath(os.fspath(system_root)))
+
     if (enable or start) and not apply:
         raise InstallError("enable/start require apply")
     if apply and system_root == Path("/") and os.geteuid() != 0:
@@ -494,7 +648,7 @@ def install(
                         "running guard does not match the installed release: "
                         f"expected={expected_argv!r}, observed={running_argv!r}"
                     )
-                systemd_state += "+restarted-active-exact-release"
+                systemd_state += "+exact-release-process-observed"
         else:
             for path, (data, mode) in files.items():
                 installed.append(atomic_install(path, data, mode))
@@ -518,7 +672,9 @@ def install(
         "systemd_state": systemd_state,
         "observe_only_preflight": preflight,
         "running_argv": running_argv,
+        "health_gate": "pending-deployment-acceptance" if start else "not-assessed",
         "does_not_establish": [
+            "stable_guard_health_over_multiple_ticks",
             "internal_root_cause_of_grabowski_memory_growth",
             "future_restart_correctness_under_all_failure_modes",
             "absence_of_future_global_oom_from_other_processes",
@@ -546,7 +702,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = install(
-            system_root=args.system_root.expanduser().resolve(),
+            system_root=args.system_root.expanduser(),
             release_root=args.release_root.expanduser(),
             apply=args.apply,
             enable=args.enable,

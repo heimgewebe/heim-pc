@@ -10,11 +10,11 @@ import errno
 import fcntl
 import json
 import os
+import signal
 from pathlib import Path
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any, Callable, Iterator
 
@@ -34,6 +34,14 @@ class GuardError(RuntimeError):
     pass
 
 
+class StateValueError(GuardError):
+    """Trusted state bytes have invalid JSON, schema or values."""
+
+
+class ProcessGone(GuardError):
+    """The sampled procfs task has exited, including an unreaped zombie."""
+
+
 @dataclass(frozen=True)
 class Observation:
     observed_at_unix: int
@@ -47,6 +55,10 @@ class Observation:
     mem_available_bytes: int
     cgroup_memory_current_bytes: int | None
     cgroup_swap_current_bytes: int | None
+
+    @property
+    def anon_pressure_bytes(self) -> int:
+        return self.rss_anon_bytes + self.swap_bytes
 
 
 def _bounded_int(value: Any, *, name: str, minimum: int, maximum: int) -> int:
@@ -80,6 +92,7 @@ def load_policy(path: Path) -> dict[str, Any]:
         "confirm_samples",
         "emergency_mem_available_bytes",
         "emergency_rss_anon_bytes",
+        "emergency_anon_pressure_bytes",
         "restart_cooldown_seconds",
         "restart_window_seconds",
         "max_restarts_per_window",
@@ -115,6 +128,9 @@ def load_policy(path: Path) -> dict[str, Any]:
         "emergency_rss_anon_bytes": _bounded_int(
             guard["emergency_rss_anon_bytes"], name="grabowski_guard.emergency_rss_anon_bytes", minimum=1024**3, maximum=64 * 1024**3
         ),
+        "emergency_anon_pressure_bytes": _bounded_int(
+            guard["emergency_anon_pressure_bytes"], name="grabowski_guard.emergency_anon_pressure_bytes", minimum=1024**3, maximum=128 * 1024**3
+        ),
         "restart_cooldown_seconds": _bounded_int(
             guard["restart_cooldown_seconds"], name="grabowski_guard.restart_cooldown_seconds", minimum=30, maximum=86400
         ),
@@ -135,6 +151,8 @@ def load_policy(path: Path) -> dict[str, Any]:
         raise GuardError("warn RSS threshold must be below restart RSS threshold")
     if result["emergency_rss_anon_bytes"] > result["restart_rss_anon_bytes"]:
         raise GuardError("emergency RSS threshold must not exceed restart RSS threshold")
+    if result["emergency_anon_pressure_bytes"] < result["emergency_rss_anon_bytes"]:
+        raise GuardError("total anonymous emergency threshold must not be below resident emergency threshold")
     if result["restart_cooldown_seconds"] > result["restart_window_seconds"]:
         raise GuardError("restart cooldown must not exceed restart window")
     return result
@@ -260,6 +278,8 @@ def _read_process_starttime(pid: int, proc_root: Path) -> int:
     fields_after_comm = raw[close_paren + 2 :].split()
     if len(fields_after_comm) <= 19:
         raise GuardError("target process stat lacks starttime")
+    if fields_after_comm[0] in {"Z", "X", "x"}:
+        raise ProcessGone("target process has exited")
     try:
         return int(fields_after_comm[19])
     except ValueError as exc:
@@ -312,7 +332,16 @@ def observe(
         status = _read_status(pid, proc_root)
         cgroup_after = _read_process_cgroup(pid, proc_root)
         starttime_after = _read_process_starttime(pid, proc_root)
+    except ProcessGone:
+        return None
     except GuardError:
+        # status may lose RSS fields between the first stat read and exit.
+        try:
+            _read_process_starttime(pid, proc_root)
+        except ProcessGone:
+            return None
+        except GuardError:
+            pass
         unit_after_error = read_unit_state(policy, runner)
         if (
             unit_after_error["active_state"] != "active"
@@ -362,6 +391,7 @@ def default_state(policy: dict[str, Any]) -> dict[str, Any]:
         "kind": "heim_pc_grabowski_memory_guard_state",
         "target_unit": policy["target_unit"],
         "last_pid": 0,
+        "last_process_starttime_ticks": 0,
         "consecutive_over_limit": 0,
         "restart_history_unix": [],
         "circuit_open": False,
@@ -371,14 +401,14 @@ def default_state(policy: dict[str, Any]) -> dict[str, Any]:
 
 def _state_nonnegative_int(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise GuardError(f"{name} must be a non-boolean integer >= 0")
+        raise StateValueError(f"{name} must be a non-boolean integer >= 0")
     return value
 
 
 def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise GuardError("guard state must be an object")
-    legacy_fields = {
+        raise StateValueError("guard state must be an object")
+    base_fields = {
         "schema_version",
         "kind",
         "target_unit",
@@ -387,14 +417,24 @@ def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
         "restart_history_unix",
         "circuit_open",
     }
-    expected_fields = {*legacy_fields, "pending_action"}
+    legacy_fields = base_fields
+    pre_starttime_fields = {*base_fields, "pending_action"}
+    expected_fields = {*pre_starttime_fields, "last_process_starttime_ticks"}
     observed_fields = set(value)
     if observed_fields == legacy_fields:
-        # Schema v1 before pending_action existed is the only accepted legacy
-        # shape. Migrate it in memory without discarding counters/history/circuit.
-        value = {**value, "pending_action": None}
+        # Earliest schema-v1 shape, before pending_action and process-starttime
+        # binding. Preserve durable safety state while forcing the next sample
+        # to begin a fresh confirmation sequence.
+        value = {
+            **value,
+            "pending_action": None,
+            "last_process_starttime_ticks": 0,
+        }
+    elif observed_fields == pre_starttime_fields:
+        # Schema v1 immediately before process-starttime binding.
+        value = {**value, "last_process_starttime_ticks": 0}
     elif observed_fields != expected_fields:
-        raise GuardError("guard state fields are invalid")
+        raise StateValueError("guard state fields are invalid")
     schema_version = value.get("schema_version")
     if (
         isinstance(schema_version, bool)
@@ -402,7 +442,7 @@ def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
         or value.get("kind") != "heim_pc_grabowski_memory_guard_state"
         or value.get("target_unit") != policy["target_unit"]
     ):
-        raise GuardError("guard state identity is invalid")
+        raise StateValueError("guard state identity is invalid")
 
     history = value.get("restart_history_unix")
     if (
@@ -414,15 +454,19 @@ def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
         )
         or history != sorted(history)
     ):
-        raise GuardError("guard restart history is invalid")
+        raise StateValueError("guard restart history is invalid")
 
     _state_nonnegative_int(value.get("last_pid"), name="guard state last_pid")
+    _state_nonnegative_int(
+        value.get("last_process_starttime_ticks"),
+        name="guard state last_process_starttime_ticks",
+    )
     _state_nonnegative_int(
         value.get("consecutive_over_limit"),
         name="guard state consecutive_over_limit",
     )
     if not isinstance(value.get("circuit_open"), bool):
-        raise GuardError("guard circuit state is invalid")
+        raise StateValueError("guard circuit state is invalid")
 
     pending = value.get("pending_action")
     if pending is not None:
@@ -432,9 +476,9 @@ def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
             "pid",
             "reason",
         }:
-            raise GuardError("guard pending action is invalid")
+            raise StateValueError("guard pending action is invalid")
         if pending.get("action") not in {"restart", "stop-circuit"}:
-            raise GuardError("guard pending action kind is invalid")
+            raise StateValueError("guard pending action kind is invalid")
         _state_nonnegative_int(
             pending.get("initiated_at_unix"),
             name="guard pending action timestamp",
@@ -443,33 +487,14 @@ def _validate_state_value(value: Any, policy: dict[str, Any]) -> dict[str, Any]:
             pending.get("pid"),
             name="guard pending action pid",
         )
-        if pending_pid <= 0:
-            raise GuardError("guard pending action pid must be positive")
+        if pending_pid == 0 and pending["action"] == "restart":
+            raise StateValueError("guard pending restart pid must be positive")
         reason = pending.get("reason")
         if not isinstance(reason, str) or not reason or len(reason) > 128:
-            raise GuardError("guard pending action reason is invalid")
+            raise StateValueError("guard pending action reason is invalid")
         if value["circuit_open"] is not True:
-            raise GuardError("guard pending action requires an open circuit")
+            raise StateValueError("guard pending action requires an open circuit")
     return value
-
-
-def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
-    # Path.exists() follows symlinks and returns False for a dangling target.
-    # Reject symlinks first so an unsafe persistent state cannot masquerade as
-    # an absent state during validation or activation preflight.
-    if path.is_symlink():
-        raise GuardError(f"unsafe guard state file: {path}")
-    if not path.exists():
-        return default_state(policy)
-    if not path.is_file():
-        raise GuardError(f"unsafe guard state file: {path}")
-    try:
-        if path.stat().st_size > 64 * 1024:
-            raise GuardError("guard state file is oversized")
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GuardError(f"cannot read guard state: {exc}") from exc
-    return _validate_state_value(value, policy)
 
 
 def _state_entry_metadata_at(dir_fd: int, name: str) -> os.stat_result | None:
@@ -514,9 +539,12 @@ def _load_state_at(dir_fd: int, name: str, policy: dict[str, Any]) -> dict[str, 
             not stat.S_ISREG(opened.st_mode)
             or opened.st_dev != metadata.st_dev
             or opened.st_ino != metadata.st_ino
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
             or opened.st_size > 64 * 1024
         ):
-            raise GuardError("guard state file changed during read")
+            raise GuardError("guard state file changed or has unsafe owner/mode")
         chunks: list[bytes] = []
         remaining = 64 * 1024 + 1
         while remaining > 0:
@@ -531,7 +559,7 @@ def _load_state_at(dir_fd: int, name: str, policy: dict[str, Any]) -> dict[str, 
         try:
             value = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise GuardError(f"cannot read guard state: {exc}") from exc
+            raise StateValueError(f"cannot parse guard state: {exc}") from exc
     finally:
         os.close(fd)
     return _validate_state_value(value, policy)
@@ -544,14 +572,19 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
         for item in state["restart_history_unix"]
         if now - item <= policy["restart_window_seconds"]
     ]
-    same_pid = state["last_pid"] == observation.pid
-    consecutive = state["consecutive_over_limit"] if same_pid else 0
+    same_process = (
+        state["last_pid"] == observation.pid
+        and state["last_process_starttime_ticks"]
+        == observation.process_starttime_ticks
+    )
+    consecutive = state["consecutive_over_limit"] if same_process else 0
     over_restart = observation.rss_anon_bytes >= policy["restart_rss_anon_bytes"]
     consecutive = consecutive + 1 if over_restart else 0
 
     next_state = {
         **state,
         "last_pid": observation.pid,
+        "last_process_starttime_ticks": observation.process_starttime_ticks,
         "consecutive_over_limit": consecutive,
         "restart_history_unix": history,
     }
@@ -561,7 +594,10 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
 
     emergency = (
         observation.mem_available_bytes <= policy["emergency_mem_available_bytes"]
-        and observation.rss_anon_bytes >= policy["emergency_rss_anon_bytes"]
+        and (
+            observation.rss_anon_bytes >= policy["emergency_rss_anon_bytes"]
+            or observation.anon_pressure_bytes >= policy["emergency_anon_pressure_bytes"]
+        )
     )
     sustained = over_restart and consecutive >= policy["confirm_samples"]
     if not emergency and not sustained:
@@ -639,10 +675,10 @@ def _open_state_directory_fd(path: Path, *, create: bool) -> int | None:
             current_fd = child_fd
 
         metadata = os.fstat(current_fd)
-        if metadata.st_uid != os.getuid():
+        if metadata.st_uid != os.geteuid():
             raise GuardError(f"guard state directory has unexpected owner: {path}")
-        if create and stat.S_IMODE(metadata.st_mode) != 0o700:
-            os.fchmod(current_fd, 0o700)
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise GuardError(f"guard state directory must have mode 0700: {path}")
         return current_fd
     except BaseException:
         try:
@@ -650,19 +686,6 @@ def _open_state_directory_fd(path: Path, *, create: bool) -> int | None:
         except OSError:
             pass
         raise
-
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    fd = os.open(path, flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
 
 def _acquire_flock(fd: int, *, exclusive: bool) -> None:
     operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
@@ -698,52 +721,6 @@ def _state_lock(
         os.close(fd)
 
 
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise GuardError(f"unsafe guard state target: {path}")
-    data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _append_event(path: Path, event: dict[str, Any], *, max_bytes: int) -> None:
-    line = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    if len(line) > max_bytes:
-        raise GuardError("one guard event exceeds event segment limit")
-    previous = path.with_name(path.name + ".previous")
-    for candidate in (path, previous):
-        if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
-            raise GuardError(f"unsafe guard event file: {candidate}")
-
-    directory_changed = not path.exists()
-    if path.exists() and path.stat().st_size + len(line) > max_bytes:
-        previous.unlink(missing_ok=True)
-        os.replace(path, previous)
-        directory_changed = True
-
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
-    try:
-        os.write(fd, line)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    if directory_changed:
-        _fsync_directory(path.parent)
-
-
 def _atomic_json_at(dir_fd: int, name: str, value: dict[str, Any]) -> None:
     metadata = _state_entry_metadata_at(dir_fd, name)
     if metadata is not None and not stat.S_ISREG(metadata.st_mode):
@@ -775,8 +752,8 @@ def _atomic_json_at(dir_fd: int, name: str, value: dict[str, Any]) -> None:
                 if written <= 0:
                     raise GuardError(f"short write while persisting guard state: {name}")
                 view = view[written:]
-            os.fsync(fd)
             os.fchmod(fd, 0o600)
+            os.fsync(fd)
         finally:
             os.close(fd)
         os.replace(
@@ -860,9 +837,11 @@ def _event(observation: Observation | None, *, action: str, reason: str, result:
     if observation is not None:
         value["observation"] = {
             "pid": observation.pid,
+            "process_starttime_ticks": observation.process_starttime_ticks,
             "rss_anon_bytes": observation.rss_anon_bytes,
             "rss_bytes": observation.rss_bytes,
             "swap_bytes": observation.swap_bytes,
+            "anon_pressure_bytes": observation.anon_pressure_bytes,
             "mem_available_bytes": observation.mem_available_bytes,
             "cgroup_memory_current_bytes": observation.cgroup_memory_current_bytes,
             "cgroup_swap_current_bytes": observation.cgroup_swap_current_bytes,
@@ -876,8 +855,19 @@ def _verified_restart(
     runner: Runner,
     *,
     proc_root: Path = PROC_ROOT,
+    before_mutation: Callable[[], None],
 ) -> tuple[bool, dict[str, Any]]:
-    pre = read_unit_state(policy, runner)
+    try:
+        pre = read_unit_state(policy, runner)
+    except GuardError as exc:
+        return False, {
+            "systemctl_attempted": False,
+            "precondition_match": False,
+            "precondition_error": str(exc),
+            "pre_pid": 0,
+            "pre_active_state": "unknown",
+            "pre_control_group": "",
+        }
     pre_process_starttime_ticks: int | None = None
     pre_process_control_group: str | None = None
     precondition_error: str | None = None
@@ -922,6 +912,8 @@ def _verified_restart(
     if not precondition_match:
         return False, readback
 
+    before_mutation()
+    readback["systemctl_attempted"] = True
     completed = _call_runner(
         runner,
         [SYSTEMCTL, "restart", policy["target_unit"]],
@@ -957,8 +949,7 @@ def _verified_stop(policy: dict[str, Any], runner: Runner) -> tuple[bool, dict[s
     post = read_unit_state(policy, runner)
     success = (
         completed.returncode == 0
-        and post["active_state"] != "active"
-        and post["pid"] == 0
+        and _unit_is_inactive(post)
     )
     return success, {
         "systemctl_returncode": completed.returncode,
@@ -1008,6 +999,7 @@ def _preflight_locked(
         "consecutive_over_limit": state["consecutive_over_limit"],
         "restart_history_count": len(state["restart_history_unix"]),
         "last_pid": state["last_pid"],
+        "last_process_starttime_ticks": state["last_process_starttime_ticks"],
         "pending_action": state["pending_action"],
     }
     return event
@@ -1033,32 +1025,69 @@ def preflight(
         )
 
 
+def _unit_is_inactive(unit: dict[str, Any]) -> bool:
+    return unit["active_state"] in {"inactive", "failed"} and unit["pid"] == 0
+
+
+@contextmanager
+def _defer_termination() -> Iterator[None]:
+    # Python handlers leave child systemctl signal masks unchanged. Delivery is
+    # deferred only through the bounded transaction, then restored/re-delivered.
+    received: list[int] = []
+    previous = {}
+    def defer(signum: int, _frame: Any) -> None:
+        if not received:
+            received.append(signum)
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.signal(signum, defer)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if received:
+            signal.raise_signal(received[0])
+
+
 def _prepared_action_state(
     state: dict[str, Any],
-    observation: Observation,
+    observation: Observation | None,
     *,
     action: str,
     reason: str,
+    target_pid: int = 0,
 ) -> dict[str, Any]:
     if action not in {"restart", "stop-circuit"}:
         raise GuardError(f"cannot prepare unsupported action: {action}")
-    prepared = {
+    history = list(state["restart_history_unix"])
+    observed_at = int(time.time()) if observation is None else observation.observed_at_unix
+    initiated_at = max(observed_at, history[-1] if history else 0)
+    if action == "restart":
+        history.append(initiated_at)
+    return {
         **state,
-        "last_pid": observation.pid,
+        "last_pid": observation.pid if observation else target_pid,
+        "last_process_starttime_ticks": observation.process_starttime_ticks if observation else 0,
         "consecutive_over_limit": 0,
+        "restart_history_unix": history,
         "circuit_open": True,
         "pending_action": {
             "action": action,
-            "initiated_at_unix": observation.observed_at_unix,
-            "pid": observation.pid,
+            "initiated_at_unix": initiated_at,
+            "pid": observation.pid if observation else target_pid,
             "reason": reason,
         },
     }
-    history = list(prepared["restart_history_unix"])
-    if action == "restart":
-        history.append(observation.observed_at_unix)
-    prepared["restart_history_unix"] = history
-    return prepared
+
+
+def _record_event(dir_fd: int, policy: dict[str, Any], event: dict[str, Any]) -> None:
+    # Attempt both audit surfaces even when one fails; do not hide storage errors.
+    try:
+        _atomic_json_at(dir_fd, "latest.json", event)
+    finally:
+        if event["action"] != "none":
+            _append_event_at(dir_fd, "events.jsonl", event,
+                             max_bytes=policy["event_segment_max_bytes"])
 
 
 def _run_once_locked(
@@ -1073,157 +1102,116 @@ def _run_once_locked(
 ) -> dict[str, Any]:
     state_present = _state_file_present_at(state_dir_fd, "state.json")
     state = _load_state_at(state_dir_fd, "state.json", policy)
-    observation = observe(
-        policy,
-        runner=runner,
-        proc_root=proc_root,
-        cgroup_root=cgroup_root,
-        now_unix=now_unix,
-    )
-    if observation is None:
-        next_state = {
-            **state,
-            "last_pid": 0,
-            "consecutive_over_limit": 0,
-        }
-        if next_state != state or not state_present:
-            _atomic_json_at(state_dir_fd, "state.json", next_state)
-        event = _event(None, action="none", reason="target_not_active", result="observed")
-        _atomic_json_at(state_dir_fd, "latest.json", event)
-        return event
-
-    next_state, action, reason = evaluate(policy, state, observation)
-    event = _event(observation, action=action, reason=reason, result="observed")
-
-    if action in {"restart", "stop-circuit"} and not allow_actions:
-        event["result"] = "observe-only"
-        if next_state != state or not state_present:
-            _atomic_json_at(state_dir_fd, "state.json", next_state)
-        _atomic_json_at(state_dir_fd, "latest.json", event)
-        _append_event_at(
-            state_dir_fd,
-            "events.jsonl",
-            event,
-            max_bytes=policy["event_segment_max_bytes"],
-        )
-        return event
-
-    if action in {"restart", "stop-circuit"}:
-        prepared_state = _prepared_action_state(
-            next_state,
-            observation,
-            action=action,
-            reason=reason,
-        )
-        # Keep the fail-closed action intent on the same verified directory FD
-        # that owns the flock. A renamed/replaced ancestor cannot redirect it.
-        _atomic_json_at(state_dir_fd, "state.json", prepared_state)
-    else:
-        prepared_state = next_state
-
-    if action == "restart":
-        success, readback = _verified_restart(
-            policy,
-            observation,
-            runner,
-            proc_root=proc_root,
-        )
-        event["readback"] = readback
-        if readback["systemctl_attempted"] is False:
-            current_pid = int(readback["pre_pid"])
-            safe_last_pid = (
-                current_pid
-                if (
-                    current_pid > 0
-                    and readback["pre_active_state"] == "active"
-                    and readback["pre_control_group"] == policy["expected_control_group"]
-                )
-                else 0
-            )
-            aborted_state = {
-                **next_state,
-                "last_pid": safe_last_pid,
-                "consecutive_over_limit": 0,
-                "circuit_open": state["circuit_open"],
-                "pending_action": None,
-            }
-            _atomic_json_at(state_dir_fd, "state.json", aborted_state)
-            event["result"] = "restart-aborted-stale-observation"
-            _atomic_json_at(state_dir_fd, "latest.json", event)
-            _append_event_at(
-                state_dir_fd,
-                "events.jsonl",
-                event,
-                max_bytes=policy["event_segment_max_bytes"],
-            )
+    target_pid = 0
+    if state["circuit_open"]:
+        # Containment must not depend on a readable/active MainPID memory sample.
+        unit = read_unit_state(policy, runner)
+        target_pid = unit["pid"]
+        observation = None
+        next_state = {**state, "last_pid": 0, "last_process_starttime_ticks": 0,
+                      "consecutive_over_limit": 0}
+        if _unit_is_inactive(unit):
+            pending = state["pending_action"]
+            event = _event(None, action="recovery" if pending else "none",
+                           reason="target_inactive_circuit_open", result="observed")
+            if pending and allow_actions:
+                next_state["pending_action"] = None
+                event["recovered_action"] = pending
+                event["result"] = "pending-cleared-target-inactive"
+            elif pending:
+                event["result"] = "observe-only"
+            if next_state != state or not state_present:
+                _atomic_json_at(state_dir_fd, "state.json", next_state)
+            _record_event(state_dir_fd, policy, event)
             return event
-        if success:
-            completed_at = max(
-                observation.observed_at_unix,
-                int(time.time()),
-            )
-            finalized_history = list(prepared_state["restart_history_unix"])
-            if finalized_history:
-                finalized_history[-1] = completed_at
-            final_state = {
-                **prepared_state,
-                "last_pid": int(readback["post_pid"]),
-                "consecutive_over_limit": 0,
-                "restart_history_unix": finalized_history,
-                "circuit_open": False,
-                "pending_action": None,
-            }
-            _atomic_json_at(state_dir_fd, "state.json", final_state)
-            event["result"] = "restarted-verified"
-            next_state = final_state
-        else:
-            event["result"] = "restart-outcome-unverified-circuit-open"
-            _atomic_json_at(state_dir_fd, "latest.json", event)
-            _append_event_at(
-                state_dir_fd,
-                "events.jsonl",
-                event,
-                max_bytes=policy["event_segment_max_bytes"],
-            )
-            raise GuardError("restart outcome could not be verified; circuit remains open")
-
-    elif action == "stop-circuit":
-        success, readback = _verified_stop(policy, runner)
-        event["readback"] = readback
-        if success:
-            final_state = {
-                **prepared_state,
-                "last_pid": 0,
-                "consecutive_over_limit": 0,
-                "circuit_open": True,
-                "pending_action": None,
-            }
-            _atomic_json_at(state_dir_fd, "state.json", final_state)
-            event["result"] = "stopped-circuit-open"
-            next_state = final_state
-        else:
-            event["result"] = "stop-outcome-unverified-circuit-open"
-            _atomic_json_at(state_dir_fd, "latest.json", event)
-            _append_event_at(
-                state_dir_fd,
-                "events.jsonl",
-                event,
-                max_bytes=policy["event_segment_max_bytes"],
-            )
-            raise GuardError("circuit-breaker stop outcome could not be verified; circuit remains open")
-
+        if unit["control_group"] not in {"", policy["expected_control_group"]}:
+            raise GuardError("target unit cgroup mismatch during circuit enforcement")
+        action, reason = "stop-circuit", "circuit_already_open"
     else:
+        observation = observe(policy, runner=runner, proc_root=proc_root,
+                              cgroup_root=cgroup_root, now_unix=now_unix)
+        if observation is None:
+            next_state = {**state, "last_pid": 0, "last_process_starttime_ticks": 0,
+                          "consecutive_over_limit": 0}
+            action, reason = "none", "target_not_active"
+        else:
+            next_state, action, reason = evaluate(policy, state, observation)
+
+    event = _event(observation, action=action, reason=reason, result="observed")
+    if action not in {"restart", "stop-circuit"} or not allow_actions:
+        if action in {"restart", "stop-circuit"}:
+            event["result"] = "observe-only"
         if next_state != state or not state_present:
             _atomic_json_at(state_dir_fd, "state.json", next_state)
+        _record_event(state_dir_fd, policy, event)
+        return event
 
-    _atomic_json_at(state_dir_fd, "latest.json", event)
-    if action != "none":
-        _append_event_at(
-            state_dir_fd,
-            "events.jsonl",
-            event,
-            max_bytes=policy["event_segment_max_bytes"],
-        )
+    prepared_state = None
+    attempted = False
+    def prepare() -> None:
+        nonlocal prepared_state, attempted
+        prepared_state = _prepared_action_state(next_state, observation,
+            action=action, reason=reason, target_pid=target_pid)
+        # This FD also owns the lock. No pathname can redirect this intent.
+        _atomic_json_at(state_dir_fd, "state.json", prepared_state)
+        attempted = True
+
+    with _defer_termination():
+        try:
+            if action == "restart":
+                assert observation is not None
+                success, readback = _verified_restart(policy, observation, runner,
+                    proc_root=proc_root, before_mutation=prepare)
+            else:
+                prepare()
+                success, readback = _verified_stop(policy, runner)
+                readback["systemctl_attempted"] = True
+        except (GuardError, OSError) as exc:
+            event["readback"] = {"systemctl_attempted": attempted, "error": str(exc)}
+            event["result"] = (f"{action}-outcome-unverified-circuit-open"
+                               if attempted else "intent-persistence-failed-no-mutation")
+            _record_event(state_dir_fd, policy, event)
+            raise
+
+        event["readback"] = readback
+        if action == "restart" and not readback["systemctl_attempted"]:
+            # No prepared write occurred. Reset confirmation, preserve budget.
+            current_pid = readback.get("pre_pid", 0)
+            safe_pid = current_pid if (
+                current_pid > 0 and readback.get("pre_active_state") == "active"
+                and readback.get("pre_control_group") == policy["expected_control_group"]
+            ) else 0
+            final_state = {**next_state, "last_pid": safe_pid,
+                           "last_process_starttime_ticks": 0,
+                           "consecutive_over_limit": 0}
+            event["result"] = "restart-aborted-stale-observation"
+        elif not success:
+            event["result"] = f"{'restart' if action == 'restart' else 'stop'}-outcome-unverified-circuit-open"
+            _record_event(state_dir_fd, policy, event)
+            label = "restart" if action == "restart" else "circuit-breaker stop"
+            raise GuardError(f"{label} outcome could not be verified; circuit remains open")
+        else:
+            assert prepared_state is not None
+            history = list(prepared_state["restart_history_unix"])
+            if action == "restart":
+                history[-1] = max(history[-1], int(time.time()),
+                                  observation.observed_at_unix)
+            final_state = {**prepared_state,
+                "last_pid": int(readback["post_pid"]) if action == "restart" else 0,
+                "last_process_starttime_ticks": 0,
+                "consecutive_over_limit": 0,
+                "restart_history_unix": history,
+                "circuit_open": action == "stop-circuit",
+                "pending_action": None}
+            event["result"] = "restarted-verified" if action == "restart" else "stopped-circuit-open"
+        try:
+            _atomic_json_at(state_dir_fd, "state.json", final_state)
+        except (GuardError, OSError) as exc:
+            event["result"] = "final-state-persistence-failed"
+            event["readback"]["error"] = str(exc)
+            _record_event(state_dir_fd, policy, event)
+            raise
+        _record_event(state_dir_fd, policy, event)
     return event
 
 
@@ -1258,10 +1246,21 @@ def _reset_circuit_locked(
     runner: Runner = _run,
 ) -> dict[str, Any]:
     unit = read_unit_state(policy, runner)
-    if unit["active_state"] == "active" or unit["pid"] > 0:
+    if not _unit_is_inactive(unit):
         raise GuardError("circuit reset requires the target operator to be inactive")
-    state = _load_state_at(state_dir_fd, "state.json", policy)
+    corrupt_archive = None
+    try:
+        state = _load_state_at(state_dir_fd, "state.json", policy)
+    except StateValueError:
+        # Only value/schema failures reach here: the opened file passed trust
+        # checks first. Preserve its exact bytes before replacing corrupt state.
+        corrupt_archive = f"state.corrupt.{time.time_ns()}.json"
+        os.replace("state.json", corrupt_archive,
+                   src_dir_fd=state_dir_fd, dst_dir_fd=state_dir_fd)
+        os.fsync(state_dir_fd)
+        state = default_state(policy)
     state["last_pid"] = 0
+    state["last_process_starttime_ticks"] = 0
     state["consecutive_over_limit"] = 0
     state["restart_history_unix"] = []
     state["circuit_open"] = False
@@ -1275,13 +1274,9 @@ def _reset_circuit_locked(
         "reason": "explicit_operator_recovery",
         "result": "reset",
     }
-    _atomic_json_at(state_dir_fd, "latest.json", event)
-    _append_event_at(
-        state_dir_fd,
-        "events.jsonl",
-        event,
-        max_bytes=policy["event_segment_max_bytes"],
-    )
+    if corrupt_archive is not None:
+        event["corrupt_state_archive"] = corrupt_archive
+    _record_event(state_dir_fd, policy, event)
     return event
 
 

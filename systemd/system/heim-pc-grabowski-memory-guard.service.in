@@ -7,6 +7,8 @@ Type=simple
 ExecStart=/usr/bin/python3 @SYSTEM_RELEASE_ROOT@/scripts/grabowski_memory_guard.py --policy @SYSTEM_RELEASE_ROOT@/config/memory-pressure-guard.v1.json --state-dir /var/lib/heim-pc/grabowski-memory-guard --loop
 Restart=on-failure
 RestartSec=5s
+# Allow bounded restart/readback/finalization before systemd escalates to SIGKILL.
+TimeoutStopSec=150s
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

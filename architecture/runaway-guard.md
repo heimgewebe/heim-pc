@@ -103,7 +103,11 @@ die Procfs-Startzeit und die Cgroup vor und nach dem Status-Snapshot erneut und
 liest anschließend MainPID/ControlGroup noch einmal aus systemd. Ein regulär
 verschwundener oder inzwischen ersetzter MainPID wird als veraltete Stichprobe
 verworfen; PID-Reuse oder eine inkonsistente Prozessidentität führt fail-closed
-zu keiner Mutation.
+zu keiner Mutation. Auch der persistente Bestätigungszähler für zwei
+aufeinanderfolgende 24-GiB-Samples ist an PID **und** Procfs-Startzeit gebunden.
+Ein gleicher numerischer PID mit neuer Startzeit beginnt deshalb wieder bei
+Sample 1. Älterer Schema-v1-State ohne persistierte Startzeit wird mit Startzeit
+0 eingelesen und erzwingt damit ebenfalls eine frische Bestätigungssequenz.
 
 ### Startschwellen
 
@@ -113,10 +117,23 @@ Die konservative Anfangspolicy lautet:
 * ab 24 GiB RssAnon in zwei aufeinanderfolgenden Stichproben:
   kontrollierter systemctl restart grabowski-operator.service;
 * bei höchstens 8 GiB MemAvailable und mindestens 12 GiB Grabowski-RssAnon:
-  sofortiger kontrollierter Restart.
+  sofortiger kontrollierter Restart;
+* bei demselben Hostdruck alternativ ab 24 GiB `anon_pressure = RssAnon + VmSwap`:
+  sofortiger Restart auch nach starker Auslagerung. Die eigene Policygröße
+  heißt `emergency_anon_pressure_bytes`; Warnung und Zwei-Sample-Regel bleiben
+  ausschließlich an residentem RssAnon gebunden.
 
-Die Entscheidung verwendet absichtlich RssAnon des Hauptprozesses und nicht
-allein MemoryCurrent der Cgroup. MemoryCurrent enthält auch reclaimbaren
+Die zusätzliche Swap-Notfallschwelle wurde separat plausibilisiert: 240 passive
+Snapshots vom 25.09.2026, etwa 10:00–12:06 UTC, hatten höchstens
+18.709.430.272 Byte (17,43 GiB) Hauptprozess-RSS plus Swap. RSS enthält auch
+nicht-anonyme Seiten und ist damit eine konservative Obergrenze. 24 GiB lassen
+rund 38 Prozent Abstand zu diesem beobachteten Maximum. Die Samples hatten
+mindestens 29,47 GiB MemAvailable; sie beweisen keine vollständige Kalibrierung
+aller künftigen Lasten oder aller Drucksituationen. Der Regressionstest für
+11 GiB RssAnon plus 22 GiB Swap bei 512 MiB MemAvailable wählt jetzt Restart;
+derselbe Footprint bei gesundem Hostdruck löst den neuen Pfad nicht aus.
+
+Die Attribution verwendet den Hauptprozess und nicht allein MemoryCurrent der Cgroup. MemoryCurrent enthält auch reclaimbaren
 Dateicache, Slab und andere Cgroup-Anteile; der aktuelle gesunde Betrieb hat
 bereits gezeigt, dass dadurch ein niedriger Hardcap zu früh auslösen könnte.
 
@@ -135,22 +152,43 @@ Stunde. Tritt während des Cooldowns erneut die Host-Notfallschwelle ein oder is
 das Stundenbudget ausgeschöpft, öffnet der Guard den Circuit Breaker und stoppt
 den Operator kontrolliert.
 
-Vor jedem `restart` oder `stop-circuit` schreibt der Guard die beabsichtigte
-Aktion, das Restart-Budget und `circuit_open=true` atomar und `fsync`-gebunden
-als `pending_action` in den persistenten State. Unmittelbar vor einem Restart
-wird die beim Memory-Sample gebundene Prozessidentität erneut gegen Unit-MainPID,
-ControlGroup, `/proc/<pid>/stat`-Startzeit und Prozess-Cgroup geprüft. Ist die
-Identität inzwischen abgewichen, wird `systemctl restart` nicht aufgerufen; die
-vorbereitete Restart-Buchhaltung wird ohne Budgetverbrauch zurückgenommen und
-der nächste Tick muss frisch messen. Erst bei unveränderter Identität darf
-`systemctl` den Operator mutieren. Stirbt der Guard zwischen State-Write und
-Mutation oder bleibt ein tatsächlich versuchter Restart im Ergebnis unklar,
-bleibt der vorbereitete Circuit offen; beim Wiederanlauf wird nicht erneut
-restartet, sondern fail-closed in den Stop-/Recovery-Pfad gewechselt.
+Vor einem Restart wird zuerst die beim Memory-Sample gebundene Prozessidentität
+frisch gegen Unit-MainPID, ControlGroup, `/proc/<pid>/stat`-Startzeit und
+Prozess-Cgroup geprüft. Eine stale oder unlesbare Precondition (auch ein
+`systemctl show`-Timeout) führt zu einem auditierbaren Abort ohne Restart,
+Budgetverbrauch oder künstliches Öffnen des Circuits. Der nächste Tick misst neu.
+
+Erst nach bestandener Restart-Precondition und vor jedem `restart` beziehungsweise
+`stop-circuit` schreibt der Guard die beabsichtigte Aktion, das Restart-Budget und
+`circuit_open=true` atomar und `fsync`-gebunden als `pending_action`.
+Schlägt diese Persistenz fehl, wird der Operator nicht mutiert. Stirbt der Guard
+nach dem Intent-Write oder bleibt ein versuchter Eingriff unklar, bleibt der
+Circuit offen; Recovery versucht niemals blind einen zweiten Restart.
+
+SIGTERM/SIGINT werden während der begrenzten Transaktion bis einschließlich
+finalem State und Audit zurückgestellt und anschließend mit dem ursprünglichen
+Handler erneut zugestellt. Kindprozesse behalten ihre normalen Signalmasken.
+`TimeoutStopSec=150s` deckt die maximal konfigurierbaren systemctl-/Wartephasen
+ab. SIGKILL, Stromverlust oder dauerhaft blockierte Storage-I/O bleiben
+Crashfälle und konvergieren über den persistenten fail-closed Intent.
+
+Recovery verwendet dieselbe Aktionsabwicklung:
+
+| Persistenter Zustand | Frischer Target-Zustand | Ergebnis |
+| --- | --- | --- |
+| Pending Stop oder Restart, Circuit offen | inactive/failed und PID 0 | Pending auditierbar löschen; Circuit offen lassen; kein neuer Eingriff |
+| Circuit offen, mit oder ohne Pending | active/activating/reloading oder anderer noch nicht abgeschlossener Zustand | Stop-Intent persistieren, stoppen, Inaktivität verifizieren |
+| Circuit offen, ohne Pending | inactive/failed und PID 0 | Keine weitere Stop-Mutation |
+| Restart-Precondition stale/unlesbar | Noch kein Mutationsversuch | Abort, frische Confirmation erforderlich, Budget unverändert |
+
+Ein Zombie-/Dead-Prozess in procfs gilt als verschwundene Observation, auch
+wenn systemd kurzzeitig noch denselben alten MainPID meldet.
 
 Ein erfolgreicher, eindeutig verifizierter Restart finalisiert den State erst
 danach auf den neuen PID, ersetzt den vorläufigen Restart-Zeitstempel durch den
-tatsächlichen Abschlusszeitpunkt und löscht `pending_action`. Ein nonzero
+tatsächlichen Abschlusszeitpunkt und löscht `pending_action`. Persistierte
+Zeitpunkte sind mindestens so groß wie der vorherige History-Eintrag und die
+Observation; ein Wall-Clock-Rücksprung erzeugt keine unsortierte Historie. Ein nonzero
 `systemctl`-Returncode kann auch bei zufällig neuem PID niemals als erfolgreicher
 Guard-Restart gelten.
 
@@ -159,16 +197,32 @@ exklusiven Directory-`flock` serialisiert; Preflight und reine State-Validierung
 verwenden denselben Lock read-only. Der StateDirectory-Pfad wird komponentenweise
 mit `O_NOFOLLOW` geöffnet; nach erfolgreicher Verifikation bleiben Lock,
 State-Reads, atomare State-Replaces sowie Event-Appends an genau diesem
-Directory-FD gebunden. Ein späterer Rename oder Austausch eines sichtbaren
+Directory-FD gebunden. Der StateDirectory muss dem effektiven UID gehören
+(root im Livebetrieb) und exakt Mode 0700 haben; `state.json` muss nach
+`fstat` regular, gleich-owned, einmal verlinkt und Mode 0600 sein. Diese
+Trust-Prüfungen gelten ebenso für reine Validation und Preflight.
+Ein späterer Rename oder Austausch eines sichtbaren
 Pfadbestandteils kann den laufenden Tick damit nicht auf einen anderen State
 umlenken. Zugleich kann ein überlappender Guard-Tick einen manuellen Circuit-Reset
 nicht mit einem veralteten State zurücküberschreiben.
 
 `systemctl show` ist auf 10 Sekunden, `restart` auf 45 Sekunden und `stop`
 auf 25 Sekunden begrenzt. Timeout wird als `GuardError` behandelt und lässt
-einen bereits vorbereiteten Circuit fail-closed offen. Der Rechner wird niemals
+einen bereits vorbereiteten Circuit fail-closed offen. Fehlgeschlagene oder
+unklare Eingriffe werden vor dem Weiterreichen des Fehlers in `latest.json`
+und `events.jsonl` versucht zu protokollieren; beide Writes werden auch bei
+Ausfall einer Auditfläche versucht. Bei unbeschreibbarem Storage kann kein
+dauerhafter Auditbeleg garantiert werden. Der Rechner wird niemals
 automatisch rebootet. Ein offener Circuit bleibt absichtlich fail-closed, bis er
 nach Ursachenprüfung manuell zurückgesetzt wird.
+
+`--reset-circuit` verlangt nachgewiesene Inaktivität (inactive/failed und PID 0).
+Nur nach erfolgreicher FD-Trust-Prüfung darf ungültiges JSON beziehungsweise
+Schema-/Wertekorruption in `state.corrupt.<timestamp>.json` im selben Directory
+bewahrt und durch Default-State ersetzt werden; das Reset-Event benennt das
+Archiv. Symlink-, Owner-, Mode-, I/O- oder Größenverletzungen werden nicht
+als reparierbare Wertefehler behandelt. Archive sind explizite Recovery-Belege,
+kein automatisch wachsender Normalbetriebspfad.
 
 ### Unabhängigkeit des Guards
 
@@ -189,6 +243,12 @@ tatsächlichen State-Änderung; im Loop bleiben reine `action=none`-Ticks auf
 stdout still. Atomare State-/Installations-Replaces werden zusätzlich durch
 Directory-`fsync` dauerhaft gemacht. Tailscale und SSH bleiben zusätzliche
 manuelle Rettungswege außerhalb der Operator-Cgroup.
+
+`latest.json` bleibt pro Tick fsync-gebunden, damit der Deployment-Health-Gate
+echte frische Evidenz hat. Unbelegte I/O-Scheduler-Optimierungen werden hier nicht
+eingeführt. Rohe Storage-`OSError` beenden den Prozess mit Fehler; systemd darf
+ihn mit `Restart=on-failure` neu starten. Persistierte Intents verhindern dabei
+einen unbudgetierten weiteren Restart. Sie werden nicht pauschal verschluckt.
 
 ## Optionaler Kernel-Airbag
 
@@ -247,7 +307,12 @@ Es wird kein zusätzliches OOM-Killer-Paket installiert.
 
 Der Installer trennt Installation, Enable und Start. **Jeder** Live-`--apply`
 verlangt eine exakte `--expected-head`-Bindung; ein zufällig sauber
-ausgecheckter Commit reicht nicht als Deployment-Autorität.
+ausgecheckter Commit reicht nicht als Deployment-Autorität. Installationspfade
+bleiben lexikalisch erhalten und werden komponentenweise descriptor-relativ mit
+`O_NOFOLLOW` geöffnet. Derselbe verifizierte Parent-Directory-FD bleibt bis zum
+atomaren Replace und Directory-`fsync` die Schreibautorität. Damit können weder
+Symlink-Ancestors in einem `--system-root` noch ein späterer Pfadtausch einen
+Release- oder Unit-Write aus dem deklarierten Root umlenken.
 
 Für einen Live-Host werden zuerst nur die neuen inhaltsadressierten Release-
 Dateien publiziert. Bevor eine bereits aktivierte **oder nur manuell aktive**
@@ -264,6 +329,18 @@ Stop-Entscheidung blockieren fail-closed. Erst danach wird die Unit ersetzt.
 Guard-Instanz darf nach einem Update nicht mit dem vorherigen Release weiterlaufen.
 Der Abschlussbeleg verlangt anschließend `active`, eine gültige eigene Cgroup
 und eine exakte `/proc/<MainPID>/cmdline`, die auf den neuen Commit-Release zeigt.
+Der Receipt nennt dies `exact-release-process-observed` und kennzeichnet
+`health_gate=pending-deployment-acceptance`: Type=simple beweist damit noch
+keinen erfolgreichen Tick und keine stabile Gesundheit.
+
+**Verbindlicher Deployment-/Acceptance-Gate:** Nach Installation über mehr als
+zwei Sampleintervalle (aktuell länger als 30 Sekunden) beobachten. Zu Beginn und
+Ende dieselbe Guard-PID samt procfs-Startzeit und unverändertes `NRestarts`
+nachweisen; exakte Release-argv und eigene Cgroup müssen weiter stimmen.
+Mindestens drei aufeinanderfolgende, zeitlich fortschreitende `latest.json`-
+Events ohne Guard-Fehler sowie ein gültiger State ohne Pending/Circuit sind
+erforderlich. Exit, Prozesswechsel, stagnierende/fehlende Events oder
+Journalfehler verweigern Acceptance. Installer-Receipt allein genügt nicht.
 
 Beispiel:
 
@@ -282,3 +359,17 @@ Beobachtungsschicht und wird hier nicht als installierter Effekt beansprucht.
 Direkt gestartete andere Programme erhalten weiterhin kein pauschales
 Cgroup-Limit. Ein weiterer globaler OOM mit einem anderen dominanten
 Verursacher würde deshalb eine neue Evidenzbewertung erfordern.
+
+## Bewusst nachgelagerte Arbeit
+
+* **Cgroup-weites Child-Anon:** `memory.stat:anon` ist die passende
+  cachefreie Messgröße für Kinder, aber die vorhandene 240-Sample-Historie
+  enthält nur `memory.current` und Swap. Ein einzelner Livevergleich von
+  Hauptprozess-RssAnon und Cgroup-anon sowie kleine beobachtete Child-RSS-Werte
+  kalibrieren keine legitimen Job-Spitzen. Follow-up: die vorhandene passive
+  Telemetrie um anon ergänzen, normale Child-Lasten auswerten, erst danach eine
+  separate Schwelle reviewen. Dieser PR garantiert MainPID-Containment;
+  ein Child-only-Runaway bleibt eine explizite Schutzlücke.
+* **Release-Pruning:** separat mit nachgewiesenem Ausschluss des laufenden und
+  des Recovery-Releases entwerfen. Kein Löschpfad in diesem Safety-Fix.
+* **Interner Leak:** Ursachenanalyse in Grabowski bleibt unabhängig nötig.

@@ -117,6 +117,8 @@ systemweiten Guard abgesichert:
 * Ab 24 GiB `RssAnon` in zwei aufeinanderfolgenden Messungen wird der ganze
   Operator kontrolliert neu gestartet. Bei höchstens 8 GiB `MemAvailable`
   und mindestens 12 GiB Grabowski-`RssAnon` greift der Notfallpfad sofort.
+  Alternativ greift er bei demselben Hostdruck ab 24 GiB `RssAnon + VmSwap`;
+  die Swap-Schwelle ist separat gegen historische Healthy-Samples plausibilisiert.
 * 18 GiB sind nur Warnschwelle. Ein 10-Minuten-Cooldown und maximal drei
   Restarts pro Stunde verhindern Restart-Schleifen; danach stoppt ein
   Circuit Breaker nur den Operator. Der Rechner wird niemals automatisch
@@ -135,8 +137,9 @@ kann einen laufenden Tick daher nicht umlenken. Ein ungültiger State, offener C
 `pending_action` oder eine aktuelle Restart-/Stop-Entscheidung blockiert
 fail-closed.
 
-Vor jeder Guard-Mutation wird `pending_action` samt Restart-Budget und offenem
-Circuit atomar persistiert und der Directory-Eintrag gefsync't. Direkt vor
+Nach erfolgreicher Precondition und vor jeder Guard-Mutation wird `pending_action`
+samt Restart-Budget und offenem Circuit atomar persistiert und der Directory-Eintrag
+gefsync't. Vor
 einem Operator-Restart wird der zuvor gemessene MainPID zusätzlich über
 ControlGroup, Prozess-Cgroup und `/proc/<pid>/stat`-Startzeit erneut gebunden.
 Hat sich die Prozessidentität seit dem Memory-Sample geändert, wird der Restart
@@ -146,6 +149,9 @@ Directory-`flock`. `systemctl`-Reads und -Mutationen sind zeitbegrenzt; nonzero
 Returncodes zählen niemals als Erfolg. Bei `--start` wird eine bereits laufende
 Guard-Instanz ausdrücklich neu gestartet und anschließend über
 `/proc/<pid>/cmdline` an den exakten inhaltsadressierten Release-Pfad gebunden.
+Der Installer belegt zunächst nur den beobachteten Release-Prozess. Stabile
+Gesundheit verlangt danach den verbindlichen Gate über mehr als zwei Ticks aus
+`architecture/runaway-guard.md`.
 Der Guard selbst hat `MemoryMax=128M`, `MemorySwapMax=0` und
 `OOMScoreAdjust=-900`.
 
