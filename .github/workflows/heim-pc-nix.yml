@@ -40,9 +40,21 @@ jobs:
           --head "$EXPECTED_SOURCE_REVISION"
           >> "$GITHUB_OUTPUT"
 
+      - name: Validate detector output
+        env:
+          NIX_CHANGED: ${{ steps.changes.outputs.nix_changed }}
+        run: |
+          case "$NIX_CHANGED" in
+            true|false) ;;
+            *)
+              printf 'invalid nix_changed output: %q\n' "$NIX_CHANGED" >&2
+              exit 1
+              ;;
+          esac
+
   nix:
     needs: detect
-    if: needs.detect.outputs.nix_changed == 'true'
+    if: always() && (needs.detect.result != 'success' || needs.detect.outputs.nix_changed != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:

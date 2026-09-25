@@ -58,8 +58,20 @@ class T(unittest.TestCase):
             workflow,
         )
         self.assertIn("python3 scripts/ci/nix_changed.py", workflow)
+        self.assertIn("Validate detector output", workflow)
+        self.assertIn(
+            "NIX_CHANGED: ${{ steps.changes.outputs.nix_changed }}",
+            workflow,
+        )
+        self.assertIn('case "$NIX_CHANGED" in', workflow)
+        self.assertIn("true|false) ;;", workflow)
         self.assertIn("needs: detect", workflow)
-        self.assertIn("if: needs.detect.outputs.nix_changed == 'true'", workflow)
+        self.assertIn(
+            "if: always() && (needs.detect.result != 'success' || "
+            "needs.detect.outputs.nix_changed != 'false')",
+            workflow,
+        )
+        self.assertNotIn("if: needs.detect.outputs.nix_changed == 'true'", workflow)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
