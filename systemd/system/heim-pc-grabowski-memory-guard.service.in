@@ -25,6 +25,7 @@ RestrictAddressFamilies=AF_UNIX
 StateDirectory=heim-pc/grabowski-memory-guard
 StateDirectoryMode=0700
 MemoryMax=128M
+MemorySwapMax=0
 CPUQuota=10%
 OOMScoreAdjust=-900
 

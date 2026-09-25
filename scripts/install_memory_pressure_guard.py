@@ -88,8 +88,41 @@ def rooted(system_root: Path, live_path: Path) -> Path:
     return system_root / live_path.relative_to("/")
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ensure_parent_directories(path: Path) -> None:
+    missing: list[Path] = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise InstallError(f"cannot resolve parent directory for {path}")
+        cursor = parent
+    if cursor.is_symlink() or not cursor.is_dir():
+        raise InstallError(f"install parent ancestor is unsafe: {cursor}")
+
+    path.mkdir(parents=True, exist_ok=True, mode=0o755)
+    for directory in reversed(missing):
+        metadata = directory.lstat()
+        if directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise InstallError(f"created install directory is unsafe: {directory}")
+        os.chmod(directory, 0o755)
+
+
 def atomic_install(target: Path, data: bytes, mode: int) -> dict[str, Any]:
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _ensure_parent_directories(target.parent)
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise InstallError(f"install target must be regular or absent: {target}")
     before = target.read_bytes() if target.exists() else None
@@ -105,6 +138,7 @@ def atomic_install(target: Path, data: bytes, mode: int) -> dict[str, Any]:
                 os.fsync(handle.fileno())
             os.chmod(temporary, mode)
             os.replace(temporary, target)
+            _fsync_directory(target.parent)
         finally:
             temporary.unlink(missing_ok=True)
     else:
@@ -204,7 +238,7 @@ def parse_json_stdout(
     return value
 
 
-def validate_persistent_state(release: Path) -> dict[str, Any]:
+def observe_only_preflight(release: Path) -> dict[str, Any]:
     completed = run(
         [
             PYTHON,
@@ -213,36 +247,20 @@ def validate_persistent_state(release: Path) -> dict[str, Any]:
             str(release / "config/memory-pressure-guard.v1.json"),
             "--state-dir",
             str(STATE_DIR),
-            "--validate-state-only",
+            "--preflight-only",
         ]
     )
-    value = parse_json_stdout(completed, label="guard persistent-state validation")
-    if value.get("status") != "valid":
-        raise InstallError("guard persistent-state validation did not report valid")
-    if value.get("circuit_open") is not False:
+    value = parse_json_stdout(completed, label="guard activation preflight")
+    state = value.get("persistent_state")
+    if not isinstance(state, dict):
+        raise InstallError("guard preflight omitted persistent state evidence")
+    if state.get("circuit_open") is not False:
         raise InstallError("guard preflight refused because the persistent circuit is open")
-    return value
-
-
-def observe_only_preflight(release: Path) -> dict[str, Any]:
-    persistent_state = validate_persistent_state(release)
-    with tempfile.TemporaryDirectory(prefix="heim-pc-guard-preflight-") as temporary:
-        completed = run(
-            [
-                PYTHON,
-                str(release / "scripts/grabowski_memory_guard.py"),
-                "--policy",
-                str(release / "config/memory-pressure-guard.v1.json"),
-                "--state-dir",
-                temporary,
-                "--observe-only",
-            ]
-        )
-    value = parse_json_stdout(completed, label="guard observe-only preflight")
-    value["persistent_state"] = persistent_state
+    if state.get("pending_action") is not None:
+        raise InstallError("guard preflight refused because a pending action exists")
     action = value.get("action")
     result = value.get("result")
-    if action not in {"none", "warn"} or result not in {"observed", "observe-only"}:
+    if result != "preflight" or action not in {"none", "warn", "cooldown"}:
         raise InstallError(
             "guard preflight is not safe for automatic activation: "
             f"action={action!r}, result={result!r}"
@@ -261,6 +279,16 @@ def existing_unit_enabled() -> bool:
         "enabled",
         "enabled-runtime",
     }
+
+
+def existing_unit_active() -> bool:
+    completed = subprocess.run(
+        [SYSTEMCTL, "is-active", f"{UNIT_NAME}.service"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == "active"
 
 
 def expected_guard_argv(release: Path) -> list[str]:
@@ -339,6 +367,7 @@ def install(
     systemd_state = "not-applied"
     preflight: dict[str, Any] | None = None
     preexisting_enabled = False
+    preexisting_active = False
     running_argv: list[str] | None = None
 
     if apply:
@@ -348,6 +377,7 @@ def install(
 
         if live_system:
             preexisting_enabled = existing_unit_enabled()
+            preexisting_active = existing_unit_active()
 
             # Publish immutable release files first.  Do not replace or enable the
             # boot unit until the new release has passed the safety preflight.
@@ -356,7 +386,7 @@ def install(
                     continue
                 installed.append(atomic_install(path, data, mode))
 
-            if enable or start or preexisting_enabled:
+            if enable or start or preexisting_enabled or preexisting_active:
                 preflight = observe_only_preflight(release)
 
             installed.append(atomic_install(service_target, service_data, service_mode))
@@ -377,8 +407,12 @@ def install(
             if enable:
                 run([SYSTEMCTL, "enable", f"{UNIT_NAME}.service"])
                 systemd_state = "enabled"
+            elif preexisting_enabled and preexisting_active:
+                systemd_state = "installed-existing-enabled-active"
             elif preexisting_enabled:
                 systemd_state = "installed-existing-enabled"
+            elif preexisting_active:
+                systemd_state = "installed-existing-active"
 
             if start:
                 run([SYSTEMCTL, "restart", f"{UNIT_NAME}.service"])
@@ -434,6 +468,7 @@ def install(
         "enable": enable,
         "start": start,
         "preexisting_enabled": preexisting_enabled,
+        "preexisting_active": preexisting_active,
         "planned": planned,
         "installed": installed,
         "unit_verification": verification,

@@ -98,8 +98,12 @@ werden ausschließlich folgende Entscheidungsdaten frisch gelesen:
 * memory.current und memory.swap.current der Operator-Cgroup.
 
 Vor jeder Bewertung muss sowohl systemd als auch /proc/<pid>/cgroup exakt
-/system.slice/grabowski-operator.service bestätigen. PID-Reuse oder eine
-abweichende Cgroup führen nicht zu einer Mutation.
+/system.slice/grabowski-operator.service bestätigen. Zusätzlich liest der Guard
+die Procfs-Startzeit und die Cgroup vor und nach dem Status-Snapshot erneut und
+liest anschließend MainPID/ControlGroup noch einmal aus systemd. Ein regulär
+verschwundener oder inzwischen ersetzter MainPID wird als veraltete Stichprobe
+verworfen; PID-Reuse oder eine inkonsistente Prozessidentität führt fail-closed
+zu keiner Mutation.
 
 ### Startschwellen
 
@@ -129,13 +133,32 @@ bestätigt werden:
 Es gilt ein Restart-Cooldown von 10 Minuten und maximal drei Restarts in einer
 Stunde. Tritt während des Cooldowns erneut die Host-Notfallschwelle ein oder ist
 das Stundenbudget ausgeschöpft, öffnet der Guard den Circuit Breaker und stoppt
-den Operator kontrolliert. Auch ein ausgelöster Restart, dessen neuer PID-/Cgroup-
-Zustand nicht eindeutig verifiziert werden kann, öffnet persistent den Circuit;
-der Guard wiederholt dann nicht alle 15 Sekunden denselben Restart-Versuch.
-Der Rechner wird niemals automatisch rebootet.
+den Operator kontrolliert.
 
-Ein offener Circuit bleibt absichtlich fail-closed, bis er nach Ursachenprüfung
-manuell zurückgesetzt wird.
+Vor jedem `restart` oder `stop-circuit` schreibt der Guard die beabsichtigte
+Aktion, das Restart-Budget und `circuit_open=true` atomar und `fsync`-gebunden
+als `pending_action` in den persistenten State. Erst danach darf `systemctl`
+den Operator mutieren. Stirbt der Guard zwischen State-Write und Mutation oder
+bleibt der neue PID-/Cgroup-Zustand unklar, bleibt der vorbereitete Circuit
+offen; beim Wiederanlauf wird nicht erneut restartet, sondern fail-closed in den
+Stop-/Recovery-Pfad gewechselt.
+
+Ein erfolgreicher, eindeutig verifizierter Restart finalisiert den State erst
+danach auf den neuen PID, ersetzt den vorläufigen Restart-Zeitstempel durch den
+tatsächlichen Abschlusszeitpunkt und löscht `pending_action`. Ein nonzero
+`systemctl`-Returncode kann auch bei zufällig neuem PID niemals als erfolgreicher
+Guard-Restart gelten.
+
+Alle State-Mutationen des Daemons und `--reset-circuit` sind über denselben
+exklusiven Directory-`flock` serialisiert; Preflight und reine State-Validierung
+verwenden denselben Lock read-only. Damit kann ein überlappender Guard-Tick einen
+manuellen Circuit-Reset nicht mit einem veralteten State zurücküberschreiben.
+
+`systemctl show` ist auf 10 Sekunden, `restart` auf 45 Sekunden und `stop`
+auf 25 Sekunden begrenzt. Timeout wird als `GuardError` behandelt und lässt
+einen bereits vorbereiteten Circuit fail-closed offen. Der Rechner wird niemals
+automatisch rebootet. Ein offener Circuit bleibt absichtlich fail-closed, bis er
+nach Ursachenprüfung manuell zurückgesetzt wird.
 
 ### Unabhängigkeit des Guards
 
@@ -143,14 +166,19 @@ Der Guard selbst erhält:
 
 * eigenes systemd-Service-Cgroup;
 * MemoryMax=128M;
+* MemorySwapMax=0, damit die Rettungsinstanz unter Swap-Thrashing nicht selbst
+  erst eingelagert werden muss;
 * OOMScoreAdjust=-900;
 * einen root-eigenen State-Pfad unter
   /var/lib/heim-pc/grabowski-memory-guard;
 * keinen Schreibzugriff auf die Grabowski-State-Verzeichnisse.
 
 Damit hängt die Rettungslogik weder vom Grabowski-Prozess noch von dessen Audit-
-oder Receipt-Locks ab. Tailscale und SSH bleiben zusätzliche manuelle
-Rettungswege außerhalb der Operator-Cgroup.
+oder Receipt-Locks ab. Gesunde Ticks schreiben `state.json` nur bei einer
+tatsächlichen State-Änderung; im Loop bleiben reine `action=none`-Ticks auf
+stdout still. Atomare State-/Installations-Replaces werden zusätzlich durch
+Directory-`fsync` dauerhaft gemacht. Tailscale und SSH bleiben zusätzliche
+manuelle Rettungswege außerhalb der Operator-Cgroup.
 
 ## Optionaler Kernel-Airbag
 
@@ -212,14 +240,15 @@ verlangt eine exakte `--expected-head`-Bindung; ein zufällig sauber
 ausgecheckter Commit reicht nicht als Deployment-Autorität.
 
 Für einen Live-Host werden zuerst nur die neuen inhaltsadressierten Release-
-Dateien publiziert. Bevor eine bereits boot-aktivierte Unit ersetzt, neu
-aktiviert oder gestartet werden darf, validiert der neue commitgebundene Guard
-mit `--validate-state-only` den vollständigen persistenten State einschließlich
-Schema, Ziel-Unit, Restart-Historie, Zähler und Circuit. Erst danach läuft
-derselbe Kandidat einmal in einem isolierten temporären `--observe-only`-State
-gegen den realen Operator. Ein ungültiger persistenter State, ein bereits
-geöffneter Circuit sowie eine aktuelle Restart- oder Stop-Entscheidung blockieren
-fail-closed. Erst danach wird die Unit ersetzt.
+Dateien publiziert. Bevor eine bereits aktivierte **oder nur manuell aktive**
+Unit ersetzt, neu aktiviert oder gestartet werden darf, führt der neue
+commitgebundene Guard
+`--preflight-only` aus. Dieser Modus liest den vollständigen persistenten State
+einschließlich Schema, Ziel-Unit, Restart-Historie, Zähler, Circuit und
+`pending_action`, beobachtet zugleich den realen Operator und führt dabei
+weder State-Writes noch Prozessmutationen aus. Ein ungültiger persistenter State,
+ein offener Circuit, eine ausstehende Aktion sowie eine aktuelle Restart- oder
+Stop-Entscheidung blockieren fail-closed. Erst danach wird die Unit ersetzt.
 
 `--start` verwendet absichtlich `systemctl restart`: Eine bereits aktive alte
 Guard-Instanz darf nach einem Update nicht mit dem vorherigen Release weiterlaufen.

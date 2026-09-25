@@ -122,17 +122,23 @@ systemweiten Guard abgesichert:
   Circuit Breaker nur den Operator. Der Rechner wird niemals automatisch
   rebootet.
 
-Jeder Live-`--apply` verlangt zwingend `--expected-head`. Vor jedem
-Live-Enable oder Live-Start validiert der **neue commitgebundene Guard selbst**
-den vollständigen persistenten State (Schema, Ziel-Unit, Zähler,
-Restart-Historie und Circuit) und läuft danach im isolierten
-`--observe-only`-Modus gegen den realen Operator. Die neue systemd-Unit wird
-erst nach erfolgreichem Preflight ersetzt oder aktiviert; ein ungültiger State,
-ein offener Circuit oder eine bereits anstehende Restart-/Stop-Entscheidung
-blockiert fail-closed. Bei `--start` wird eine bereits laufende Guard-Instanz
-ausdrücklich neu gestartet. Der anschließende Readback prüft zusätzlich die
-tatsächliche `/proc/<pid>/cmdline` gegen den exakten inhaltsadressierten
-Release-Pfad.
+Jeder Live-`--apply` verlangt zwingend `--expected-head`. Bevor eine
+bereits aktivierte **oder nur manuell aktive** Guard-Unit ersetzt, enabled oder
+gestartet werden darf, führt der **neue commitgebundene Guard selbst**
+`--preflight-only` aus. Dieser Pfad liest den echten persistenten State und den
+realen Operator read-only; ein ungültiger State, offener Circuit,
+`pending_action` oder eine aktuelle Restart-/Stop-Entscheidung blockiert
+fail-closed.
+
+Vor jeder Guard-Mutation wird `pending_action` samt Restart-Budget und offenem
+Circuit atomar persistiert und der Directory-Eintrag gefsync't. Daemon-Tick,
+Preflight und Circuit-Reset serialisieren sich über denselben State-Directory-
+`flock`. `systemctl`-Reads und -Mutationen sind zeitbegrenzt; nonzero
+Returncodes zählen niemals als Erfolg. Bei `--start` wird eine bereits laufende
+Guard-Instanz ausdrücklich neu gestartet und anschließend über
+`/proc/<pid>/cmdline` an den exakten inhaltsadressierten Release-Pfad gebunden.
+Der Guard selbst hat `MemoryMax=128M`, `MemorySwapMax=0` und
+`OOMScoreAdjust=-900`.
 
 Auf dem Host läuft zusätzlich bereits
 `heim-pc-memory-pressure-snapshot.timer` als unabhängige passive

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -88,6 +89,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                 service,
             )
             self.assertIn("OOMScoreAdjust=-900", service)
+            self.assertIn("MemorySwapMax=0", service)
             self.assertNotIn("PartOf=grabowski-operator.service", service)
             self.assertNotIn("earlyoom", service.lower())
             self.assertEqual(receipt["systemd_state"], "staged-root-installed")
@@ -158,7 +160,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                         start=False,
                     )
 
-    def test_observe_only_preflight_accepts_healthy_state(self) -> None:
+    def test_activation_preflight_accepts_healthy_persistent_state(self) -> None:
         completed = subprocess.CompletedProcess(
             ["python"],
             0,
@@ -166,58 +168,74 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                 {
                     "action": "none",
                     "reason": "healthy",
-                    "result": "observed",
+                    "result": "preflight",
+                    "persistent_state": {
+                        "circuit_open": False,
+                        "consecutive_over_limit": 0,
+                        "restart_history_count": 0,
+                        "last_pid": 123,
+                        "pending_action": None,
+                    },
                 }
             ),
             "",
         )
-        with (
-            patch.object(
-                installer,
-                "validate_persistent_state",
-                return_value={"status": "valid", "circuit_open": False},
-            ),
-            patch.object(installer, "run", return_value=completed),
-        ):
+        with patch.object(installer, "run", return_value=completed) as mocked:
             result = installer.observe_only_preflight(Path("/release"))
+        argv = mocked.call_args.args[0]
+        self.assertIn("--preflight-only", argv)
+        self.assertIn(str(installer.STATE_DIR), argv)
         self.assertEqual(result["action"], "none")
+        self.assertEqual(result["result"], "preflight")
 
-    def test_observe_only_preflight_refuses_pending_restart(self) -> None:
+    def test_activation_preflight_refuses_pending_restart(self) -> None:
         completed = subprocess.CompletedProcess(
             ["python"],
             0,
             json.dumps(
                 {
                     "action": "restart",
-                    "reason": "host_memory_emergency",
-                    "result": "observe-only",
+                    "reason": "sustained_grabowski_rss",
+                    "result": "preflight",
+                    "persistent_state": {
+                        "circuit_open": False,
+                        "consecutive_over_limit": 1,
+                        "restart_history_count": 0,
+                        "last_pid": 123,
+                        "pending_action": None,
+                    },
                 }
             ),
             "",
         )
-        with (
-            patch.object(
-                installer,
-                "validate_persistent_state",
-                return_value={"status": "valid", "circuit_open": False},
-            ),
-            patch.object(installer, "run", return_value=completed),
-        ):
+        with patch.object(installer, "run", return_value=completed):
             with self.assertRaisesRegex(
                 installer.InstallError,
                 "not safe for automatic activation",
             ):
                 installer.observe_only_preflight(Path("/release"))
 
-    def test_validate_persistent_state_refuses_open_circuit(self) -> None:
+    def test_activation_preflight_refuses_open_persistent_circuit(self) -> None:
         completed = subprocess.CompletedProcess(
             ["python"],
             0,
             json.dumps(
                 {
-                    "status": "valid",
-                    "circuit_open": True,
-                    "target_unit": "grabowski-operator.service",
+                    "action": "stop-circuit",
+                    "reason": "circuit_already_open",
+                    "result": "preflight",
+                    "persistent_state": {
+                        "circuit_open": True,
+                        "consecutive_over_limit": 0,
+                        "restart_history_count": 1,
+                        "last_pid": 123,
+                        "pending_action": {
+                            "action": "restart",
+                            "initiated_at_unix": 100,
+                            "pid": 123,
+                            "reason": "host_memory_emergency",
+                        },
+                    },
                 }
             ),
             "",
@@ -227,27 +245,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                 installer.InstallError,
                 "persistent circuit is open",
             ):
-                installer.validate_persistent_state(Path("/release"))
-
-    def test_validate_persistent_state_uses_candidate_guard(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["python"],
-            0,
-            json.dumps(
-                {
-                    "status": "valid",
-                    "circuit_open": False,
-                    "target_unit": "grabowski-operator.service",
-                }
-            ),
-            "",
-        )
-        with patch.object(installer, "run", return_value=completed) as mocked:
-            result = installer.validate_persistent_state(Path("/release"))
-        argv = mocked.call_args.args[0]
-        self.assertIn("--validate-state-only", argv)
-        self.assertIn(str(installer.STATE_DIR), argv)
-        self.assertFalse(result["circuit_open"])
+                installer.observe_only_preflight(Path("/release"))
 
     def test_activation_preflight_precedes_unit_install_enable_and_restart(self) -> None:
         head = "d" * 40
@@ -269,7 +267,11 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             return {
                 "action": "none",
                 "reason": "healthy",
-                "result": "observed",
+                "result": "preflight",
+                "persistent_state": {
+                    "circuit_open": False,
+                    "pending_action": None,
+                },
             }
 
         def fake_run(
@@ -309,6 +311,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ),
             patch.object(installer.os, "geteuid", return_value=0),
             patch.object(installer, "existing_unit_enabled", return_value=False),
+            patch.object(installer, "existing_unit_active", return_value=False),
             patch.object(installer, "observe_only_preflight", side_effect=fake_preflight),
             patch.object(installer, "atomic_install", side_effect=fake_atomic),
             patch.object(installer, "run", side_effect=fake_run),
@@ -407,12 +410,20 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ),
             patch.object(installer.os, "geteuid", return_value=0),
             patch.object(installer, "existing_unit_enabled", return_value=True),
+            patch.object(installer, "existing_unit_active", return_value=False),
             patch.object(
                 installer,
                 "observe_only_preflight",
                 side_effect=lambda candidate: (
                     events.append(("preflight", str(candidate)))
-                    or {"action": "none", "result": "observed"}
+                    or {
+                        "action": "none",
+                        "result": "preflight",
+                        "persistent_state": {
+                            "circuit_open": False,
+                            "pending_action": None,
+                        },
+                    }
                 ),
             ),
             patch.object(installer, "atomic_install", side_effect=fake_atomic),
@@ -432,6 +443,88 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             events.index(("install", str(installer.SYSTEM_UNIT_PATH))),
         )
         self.assertEqual(receipt["systemd_state"], "installed-existing-enabled")
+
+    def test_active_not_enabled_unit_is_preflighted_before_replacement(self) -> None:
+        head = "1" * 40
+        release = installer.DEFAULT_RELEASE_ROOT / head
+        blobs = self.blobs()
+        events: list[tuple[str, str]] = []
+
+        def fake_atomic(path: Path, data: bytes, mode: int) -> dict[str, object]:
+            events.append(("install", str(path)))
+            return {
+                "path": str(path),
+                "action": "installed",
+                "mode": format(mode, "04o"),
+                "sha256": installer.sha256(data),
+            }
+
+        def fake_run(
+            argv: list[str], *, cwd: Path | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[1:3] == ["show", f"{installer.UNIT_NAME}.service"]:
+                return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(installer, "repository_identity", return_value=(head, False)),
+            patch.object(
+                installer,
+                "repository_blob",
+                side_effect=lambda _root, *, head, relative_path: blobs[
+                    relative_path
+                ],
+            ),
+            patch.object(
+                installer,
+                "verify_unit_data",
+                return_value={"status": "verified", "returncode": 0},
+            ),
+            patch.object(installer.os, "geteuid", return_value=0),
+            patch.object(installer, "existing_unit_enabled", return_value=False),
+            patch.object(installer, "existing_unit_active", return_value=True),
+            patch.object(
+                installer,
+                "observe_only_preflight",
+                side_effect=lambda candidate: (
+                    events.append(("preflight", str(candidate)))
+                    or {
+                        "action": "none",
+                        "result": "preflight",
+                        "persistent_state": {
+                            "circuit_open": False,
+                            "pending_action": None,
+                        },
+                    }
+                ),
+            ),
+            patch.object(installer, "atomic_install", side_effect=fake_atomic),
+            patch.object(installer, "run", side_effect=fake_run),
+        ):
+            receipt = installer.install(
+                system_root=Path("/"),
+                release_root=installer.DEFAULT_RELEASE_ROOT,
+                apply=True,
+                enable=False,
+                start=False,
+                expected_head=head,
+            )
+
+        self.assertLess(
+            events.index(("preflight", str(release))),
+            events.index(("install", str(installer.SYSTEM_UNIT_PATH))),
+        )
+        self.assertEqual(receipt["systemd_state"], "installed-existing-active")
+        self.assertTrue(receipt["preexisting_active"])
+
+    def test_atomic_install_uses_0755_parent_and_fsyncs_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "a" / "b" / "payload"
+            with patch.object(installer, "_fsync_directory") as fsync_directory:
+                result = installer.atomic_install(target, b"payload", 0o600)
+            self.assertEqual(result["action"], "installed")
+            self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o755)
+            fsync_directory.assert_called_once_with(target.parent)
 
     def test_running_release_must_match_exact_commit(self) -> None:
         head = "f" * 40
@@ -477,10 +570,18 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ),
             patch.object(installer.os, "geteuid", return_value=0),
             patch.object(installer, "existing_unit_enabled", return_value=False),
+            patch.object(installer, "existing_unit_active", return_value=False),
             patch.object(
                 installer,
                 "observe_only_preflight",
-                return_value={"action": "none", "result": "observed"},
+                return_value={
+                        "action": "none",
+                        "result": "preflight",
+                        "persistent_state": {
+                            "circuit_open": False,
+                            "pending_action": None,
+                        },
+                    },
             ),
             patch.object(installer, "atomic_install", side_effect=fake_atomic),
             patch.object(installer, "run", side_effect=fake_run),
@@ -512,6 +613,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
         self.assertNotIn("Slice=grabowski", service)
         self.assertIn("OOMScoreAdjust=-900", service)
         self.assertIn("MemoryMax=128M", service)
+        self.assertIn("MemorySwapMax=0", service)
 
 
 if __name__ == "__main__":

@@ -178,6 +178,24 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ):
                 guard.validate_persistent_state(self.policy, state_dir)
 
+    def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
+        cases = (
+            ("last_pid", True, "last_pid"),
+            ("consecutive_over_limit", -1, "consecutive_over_limit"),
+            ("restart_history_unix", [20, 10], "restart history"),
+            ("restart_history_unix", [True], "restart history"),
+        )
+        for field, value, pattern in cases:
+            with self.subTest(field=field, value=value):
+                with tempfile.TemporaryDirectory() as temporary:
+                    state_dir = Path(temporary)
+                    state = guard.default_state(self.policy)
+                    state[field] = value
+                    path = state_dir / "state.json"
+                    path.write_text(json.dumps(state))
+                    with self.assertRaisesRegex(guard.GuardError, pattern):
+                        guard.load_state(path, self.policy)
+
     def test_validate_persistent_state_reports_open_circuit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_dir = Path(temporary) / "state"
@@ -256,6 +274,9 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             "VmSwap:\t262144 kB\n"
         )
         (process / "cgroup").write_text(f"0::{process_cgroup}\n")
+        (process / "stat").write_text(
+            f"{pid} (python) S 1 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 100\n"
+        )
         (proc / "meminfo").write_text(
             "MemTotal:       65740408 kB\n"
             f"MemAvailable:   {mem_available_kib} kB\n"
@@ -337,7 +358,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 patch.object(guard.time, "sleep", return_value=None),
                 self.assertRaisesRegex(
                     guard.GuardError,
-                    "restart outcome could not be verified; circuit opened",
+                    "restart outcome could not be verified; circuit remains open",
                 ),
             ):
                 guard.run_once(
@@ -358,6 +379,359 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                 latest["result"],
                 "restart-outcome-unverified-circuit-open",
             )
+
+    def test_restart_intent_is_durable_before_systemctl_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+            state_path = base / "state/state.json"
+            calls: list[str] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                if argv[1] == "show":
+                    pid = 456 if "restart" in calls else 123
+                    return self.active_show(argv, pid=pid)
+                if argv[1] == "restart":
+                    prepared = json.loads(state_path.read_text())
+                    self.assertTrue(prepared["circuit_open"])
+                    self.assertEqual(prepared["restart_history_unix"], [100])
+                    self.assertEqual(
+                        prepared["pending_action"]["action"],
+                        "restart",
+                    )
+                    self.assertEqual(prepared["pending_action"]["pid"], 123)
+                    calls.append("restart")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            with (
+                patch.object(guard.time, "sleep", return_value=None),
+                patch.object(guard.time, "time", return_value=100),
+            ):
+                result = guard.run_once(
+                    self.policy,
+                    base / "state",
+                    runner=fake_runner,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=100,
+                )
+
+            self.assertEqual(result["result"], "restarted-verified")
+            final = json.loads(state_path.read_text())
+            self.assertFalse(final["circuit_open"])
+            self.assertIsNone(final["pending_action"])
+            self.assertEqual(final["restart_history_unix"], [100])
+            self.assertEqual(final["last_pid"], 456)
+
+    def test_pending_restart_reentry_stops_instead_of_restarting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(
+                base,
+                rss_anon_kib=8 * 1024**2,
+                mem_available_kib=32 * 1024**2,
+            )
+            state_dir = base / "state"
+            state_dir.mkdir()
+            state = guard.default_state(self.policy)
+            state["last_pid"] = 123
+            state["restart_history_unix"] = [100]
+            state["circuit_open"] = True
+            state["pending_action"] = {
+                "action": "restart",
+                "initiated_at_unix": 100,
+                "pid": 123,
+                "reason": "host_memory_emergency",
+            }
+            (state_dir / "state.json").write_text(json.dumps(state))
+            mutations: list[str] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                if argv[1] == "show":
+                    if mutations:
+                        return subprocess.CompletedProcess(
+                            argv,
+                            0,
+                            "MainPID=0\n"
+                            "ActiveState=inactive\n"
+                            "SubState=dead\n"
+                            "ControlGroup=\n",
+                            "",
+                        )
+                    return self.active_show(argv, pid=123)
+                if argv[1] == "stop":
+                    mutations.append("stop")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[1] == "restart":
+                    mutations.append("restart")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            result = guard.run_once(
+                self.policy,
+                state_dir,
+                runner=fake_runner,
+                proc_root=proc,
+                cgroup_root=cgroup,
+                allow_actions=True,
+                now_unix=115,
+            )
+
+            self.assertEqual(mutations, ["stop"])
+            self.assertEqual(result["result"], "stopped-circuit-open")
+            final = json.loads((state_dir / "state.json").read_text())
+            self.assertTrue(final["circuit_open"])
+            self.assertIsNone(final["pending_action"])
+
+    def test_preflight_reads_persistent_state_without_mutating_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(
+                base,
+                rss_anon_kib=18 * 1024**2,
+                mem_available_kib=32 * 1024**2,
+            )
+            state_dir = base / "state"
+            state_dir.mkdir()
+            state = guard.default_state(self.policy)
+            state["last_pid"] = 123
+            state["consecutive_over_limit"] = 1
+            raw = json.dumps(state, sort_keys=True) + "\n"
+            (state_dir / "state.json").write_text(raw)
+
+            event = guard.preflight(
+                self.policy,
+                state_dir,
+                runner=self.active_show,
+                proc_root=proc,
+                cgroup_root=cgroup,
+                now_unix=115,
+            )
+
+            self.assertEqual(event["result"], "preflight")
+            self.assertEqual(event["action"], "warn")
+            self.assertEqual((state_dir / "state.json").read_text(), raw)
+            self.assertFalse((state_dir / "latest.json").exists())
+            self.assertFalse((state_dir / "events.jsonl").exists())
+
+    def test_systemctl_timeout_becomes_guard_error(self) -> None:
+        with patch.object(
+            guard.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["systemctl"], 1),
+        ):
+            with self.assertRaisesRegex(guard.GuardError, "command timed out"):
+                guard._run(["/usr/bin/systemctl", "show", "x"], timeout_seconds=1)
+
+    def test_nonzero_restart_returncode_is_not_success(self) -> None:
+        def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[1] == "restart":
+                return subprocess.CompletedProcess(argv, 1, "", "failed")
+            if argv[1] == "show":
+                return self.active_show(argv, pid=456)
+            raise AssertionError(argv)
+
+        with patch.object(guard.time, "sleep", return_value=None):
+            success, readback = guard._verified_restart(
+                self.policy,
+                123,
+                fake_runner,
+            )
+        self.assertFalse(success)
+        self.assertEqual(readback["systemctl_returncode"], 1)
+        self.assertEqual(readback["post_pid"], 456)
+
+    def test_nonzero_stop_returncode_is_not_success(self) -> None:
+        def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[1] == "stop":
+                return subprocess.CompletedProcess(argv, 1, "", "failed")
+            if argv[1] == "show":
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "MainPID=0\n"
+                    "ActiveState=inactive\n"
+                    "SubState=dead\n"
+                    "ControlGroup=\n",
+                    "",
+                )
+            raise AssertionError(argv)
+
+        success, readback = guard._verified_stop(self.policy, fake_runner)
+        self.assertFalse(success)
+        self.assertEqual(readback["systemctl_returncode"], 1)
+
+    def test_observe_returns_none_if_mainpid_changes_mid_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(Path(temporary))
+            shows = 0
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                nonlocal shows
+                if argv[1] != "show":
+                    raise AssertionError(argv)
+                shows += 1
+                return self.active_show(argv, pid=123 if shows == 1 else 456)
+
+            result = guard.observe(
+                self.policy,
+                runner=fake_runner,
+                proc_root=proc,
+                cgroup_root=cgroup,
+                now_unix=100,
+            )
+            self.assertIsNone(result)
+
+    def test_observe_rejects_pid_reuse_during_proc_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(Path(temporary))
+            with (
+                patch.object(
+                    guard,
+                    "_read_process_starttime",
+                    side_effect=[100, 101],
+                ),
+                self.assertRaisesRegex(
+                    guard.GuardError,
+                    "identity changed during observation",
+                ),
+            ):
+                guard.observe(
+                    self.policy,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    now_unix=100,
+                )
+
+    def test_state_directory_lock_serializes_mutators(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = Path(temporary) / "state"
+            with (
+                patch.object(guard, "STATE_LOCK_TIMEOUT_SECONDS", 0.01),
+                guard._state_lock(state_dir, exclusive=True, create=True),
+            ):
+                with self.assertRaisesRegex(
+                    guard.GuardError,
+                    "state lock acquisition timed out",
+                ):
+                    with guard._state_lock(
+                        state_dir,
+                        exclusive=True,
+                        create=True,
+                    ):
+                        self.fail("second exclusive lock unexpectedly succeeded")
+
+    def test_verified_restart_uses_completion_time_for_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+            calls: list[str] = []
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                if argv[1] == "show":
+                    pid = 456 if "restart" in calls else 123
+                    return self.active_show(argv, pid=pid)
+                if argv[1] == "restart":
+                    calls.append("restart")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            with (
+                patch.object(guard.time, "sleep", return_value=None),
+                patch.object(guard.time, "time", return_value=145),
+            ):
+                result = guard.run_once(
+                    self.policy,
+                    base / "state",
+                    runner=fake_runner,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=100,
+                )
+
+            self.assertEqual(result["result"], "restarted-verified")
+            final = json.loads((base / "state/state.json").read_text())
+            self.assertEqual(final["restart_history_unix"], [145])
+
+    def test_preflight_uses_persistent_confirmation_counter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(
+                base,
+                rss_anon_kib=24 * 1024**2,
+                mem_available_kib=32 * 1024**2,
+            )
+            state_dir = base / "state"
+            state_dir.mkdir()
+            state = guard.default_state(self.policy)
+            state["last_pid"] = 123
+            state["consecutive_over_limit"] = 1
+            (state_dir / "state.json").write_text(json.dumps(state))
+
+            event = guard.preflight(
+                self.policy,
+                state_dir,
+                runner=self.active_show,
+                proc_root=proc,
+                cgroup_root=cgroup,
+                now_unix=115,
+            )
+
+            self.assertEqual(event["action"], "restart")
+            self.assertEqual(event["reason"], "sustained_grabowski_rss")
+            self.assertEqual(event["result"], "preflight")
+
+    def test_healthy_second_tick_does_not_rewrite_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(
+                base,
+                rss_anon_kib=8 * 1024**2,
+                mem_available_kib=32 * 1024**2,
+            )
+            state_dir = base / "state"
+
+            with patch.object(
+                guard,
+                "_atomic_json",
+                wraps=guard._atomic_json,
+            ) as atomic_json:
+                guard.run_once(
+                    self.policy,
+                    state_dir,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=100,
+                )
+                guard.run_once(
+                    self.policy,
+                    state_dir,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=115,
+                )
+
+            state_writes = [
+                call
+                for call in atomic_json.call_args_list
+                if call.args[0].name == "state.json"
+            ]
+            self.assertEqual(len(state_writes), 1)
+
+    def test_atomic_json_fsyncs_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state.json"
+            with patch.object(guard, "_fsync_directory") as fsync_directory:
+                guard._atomic_json(path, {"ok": True})
+            fsync_directory.assert_called_once_with(path.parent)
 
     def test_verified_restart_requires_new_active_pid(self) -> None:
         calls: list[list[str]] = []
