@@ -386,7 +386,7 @@ def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
         raise GuardError(f"cannot read guard state: {exc}") from exc
     if not isinstance(value, dict):
         raise GuardError("guard state must be an object")
-    expected_fields = {
+    legacy_fields = {
         "schema_version",
         "kind",
         "target_unit",
@@ -394,9 +394,14 @@ def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
         "consecutive_over_limit",
         "restart_history_unix",
         "circuit_open",
-        "pending_action",
     }
-    if set(value) != expected_fields:
+    expected_fields = {*legacy_fields, "pending_action"}
+    observed_fields = set(value)
+    if observed_fields == legacy_fields:
+        # Schema v1 before pending_action existed is the only accepted legacy
+        # shape. Migrate it in memory without discarding counters/history/circuit.
+        value = {**value, "pending_action": None}
+    elif observed_fields != expected_fields:
         raise GuardError("guard state fields are invalid")
     schema_version = value.get("schema_version")
     if (

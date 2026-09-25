@@ -178,6 +178,25 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             ):
                 guard.validate_persistent_state(self.policy, state_dir)
 
+    def test_load_state_migrates_known_legacy_shape_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = guard.default_state(self.policy)
+            state["last_pid"] = 123
+            state["consecutive_over_limit"] = 1
+            state["restart_history_unix"] = [10, 20]
+            state["circuit_open"] = True
+            state.pop("pending_action")
+            path = Path(temporary) / "state.json"
+            path.write_text(json.dumps(state))
+
+            migrated = guard.load_state(path, self.policy)
+
+        self.assertEqual(migrated["last_pid"], 123)
+        self.assertEqual(migrated["consecutive_over_limit"], 1)
+        self.assertEqual(migrated["restart_history_unix"], [10, 20])
+        self.assertTrue(migrated["circuit_open"])
+        self.assertIsNone(migrated["pending_action"])
+
     def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
         cases = (
             ("last_pid", True, "last_pid"),

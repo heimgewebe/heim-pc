@@ -119,6 +119,9 @@ def _ensure_parent_directories(path: Path) -> None:
         if directory.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
             raise InstallError(f"created install directory is unsafe: {directory}")
         os.chmod(directory, 0o755)
+        # Persist every newly created directory entry before any service unit
+        # can be pointed at this release tree.
+        _fsync_directory(directory.parent)
 
 
 def atomic_install(target: Path, data: bytes, mode: int) -> dict[str, Any]:
@@ -268,27 +271,67 @@ def observe_only_preflight(release: Path) -> dict[str, Any]:
     return value
 
 
+def _systemctl_show_properties(properties: list[str]) -> dict[str, str]:
+    argv = [
+        SYSTEMCTL,
+        "show",
+        f"{UNIT_NAME}.service",
+        *[f"--property={name}" for name in properties],
+        "--no-pager",
+    ]
+    completed = run(argv)
+    values: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    missing = [name for name in properties if name not in values]
+    if missing:
+        raise InstallError(f"guard unit state probe omitted properties: {missing}")
+    return values
+
+
 def existing_unit_enabled() -> bool:
-    completed = subprocess.run(
-        [SYSTEMCTL, "is-enabled", f"{UNIT_NAME}.service"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return completed.returncode == 0 and completed.stdout.strip() in {
-        "enabled",
-        "enabled-runtime",
-    }
+    values = _systemctl_show_properties(["LoadState", "UnitFileState"])
+    load_state = values["LoadState"]
+    if load_state == "not-found":
+        return False
+    if load_state not in {"loaded", "masked"}:
+        raise InstallError(f"unexpected guard unit LoadState: {load_state!r}")
+
+    state = values["UnitFileState"]
+    if state in {"enabled", "enabled-runtime"}:
+        return True
+    if state in {
+        "disabled",
+        "static",
+        "indirect",
+        "masked",
+        "masked-runtime",
+        "generated",
+        "transient",
+        "alias",
+        "linked",
+        "linked-runtime",
+    }:
+        return False
+    raise InstallError(f"unexpected guard unit UnitFileState: {state!r}")
 
 
 def existing_unit_active() -> bool:
-    completed = subprocess.run(
-        [SYSTEMCTL, "is-active", f"{UNIT_NAME}.service"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return completed.returncode == 0 and completed.stdout.strip() == "active"
+    values = _systemctl_show_properties(["LoadState", "ActiveState"])
+    load_state = values["LoadState"]
+    if load_state == "not-found":
+        return False
+    if load_state not in {"loaded", "masked"}:
+        raise InstallError(f"unexpected guard unit LoadState: {load_state!r}")
+
+    state = values["ActiveState"]
+    if state == "active":
+        return True
+    if state in {"inactive", "failed"}:
+        return False
+    raise InstallError(f"guard unit is in a transitional/unknown ActiveState: {state!r}")
 
 
 def expected_guard_argv(release: Path) -> list[str]:

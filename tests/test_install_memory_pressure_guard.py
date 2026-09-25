@@ -517,14 +517,87 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
         self.assertEqual(receipt["systemd_state"], "installed-existing-active")
         self.assertTrue(receipt["preexisting_active"])
 
-    def test_atomic_install_uses_0755_parent_and_fsyncs_directory(self) -> None:
+    def test_atomic_install_uses_0755_parent_and_fsyncs_every_new_directory_edge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "a" / "b" / "payload"
+            base = Path(temporary)
+            target = base / "a" / "b" / "payload"
             with patch.object(installer, "_fsync_directory") as fsync_directory:
                 result = installer.atomic_install(target, b"payload", 0o600)
             self.assertEqual(result["action"], "installed")
             self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o755)
-            fsync_directory.assert_called_once_with(target.parent)
+            self.assertEqual(
+                [call.args[0] for call in fsync_directory.call_args_list],
+                [base, base / "a", base / "a" / "b"],
+            )
+
+    def test_unit_state_probe_fails_closed_on_systemctl_error(self) -> None:
+        with patch.object(
+            installer,
+            "run",
+            side_effect=installer.InstallError("Failed to connect to bus"),
+        ):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "Failed to connect to bus",
+            ):
+                installer.existing_unit_active()
+
+    def test_unit_state_probe_accepts_known_negative_states(self) -> None:
+        active = subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "LoadState=loaded\nActiveState=inactive\n",
+            "",
+        )
+        enabled = subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "LoadState=loaded\nUnitFileState=disabled\n",
+            "",
+        )
+        with patch.object(
+            installer,
+            "run",
+            side_effect=[active, enabled],
+        ):
+            self.assertFalse(installer.existing_unit_active())
+            self.assertFalse(installer.existing_unit_enabled())
+
+    def test_unit_state_probe_treats_missing_unit_as_safe_absence(self) -> None:
+        enabled = subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "LoadState=not-found\nUnitFileState=\n",
+            "",
+        )
+        active = subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "LoadState=not-found\nActiveState=inactive\n",
+            "",
+        )
+        with patch.object(
+            installer,
+            "run",
+            side_effect=[enabled, active],
+        ):
+            self.assertFalse(installer.existing_unit_enabled())
+            self.assertFalse(installer.existing_unit_active())
+
+    def test_unit_state_probe_rejects_transitional_active_state(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "LoadState=loaded\nActiveState=activating\n",
+            "",
+        )
+        with patch.object(installer, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "transitional/unknown ActiveState",
+            ):
+                installer.existing_unit_active()
+
 
     def test_running_release_must_match_exact_commit(self) -> None:
         head = "f" * 40
