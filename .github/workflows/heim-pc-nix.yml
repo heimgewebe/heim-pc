@@ -3,7 +3,25 @@ name: heim-pc-nix
 on:
   push:
     branches: [ main ]
+    paths:
+      - ".github/workflows/heim-pc-nix.yml"
+      - "flake.nix"
+      - "flake.lock"
+      - "nixos/**"
+      - "scripts/ci/check_pinned_nix_find_contract.py"
+      - "scripts/managed_build.py"
+      - "scripts/storage_inventory.py"
+      - "scripts/nixos_*.py"
   pull_request:
+    paths:
+      - ".github/workflows/heim-pc-nix.yml"
+      - "flake.nix"
+      - "flake.lock"
+      - "nixos/**"
+      - "scripts/ci/check_pinned_nix_find_contract.py"
+      - "scripts/managed_build.py"
+      - "scripts/storage_inventory.py"
+      - "scripts/nixos_*.py"
 
 permissions:
   contents: read

@@ -50,6 +50,20 @@ class T(unittest.TestCase):
 
     def test_nix_workflow_binds_exact_source_without_lock_update(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        self.assertEqual(workflow.count("    paths:\n"), 2)
+        for path in (
+            ".github/workflows/heim-pc-nix.yml",
+            "flake.nix",
+            "flake.lock",
+            "nixos/**",
+            "scripts/ci/check_pinned_nix_find_contract.py",
+            "scripts/managed_build.py",
+            "scripts/storage_inventory.py",
+            "scripts/nixos_*.py",
+        ):
+            self.assertEqual(workflow.count(f'      - "{path}"'), 2, path)
+        self.assertNotIn('      - "**"', workflow)
+        self.assertNotIn('      - "**/*"', workflow)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)
