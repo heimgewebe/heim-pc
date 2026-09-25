@@ -105,6 +105,76 @@ ab, ersetzt nur die vorhandene `health.listen_addr`-Zeile atomar und liest den
 Zielwert anschließend zurück. Sie startet keinen Dienst; `tunnel-client doctor`
 und die systemd-Laufzeitprüfung bleiben getrennte Abschlussbelege.
 
+## Schutz vor globaler Speichererschöpfung
+
+Der belegte globale OOM vom 25.09.2026 wird durch einen unabhängigen
+systemweiten Guard abgesichert:
+
+* `heim-pc-grabowski-memory-guard.service` läuft außerhalb der
+  `grabowski-operator.service`-Cgroup und bewertet alle 15 Sekunden den
+  `RssAnon`-Wert des exakten Grabowski-`MainPID` plus `MemAvailable` des
+  Hosts.
+* Ab 24 GiB `RssAnon` in zwei aufeinanderfolgenden Messungen wird der ganze
+  Operator kontrolliert neu gestartet. Bei höchstens 8 GiB `MemAvailable`
+  und mindestens 12 GiB Grabowski-`RssAnon` greift der Notfallpfad sofort.
+  Alternativ greift er bei demselben Hostdruck ab 24 GiB `RssAnon + VmSwap`;
+  die Swap-Schwelle ist separat gegen historische Healthy-Samples plausibilisiert.
+* 18 GiB sind nur Warnschwelle. Ein 10-Minuten-Cooldown und maximal drei
+  Restarts pro Stunde verhindern Restart-Schleifen; danach stoppt ein
+  Circuit Breaker nur den Operator. Der Rechner wird niemals automatisch
+  rebootet.
+
+Jeder Live-`--apply` verlangt zwingend `--expected-head`. Bevor eine
+bereits aktivierte **oder nur manuell aktive** Guard-Unit ersetzt, enabled oder
+gestartet werden darf, führt der **neue commitgebundene Guard selbst**
+`--preflight-only` aus. Dieser Pfad liest den echten persistenten State und den
+realen Operator read-only; der StateDirectory-Pfad bleibt dabei lexikalisch
+erhalten und jeder bereits existierende Pfadbestandteil muss ein echtes
+Verzeichnis statt eines Symlinks sein. Nach erfolgreichem Öffnen bleiben Lock,
+State-Read, atomare State-Replaces und Event-Appends an denselben verifizierten
+Directory-FD gebunden; ein späterer Rename oder Austausch des sichtbaren Pfads
+kann einen laufenden Tick daher nicht umlenken. Ein ungültiger State, offener Circuit,
+`pending_action` oder eine aktuelle Restart-/Stop-Entscheidung blockiert
+fail-closed.
+
+Nach erfolgreicher Precondition und vor jeder Guard-Mutation wird `pending_action`
+samt Restart-Budget und offenem Circuit atomar persistiert und der Directory-Eintrag
+gefsync't. Vor
+einem Operator-Restart wird der zuvor gemessene MainPID zusätzlich über
+ControlGroup, Prozess-Cgroup und `/proc/<pid>/stat`-Startzeit erneut gebunden.
+Hat sich die Prozessidentität seit dem Memory-Sample geändert, wird der Restart
+ohne Budgetverbrauch abgebrochen und erst der nächste Tick darf neu entscheiden.
+Daemon-Tick, Preflight und Circuit-Reset serialisieren sich über denselben State-
+Directory-`flock`. `systemctl`-Reads und -Mutationen sind zeitbegrenzt; nonzero
+Returncodes zählen niemals als Erfolg. Bei `--start` wird eine bereits laufende
+Guard-Instanz ausdrücklich neu gestartet und anschließend über
+`/proc/<pid>/cmdline` an den exakten inhaltsadressierten Release-Pfad gebunden.
+Der Installer belegt zunächst nur den beobachteten Release-Prozess. Stabile
+Gesundheit verlangt danach den verbindlichen Gate über mehr als zwei Ticks aus
+`architecture/runaway-guard.md`.
+Der Guard selbst hat `MemoryMax=128M`, `MemorySwapMax=0` und
+`OOMScoreAdjust=-900`.
+
+Auf dem Host läuft zusätzlich bereits
+`heim-pc-memory-pressure-snapshot.timer` als unabhängige passive
+Root-Telemetrie für RAM, Swap, PSI, Top-Prozesse und Cgroups. Diese vorhandene
+Wache wird von diesem Änderungspaket bewusst nicht dupliziert oder verändert.
+
+Ein `MemoryMax` von ungefähr 32 GiB plus `MemoryOOMGroup=yes` bleibt ein
+möglicher späterer Kernel-Airbag und wird in dieser ersten Aktivierung nicht
+gesetzt.
+
+Installation:
+
+```bash
+sudo python3 scripts/install_memory_pressure_guard.py \
+  --apply --enable --start --expected-head <commit>
+```
+
+Der Installer installiert keine zusätzliche OOM-Killer-Software. Details,
+Schwellen und Circuit-Breaker-Regeln stehen in
+`architecture/runaway-guard.md`.
+
 ## Host-Health- und Log-Remediation
 
 `config/host-health-remediation.v1.json` bindet die schmale persistente

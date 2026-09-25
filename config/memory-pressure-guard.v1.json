@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc_grabowski_memory_guard",
+  "grabowski_guard": {
+    "target_unit": "grabowski-operator.service",
+    "expected_control_group": "/system.slice/grabowski-operator.service",
+    "sample_interval_seconds": 15,
+    "warn_rss_anon_bytes": 19327352832,
+    "restart_rss_anon_bytes": 25769803776,
+    "confirm_samples": 2,
+    "emergency_mem_available_bytes": 8589934592,
+    "emergency_rss_anon_bytes": 12884901888,
+    "emergency_anon_pressure_bytes": 25769803776,
+    "restart_cooldown_seconds": 600,
+    "restart_window_seconds": 3600,
+    "max_restarts_per_window": 3,
+    "post_restart_wait_seconds": 5,
+    "event_segment_max_bytes": 8388608
+  },
+  "does_not_establish": [
+    "the_internal_root_cause_of_grabowski_memory_growth",
+    "that_a_high_rss_grabowski_process_is_faulty",
+    "absence_of_future_global_oom_from_other_processes",
+    "permanent_optimality_of_guard_thresholds"
+  ]
+}

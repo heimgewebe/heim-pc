@@ -34,7 +34,7 @@ It provides a complete overview of the canonical documentation zones and their c
 | staged-package-updates | [architecture/staged-package-updates.md](architecture/staged-package-updates.md) | canonical | 2026-08-26 | security |
 | maintenance-outcomes | [architecture/maintenance-outcomes.md](architecture/maintenance-outcomes.md) | canonical | 2026-08-22 | storage-lifecycle, security, drift-policy |
 | home-hygiene | [architecture/home-hygiene.md](architecture/home-hygiene.md) | canonical | 2026-08-22 | operatorium-entry, security, storage-lifecycle, managed-builds |
-| runaway-guard | [architecture/runaway-guard.md](architecture/runaway-guard.md) | canonical | 2026-07-27 | security |
+| runaway-guard | [architecture/runaway-guard.md](architecture/runaway-guard.md) | canonical | 2026-09-25 | security |
 | network-identity | [architecture/network-identity.md](architecture/network-identity.md) | canonical | 2026-07-28 | security, runaway-guard |
 
 ## Zone: reality
