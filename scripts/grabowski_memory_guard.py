@@ -505,11 +505,13 @@ def run_once(
             next_state["last_pid"] = int(readback["post_pid"])
             event["result"] = "restarted-verified"
         else:
-            event["result"] = "restart-outcome-unverified"
+            next_state["circuit_open"] = True
+            next_state["consecutive_over_limit"] = 0
+            event["result"] = "restart-outcome-unverified-circuit-open"
             _atomic_json(state_path, next_state)
             _atomic_json(latest_path, event)
             _append_event(event_path, event, max_bytes=policy["event_segment_max_bytes"])
-            raise GuardError("restart outcome could not be verified")
+            raise GuardError("restart outcome could not be verified; circuit opened")
 
     elif action == "stop-circuit":
         success, readback = _verified_stop(policy, runner)

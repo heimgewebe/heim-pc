@@ -129,7 +129,10 @@ bestätigt werden:
 Es gilt ein Restart-Cooldown von 10 Minuten und maximal drei Restarts in einer
 Stunde. Tritt während des Cooldowns erneut die Host-Notfallschwelle ein oder ist
 das Stundenbudget ausgeschöpft, öffnet der Guard den Circuit Breaker und stoppt
-den Operator kontrolliert. Der Rechner wird niemals automatisch rebootet.
+den Operator kontrolliert. Auch ein ausgelöster Restart, dessen neuer PID-/Cgroup-
+Zustand nicht eindeutig verifiziert werden kann, öffnet persistent den Circuit;
+der Guard wiederholt dann nicht alle 15 Sekunden denselben Restart-Versuch.
+Der Rechner wird niemals automatisch rebootet.
 
 Ein offener Circuit bleibt absichtlich fail-closed, bis er nach Ursachenprüfung
 manuell zurückgesetzt wird.

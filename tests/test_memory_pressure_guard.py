@@ -289,6 +289,44 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.assertEqual(result["result"], "observe-only")
             self.assertFalse(any("restart" in call for call in calls))
 
+    def test_unverified_restart_opens_persistent_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proc, cgroup = self._fake_proc(base)
+
+            def fake_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                if argv[1] == "restart":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[1] == "show":
+                    return self.active_show(argv, pid=123)
+                raise AssertionError(argv)
+
+            with (
+                patch.object(guard.time, "sleep", return_value=None),
+                self.assertRaisesRegex(
+                    guard.GuardError,
+                    "restart outcome could not be verified; circuit opened",
+                ),
+            ):
+                guard.run_once(
+                    self.policy,
+                    base / "state",
+                    runner=fake_runner,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    allow_actions=True,
+                    now_unix=100,
+                )
+
+            stored = json.loads((base / "state/state.json").read_text())
+            self.assertTrue(stored["circuit_open"])
+            self.assertEqual(stored["consecutive_over_limit"], 0)
+            latest = json.loads((base / "state/latest.json").read_text())
+            self.assertEqual(
+                latest["result"],
+                "restart-outcome-unverified-circuit-open",
+            )
+
     def test_verified_restart_requires_new_active_pid(self) -> None:
         calls: list[list[str]] = []
 
