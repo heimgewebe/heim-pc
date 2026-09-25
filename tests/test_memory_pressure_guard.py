@@ -197,6 +197,48 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         self.assertTrue(migrated["circuit_open"])
         self.assertIsNone(migrated["pending_action"])
 
+    def test_load_state_rejects_dangling_state_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            path = base / "state.json"
+            path.symlink_to(base / "missing-state.json")
+            self.assertTrue(path.is_symlink())
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                guard.GuardError,
+                "unsafe guard state file",
+            ):
+                guard.load_state(path, self.policy)
+
+    def test_preflight_rejects_dangling_state_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            state_dir = base / "state"
+            state_dir.symlink_to(base / "missing-state-dir", target_is_directory=True)
+            self.assertTrue(state_dir.is_symlink())
+            self.assertFalse(state_dir.exists())
+
+            with self.assertRaisesRegex(
+                guard.GuardError,
+                "unsafe guard state directory",
+            ):
+                guard.preflight(self.policy, state_dir)
+
+    def test_run_once_rejects_dangling_state_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            state_dir = base / "state"
+            state_dir.symlink_to(base / "missing-state-dir", target_is_directory=True)
+            self.assertTrue(state_dir.is_symlink())
+            self.assertFalse(state_dir.exists())
+
+            with self.assertRaisesRegex(
+                guard.GuardError,
+                "unsafe guard state directory",
+            ):
+                guard.run_once(self.policy, state_dir)
+
     def test_load_state_rejects_boolean_negative_and_unsorted_values(self) -> None:
         cases = (
             ("last_pid", True, "last_pid"),

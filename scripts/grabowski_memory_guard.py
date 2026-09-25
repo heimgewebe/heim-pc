@@ -374,9 +374,14 @@ def _state_nonnegative_int(value: Any, *, name: str) -> int:
 
 
 def load_state(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
+    # Path.exists() follows symlinks and returns False for a dangling target.
+    # Reject symlinks first so an unsafe persistent state cannot masquerade as
+    # an absent state during validation or activation preflight.
+    if path.is_symlink():
+        raise GuardError(f"unsafe guard state file: {path}")
     if not path.exists():
         return default_state(policy)
-    if path.is_symlink() or not path.is_file():
+    if not path.is_file():
         raise GuardError(f"unsafe guard state file: {path}")
     try:
         if path.stat().st_size > 64 * 1024:
@@ -511,6 +516,8 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
 
 
 def _safe_state_dir(path: Path) -> None:
+    if path.is_symlink():
+        raise GuardError(f"unsafe guard state directory: {path}")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
@@ -554,9 +561,15 @@ def _state_lock(
 ) -> Iterator[None]:
     if create:
         _safe_state_dir(path)
-    elif not path.exists():
-        yield
-        return
+    else:
+        # A dangling directory symlink also reports exists()==False. Reject it
+        # before the absent-directory fast path so read-only preflight cannot
+        # bypass the state-directory trust boundary.
+        if path.is_symlink():
+            raise GuardError(f"unsafe guard state directory: {path}")
+        if not path.exists():
+            yield
+            return
 
     metadata = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
