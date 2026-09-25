@@ -50,6 +50,54 @@ class T(unittest.TestCase):
 
     def test_nix_workflow_binds_exact_source_without_lock_update(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        self.assertNotIn("\n    paths:\n", workflow)
+        self.assertIn("jobs:\n  detect:", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn(
+            "BASE_SOURCE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}",
+            workflow,
+        )
+        self.assertIn("Detect Nix CI control-plane changes independently", workflow)
+        self.assertIn(
+            "control_changed: ${{ steps.control.outputs.control_changed }}",
+            workflow,
+        )
+        self.assertIn(
+            ".github/workflows/heim-pc-nix.yml scripts/ci/nix_changed.py",
+            workflow,
+        )
+        self.assertIn(
+            "if: steps.control.outputs.control_changed == 'false'",
+            workflow,
+        )
+        self.assertIn(
+            'git show "${BASE_SOURCE_REVISION}:scripts/ci/nix_changed.py"',
+            workflow,
+        )
+        self.assertIn('python3 "$detector"', workflow)
+        self.assertIn("Validate detector outputs", workflow)
+        self.assertIn(
+            "CONTROL_CHANGED: ${{ steps.control.outputs.control_changed }}",
+            workflow,
+        )
+        self.assertIn(
+            "NIX_CHANGED: ${{ steps.changes.outputs.nix_changed }}",
+            workflow,
+        )
+        self.assertIn('case "$CONTROL_CHANGED" in', workflow)
+        self.assertIn('case "$NIX_CHANGED" in', workflow)
+        self.assertIn("true|false) ;;", workflow)
+        self.assertIn("needs: detect", workflow)
+        self.assertIn("needs.detect.result != 'success'", workflow)
+        self.assertIn(
+            "needs.detect.outputs.control_changed != 'false'",
+            workflow,
+        )
+        self.assertIn(
+            "needs.detect.outputs.nix_changed != 'false'",
+            workflow,
+        )
+        self.assertNotIn("if: needs.detect.outputs.nix_changed == 'true'", workflow)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"', workflow)

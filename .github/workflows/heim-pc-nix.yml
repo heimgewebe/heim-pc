@@ -9,7 +9,97 @@ permissions:
   contents: read
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      control_changed: ${{ steps.control.outputs.control_changed }}
+      nix_changed: ${{ steps.changes.outputs.nix_changed }}
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SOURCE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Checkout exact source revision for change detection
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify detector source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+
+      - name: Detect Nix CI control-plane changes independently
+        id: control
+        run: |
+          control_changed=true
+          if printf '%s\n' "$BASE_SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$' \
+              && printf '%s\n' "$EXPECTED_SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$' \
+              && git cat-file -e "$BASE_SOURCE_REVISION^{commit}" \
+              && git cat-file -e "$EXPECTED_SOURCE_REVISION^{commit}"; then
+            case "$EVENT_NAME" in
+              pull_request) revision_range="$BASE_SOURCE_REVISION...$EXPECTED_SOURCE_REVISION" ;;
+              push) revision_range="$BASE_SOURCE_REVISION..$EXPECTED_SOURCE_REVISION" ;;
+              *) revision_range="" ;;
+            esac
+            if test -n "$revision_range"; then
+              if git diff --quiet --no-renames "$revision_range" -- \
+                  .github/workflows/heim-pc-nix.yml scripts/ci/nix_changed.py; then
+                control_changed=false
+              else
+                status=$?
+                if test "$status" -ne 1; then
+                  printf 'control-plane comparison failed with status %s; forcing Nix CI\n' "$status" >&2
+                fi
+              fi
+            fi
+          fi
+          printf 'control_changed=%s\n' "$control_changed" >> "$GITHUB_OUTPUT"
+
+      - name: Detect Nix-relevant changes with trusted base detector
+        id: changes
+        if: steps.control.outputs.control_changed == 'false'
+        run: |
+          detector="$RUNNER_TEMP/heim-pc-nix-changed.py"
+          git show "${BASE_SOURCE_REVISION}:scripts/ci/nix_changed.py" > "$detector"
+          python3 "$detector" \
+            --event-name "$EVENT_NAME" \
+            --base "$BASE_SOURCE_REVISION" \
+            --head "$EXPECTED_SOURCE_REVISION" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Validate detector outputs
+        env:
+          CONTROL_CHANGED: ${{ steps.control.outputs.control_changed }}
+          NIX_CHANGED: ${{ steps.changes.outputs.nix_changed }}
+        run: |
+          case "$CONTROL_CHANGED" in
+            true|false) ;;
+            *)
+              printf 'invalid control_changed output: %q\n' "$CONTROL_CHANGED" >&2
+              exit 1
+              ;;
+          esac
+          if test "$CONTROL_CHANGED" = false; then
+            case "$NIX_CHANGED" in
+              true|false) ;;
+              *)
+                printf 'invalid nix_changed output: %q\n' "$NIX_CHANGED" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
   nix:
+    needs: detect
+    if: >-
+      always() &&
+      (needs.detect.result != 'success' ||
+       needs.detect.outputs.control_changed != 'false' ||
+       needs.detect.outputs.nix_changed != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
