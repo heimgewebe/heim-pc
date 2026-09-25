@@ -208,10 +208,17 @@ Der Installer trennt Installation, Enable und Start. Ein produktiver Start ist
 nur nach Commit, exakter --expected-head-Bindung und erfolgreichem
 systemd-Readback zulässig.
 
-Vor einem produktiven Start führt der Installer den commitgebundenen Guard
-einmal im `--observe-only`-Modus gegen den realen Operator aus. Eine bereits
-anstehende Restart- oder Circuit-Breaker-Entscheidung blockiert die automatische
-Aktivierung.
+Für einen Live-Host werden zuerst nur die neuen inhaltsadressierten Release-
+Dateien publiziert. Bevor eine bereits boot-aktivierte Unit ersetzt, neu
+aktiviert oder gestartet werden darf, läuft der neue Guard einmal in einem
+isolierten temporären `--observe-only`-State gegen den realen Operator. Ein
+bereits persistierter offener Circuit sowie eine aktuelle Restart- oder
+Stop-Entscheidung blockieren fail-closed. Erst danach wird die Unit ersetzt.
+
+`--start` verwendet absichtlich `systemctl restart`: Eine bereits aktive alte
+Guard-Instanz darf nach einem Update nicht mit dem vorherigen Release weiterlaufen.
+Der Abschlussbeleg verlangt anschließend `active`, eine gültige eigene Cgroup
+und eine exakte `/proc/<MainPID>/cmdline`, die auf den neuen Commit-Release zeigt.
 
 Beispiel:
 

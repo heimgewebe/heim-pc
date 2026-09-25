@@ -50,7 +50,7 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
                 ),
                 patch.object(
                     installer,
-                    "verify_unit_file",
+                    "verify_unit_data",
                     return_value={"status": "verified", "returncode": 0},
                 ),
                 patch.object(installer.os, "geteuid", return_value=1000),
@@ -156,7 +156,10 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ),
             "",
         )
-        with patch.object(installer, "run", return_value=completed):
+        with (
+            patch.object(installer, "persistent_circuit_open", return_value=False),
+            patch.object(installer, "run", return_value=completed),
+        ):
             result = installer.observe_only_preflight(Path("/release"))
         self.assertEqual(result["action"], "none")
 
@@ -173,12 +176,280 @@ class InstallMemoryPressureGuardTests(unittest.TestCase):
             ),
             "",
         )
-        with patch.object(installer, "run", return_value=completed):
+        with (
+            patch.object(installer, "persistent_circuit_open", return_value=False),
+            patch.object(installer, "run", return_value=completed),
+        ):
             with self.assertRaisesRegex(
                 installer.InstallError,
                 "not safe for automatic activation",
             ):
                 installer.observe_only_preflight(Path("/release"))
+
+    def test_observe_only_preflight_refuses_open_persistent_circuit(self) -> None:
+        with patch.object(installer, "persistent_circuit_open", return_value=True):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "persistent circuit is open",
+            ):
+                installer.observe_only_preflight(Path("/release"))
+
+    def test_activation_preflight_precedes_unit_install_enable_and_restart(self) -> None:
+        head = "d" * 40
+        release = installer.DEFAULT_RELEASE_ROOT / head
+        blobs = self.blobs()
+        events: list[tuple[str, str]] = []
+
+        def fake_atomic(path: Path, data: bytes, mode: int) -> dict[str, object]:
+            events.append(("install", str(path)))
+            return {
+                "path": str(path),
+                "action": "installed",
+                "mode": format(mode, "04o"),
+                "sha256": installer.sha256(data),
+            }
+
+        def fake_preflight(candidate_release: Path) -> dict[str, object]:
+            events.append(("preflight", str(candidate_release)))
+            return {
+                "action": "none",
+                "reason": "healthy",
+                "result": "observed",
+            }
+
+        def fake_run(
+            argv: list[str], *, cwd: Path | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            events.append(("run", " ".join(argv)))
+            if argv[1:3] == ["show", f"{installer.UNIT_NAME}.service"]:
+                if "--value" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "ActiveState=active\n"
+                    "MainPID=456\n"
+                    f"ControlGroup=/system.slice/{installer.UNIT_NAME}.service\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(
+                installer,
+                "repository_identity",
+                return_value=(head, False),
+            ),
+            patch.object(
+                installer,
+                "repository_blob",
+                side_effect=lambda _root, *, head, relative_path: blobs[
+                    relative_path
+                ],
+            ),
+            patch.object(
+                installer,
+                "verify_unit_data",
+                return_value={"status": "verified", "returncode": 0},
+            ),
+            patch.object(installer.os, "geteuid", return_value=0),
+            patch.object(installer, "existing_unit_enabled", return_value=False),
+            patch.object(installer, "observe_only_preflight", side_effect=fake_preflight),
+            patch.object(installer, "atomic_install", side_effect=fake_atomic),
+            patch.object(installer, "run", side_effect=fake_run),
+            patch.object(
+                installer,
+                "read_process_argv",
+                return_value=installer.expected_guard_argv(release),
+            ),
+        ):
+            receipt = installer.install(
+                system_root=Path("/"),
+                release_root=installer.DEFAULT_RELEASE_ROOT,
+                apply=True,
+                enable=True,
+                start=True,
+                expected_head=head,
+            )
+
+        preflight_index = events.index(("preflight", str(release)))
+        unit_install_index = next(
+            index
+            for index, event in enumerate(events)
+            if event == ("install", str(installer.SYSTEM_UNIT_PATH))
+        )
+        enable_index = next(
+            index
+            for index, event in enumerate(events)
+            if event == (
+                "run",
+                f"{installer.SYSTEMCTL} enable {installer.UNIT_NAME}.service",
+            )
+        )
+        restart_index = next(
+            index
+            for index, event in enumerate(events)
+            if event == (
+                "run",
+                f"{installer.SYSTEMCTL} restart {installer.UNIT_NAME}.service",
+            )
+        )
+
+        self.assertLess(preflight_index, unit_install_index)
+        self.assertLess(preflight_index, enable_index)
+        self.assertLess(enable_index, restart_index)
+        self.assertFalse(
+            any(
+                event
+                == ("run", f"{installer.SYSTEMCTL} start {installer.UNIT_NAME}.service")
+                for event in events
+            )
+        )
+        self.assertEqual(
+            receipt["systemd_state"],
+            "enabled+restarted-active-exact-release",
+        )
+        self.assertEqual(
+            receipt["running_argv"],
+            installer.expected_guard_argv(release),
+        )
+
+    def test_preexisting_enabled_unit_is_preflighted_before_replacement(self) -> None:
+        head = "e" * 40
+        release = installer.DEFAULT_RELEASE_ROOT / head
+        blobs = self.blobs()
+        events: list[tuple[str, str]] = []
+
+        def fake_atomic(path: Path, data: bytes, mode: int) -> dict[str, object]:
+            events.append(("install", str(path)))
+            return {
+                "path": str(path),
+                "action": "installed",
+                "mode": format(mode, "04o"),
+                "sha256": installer.sha256(data),
+            }
+
+        def fake_run(
+            argv: list[str], *, cwd: Path | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[1:3] == ["show", f"{installer.UNIT_NAME}.service"]:
+                return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(installer, "repository_identity", return_value=(head, False)),
+            patch.object(
+                installer,
+                "repository_blob",
+                side_effect=lambda _root, *, head, relative_path: blobs[
+                    relative_path
+                ],
+            ),
+            patch.object(
+                installer,
+                "verify_unit_data",
+                return_value={"status": "verified", "returncode": 0},
+            ),
+            patch.object(installer.os, "geteuid", return_value=0),
+            patch.object(installer, "existing_unit_enabled", return_value=True),
+            patch.object(
+                installer,
+                "observe_only_preflight",
+                side_effect=lambda candidate: (
+                    events.append(("preflight", str(candidate)))
+                    or {"action": "none", "result": "observed"}
+                ),
+            ),
+            patch.object(installer, "atomic_install", side_effect=fake_atomic),
+            patch.object(installer, "run", side_effect=fake_run),
+        ):
+            receipt = installer.install(
+                system_root=Path("/"),
+                release_root=installer.DEFAULT_RELEASE_ROOT,
+                apply=True,
+                enable=False,
+                start=False,
+                expected_head=head,
+            )
+
+        self.assertLess(
+            events.index(("preflight", str(release))),
+            events.index(("install", str(installer.SYSTEM_UNIT_PATH))),
+        )
+        self.assertEqual(receipt["systemd_state"], "installed-existing-enabled")
+
+    def test_running_release_must_match_exact_commit(self) -> None:
+        head = "f" * 40
+        blobs = self.blobs()
+
+        def fake_atomic(path: Path, data: bytes, mode: int) -> dict[str, object]:
+            return {
+                "path": str(path),
+                "action": "installed",
+                "mode": format(mode, "04o"),
+                "sha256": installer.sha256(data),
+            }
+
+        def fake_run(
+            argv: list[str], *, cwd: Path | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[1:3] == ["show", f"{installer.UNIT_NAME}.service"]:
+                if "--value" in argv:
+                    return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "ActiveState=active\n"
+                    "MainPID=456\n"
+                    f"ControlGroup=/system.slice/{installer.UNIT_NAME}.service\n",
+                    "",
+                )
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(installer, "repository_identity", return_value=(head, False)),
+            patch.object(
+                installer,
+                "repository_blob",
+                side_effect=lambda _root, *, head, relative_path: blobs[
+                    relative_path
+                ],
+            ),
+            patch.object(
+                installer,
+                "verify_unit_data",
+                return_value={"status": "verified", "returncode": 0},
+            ),
+            patch.object(installer.os, "geteuid", return_value=0),
+            patch.object(installer, "existing_unit_enabled", return_value=False),
+            patch.object(
+                installer,
+                "observe_only_preflight",
+                return_value={"action": "none", "result": "observed"},
+            ),
+            patch.object(installer, "atomic_install", side_effect=fake_atomic),
+            patch.object(installer, "run", side_effect=fake_run),
+            patch.object(
+                installer,
+                "read_process_argv",
+                return_value=[
+                    installer.PYTHON,
+                    "/usr/local/lib/heim-pc/memory-pressure-guard/releases/old/scripts/grabowski_memory_guard.py",
+                ],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                installer.InstallError,
+                "does not match the installed release",
+            ):
+                installer.install(
+                    system_root=Path("/"),
+                    release_root=installer.DEFAULT_RELEASE_ROOT,
+                    apply=True,
+                    enable=False,
+                    start=True,
+                    expected_head=head,
+                )
 
     def test_system_template_is_outside_target_cgroup(self) -> None:
         service = installer.SYSTEM_SERVICE_TEMPLATE.read_text()

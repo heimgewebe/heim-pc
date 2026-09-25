@@ -153,6 +153,14 @@ def verify_unit_file(path: Path) -> dict[str, Any]:
     raise InstallError(f"systemd-analyze verify failed: {detail[:1000]}")
 
 
+def verify_unit_data(data: bytes) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="heim-pc-guard-unit-verify-") as temporary:
+        path = Path(temporary) / f"{UNIT_NAME}.service"
+        path.write_bytes(data)
+        os.chmod(path, 0o644)
+        return verify_unit_file(path)
+
+
 def plan(
     *,
     system_root: Path,
@@ -184,7 +192,9 @@ def plan(
     return planned, files, release, service_target
 
 
-def parse_json_stdout(completed: subprocess.CompletedProcess[str], *, label: str) -> dict[str, Any]:
+def parse_json_stdout(
+    completed: subprocess.CompletedProcess[str], *, label: str
+) -> dict[str, Any]:
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
@@ -194,26 +204,89 @@ def parse_json_stdout(completed: subprocess.CompletedProcess[str], *, label: str
     return value
 
 
+def persistent_circuit_open() -> bool:
+    path = STATE_DIR / "state.json"
+    if not path.exists():
+        return False
+    if path.is_symlink() or not path.is_file():
+        raise InstallError(f"guard state must be a regular file: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallError(f"cannot read guard state: {exc}") from exc
+    circuit_open = value.get("circuit_open")
+    if not isinstance(circuit_open, bool):
+        raise InstallError("guard state circuit_open is invalid")
+    return circuit_open
+
+
 def observe_only_preflight(release: Path) -> dict[str, Any]:
-    completed = run(
-        [
-            PYTHON,
-            str(release / "scripts/grabowski_memory_guard.py"),
-            "--policy",
-            str(release / "config/memory-pressure-guard.v1.json"),
-            "--state-dir",
-            str(STATE_DIR),
-            "--observe-only",
-        ]
-    )
+    if persistent_circuit_open():
+        raise InstallError("guard preflight refused because the persistent circuit is open")
+    with tempfile.TemporaryDirectory(prefix="heim-pc-guard-preflight-") as temporary:
+        completed = run(
+            [
+                PYTHON,
+                str(release / "scripts/grabowski_memory_guard.py"),
+                "--policy",
+                str(release / "config/memory-pressure-guard.v1.json"),
+                "--state-dir",
+                temporary,
+                "--observe-only",
+            ]
+        )
     value = parse_json_stdout(completed, label="guard observe-only preflight")
     action = value.get("action")
     result = value.get("result")
     if action not in {"none", "warn"} or result not in {"observed", "observe-only"}:
         raise InstallError(
-            f"guard preflight is not safe for automatic activation: action={action!r}, result={result!r}"
+            "guard preflight is not safe for automatic activation: "
+            f"action={action!r}, result={result!r}"
         )
     return value
+
+
+def existing_unit_enabled() -> bool:
+    completed = subprocess.run(
+        [SYSTEMCTL, "is-enabled", f"{UNIT_NAME}.service"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() in {
+        "enabled",
+        "enabled-runtime",
+    }
+
+
+def expected_guard_argv(release: Path) -> list[str]:
+    return [
+        PYTHON,
+        str(release / "scripts/grabowski_memory_guard.py"),
+        "--policy",
+        str(release / "config/memory-pressure-guard.v1.json"),
+        "--state-dir",
+        str(STATE_DIR),
+        "--loop",
+    ]
+
+
+def read_process_argv(pid: int) -> list[str]:
+    if pid <= 0:
+        raise InstallError("guard process pid must be positive")
+    path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InstallError(f"cannot read guard process argv: {exc}") from exc
+    argv = [
+        os.fsdecode(part)
+        for part in raw.split(b"\0")
+        if part
+    ]
+    if not argv:
+        raise InstallError("guard process argv is empty")
+    return argv
 
 
 def install(
@@ -259,26 +332,50 @@ def install(
     verification: dict[str, Any] = {"status": "not-applied"}
     systemd_state = "not-applied"
     preflight: dict[str, Any] | None = None
+    preexisting_enabled = False
+    running_argv: list[str] | None = None
 
     if apply:
-        for path, (data, mode) in files.items():
-            installed.append(atomic_install(path, data, mode))
-        verification = verify_unit_file(service_target)
+        live_system = system_root == Path("/")
+        service_data, service_mode = files[service_target]
+        verification = verify_unit_data(service_data)
 
-        if system_root == Path("/"):
+        if live_system:
+            preexisting_enabled = existing_unit_enabled()
+
+            # Publish immutable release files first.  Do not replace or enable the
+            # boot unit until the new release has passed the safety preflight.
+            for path, (data, mode) in files.items():
+                if path == service_target:
+                    continue
+                installed.append(atomic_install(path, data, mode))
+
+            if enable or start or preexisting_enabled:
+                preflight = observe_only_preflight(release)
+
+            installed.append(atomic_install(service_target, service_data, service_mode))
             run([SYSTEMCTL, "daemon-reload"])
             load_state = run(
-                [SYSTEMCTL, "show", f"{UNIT_NAME}.service", "--property=LoadState", "--value"]
+                [
+                    SYSTEMCTL,
+                    "show",
+                    f"{UNIT_NAME}.service",
+                    "--property=LoadState",
+                    "--value",
+                ]
             ).stdout.strip()
             if load_state != "loaded":
                 raise InstallError(f"guard unit did not load: {load_state!r}")
             systemd_state = "installed"
+
             if enable:
                 run([SYSTEMCTL, "enable", f"{UNIT_NAME}.service"])
                 systemd_state = "enabled"
+            elif preexisting_enabled:
+                systemd_state = "installed-existing-enabled"
+
             if start:
-                preflight = observe_only_preflight(release)
-                run([SYSTEMCTL, "start", f"{UNIT_NAME}.service"])
+                run([SYSTEMCTL, "restart", f"{UNIT_NAME}.service"])
                 properties = run(
                     [
                         SYSTEMCTL,
@@ -306,8 +403,18 @@ def install(
                     raise InstallError("guard did not become active")
                 if parsed.get("ControlGroup") != f"/system.slice/{UNIT_NAME}.service":
                     raise InstallError("guard cgroup readback is invalid")
-                systemd_state += "+started-active"
+
+                running_argv = read_process_argv(main_pid)
+                expected_argv = expected_guard_argv(release)
+                if running_argv != expected_argv:
+                    raise InstallError(
+                        "running guard does not match the installed release: "
+                        f"expected={expected_argv!r}, observed={running_argv!r}"
+                    )
+                systemd_state += "+restarted-active-exact-release"
         else:
+            for path, (data, mode) in files.items():
+                installed.append(atomic_install(path, data, mode))
             systemd_state = "staged-root-installed"
 
     receipt = {
@@ -320,11 +427,13 @@ def install(
         "apply": apply,
         "enable": enable,
         "start": start,
+        "preexisting_enabled": preexisting_enabled,
         "planned": planned,
         "installed": installed,
         "unit_verification": verification,
         "systemd_state": systemd_state,
         "observe_only_preflight": preflight,
+        "running_argv": running_argv,
         "does_not_establish": [
             "internal_root_cause_of_grabowski_memory_growth",
             "future_restart_correctness_under_all_failure_modes",
@@ -363,7 +472,10 @@ def main() -> int:
     except (InstallError, OSError, ValueError) as exc:
         print(
             json.dumps(
-                {"kind": "heim_pc_grabowski_memory_guard_install_error", "error": str(exc)},
+                {
+                    "kind": "heim_pc_grabowski_memory_guard_install_error",
+                    "error": str(exc),
+                },
                 sort_keys=True,
             ),
             file=sys.stderr,
