@@ -8,8 +8,40 @@ import sys
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_OPERATOR_ENTRY = REPO_ROOT / "manifest" / "operator-entry.v1.json"
+
+
 def canonical_entry() -> Path:
     return Path.home() / "repos" / "asr" / "scripts" / "asr_engine.py"
+
+
+def installed_operator_entry() -> Path:
+    return Path.home() / ".config" / "heimgewebe" / "operator-entry.v1.json"
+
+
+def projection_drift_warning() -> str | None:
+    installed = installed_operator_entry()
+    try:
+        canonical_bytes = CANONICAL_OPERATOR_ENTRY.read_bytes()
+    except OSError:
+        return (
+            "WARNING: cannot verify the canonical heim-pc operator-entry projection; "
+            "refresh the canonical checkout before relying on host capability resolution."
+        )
+    try:
+        installed_bytes = installed.read_bytes()
+    except OSError:
+        installed_bytes = None
+    if installed_bytes == canonical_bytes:
+        return None
+    return (
+        "WARNING: installed heim-pc operator-entry projection is missing or drifted. "
+        "Review `python3 ~/repos/heim-pc/scripts/install_operator_entry.py --home ~/` "
+        "then apply with `--apply --replace-existing`, and verify with "
+        "`python3 ~/repos/heim-pc/scripts/check_operator_entry.py --home ~/ --require-installed` "
+        "before relying on host capability resolution."
+    )
 
 
 def main() -> int:
@@ -20,12 +52,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 127
-    print(
-        "WARNING: heim-pc ASR compatibility wrapper is deprecated; canonical "
-        "authority is ~/repos/asr. Refresh the installed operator-entry projection "
-        "before relying on host capability resolution.",
-        file=sys.stderr,
-    )
+    warning = projection_drift_warning()
+    if warning is not None:
+        print(warning, file=sys.stderr)
     os.execv(sys.executable, [sys.executable, str(target), *sys.argv[1:]])
     raise AssertionError("os.execv unexpectedly returned")
 

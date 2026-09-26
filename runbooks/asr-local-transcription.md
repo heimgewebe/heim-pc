@@ -27,14 +27,19 @@ Vor dem host-local Schritt zuerst eine bereits veröffentlichte native typed Gra
 Die aufgelöste Authority muss `heimgewebe_asr_open_engine` sein und auf `${HOME}/repos/asr` zeigen. Diese Prüfung erteilt weder Engine- noch Cloud-Autorität.
 ## Host-Cutover
 
-1. `grabowski_host_capability_resolve(intent="audio.transcribe")` lesen.
-2. Generischen `doctor` unter `${HOME}/repos/asr/scripts/asr_engine.py` ausführen.
-3. Wenn nur der alte Hostcache vorhanden ist, **nicht setup ausführen**.
-4. Alten Cache/State atomar nach `~/.local/{cache,state}/heimgewebe/asr` verschieben.
-5. Alte Hostpfade optional als Symlink auf den neuen Root erhalten.
-6. Generischen `doctor` erneut ausführen.
-7. Eine reale lokale Transkription als Dogfood prüfen.
-
+1. Installationsplan für die Host-Projektion lesen:
+   `python3 ${HOME}/repos/heim-pc/scripts/install_operator_entry.py --home ${HOME}`.
+2. Nach Prüfung des Plans die kanonische Projektion anwenden:
+   `python3 ${HOME}/repos/heim-pc/scripts/install_operator_entry.py --home ${HOME} --apply --replace-existing`.
+3. Byteidentität und Install-Receipt beweisen:
+   `python3 ${HOME}/repos/heim-pc/scripts/check_operator_entry.py --home ${HOME} --require-installed`.
+4. Erst danach `grabowski_host_capability_resolve(intent="audio.transcribe")` lesen und prüfen, dass `heimgewebe_asr_open_engine` sowie `${HOME}/repos/asr` aufgelöst werden.
+5. Generischen `doctor` unter `${HOME}/repos/asr/scripts/asr_engine.py` ausführen.
+6. Wenn nur der alte Hostcache vorhanden ist, **nicht setup ausführen**.
+7. Alten Cache/State atomar nach `~/.local/{cache,state}/heimgewebe/asr` verschieben.
+8. Alte Hostpfade optional als Symlink auf den neuen Root erhalten.
+9. Generischen `doctor` erneut ausführen.
+10. Eine reale lokale Transkription als Dogfood prüfen.
 ## Kompatibilität
 
 `${HOME}/repos/heim-pc/scripts/asr_engine.py` ist nur ein Exec-Wrapper zum
