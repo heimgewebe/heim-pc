@@ -9,7 +9,11 @@ operational_runbook:
     platforms: [linux]
     components: [heim-pc, asr]
   evidence_refs: [architecture/asr-engine.md, manifest/operator-entry.v1.json]
-  does_not_establish: [routing_authority, policy_authority, cloud_cost_authorization, current_runtime_state]
+  known_bad_paths: [per-request-pip-install, per-request-virtualenv, per-request-model-cache, silent-cloud-fallback, consumer-engine-pinning]
+  does_not_establish: [routing_authority, policy_authority, cloud_cost_authorization, current_runtime_state, mutation_permission, retry_permission, task_completion]
+  rollback:
+    principle: Do not delete or replace the shared ASR cache as an automatic recovery action.
+    action: Re-read the generic ASR locator and doctor evidence; repair only the explicitly failed canonical component.
 ---
 
 # ASR host integration
@@ -20,7 +24,9 @@ Dieses Heim-PC-Runbook beschreibt nur Host-Kompatibilität.
 
 ## 1. Native Oberfläche vor Host-Locator prüfen
 
-Vor dem host-local Schritt zuerst eine bereits veröffentlichte native typed Grabowski-Oberfläche verwenden, wenn sie den Auftrag erfüllt. Nur wenn keine solche Oberfläche passt, den installierten Maschinenvertrag über die host-local Capability-Auflösung lesen. Ein `blocked` ist kein Miss und darf nicht durch einen Ersatzpfad umgangen werden. Nur ein explizites `not_found` darf zu einer bereits deklarierten Spezialroute weiterführen:
+Vor dem host-local Schritt zuerst eine bereits veröffentlichte native typed Grabowski-Oberfläche verwenden, wenn sie den Auftrag erfüllt. Nur wenn keine solche Oberfläche passt, den installierten Maschinenvertrag über die host-local Capability-Auflösung lesen. Ein `blocked` ist kein Miss und darf nicht durch einen Ersatzpfad umgangen werden. Nur ein explizites `not_found` darf zu einer bereits deklarierten Spezialroute weiterführen.
+
+Für den hier beschriebenen **Host-Cutover** gilt zusätzlich: Den Host-Locator erst lesen, nachdem die Host-Cutover-Schritte 1–3 erfolgreich abgeschlossen sind: Installationsplan prüfen → `--apply --replace-existing` ausführen → `check_operator_entry.py --require-installed` erfolgreich prüfen. Vor diesem Nachweis darf die installierte Projektion nicht als aktuelle Authority-Quelle behandelt werden.
 
 `grabowski_host_capability_resolve(intent="audio.transcribe")`
 

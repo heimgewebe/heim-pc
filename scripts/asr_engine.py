@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -37,12 +38,29 @@ def projection_drift_warning() -> str | None:
         "before relying on host capability resolution."
     )
     try:
-        installed_bytes = installed.read_bytes()
+        installed_metadata = installed.lstat()
     except FileNotFoundError:
         return (
             f"WARNING: installed heim-pc operator-entry projection is missing at {installed}. "
             + recovery
         )
+    except OSError:
+        return (
+            f"WARNING: installed heim-pc operator-entry projection is unreadable at {installed}. "
+            + recovery
+        )
+    if stat.S_ISLNK(installed_metadata.st_mode):
+        return (
+            f"WARNING: installed heim-pc operator-entry projection is a symlink at {installed}. "
+            + recovery
+        )
+    if not stat.S_ISREG(installed_metadata.st_mode):
+        return (
+            f"WARNING: installed heim-pc operator-entry projection is not a regular file at {installed}. "
+            + recovery
+        )
+    try:
+        installed_bytes = installed.read_bytes()
     except OSError:
         return (
             f"WARNING: installed heim-pc operator-entry projection is unreadable at {installed}. "

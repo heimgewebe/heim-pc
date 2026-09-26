@@ -522,10 +522,34 @@ class OperatorEntryTests(unittest.TestCase):
             "über die host-local Capability-Auflösung lesen. Ein `blocked` ist kein "
             "Miss und darf nicht durch einen Ersatzpfad umgangen werden. Nur ein "
             "explizites `not_found` darf zu einer bereits deklarierten Spezialroute "
-            "weiterführen:\n\n"
-            "`grabowski_host_capability_resolve(intent=\"audio.transcribe\")`"
+            "weiterführen."
         )
         self.assertTrue(section.startswith(expected_opening), section)
+        precondition = (
+            "Host-Cutover-Schritte 1–3 erfolgreich abgeschlossen sind: "
+            "Installationsplan prüfen → `--apply --replace-existing` ausführen → "
+            "`check_operator_entry.py --require-installed` erfolgreich prüfen"
+        )
+        self.assertIn(precondition, section)
+        self.assertLess(
+            section.index(precondition),
+            section.index('`grabowski_host_capability_resolve(intent="audio.transcribe")`'),
+        )
+
+        cutover = runbook.split("## Host-Cutover", 1)[1].split("\n## ", 1)[0]
+        plan_index = cutover.index("Installationsplan")
+        apply_index = cutover.index("--apply --replace-existing")
+        verify_index = cutover.index("--require-installed")
+        resolve_index = cutover.index("grabowski_host_capability_resolve")
+        self.assertLess(plan_index, apply_index)
+        self.assertLess(apply_index, verify_index)
+        self.assertLess(verify_index, resolve_index)
+        for non_claim in ("mutation_permission", "retry_permission", "task_completion"):
+            self.assertIn(non_claim, runbook)
+        self.assertIn(
+            "Do not delete or replace the shared ASR cache as an automatic recovery action.",
+            runbook,
+        )
 
         readme_route = readme.split(
             "Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:", 1

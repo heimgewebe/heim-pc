@@ -64,6 +64,29 @@ def test_compatibility_wrapper_warns_when_installed_projection_is_stale(tmp_path
     assert "is missing at" not in result.stderr
     assert "sha256" in result.stderr
 
+def test_compatibility_wrapper_warns_when_installed_projection_is_symlink(tmp_path):
+    _generic_target(tmp_path)
+    target = tmp_path / ".config" / "heimgewebe" / "operator-entry.v1.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(CANONICAL_OPERATOR_ENTRY)
+    result = _run_wrapper(tmp_path, "doctor")
+    assert result.returncode == 0
+    assert "operator-entry projection is a symlink at" in result.stderr
+    assert "--require-installed" in result.stderr
+
+
+def test_compatibility_wrapper_warns_when_installed_projection_is_unreadable(tmp_path):
+    _generic_target(tmp_path)
+    target = tmp_path / ".config" / "heimgewebe" / "operator-entry.v1.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(CANONICAL_OPERATOR_ENTRY.read_bytes())
+    target.chmod(0)
+    result = _run_wrapper(tmp_path, "doctor")
+    target.chmod(0o600)
+    assert result.returncode == 0
+    assert "operator-entry projection is unreadable at" in result.stderr
+
+
 
 def test_compatibility_wrapper_is_quiet_when_projection_matches(tmp_path):
     _generic_target(tmp_path)
@@ -86,3 +109,14 @@ def test_compatibility_wrapper_contains_no_engine_or_cloud_policy():
     ):
         assert forbidden not in source
     assert 'repos" / "asr" / "scripts" / "asr_engine.py' in source
+
+def test_asr_cutover_surface_files_are_newline_terminated():
+    for relative in (
+        "AGENTS.md",
+        "runbooks/asr-local-transcription.md",
+        "scripts/asr_engine.py",
+        "scripts/check_operator_entry.py",
+        "tests/test_asr_engine.py",
+        "tests/test_operator_entry.py",
+    ):
+        assert (ROOT / relative).read_bytes().endswith(b"\n"), relative
