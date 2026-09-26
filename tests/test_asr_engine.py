@@ -38,6 +38,8 @@ def test_compatibility_wrapper_forwards_argv_to_generic_authority(tmp_path):
     result = _run_wrapper(tmp_path, "route", "--audio", "/tmp/a.m4a", "--json")
     assert result.returncode == 0
     assert json.loads(result.stdout) == ["route", "--audio", "/tmp/a.m4a", "--json"]
+    assert "compatibility wrapper is deprecated" in result.stderr
+    assert "operator-entry projection" in result.stderr
 
 
 def test_compatibility_wrapper_contains_no_engine_or_cloud_policy():

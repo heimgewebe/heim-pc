@@ -20,6 +20,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 127
+    print(
+        "WARNING: heim-pc ASR compatibility wrapper is deprecated; canonical "
+        "authority is ~/repos/asr. Refresh the installed operator-entry projection "
+        "before relying on host capability resolution.",
+        file=sys.stderr,
+    )
     os.execv(sys.executable, [sys.executable, str(target), *sys.argv[1:]])
     raise AssertionError("os.execv unexpectedly returned")
 
