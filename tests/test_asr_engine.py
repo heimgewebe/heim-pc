@@ -49,7 +49,8 @@ def test_compatibility_wrapper_warns_when_installed_projection_is_missing(tmp_pa
     _generic_target(tmp_path)
     result = _run_wrapper(tmp_path, "doctor")
     assert result.returncode == 0
-    assert "operator-entry projection is missing or drifted" in result.stderr
+    assert "operator-entry projection is missing at" in result.stderr
+    assert "is stale" not in result.stderr
     assert "--apply --replace-existing" in result.stderr
     assert "--require-installed" in result.stderr
 
@@ -59,7 +60,9 @@ def test_compatibility_wrapper_warns_when_installed_projection_is_stale(tmp_path
     _install_projection(tmp_path, b"{\"schemaVersion\":1}\n")
     result = _run_wrapper(tmp_path, "doctor")
     assert result.returncode == 0
-    assert "operator-entry projection is missing or drifted" in result.stderr
+    assert "operator-entry projection is stale" in result.stderr
+    assert "is missing at" not in result.stderr
+    assert "sha256" in result.stderr
 
 
 def test_compatibility_wrapper_is_quiet_when_projection_matches(tmp_path):

@@ -25,6 +25,7 @@ Vor dem host-local Schritt zuerst eine bereits veröffentlichte native typed Gra
 `grabowski_host_capability_resolve(intent="audio.transcribe")`
 
 Die aufgelöste Authority muss `heimgewebe_asr_open_engine` sein und auf `${HOME}/repos/asr` zeigen. Diese Prüfung erteilt weder Engine- noch Cloud-Autorität.
+
 ## Host-Cutover
 
 1. Installationsplan für die Host-Projektion lesen:
@@ -40,6 +41,7 @@ Die aufgelöste Authority muss `heimgewebe_asr_open_engine` sein und auf `${HOME
 8. Alte Hostpfade optional als Symlink auf den neuen Root erhalten.
 9. Generischen `doctor` erneut ausführen.
 10. Eine reale lokale Transkription als Dogfood prüfen.
+
 ## Kompatibilität
 
 `${HOME}/repos/heim-pc/scripts/asr_engine.py` ist nur ein Exec-Wrapper zum

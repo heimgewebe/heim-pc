@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -29,18 +30,32 @@ def projection_drift_warning() -> str | None:
             "WARNING: cannot verify the canonical heim-pc operator-entry projection; "
             "refresh the canonical checkout before relying on host capability resolution."
         )
-    try:
-        installed_bytes = installed.read_bytes()
-    except OSError:
-        installed_bytes = None
-    if installed_bytes == canonical_bytes:
-        return None
-    return (
-        "WARNING: installed heim-pc operator-entry projection is missing or drifted. "
+    recovery = (
         "Review `python3 ~/repos/heim-pc/scripts/install_operator_entry.py --home ~/` "
         "then apply with `--apply --replace-existing`, and verify with "
         "`python3 ~/repos/heim-pc/scripts/check_operator_entry.py --home ~/ --require-installed` "
         "before relying on host capability resolution."
+    )
+    try:
+        installed_bytes = installed.read_bytes()
+    except FileNotFoundError:
+        return (
+            f"WARNING: installed heim-pc operator-entry projection is missing at {installed}. "
+            + recovery
+        )
+    except OSError:
+        return (
+            f"WARNING: installed heim-pc operator-entry projection is unreadable at {installed}. "
+            + recovery
+        )
+    if installed_bytes == canonical_bytes:
+        return None
+    installed_sha256 = hashlib.sha256(installed_bytes).hexdigest()
+    canonical_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
+    return (
+        "WARNING: installed heim-pc operator-entry projection is stale "
+        f"(sha256 {installed_sha256} != canonical {canonical_sha256}). "
+        + recovery
     )
 
 
