@@ -30,14 +30,14 @@
         "transcription",
         "asr"
       ],
-      "authority": "heim_pc_asr_open_engine",
+      "authority": "heimgewebe_asr_open_engine",
       "authorityKind": "capability_locator_only",
-      "repository": "${HOME}/repos/heim-pc",
-      "architecture": "${HOME}/repos/heim-pc/architecture/asr-engine.md",
-      "policy": "${HOME}/repos/heim-pc/manifest/asr-engine-policy.v1.json",
+      "repository": "${HOME}/repos/asr",
+      "architecture": "${HOME}/repos/asr/architecture/asr-engine.md",
+      "policy": "${HOME}/repos/asr/manifest/asr-engine-policy.v1.json",
       "entryArgvPrefix": [
         "python3",
-        "${HOME}/repos/heim-pc/scripts/asr_engine.py"
+        "${HOME}/repos/asr/scripts/asr_engine.py"
       ],
       "defaultOperation": "transcribe",
       "policyResolution": "read_at_execution_time",
@@ -49,19 +49,25 @@
         "cloud_cost_authorization",
         "transcription_correctness"
       ],
-      "purpose": "Transcribe local audio through the canonical heim-pc ASR authority without pinning an engine in the locator",
+      "purpose": "Resolve local audio transcription to the canonical heimgewebe/asr authority without giving the host locator engine, routing, or cloud-cost authority",
       "entryKind": "argv",
       "readinessOperation": "doctor",
-      "runbook": "${HOME}/repos/heim-pc/runbooks/asr-local-transcription.md",
+      "runbook": "${HOME}/repos/asr/runbooks/asr-local-transcription.md",
       "reusePolicy": {
         "resolveBeforeSetup": true,
         "readinessBeforeSetup": true,
         "setupOnlyWhenReadinessReportsMissing": true,
-        "sharedRuntimeCacheRoot": "${HOME}/.local/cache/heim-pc/asr-open-engine",
+        "sharedRuntimeCacheRoot": "${HOME}/.local/cache/heimgewebe/asr",
         "perRequestVirtualenvAllowed": false,
         "perRequestModelCacheAllowed": false,
-        "perRequestPackageInstallAllowed": false
-      }
+        "perRequestPackageInstallAllowed": false,
+        "sharedRuntimeStateRoot": "${HOME}/.local/state/heimgewebe/asr"
+      },
+      "contract": "${HOME}/repos/asr/manifest/asr-transcript-contract.v1.json",
+      "compatibilityEntryArgvPrefix": [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/asr_engine.py"
+      ]
     },
     "documentTextExtraction": {
       "schemaVersion": 1,
