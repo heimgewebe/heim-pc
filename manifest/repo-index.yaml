@@ -9,7 +9,6 @@ zones:
       - operatorium-entry.md
       - asr-engine.md
       - document-text-engine.md
-      - asr-golden-corpus.md
       - model.md
       - system-constitution.md
       - nixos-executor-2026.md
