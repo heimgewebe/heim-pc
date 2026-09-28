@@ -476,14 +476,17 @@
             recoveryPath = ../production/recovery-contract-v1.json;
             criticalUserDataPath = ../production/critical-user-data-contract-v1.json;
             criticalUserHomePath = ../production/critical-user-home-data-contract-v1.json;
-            criticalDockerVolumesPath = ../production/critical-docker-volume-data-contract-v1.json;
             contract = builtins.fromJSON (builtins.readFile recoveryPath);
             criticalUserData = builtins.fromJSON (builtins.readFile criticalUserDataPath);
+            criticalUserHome = builtins.fromJSON (builtins.readFile criticalUserHomePath);
             criticalUserDataSha256 = builtins.hashFile "sha256" criticalUserDataPath;
             criticalUserHomeSha256 = builtins.hashFile "sha256" criticalUserHomePath;
-            criticalDockerVolumesSha256 = builtins.hashFile "sha256" criticalDockerVolumesPath;
             homeMember = builtins.elemAt criticalUserData.members 0;
-            dockerVolumesMember = builtins.elemAt criticalUserData.members 1;
+            materialization = criticalUserHome.materialization_policy;
+            bootstrapRole = builtins.getAttr "bootstrap-direct" materialization.roles;
+            authorityRole = builtins.getAttr "authority-reconcile" materialization.roles;
+            coldRole = builtins.getAttr "cold-preservation" materialization.roles;
+            coldImportRoot = "/var/lib/heim-pc-data/import/legacy-2026";
             target = self.nixosConfigurations.heim-pc-storage-target.config;
           in
           assert contract.status == "external-evidence-required";
@@ -497,24 +500,49 @@
           assert criticalUserData.schema_version == 1;
           assert criticalUserData.kind == "heim_pc.critical_user_data_scope_contract";
           assert criticalUserData.scope == "critical-user-data";
-          assert criticalUserData.scope_semantics == "explicit-root-set-default-include";
-          assert builtins.length criticalUserData.members == 2;
+          assert criticalUserData.scope_semantics == "explicit-positive-selection";
+          assert builtins.length criticalUserData.members == 1;
           assert homeMember.id == "home";
           assert homeMember.contract_sha256 == criticalUserHomeSha256;
-          assert homeMember.destination.nixos_storage_domain == "@home";
-          assert dockerVolumesMember.id == "docker-volumes";
-          assert dockerVolumesMember.contract_sha256 == criticalDockerVolumesSha256;
-          assert dockerVolumesMember.destination.nixos_storage_domain == "@data";
+          assert homeMember.destination.nixos_storage_domain == "per-entry-policy";
+          assert homeMember.destination.logical_path == "materialization-policy";
+          assert homeMember.restore_mode == "source-scope-with-role-specific-materialization";
+          assert criticalUserHome.scope == "critical-user-data-home";
+          assert criticalUserHome.scope_semantics == "explicit-path-set";
+          assert criticalUserHome.root == "/home/alex";
+          assert criticalUserHome.inventory.uid_gid_bound;
+          assert materialization.kind == "heim_pc.critical_user_data_materialization_policy";
+          assert materialization.source_scope_and_nixos_target_layout_are_separate;
+          assert materialization.source_equivalent_disposable_restore_required;
+          assert materialization.cold_import_root == coldImportRoot;
+          assert !materialization.first_productive_boot_requires_cold_import_completion;
+          assert bootstrapRole.nixos_storage_domain == "@home";
+          assert bootstrapRole.target_mapping == "same-absolute-path";
+          assert bootstrapRole.source_path_is_live_target_path;
+          assert authorityRole.nixos_storage_domain == "@data";
+          assert authorityRole.staging_root == "${coldImportRoot}/authority";
+          assert !authorityRole.source_path_is_live_target_path;
+          assert authorityRole.direct_activation_forbidden;
+          assert coldRole.nixos_storage_domain == "@data";
+          assert coldRole.staging_root == coldImportRoot;
+          assert !coldRole.source_path_is_live_target_path;
+          assert !coldRole.required_before_first_productive_boot;
+          assert !criticalUserData.migration_policy.source_paths_define_nixos_target_layout;
+          assert criticalUserData.migration_policy.cold_preservation_storage_domain == "@data";
+          assert criticalUserData.migration_policy.cold_preservation_import_root == coldImportRoot;
+          assert !criticalUserData.migration_policy.cold_preservation_required_before_first_productive_boot;
+          assert !criticalUserData.migration_policy.local_only_repository_auto_checkout;
+          assert !criticalUserData.migration_policy.legacy_library_source_path_restored;
+          assert criticalUserData.migration_policy.operator_state_direct_restore_forbidden;
           assert builtins.hasAttr "heim-pc/recovery-contract.json" target.environment.etc;
           assert builtins.hasAttr "heim-pc/critical-user-data-contract.json" target.environment.etc;
           assert builtins.hasAttr "heim-pc/critical-user-home-data-contract.json" target.environment.etc;
-          assert builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json" target.environment.etc;
+          assert !builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json" target.environment.etc;
           pkgs.runCommand "heim-pc-recovery-readiness-contract" { } ''
             mkdir -p "$out"
             cp ${recoveryPath} "$out/recovery-contract-v1.json"
             cp ${criticalUserDataPath} "$out/critical-user-data-contract-v1.json"
             cp ${criticalUserHomePath} "$out/critical-user-home-data-contract-v1.json"
-            cp ${criticalDockerVolumesPath} "$out/critical-docker-volume-data-contract-v1.json"
           '';
 
         intentional-break-rejected =

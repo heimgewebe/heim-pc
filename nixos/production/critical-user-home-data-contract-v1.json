@@ -540,29 +540,29 @@
     },
     {
       "path": "/home/alex/collections/bibliothek",
-      "class": "canonical-digital-library",
-      "rationale": "canonical primary corpus for finalized and future digitized books",
+      "class": "legacy-library-preservation",
+      "rationale": "valuable legacy digital-library corpus including scan originals; the source layout is preservation input, not the future canonical library layout",
       "capture": "tree",
-      "restore_mode": "byte-identical"
+      "restore_mode": "cold-preservation-tree"
     },
     {
       "path": "/home/alex/repos/fotoatelier",
       "class": "local-only-repository",
       "rationale": "top-level Git repository has no configured remote and contains local untracked operational source material",
       "capture": "tree",
-      "restore_mode": "byte-identical"
+      "restore_mode": "cold-preservation-git-capsule"
     },
     {
       "path": "/home/alex/repos/schotter",
       "class": "local-only-repository",
       "rationale": "top-level Git repository has no configured remote and no same-name heimgewebe GitHub repository",
       "capture": "tree",
-      "restore_mode": "byte-identical"
+      "restore_mode": "cold-preservation-git-capsule"
     }
   ],
   "required_classes": [
     "credentials-and-identity",
-    "canonical-digital-library",
+    "legacy-library-preservation",
     "local-only-repository",
     "grabowski-authority-state",
     "grabowski-audit-chain",
@@ -588,9 +588,95 @@
   "does_not_establish": [
     "coverage of unlisted /home/alex data",
     "permission to restore active leases or tasks without authority reconciliation",
+    "production of cold-preservation capsules",
+    "successful import into a future canonical library or repository layout",
     "existence of an off-host backup",
-    "successful restore",
+    "successful source-equivalent disposable restore",
     "permission to mutate production storage",
     "permission to cross the point of no return"
-  ]
+  ],
+  "materialization_policy": {
+    "schema_version": 1,
+    "kind": "heim_pc.critical_user_data_materialization_policy",
+    "source_scope_and_nixos_target_layout_are_separate": true,
+    "source_equivalent_disposable_restore_required": true,
+    "cold_import_root": "/var/lib/heim-pc-data/import/legacy-2026",
+    "first_productive_boot_requires_cold_import_completion": false,
+    "roles": {
+      "bootstrap-direct": {
+        "classes": [
+          "credentials-and-identity"
+        ],
+        "nixos_storage_domain": "@home",
+        "target_mapping": "same-absolute-path",
+        "source_path_is_live_target_path": true,
+        "activation": "direct-after-verified-restore"
+      },
+      "authority-reconcile": {
+        "classes": [
+          "grabowski-authority-state",
+          "grabowski-audit-chain",
+          "grabowski-durable-outbox",
+          "bureau-authority-state",
+          "chronik-history-state",
+          "observer-findings"
+        ],
+        "nixos_storage_domain": "@data",
+        "staging_root": "/var/lib/heim-pc-data/import/legacy-2026/authority",
+        "target_mapping": "source-path-relative-to-/home/alex",
+        "source_path_is_live_target_path": false,
+        "activation": "service-specific-restore-reconcile-only",
+        "direct_activation_forbidden": true
+      },
+      "cold-preservation": {
+        "classes": [
+          "legacy-library-preservation",
+          "local-only-repository"
+        ],
+        "nixos_storage_domain": "@data",
+        "staging_root": "/var/lib/heim-pc-data/import/legacy-2026",
+        "source_path_is_live_target_path": false,
+        "activation": "future-explicit-import-only",
+        "required_before_first_productive_boot": false
+      }
+    },
+    "cold_entries": [
+      {
+        "source_path": "/home/alex/collections/bibliothek",
+        "capsule_kind": "tree-snapshot",
+        "target_path": "/var/lib/heim-pc-data/import/legacy-2026/bibliothek",
+        "manifest_path": "/var/lib/heim-pc-data/import/legacy-2026/bibliothek.manifest.json",
+        "old_source_path_becomes_active_path": false,
+        "future_importer_required": true
+      },
+      {
+        "source_path": "/home/alex/repos/schotter",
+        "capsule_kind": "git-bundle-plus-working-tree-overlay",
+        "bundle_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/schotter.gitbundle",
+        "working_tree_overlay_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/schotter-working-tree.tar.zst",
+        "manifest_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/schotter.manifest.json",
+        "bundle_mode": "--all",
+        "working_tree_overlay_policy": "required-iff-tracked-dirty-or-untracked",
+        "active_checkout_created_automatically": false
+      },
+      {
+        "source_path": "/home/alex/repos/fotoatelier",
+        "capsule_kind": "git-bundle-plus-working-tree-overlay",
+        "bundle_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/fotoatelier.gitbundle",
+        "working_tree_overlay_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/fotoatelier-working-tree.tar.zst",
+        "manifest_path": "/var/lib/heim-pc-data/import/legacy-2026/repos/fotoatelier.manifest.json",
+        "bundle_mode": "--all",
+        "working_tree_overlay_policy": "required-iff-tracked-dirty-or-untracked",
+        "active_checkout_created_automatically": false
+      }
+    ],
+    "capsule_manifest_requirements": {
+      "sha256_bound": true,
+      "source_path_bound": true,
+      "source_inventory_sha256_bound": true,
+      "git_ref_tips_bound_for_git_capsules": true,
+      "git_head_bound_for_git_capsules": true,
+      "working_tree_status_bound_for_git_capsules": true
+    }
+  }
 }

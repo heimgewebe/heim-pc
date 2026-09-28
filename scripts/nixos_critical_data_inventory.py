@@ -9,7 +9,6 @@ import importlib.util
 import json
 import os
 import stat
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -70,35 +69,145 @@ def _load_root_inventory_module():
     return module
 
 
-def _docker_quiesced() -> None:
-    docker = Path("/usr/bin/docker")
-    if not docker.is_file():
-        raise AggregateInventoryError("Docker quiescence cannot be verified")
-    try:
-        result = subprocess.run(
-            [str(docker), "ps", "-q"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=15,
-            env={"PATH": "/usr/bin:/bin"},
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise AggregateInventoryError("Docker quiescence cannot be verified") from exc
-    if result.returncode != 0:
-        raise AggregateInventoryError("Docker quiescence cannot be verified")
-    if result.stdout.strip():
-        raise AggregateInventoryError(
-            "authoritative Docker-volume inventory requires all containers stopped"
-        )
-
 
 def _canonical_line(value: dict[str, Any]) -> bytes:
     return (
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         + "\n"
     ).encode("utf-8")
+
+
+
+def _validate_home_materialization_policy(contract: dict[str, Any]) -> None:
+    policy = contract.get("materialization_policy")
+    cold_root = "/var/lib/heim-pc-data/import/legacy-2026"
+    authority_classes = {
+        "grabowski-authority-state",
+        "grabowski-audit-chain",
+        "grabowski-durable-outbox",
+        "bureau-authority-state",
+        "chronik-history-state",
+        "observer-findings",
+    }
+    if (
+        not isinstance(policy, dict)
+        or policy.get("schema_version") != 1
+        or policy.get("kind") != "heim_pc.critical_user_data_materialization_policy"
+        or policy.get("source_scope_and_nixos_target_layout_are_separate") is not True
+        or policy.get("source_equivalent_disposable_restore_required") is not True
+        or policy.get("cold_import_root") != cold_root
+        or policy.get("first_productive_boot_requires_cold_import_completion") is not False
+    ):
+        raise AggregateInventoryError("home materialization policy identity is invalid")
+
+    roles = policy.get("roles")
+    if not isinstance(roles, dict) or set(roles) != {
+        "bootstrap-direct",
+        "authority-reconcile",
+        "cold-preservation",
+    }:
+        raise AggregateInventoryError("home materialization roles are invalid")
+    bootstrap = roles["bootstrap-direct"]
+    authority = roles["authority-reconcile"]
+    cold = roles["cold-preservation"]
+    if (
+        bootstrap.get("classes") != ["credentials-and-identity"]
+        or bootstrap.get("nixos_storage_domain") != "@home"
+        or bootstrap.get("target_mapping") != "same-absolute-path"
+        or bootstrap.get("source_path_is_live_target_path") is not True
+        or bootstrap.get("activation") != "direct-after-verified-restore"
+    ):
+        raise AggregateInventoryError("bootstrap materialization policy is invalid")
+    if (
+        set(authority.get("classes", [])) != authority_classes
+        or authority.get("nixos_storage_domain") != "@data"
+        or authority.get("staging_root") != cold_root + "/authority"
+        or authority.get("target_mapping") != "source-path-relative-to-/home/alex"
+        or authority.get("source_path_is_live_target_path") is not False
+        or authority.get("activation") != "service-specific-restore-reconcile-only"
+        or authority.get("direct_activation_forbidden") is not True
+    ):
+        raise AggregateInventoryError("authority materialization policy is invalid")
+    if (
+        set(cold.get("classes", []))
+        != {"legacy-library-preservation", "local-only-repository"}
+        or cold.get("nixos_storage_domain") != "@data"
+        or cold.get("staging_root") != cold_root
+        or cold.get("source_path_is_live_target_path") is not False
+        or cold.get("activation") != "future-explicit-import-only"
+        or cold.get("required_before_first_productive_boot") is not False
+    ):
+        raise AggregateInventoryError("cold-preservation materialization policy is invalid")
+
+    entries = policy.get("cold_entries")
+    if not isinstance(entries, list) or len(entries) != 3:
+        raise AggregateInventoryError("cold-preservation entry set is invalid")
+    by_source = {
+        item.get("source_path"): item
+        for item in entries
+        if isinstance(item, dict) and isinstance(item.get("source_path"), str)
+    }
+    if set(by_source) != {
+        "/home/alex/collections/bibliothek",
+        "/home/alex/repos/schotter",
+        "/home/alex/repos/fotoatelier",
+    }:
+        raise AggregateInventoryError("cold-preservation source set is invalid")
+    library = by_source["/home/alex/collections/bibliothek"]
+    if (
+        library.get("capsule_kind") != "tree-snapshot"
+        or library.get("target_path") != cold_root + "/bibliothek"
+        or library.get("manifest_path") != cold_root + "/bibliothek.manifest.json"
+        or library.get("old_source_path_becomes_active_path") is not False
+        or library.get("future_importer_required") is not True
+    ):
+        raise AggregateInventoryError("library preservation policy is invalid")
+    for name in ("schotter", "fotoatelier"):
+        item = by_source[f"/home/alex/repos/{name}"]
+        if (
+            item.get("capsule_kind") != "git-bundle-plus-working-tree-overlay"
+            or item.get("bundle_path") != f"{cold_root}/repos/{name}.gitbundle"
+            or item.get("working_tree_overlay_path")
+            != f"{cold_root}/repos/{name}-working-tree.tar.zst"
+            or item.get("manifest_path") != f"{cold_root}/repos/{name}.manifest.json"
+            or item.get("bundle_mode") != "--all"
+            or item.get("working_tree_overlay_policy")
+            != "required-iff-tracked-dirty-or-untracked"
+            or item.get("active_checkout_created_automatically") is not False
+        ):
+            raise AggregateInventoryError(f"{name} preservation policy is invalid")
+
+    manifest_requirements = policy.get("capsule_manifest_requirements")
+    expected_manifest_requirements = {
+        "sha256_bound": True,
+        "source_path_bound": True,
+        "source_inventory_sha256_bound": True,
+        "git_ref_tips_bound_for_git_capsules": True,
+        "git_head_bound_for_git_capsules": True,
+        "working_tree_status_bound_for_git_capsules": True,
+    }
+    if manifest_requirements != expected_manifest_requirements:
+        raise AggregateInventoryError("capsule manifest requirements are invalid")
+
+    includes = contract.get("includes")
+    if not isinstance(includes, list):
+        raise AggregateInventoryError("home include set is invalid")
+    by_path = {
+        item.get("path"): item
+        for item in includes
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    if by_path.get("/home/alex/collections/bibliothek", {}).get("class") != "legacy-library-preservation":
+        raise AggregateInventoryError("library source classification is invalid")
+    if by_path.get("/home/alex/collections/bibliothek", {}).get("restore_mode") != "cold-preservation-tree":
+        raise AggregateInventoryError("library source restore mode is invalid")
+    for name in ("schotter", "fotoatelier"):
+        repo = by_path.get(f"/home/alex/repos/{name}", {})
+        if (
+            repo.get("class") != "local-only-repository"
+            or repo.get("restore_mode") != "cold-preservation-git-capsule"
+        ):
+            raise AggregateInventoryError(f"{name} source restore mode is invalid")
 
 
 def collect_inventory(
@@ -191,6 +300,7 @@ def collect_inventory(
             or member_contract.get("root") != "/home/alex"
         ):
             raise AggregateInventoryError("home member contract identity mismatch")
+        _validate_home_materialization_policy(member_contract)
 
         try:
             result = root_inventory.collect_inventory(

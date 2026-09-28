@@ -534,9 +534,9 @@ def _validate_critical_user_data_contract(
     expected_members = {
         "home": (
             "critical-user-home-data-contract-v1.json",
-            "@home",
-            "/home/alex",
-            "explicit-path-restore-with-authority-reconciliation",
+            "per-entry-policy",
+            "materialization-policy",
+            "source-scope-with-role-specific-materialization",
         ),
     }
     for member_id, expected in expected_members.items():
@@ -596,6 +596,14 @@ def _validate_critical_user_data_contract(
         or migration.get("legacy_docker_volume_tree_migrated") is not False
         or migration.get("root_owned_grabowski_runtime_state_migrated") is not False
         or migration.get("root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy") is not True
+        or migration.get("source_paths_define_nixos_target_layout") is not False
+        or migration.get("cold_preservation_storage_domain") != "@data"
+        or migration.get("cold_preservation_import_root")
+        != "/var/lib/heim-pc-data/import/legacy-2026"
+        or migration.get("cold_preservation_required_before_first_productive_boot") is not False
+        or migration.get("local_only_repository_auto_checkout") is not False
+        or migration.get("legacy_library_source_path_restored") is not False
+        or migration.get("operator_state_direct_restore_forbidden") is not True
         or migration.get("application_level_service_reconstruction_required") is not True
     ):
         raise ReadinessError("critical-user-data migration policy is invalid")

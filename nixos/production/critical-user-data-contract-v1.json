@@ -7,12 +7,12 @@
     {
       "id": "home",
       "contract_file": "critical-user-home-data-contract-v1.json",
-      "contract_sha256": "951165695060338f95a51d3f526f53eaaa5440ad4ec4768ca91bbc3542fa2530",
+      "contract_sha256": "dbf35b2bf3123c7979c0ff36f09d1bec065e71d9018b94413fe5d43d4b2239f8",
       "destination": {
-        "nixos_storage_domain": "@home",
-        "logical_path": "/home/alex"
+        "nixos_storage_domain": "per-entry-policy",
+        "logical_path": "materialization-policy"
       },
-      "restore_mode": "explicit-path-restore-with-authority-reconciliation"
+      "restore_mode": "source-scope-with-role-specific-materialization"
     }
   ],
   "inventory_implementation": {
@@ -20,7 +20,7 @@
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
     "root_inventory_script_sha256": "22b636e65180eb4eb15d2f1efa7b38dcd343fd942c500432dd1ca3cbeba55d9a",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
-    "aggregate_inventory_script_sha256": "24425235dbd5e216bf936d1f65acb310462fd94c8c355c63c8153f584c12d895",
+    "aggregate_inventory_script_sha256": "0cc8538c4293a0fc1fc4cdf81aa12c854ceabe80ae84dfbf368e097ce923b8c9",
     "member_contract_digest_bound": true,
     "source_and_restored_aggregate_inventory_sha256_must_match": true
   },
@@ -34,11 +34,18 @@
     "application_level_service_reconstruction_required": true,
     "legacy_docker_volume_tree_migrated": false,
     "root_owned_grabowski_runtime_state_migrated": false,
-    "root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy": true
+    "root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy": true,
+    "source_paths_define_nixos_target_layout": false,
+    "cold_preservation_storage_domain": "@data",
+    "cold_preservation_import_root": "/var/lib/heim-pc-data/import/legacy-2026",
+    "cold_preservation_required_before_first_productive_boot": false,
+    "local_only_repository_auto_checkout": false,
+    "legacy_library_source_path_restored": false,
+    "operator_state_direct_restore_forbidden": true
   },
   "required_classes": [
     "credentials-and-identity",
-    "canonical-digital-library",
+    "legacy-library-preservation",
     "local-only-repository",
     "grabowski-authority-state",
     "grabowski-audit-chain",
@@ -52,12 +59,16 @@
     "target_must_be_independent": true,
     "disposable_restore_target_required": true,
     "network_required_for_restore": false,
-    "source_and_restored_inventory_sha256_must_match": true
+    "source_and_restored_inventory_sha256_must_match": true,
+    "source_equivalent_disposable_restore_required": true,
+    "final_nixos_materialization_may_use_different_paths": true
   },
   "does_not_establish": [
     "existence of an off-host backup",
     "sufficient off-host capacity",
-    "successful restore",
+    "successful source-equivalent disposable restore",
+    "production of cold-preservation capsules",
+    "successful library or repository import",
     "authority-safe activation of restored operator state",
     "permission to mutate production storage",
     "permission to cross the point of no return"

@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "8ade5d8a9148817125ee82ee04d5e626457549dcc95b15961dd6f84740fc5006"
+SOURCE_SNAPSHOT_SHA256 = "ec1beb346f7dd27c4329f16149594c6099f324cd1f7dbfc31a418b3ca6cae289"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -272,13 +272,10 @@ class T(unittest.TestCase):
         recovery = json.loads((ROOT / "nixos/production/recovery-contract-v1.json").read_text())
         critical_path = ROOT / "nixos/production/critical-user-data-contract-v1.json"
         critical_home_path = ROOT / "nixos/production/critical-user-home-data-contract-v1.json"
-        critical_docker_path = ROOT / "nixos/production/critical-docker-volume-data-contract-v1.json"
         critical = json.loads(critical_path.read_text())
         critical_home = json.loads(critical_home_path.read_text())
-        critical_docker = json.loads(critical_docker_path.read_text())
         critical_sha256 = hashlib.sha256(critical_path.read_bytes()).hexdigest()
         critical_home_sha256 = hashlib.sha256(critical_home_path.read_bytes()).hexdigest()
-        critical_docker_sha256 = hashlib.sha256(critical_docker_path.read_bytes()).hexdigest()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         trust_module = (SOURCE / "modules/nix-trust.nix").read_text()
         lifecycle_module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
@@ -390,20 +387,12 @@ class T(unittest.TestCase):
         self.assertEqual(critical["schema_version"], 1)
         self.assertEqual(critical["kind"], "heim_pc.critical_user_data_scope_contract")
         self.assertEqual(critical["scope"], "critical-user-data")
-        self.assertEqual(
-            critical["scope_semantics"], "explicit-positive-selection"
-        )
-        self.assertEqual(
-            [member["id"] for member in critical["members"]],
-            ["home"],
-        )
+        self.assertEqual(critical["scope_semantics"], "explicit-positive-selection")
+        self.assertEqual([member["id"] for member in critical["members"]], ["home"])
         (home_member,) = critical["members"]
         self.assertEqual(home_member["contract_sha256"], critical_home_sha256)
-        self.assertEqual(home_member["destination"]["nixos_storage_domain"], "@home")
-        self.assertEqual(
-            home_member["restore_mode"],
-            "explicit-path-restore-with-authority-reconciliation",
-        )
+        self.assertEqual(home_member["destination"], {"nixos_storage_domain": "per-entry-policy", "logical_path": "materialization-policy"})
+        self.assertEqual(home_member["restore_mode"], "source-scope-with-role-specific-materialization")
         self.assertEqual(critical_home["scope"], "critical-user-data-home")
         self.assertEqual(critical_home["root"], "/home/alex")
         self.assertEqual(critical_home["scope_semantics"], "explicit-path-set")
@@ -430,46 +419,54 @@ class T(unittest.TestCase):
             "/var/lib/docker/volumes",
         }:
             self.assertNotIn(excluded, selected)
+        by_source = {item["path"]: item for item in critical_home["includes"]}
+        self.assertEqual(by_source["/home/alex/collections/bibliothek"]["class"], "legacy-library-preservation")
+        self.assertEqual(by_source["/home/alex/collections/bibliothek"]["restore_mode"], "cold-preservation-tree")
+        for repo_name in ("schotter", "fotoatelier"):
+            self.assertEqual(by_source[f"/home/alex/repos/{repo_name}"]["restore_mode"], "cold-preservation-git-capsule")
+
+        materialization = critical_home["materialization_policy"]
+        cold_root = "/var/lib/heim-pc-data/import/legacy-2026"
+        self.assertEqual(materialization["kind"], "heim_pc.critical_user_data_materialization_policy")
+        self.assertTrue(materialization["source_scope_and_nixos_target_layout_are_separate"])
+        self.assertTrue(materialization["source_equivalent_disposable_restore_required"])
+        self.assertEqual(materialization["cold_import_root"], cold_root)
+        self.assertFalse(materialization["first_productive_boot_requires_cold_import_completion"])
+        self.assertTrue(materialization["roles"]["bootstrap-direct"]["source_path_is_live_target_path"])
+        self.assertFalse(materialization["roles"]["authority-reconcile"]["source_path_is_live_target_path"])
+        self.assertTrue(materialization["roles"]["authority-reconcile"]["direct_activation_forbidden"])
+        self.assertFalse(materialization["roles"]["cold-preservation"]["required_before_first_productive_boot"])
+        cold = {item["source_path"]: item for item in materialization["cold_entries"]}
+        self.assertEqual(cold["/home/alex/collections/bibliothek"]["target_path"], cold_root + "/bibliothek")
+        self.assertFalse(cold["/home/alex/collections/bibliothek"]["old_source_path_becomes_active_path"])
+        self.assertTrue(cold["/home/alex/collections/bibliothek"]["future_importer_required"])
+        for repo_name in ("schotter", "fotoatelier"):
+            capsule = cold[f"/home/alex/repos/{repo_name}"]
+            self.assertEqual(capsule["capsule_kind"], "git-bundle-plus-working-tree-overlay")
+            self.assertEqual(capsule["bundle_path"], f"{cold_root}/repos/{repo_name}.gitbundle")
+            self.assertEqual(capsule["bundle_mode"], "--all")
+            self.assertEqual(capsule["working_tree_overlay_policy"], "required-iff-tracked-dirty-or-untracked")
+            self.assertFalse(capsule["active_checkout_created_automatically"])
+
         self.assertEqual(critical_home["selection_policy"]["default"], "exclude")
-        self.assertFalse(
-            critical_home["selection_policy"]["unlisted_paths_are_migration_data"]
-        )
-        self.assertEqual(
-            critical["migration_policy"]["selection_model"],
-            "explicit-positive-allowlist",
-        )
+        self.assertFalse(critical_home["selection_policy"]["unlisted_paths_are_migration_data"])
+        self.assertEqual(critical["migration_policy"]["selection_model"], "explicit-positive-allowlist")
         self.assertFalse(critical["migration_policy"]["unlisted_data_migrated"])
-        self.assertTrue(
-            critical["migration_policy"]["system_state_recreated_from_nix"]
-        )
-        self.assertTrue(
-            critical["migration_policy"][
-                "old_system_disk_preserved_as_independent_fallback"
-            ]
-        )
-        self.assertTrue(
-            critical["migration_policy"]["remote_reproducible_repositories_excluded"]
-        )
-        self.assertTrue(
-            critical["migration_policy"]["operator_state_restored_via_authority_reconcile"]
-        )
-        self.assertFalse(
-            critical["migration_policy"]["legacy_docker_volume_tree_migrated"]
-        )
-        self.assertFalse(
-            critical["migration_policy"]["root_owned_grabowski_runtime_state_migrated"]
-        )
-        self.assertTrue(
-            critical["migration_policy"][
-                "root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy"
-            ]
-        )
-        # The legacy Docker contract may remain documented, but it is not a member
-        # of the canonical migration scope.
-        self.assertEqual(
-            critical_docker["scope"], "critical-user-data-docker-volumes"
-        )
-        self.assertEqual(critical_docker["root"], "/var/lib/docker/volumes")
+        self.assertTrue(critical["migration_policy"]["system_state_recreated_from_nix"])
+        self.assertTrue(critical["migration_policy"]["old_system_disk_preserved_as_independent_fallback"])
+        self.assertTrue(critical["migration_policy"]["remote_reproducible_repositories_excluded"])
+        self.assertTrue(critical["migration_policy"]["operator_state_restored_via_authority_reconcile"])
+        self.assertFalse(critical["migration_policy"]["legacy_docker_volume_tree_migrated"])
+        self.assertFalse(critical["migration_policy"]["root_owned_grabowski_runtime_state_migrated"])
+        self.assertTrue(critical["migration_policy"]["root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy"])
+        self.assertFalse(critical["migration_policy"]["source_paths_define_nixos_target_layout"])
+        self.assertEqual(critical["migration_policy"]["cold_preservation_storage_domain"], "@data")
+        self.assertEqual(critical["migration_policy"]["cold_preservation_import_root"], cold_root)
+        self.assertFalse(critical["migration_policy"]["cold_preservation_required_before_first_productive_boot"])
+        self.assertFalse(critical["migration_policy"]["local_only_repository_auto_checkout"])
+        self.assertFalse(critical["migration_policy"]["legacy_library_source_path_restored"])
+        self.assertTrue(critical["migration_policy"]["operator_state_direct_restore_forbidden"])
+        self.assertFalse((ROOT / "nixos/production/critical-docker-volume-data-contract-v1.json").exists())
         self.assertEqual(
             recovery["critical_user_data_scope"],
             {
@@ -587,29 +584,16 @@ class T(unittest.TestCase):
         self.assertIn("heim-pc/recovery-contract.json", backup_module)
         self.assertIn("heim-pc/critical-user-data-contract.json", backup_module)
         self.assertIn("heim-pc/critical-user-home-data-contract.json", backup_module)
-        self.assertIn(
-            "heim-pc/critical-docker-volume-data-contract.json", backup_module
-        )
-        self.assertIn(
-            'builtins.hashFile "sha256" criticalUserDataPath', backup_module
-        )
-        self.assertIn(
-            'builtins.hashFile "sha256" criticalUserHomePath', backup_module
-        )
-        self.assertIn(
-            'builtins.hashFile "sha256" criticalDockerVolumesPath', backup_module
-        )
-        self.assertIn(
-            "contract.critical_user_data_scope.sha256 == criticalUserDataSha256",
-            flake,
-        )
-        self.assertIn(
-            "contract.critical_user_data_scope.aggregate_member_contracts_bound",
-            flake,
-        )
+        self.assertNotIn("criticalDockerVolumesPath", backup_module)
+        self.assertIn('builtins.hashFile "sha256" criticalUserDataPath', backup_module)
+        self.assertIn('builtins.hashFile "sha256" criticalUserHomePath', backup_module)
+        self.assertIn("/var/lib/heim-pc-data/import/legacy-2026", backup_module)
+        self.assertIn("contract.critical_user_data_scope.sha256 == criticalUserDataSha256", flake)
+        self.assertIn("contract.critical_user_data_scope.aggregate_member_contracts_bound", flake)
         self.assertIn("heim-pc/critical-user-data-contract.json", flake)
         self.assertIn("heim-pc/critical-user-home-data-contract.json", flake)
-        self.assertIn("heim-pc/critical-docker-volume-data-contract.json", flake)
+        self.assertNotIn("criticalDockerVolumesPath", flake)
+        self.assertIn('!builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json"', flake)
         self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 
     def test_managed_root_entrypoint_exists(self):
