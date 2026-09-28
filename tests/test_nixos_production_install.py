@@ -4781,6 +4781,9 @@ def test_historical_repro_acceptance_selector_is_source_specific_and_fail_closed
     current_source = "1a1a34e4ce5321cfaa530df4eeb15b991cf87263"
     current_path = prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS[current_source]
     current_acceptance, _ = prod.historical_reproducibility.load_acceptance(current_path)
+    sealed_source = "ddcdc9c12147bec2c5717451efaf44812a8b4edf"
+    sealed_path = prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS[sealed_source]
+    sealed_acceptance, _ = prod.historical_reproducibility.load_acceptance(sealed_path)
 
     assert prod.historical_reproducibility_acceptance_path(old_acceptance["source_revision"]) == prod.HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATH
     assert prod.historical_reproducibility_acceptance_path(current_source) == current_path
@@ -4788,6 +4791,22 @@ def test_historical_repro_acceptance_selector_is_source_specific_and_fail_closed
     assert current_acceptance["candidate_closure_manifest_sha256"] == "c9c37e7548869734a0b3ec34cf01d8dd48def6a96a6966cadff6e4f3a286ca1f"
     assert current_acceptance["candidate_closure_path_count"] == 2081
     assert current_acceptance["stable_closure_projection_sha256"] == "dbb85ff85853786d0c88add1ebf43a50fafa7a70a708866e7a15e97c83ab5f0d"
+
+    assert prod.historical_reproducibility_acceptance_path(sealed_source) == sealed_path
+    assert sealed_acceptance["source_revision"] == sealed_source
+    assert sealed_acceptance["system_path"] == "/nix/store/v04y7kply9c39jmkjal1hzka2zzgs72z-nixos-system-heim-pc-26.05.20260829.c5c4a43"
+    assert sealed_acceptance["candidate_closure_manifest_sha256"] == "62ea101b3bfcfe2eddd6b772c46db6e032da23e3369a98f7c76a491e87b151dd"
+    assert sealed_acceptance["candidate_closure_path_count"] == 2087
+    assert sealed_acceptance["stable_closure_projection_sha256"] == "eaef8a303f4bac3f88493f92533b43571f4d66a9535ee9a52b4135cfc309c371"
+    assert sealed_acceptance["semantic_projections"] == current_acceptance["semantic_projections"]
+    assert {
+        item["path"]: item["candidate_record"]["deriver"]
+        for item in sealed_acceptance["exceptions"]
+    } == {
+        "/nix/store/9rxmkw4dgx4zbg4knpgf4ks180g08n85-nvidia-kernel-modules-595.71.05-6.18.48": "/nix/store/vv81scx4x6sci66jd8id32id4n7c370g-nvidia-kernel-modules-595.71.05-6.18.48.drv",
+        "/nix/store/ih9f81k5fs8kma02wynqd8lry3s0g4xf-hwdb.bin": "/nix/store/p0m5kqzy7a1cm44z5602p9wzafx882ib-hwdb.bin.drv",
+    }
+
     with pytest.raises(prod.ProductionInstallError, match="no reviewed historical reproducibility acceptance"):
         prod.historical_reproducibility_acceptance_path("f" * 40)
     with pytest.raises(prod.ProductionInstallError, match="source revision is invalid"):

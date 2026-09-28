@@ -70,6 +70,9 @@ HISTORICAL_REPRODUCIBILITY_ACCEPTANCE_PATHS = {
     "1a1a34e4ce5321cfaa530df4eeb15b991cf87263": (
         ROOT / "nixos" / "production" / "historical-reproducibility-1a1a34e4-v1.json"
     ),
+    "ddcdc9c12147bec2c5717451efaf44812a8b4edf": (
+        ROOT / "nixos" / "production" / "historical-reproducibility-ddcdc9c-v1.json"
+    ),
 }
 INDEPENDENT_REBUILD_MATCH_FIELDS = (
     "schema_version", "kind", "source_revision", "system_path", "nix_volume",
