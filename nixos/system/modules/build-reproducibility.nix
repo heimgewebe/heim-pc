@@ -3,7 +3,7 @@ let
   # Nixpkgs c5c4a43 builds hwdb.bin with --root=$(pwd). systemd-hwdb
   # records source filenames in the database, so the transient Nix build root
   # becomes part of the output bytes. Keep the exact package set and compiler,
-  # but pass a stable relative root so independently fresh builds converge.
+  # but materialize the inputs below a stable absolute root so independently fresh builds converge.
   deterministicHwdbBin =
     pkgs.runCommand "hwdb.bin"
       {
@@ -14,19 +14,21 @@ let
         );
       }
       ''
-        mkdir -p etc/udev/hwdb.d
+        hwdbRoot=/tmp/heim-pc-hwdb-root
+        rm -rf "$hwdbRoot"
+        mkdir -p "$hwdbRoot/etc/udev/hwdb.d"
         for i in $packages; do
           echo "Adding hwdb files for package $i"
           for j in $i/{etc,lib}/udev/hwdb.d/*; do
-            cp "$j" "etc/udev/hwdb.d/$(basename "$j")"
+            cp "$j" "$hwdbRoot/etc/udev/hwdb.d/$(basename "$j")"
           done
         done
 
-        echo "Generating hwdb database with a stable relative root..."
-        res="$(${pkgs.buildPackages.systemd}/bin/systemd-hwdb --root=. update 2>&1)"
+        echo "Generating hwdb database with a stable absolute root..."
+        res="$(${pkgs.buildPackages.systemd}/bin/systemd-hwdb --root="$hwdbRoot" update 2>&1)"
         echo "$res"
         [ -z "$(echo "$res" | egrep '^Error')" ]
-        mv etc/udev/hwdb.bin "$out"
+        mv "$hwdbRoot/etc/udev/hwdb.bin" "$out"
       '';
 
   baseNvidiaPackage = config.boot.kernelPackages.nvidiaPackages.stable;

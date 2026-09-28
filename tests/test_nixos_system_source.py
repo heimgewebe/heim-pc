@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "76fedea1f00987672187a9388a606ec374ab73400c576553d07b9b96b3522457"
+SOURCE_SNAPSHOT_SHA256 = "b6d86d13fea21f483f266d995d6db6851aafd97a4d5eadb5ac93680a4a805d4d"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -251,7 +251,8 @@ class T(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/nixos-production-build-attest.yml").read_text()
 
         self.assertIn("../../modules/build-reproducibility.nix", host)
-        self.assertIn("systemd-hwdb --root=. update", module)
+        self.assertIn("hwdbRoot=/tmp/heim-pc-hwdb-root", module)
+        self.assertIn('systemd-hwdb --root="$hwdbRoot" update', module)
         self.assertIn(
             "-fdebug-prefix-map=$NIX_BUILD_TOP=/build/nvidia-kernel-modules",
             module,
