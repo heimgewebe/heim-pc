@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "7d6e4b5955971046bd983bc5b9626067509b82ba8f32745a51a359e4d909793f"
+SOURCE_SNAPSHOT_SHA256 = "9a413f9ccdb010743f9bb8572a09829f3dbda0eada5e47dd4857342e2df46848"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -227,14 +227,14 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 27)
+        self.assertEqual(len(files), 28)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
         for relative in (
             "flake.nix", "README.md", "hosts/heim-pc/default.nix",
             "hosts/heim-pc/firstboot-credentials.py",
-            "modules/audio.nix", "modules/backup.nix", "modules/bureau.nix",
+            "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
@@ -244,6 +244,26 @@ class T(unittest.TestCase):
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
+
+    def test_production_build_reproducibility_is_fixed_at_generators(self):
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        module = (SOURCE / "modules/build-reproducibility.nix").read_text()
+        workflow = (ROOT / ".github/workflows/nixos-production-build-attest.yml").read_text()
+
+        self.assertIn("../../modules/build-reproducibility.nix", host)
+        self.assertIn("systemd-hwdb --root=. update", module)
+        self.assertIn(
+            "-fdebug-prefix-map=$NIX_BUILD_TOP=/build/nvidia-kernel-modules",
+            module,
+        )
+        self.assertIn(
+            "-ffile-prefix-map=$NIX_BUILD_TOP=/build/nvidia-kernel-modules",
+            module,
+        )
+        self.assertIn("preferLocalBuild = true;", module)
+        self.assertIn("allowSubstitutes = false;", module)
+        self.assertIn("verify_independent_rebuild_candidate", workflow)
+        self.assertNotIn("historical_reproducibility", workflow)
 
     def test_pre_cutover_contracts_are_machine_readable_and_fail_closed(self):
         trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
