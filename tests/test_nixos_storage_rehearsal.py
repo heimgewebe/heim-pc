@@ -19,6 +19,8 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 NOW = datetime(2026, 9, 5, 0, 30, 0, tzinfo=timezone.utc)
+RUN_TOKEN = "a1b2c3d4e5"
+RUN_ID = f"BUR-RUN-20260905T002940Z-{RUN_TOKEN}"
 
 
 def _digest(value: dict, field: str) -> dict:
@@ -32,9 +34,9 @@ def target_evidence(**target_overrides):
     target = {
         "path": "/dev/loop7",
         "device_kind": "loop",
-        "device_identity": "loop:/var/tmp/heim-pc-t005.img:12345",
+        "device_identity": f"loop:tmpfs:/run/shm/heim-pc-t003-{RUN_TOKEN}.img:12345",
         "size_bytes": 32 * 1024**3,
-        "backing_file": "/var/tmp/heim-pc-t005.img",
+        "backing_file": f"/run/shm/heim-pc-t003-{RUN_TOKEN}.img",
         "blank": True,
         "mounted": False,
         "has_partition_table": False,
@@ -64,7 +66,7 @@ def sandbox_authority(evidence=None, **overrides):
         "schema_version": 1,
         "kind": m.AUTHORITY_KIND,
         "source_task": m.EXECUTOR_TASK,
-        "run_id": "BUR-RUN-T003-DISPOSABLE-001",
+        "run_id": RUN_ID,
         "resource": m.SANDBOX_RESOURCE,
         "exclusive": True,
         "target_path": preflight["target_path"],
@@ -78,10 +80,101 @@ def sandbox_authority(evidence=None, **overrides):
     return _digest(value, "receipt_sha256")
 
 
-def topology_readback(evidence=None, authority=None):
+def scratch_manifest(evidence=None, authority=None, artifacts=None, **overrides):
     evidence = evidence or target_evidence()
     authority = authority or sandbox_authority(evidence)
-    plan = m.compile_effect_plan(evidence, authority, now=NOW)
+    preflight = m.validate_target_evidence(evidence, now=NOW)
+    run_token = authority["run_id"].rsplit("-", 1)[-1].lower()
+    default_artifacts = []
+    backing = preflight["backing_file"].replace("/run/shm/", "/dev/shm/")
+    if (
+        backing.startswith("/dev/shm/heim-pc-t003-")
+        and run_token in Path(backing).name.lower()
+    ):
+        default_artifacts.append(
+            {
+                "kind": "backing-image",
+                "path": backing,
+                "path_type": "file",
+                "disposition": "remove",
+            }
+        )
+    default_artifacts.extend(
+        [
+            {
+                "kind": "overlay-upper",
+                "path": f"/dev/shm/heim-pc-t003-{run_token}-overlay-upper",
+                "path_type": "directory",
+                "disposition": "remove",
+            },
+            {
+                "kind": "overlay-work",
+                "path": f"/dev/shm/heim-pc-t003-{run_token}-overlay-work",
+                "path_type": "directory",
+                "disposition": "remove",
+            },
+            {
+                "kind": "namespace-scratch",
+                "path": f"/dev/shm/heim-pc-t003-{run_token}-namespace",
+                "path_type": "directory",
+                "disposition": "remove",
+            },
+            {
+                "kind": "temporary-scratch",
+                "path": f"/dev/shm/heim-pc-t003-{run_token}-temporary",
+                "path_type": "file",
+                "disposition": "remove",
+            },
+            {
+                "kind": "evidence",
+                "path": "/dev/shm/heim-pc-t003-r2-topology-readback.json",
+                "path_type": "file",
+                "disposition": "retain",
+            },
+        ]
+    )
+    selected_artifacts = copy.deepcopy(default_artifacts if artifacts is None else artifacts)
+    used_remove_kinds = {
+        item["kind"] for item in selected_artifacts
+        if item.get("disposition") == "remove"
+    }
+    value = {
+        "schema_version": 1,
+        "kind": m.SCRATCH_MANIFEST_KIND,
+        "source_task": m.EXECUTOR_TASK,
+        "run_id": authority["run_id"],
+        "target_path": preflight["target_path"],
+        "target_identity": preflight["device_identity"],
+        "artifacts": selected_artifacts,
+        "unused_artifact_kinds": sorted(m.SCRATCH_REMOVE_KINDS - used_remove_kinds),
+        "inventory_complete": True,
+        "manifest_sha256": "0" * 64,
+    }
+    value.update(overrides)
+    return _digest(value, "manifest_sha256")
+
+
+def effect_plan(evidence=None, authority=None, manifest=None, *, now=NOW):
+    evidence = evidence or target_evidence()
+    authority = authority or sandbox_authority(evidence)
+    manifest = manifest or scratch_manifest(evidence, authority)
+    return m.compile_effect_plan(evidence, authority, manifest, now=now)
+
+
+def validate_topology(value, evidence=None, authority=None, manifest=None, *, now=NOW):
+    evidence = evidence or target_evidence()
+    authority = authority or sandbox_authority(evidence)
+    manifest = manifest or scratch_manifest(evidence, authority)
+    return m.validate_topology_readback(
+        value, evidence, authority, manifest, now=now
+    )
+
+
+def topology_readback(evidence=None, authority=None, manifest=None):
+    evidence = evidence or target_evidence()
+    authority = authority or sandbox_authority(evidence)
+    manifest = manifest or scratch_manifest(evidence, authority)
+    plan = effect_plan(evidence, authority, manifest, now=NOW)
     partitions = [
         {
             "number": 1,
@@ -273,19 +366,119 @@ def test_plan_requires_exact_exclusive_t003_authority():
     evidence = target_evidence()
     authority = sandbox_authority(evidence, exclusive=False)
     with pytest.raises(m.RehearsalError, match="not exclusive"):
-        m.compile_effect_plan(evidence, authority, now=NOW)
+        effect_plan(evidence, authority, now=NOW)
 
 
 def test_authority_target_mismatch_is_rejected():
     evidence = target_evidence()
     authority = sandbox_authority(evidence, target_path="/dev/loop8")
     with pytest.raises(m.RehearsalError, match="target path mismatch"):
+        effect_plan(evidence, authority, now=NOW)
+
+
+def test_effect_plan_requires_explicit_scratch_manifest():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    with pytest.raises(m.RehearsalError, match="scratch manifest is required"):
         m.compile_effect_plan(evidence, authority, now=NOW)
+
+
+def test_scratch_manifest_must_assert_complete_inventory():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority, inventory_complete=False)
+    with pytest.raises(m.RehearsalError, match="complete run inventory"):
+        effect_plan(evidence, authority, manifest)
+
+
+def test_scratch_manifest_must_account_for_every_cleanup_kind():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["artifacts"] = [
+        item for item in manifest["artifacts"] if item["kind"] != "overlay-work"
+    ]
+    manifest["unused_artifact_kinds"] = []
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="account for every cleanup kind"):
+        effect_plan(evidence, authority, manifest)
+
+
+def test_scratch_manifest_rejects_foreign_or_untokenized_cleanup_path():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["artifacts"][1]["path"] = "/dev/shm/heim-pc-t003-foreign-overlay-upper"
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="run token"):
+        effect_plan(evidence, authority, manifest)
+
+
+def test_scratch_manifest_rejects_cleanup_outside_direct_dev_shm_entry():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["artifacts"][1]["path"] = f"/tmp/heim-pc-t003-{RUN_TOKEN}-overlay-upper"
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="direct /dev/shm entry"):
+        effect_plan(evidence, authority, manifest)
+
+
+def test_scratch_manifest_only_allows_evidence_retention():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["artifacts"][1]["disposition"] = "retain"
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="only evidence"):
+        effect_plan(evidence, authority, manifest)
+
+
+def test_scratch_cleanup_contract_covers_success_error_abort_and_retry():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    plan = effect_plan(evidence, authority)
+    contract = plan["teardown_contract"]
+    assert contract["required_on_terminal_states"] == ["success", "error", "abort", "retry"]
+    assert contract["must_attempt_all_release_commands"] is True
+    assert contract["already_absent_is_success"] is True
+    assert contract["scratch_cleanup_requires_release_success"] is True
+    assert contract["release_failure_disposition"] == "retain-scratch-and-retry-release-before-cleanup"
+    assert contract["retry_idempotent"] is True
+    remove_kinds = {item["kind"] for item in plan["scratch_cleanup"]["remove_artifacts"]}
+    assert remove_kinds == {
+        "backing-image",
+        "overlay-upper",
+        "overlay-work",
+        "namespace-scratch",
+        "temporary-scratch",
+    }
+    assert {item["kind"] for item in plan["scratch_cleanup"]["retained_evidence"]} == {"evidence"}
+    teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
+    assert teardown_effects[-1] == "loop-detach"
+    assert not any(effect.startswith("scratch-") for effect in teardown_effects)
+    cleanup_effects = [item["effect"] for item in plan["scratch_cleanup_commands"]]
+    assert cleanup_effects
+    assert all(effect.startswith("scratch-") for effect in cleanup_effects)
+    cleanup_paths = {
+        item["scratch_path"] for item in plan["scratch_cleanup_commands"]
+    }
+    assert "/dev/shm/heim-pc-t003-r2-topology-readback.json" not in cleanup_paths
+
+
+def test_scratch_manifest_run_binding_must_match_authority():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["run_id"] = "BUR-RUN-20260905T002940Z-deadbeef00"
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="run_id mismatch"):
+        effect_plan(evidence, authority, manifest)
 
 
 def test_effect_plan_is_argv_only_and_never_authorizes_execution():
     evidence = target_evidence()
-    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    plan = effect_plan(evidence, sandbox_authority(evidence), now=NOW)
     assert plan["execution_authorized"] is False
     assert plan["production_effects_authorized"] is False
     assert plan["requires_runtime_executor_reauthentication"] is True
@@ -324,15 +517,15 @@ def test_plan_digest_is_stable_across_revalidation_clock():
     authority = sandbox_authority(evidence)
     later = NOW + timedelta(seconds=45)
 
-    first = m.compile_effect_plan(evidence, authority, now=NOW)
-    second = m.compile_effect_plan(evidence, authority, now=later)
+    first = effect_plan(evidence, authority, now=NOW)
+    second = effect_plan(evidence, authority, now=later)
 
     assert first["target_preflight"]["age_seconds"] != second["target_preflight"]["age_seconds"]
     assert first["plan_sha256"] == second["plan_sha256"]
 
     # A readback produced for the original plan must remain bound when it is
     # independently validated a little later, while all evidence is still fresh.
-    result = m.validate_topology_readback(
+    result = validate_topology(
         topology_readback(evidence, authority), evidence, authority, now=later
     )
     assert result["status"] == "passed"
@@ -341,7 +534,7 @@ def test_plan_digest_is_stable_across_revalidation_clock():
 def test_topology_readback_passes_only_exact_contract():
     evidence = target_evidence()
     authority = sandbox_authority(evidence)
-    result = m.validate_topology_readback(
+    result = validate_topology(
         topology_readback(evidence, authority), evidence, authority, now=NOW
     )
     assert result["status"] == "passed"
@@ -356,7 +549,7 @@ def test_topology_readback_rejects_missing_data_subvolume():
     value["btrfs"]["subvolumes"].remove("@data")
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="subvolume"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_topology_readback_rejects_sandbox_mount_drift():
@@ -366,7 +559,7 @@ def test_topology_readback_rejects_sandbox_mount_drift():
     value["btrfs"]["sandbox_mounts"]["@data"] = "/mnt/wrong-data"
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="sandbox mount"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_topology_readback_rejects_efi_surface_drift():
@@ -376,7 +569,7 @@ def test_topology_readback_rejects_efi_surface_drift():
     value["efi"]["filesystem"] = "ext4"
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="EFI surface"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_topology_readback_rejects_partition_type_drift():
@@ -386,7 +579,7 @@ def test_topology_readback_rejects_partition_type_drift():
     value["gpt"]["partitions"][2]["type_guid"] = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="partition topology"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_topology_readback_rejects_luks_version_drift():
@@ -396,7 +589,7 @@ def test_topology_readback_rejects_luks_version_drift():
     value["luks"]["version"] = 1
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="LUKS2"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_recovery_evidence_requires_all_independent_offhost_domains():
@@ -459,7 +652,7 @@ def test_harness_does_not_hardcode_historical_production_device_identity():
 
 def test_partition_argv_is_compiled_from_contract_values():
     evidence = target_evidence()
-    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    plan = effect_plan(evidence, sandbox_authority(evidence), now=NOW)
     contract = m.load_contract()
     partition_commands = {
         item["partition_role"]: item["argv"]
@@ -477,7 +670,7 @@ def test_partition_argv_is_compiled_from_contract_values():
 
 def test_plan_declares_same_luks_secret_binding_and_teardown():
     evidence = target_evidence()
-    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    plan = effect_plan(evidence, sandbox_authority(evidence), now=NOW)
     secret_commands = [item for item in plan["commands"] if "secret_binding" in item]
     assert {item["effect"] for item in secret_commands} == {"luks-format", "luks-open"}
     assert {item["secret_binding"] for item in secret_commands} == {"luks-key-v1"}
@@ -497,6 +690,10 @@ def test_plan_declares_same_luks_secret_binding_and_teardown():
         item["argv"][0] in {"umount", "cryptsetup", "/usr/sbin/losetup"}
         for item in plan["teardown_commands"]
     )
+    assert all(
+        item["argv"][0] == "/usr/bin/rm"
+        for item in plan["scratch_cleanup_commands"]
+    )
 
 
 def test_nbd_target_does_not_claim_loop_detach_lifecycle():
@@ -506,10 +703,14 @@ def test_nbd_target_does_not_claim_loop_detach_lifecycle():
         device_identity="nbd:/var/tmp/heim-pc-t005.img:12345",
         backing_file="/var/tmp/heim-pc-t005.img",
     )
-    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    plan = effect_plan(evidence, sandbox_authority(evidence), now=NOW)
     teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
     assert "loop-detach" not in teardown_effects
     assert teardown_effects[-1] == "luks-close"
+    assert all(
+        "/var/tmp/heim-pc-t005.img" not in item["argv"]
+        for item in plan["scratch_cleanup_commands"]
+    )
 
 
 def test_topology_readback_rejects_fixed_partition_size_drift():
@@ -519,7 +720,7 @@ def test_topology_readback_rejects_fixed_partition_size_drift():
     value["gpt"]["partitions"][0]["size_bytes"] += 1024**2
     value = _digest(value, "readback_sha256")
     with pytest.raises(m.RehearsalError, match="partition size"):
-        m.validate_topology_readback(value, evidence, authority, now=NOW)
+        validate_topology(value, evidence, authority, now=NOW)
 
 
 def test_recovery_evidence_rejects_stale_outer_or_domain_timestamp():
@@ -560,7 +761,7 @@ def test_sandbox_mounts_follow_logical_contract_not_subvolume_names():
 def test_parent_mounts_precede_children_and_teardown_reverses_all_mounts():
     from pathlib import PurePosixPath
     evidence = target_evidence()
-    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    plan = effect_plan(evidence, sandbox_authority(evidence), now=NOW)
     mounts = [item for item in plan["commands"] if "logical_mountpoint" in item]
     assert mounts[0]["logical_mountpoint"] == "/"
     assert len(mounts) == 8
@@ -584,7 +785,7 @@ def test_surface_readback_requires_both_logical_and_sandbox_mountpoints(surface)
         readback[surface][key] = value
         readback = _digest(readback, "readback_sha256")
         with pytest.raises(m.RehearsalError, match="surface readback"):
-            m.validate_topology_readback(readback, evidence, authority, now=NOW)
+            validate_topology(readback, evidence, authority, now=NOW)
 
 
 @pytest.mark.parametrize("logical", ["relative", "/a/../b", "//boot", "/dev/disk"])
