@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "7d6e4b5955971046bd983bc5b9626067509b82ba8f32745a51a359e4d909793f"
+SOURCE_SNAPSHOT_SHA256 = "ead1608f459e79b9b7ce9d44380611046991b8a70b9ff02446ddd46b39462ed2"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -227,14 +227,14 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 27)
+        self.assertEqual(len(files), 28)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
         for relative in (
             "flake.nix", "README.md", "hosts/heim-pc/default.nix",
             "hosts/heim-pc/firstboot-credentials.py",
-            "modules/audio.nix", "modules/backup.nix", "modules/bureau.nix",
+            "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
@@ -245,10 +245,40 @@ class T(unittest.TestCase):
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
 
+    def test_production_build_reproducibility_is_fixed_at_generators(self):
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        module = (SOURCE / "modules/build-reproducibility.nix").read_text()
+        workflow = (ROOT / ".github/workflows/nixos-production-build-attest.yml").read_text()
+
+        self.assertIn("../../modules/build-reproducibility.nix", host)
+        self.assertIn("hwdbRoot=/tmp/heim-pc-hwdb-root", module)
+        self.assertIn('systemd-hwdb --root="$hwdbRoot" update', module)
+        self.assertIn(
+            "-fdebug-prefix-map=$NIX_BUILD_TOP=/build/nvidia-kernel-modules",
+            module,
+        )
+        self.assertIn(
+            "-ffile-prefix-map=$NIX_BUILD_TOP=/build/nvidia-kernel-modules",
+            module,
+        )
+        self.assertIn("preferLocalBuild = true;", module)
+        self.assertIn("allowSubstitutes = false;", module)
+        self.assertIn("verify_independent_rebuild_candidate", workflow)
+        self.assertNotIn("historical_reproducibility", workflow)
+
     def test_pre_cutover_contracts_are_machine_readable_and_fail_closed(self):
         trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
         lifecycle = json.loads((ROOT / "nixos/production/nix-lifecycle-contract-v1.json").read_text())
         recovery = json.loads((ROOT / "nixos/production/recovery-contract-v1.json").read_text())
+        critical_path = ROOT / "nixos/production/critical-user-data-contract-v1.json"
+        critical_home_path = ROOT / "nixos/production/critical-user-home-data-contract-v1.json"
+        critical_docker_path = ROOT / "nixos/production/critical-docker-volume-data-contract-v1.json"
+        critical = json.loads(critical_path.read_text())
+        critical_home = json.loads(critical_home_path.read_text())
+        critical_docker = json.loads(critical_docker_path.read_text())
+        critical_sha256 = hashlib.sha256(critical_path.read_bytes()).hexdigest()
+        critical_home_sha256 = hashlib.sha256(critical_home_path.read_bytes()).hexdigest()
+        critical_docker_sha256 = hashlib.sha256(critical_docker_path.read_bytes()).hexdigest()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         trust_module = (SOURCE / "modules/nix-trust.nix").read_text()
         lifecycle_module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
@@ -357,6 +387,76 @@ class T(unittest.TestCase):
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
         self.assertIn("../../modules/nix-lifecycle.nix", host)
 
+        self.assertEqual(critical["schema_version"], 1)
+        self.assertEqual(critical["kind"], "heim_pc.critical_user_data_scope_contract")
+        self.assertEqual(critical["scope"], "critical-user-data")
+        self.assertEqual(
+            critical["scope_semantics"], "explicit-root-set-default-include"
+        )
+        self.assertEqual(
+            [member["id"] for member in critical["members"]],
+            ["home", "docker-volumes"],
+        )
+        home_member, docker_member = critical["members"]
+        self.assertEqual(home_member["contract_sha256"], critical_home_sha256)
+        self.assertEqual(home_member["destination"]["nixos_storage_domain"], "@home")
+        self.assertEqual(home_member["restore_mode"], "active-user-data")
+        self.assertEqual(docker_member["contract_sha256"], critical_docker_sha256)
+        self.assertEqual(docker_member["destination"]["nixos_storage_domain"], "@data")
+        self.assertEqual(
+            docker_member["restore_mode"], "staged-archive-not-active-docker-store"
+        )
+        self.assertEqual(critical_home["scope"], "critical-user-data-home")
+        self.assertEqual(critical_home["root"], "/home/alex")
+        self.assertEqual(critical_home["scope_semantics"], "whole-home-by-default")
+        self.assertEqual(
+            critical_docker["scope"], "critical-user-data-docker-volumes"
+        )
+        self.assertEqual(critical_docker["root"], "/var/lib/docker/volumes")
+        self.assertEqual(
+            critical_docker["scope_semantics"], "whole-root-by-default"
+        )
+        self.assertTrue(
+            critical_docker["source_consistency"][
+                "full_authoritative_inventory_requires_docker_quiesced"
+            ]
+        )
+        self.assertFalse(
+            critical_docker["destination_policy"][
+                "direct_restore_into_new_docker_volume_store"
+            ]
+        )
+        self.assertTrue(
+            critical["migration_policy"]["system_state_recreated_from_nix"]
+        )
+        self.assertTrue(
+            critical["migration_policy"][
+                "old_system_disk_preserved_as_independent_fallback"
+            ]
+        )
+        self.assertEqual(
+            critical["migration_policy"]["default_for_non_reproducible_data"],
+            "preserve",
+        )
+        self.assertTrue(
+            critical["migration_policy"]["docker_volume_tree_preserved_as_cold_data"]
+        )
+        self.assertFalse(
+            critical["migration_policy"][
+                "docker_volume_tree_directly_activated_on_new_nixos"
+            ]
+        )
+        self.assertEqual(
+            recovery["critical_user_data_scope"],
+            {
+                "contract_kind": "heim_pc.critical_user_data_scope_contract",
+                "scope": "critical-user-data",
+                "sha256": critical_sha256,
+                "off_host_restore_critical_scope_sha256_bound": True,
+                "aggregate_member_contracts_bound": True,
+            },
+        )
+
         self.assertEqual(recovery["status"], "external-evidence-required")
         self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
         self.assertTrue(
@@ -454,8 +554,38 @@ class T(unittest.TestCase):
             "heim_pc.nixos_pre_cutover_readiness",
         )
         self.assertTrue(recovery["readiness_bundle"]["evidence_freshness_bound"])
+        self.assertTrue(
+            recovery["readiness_bundle"][
+                "critical_user_data_contract_sha256_bound"
+            ]
+        )
         self.assertFalse(recovery["readiness_bundle"]["production_effects_authorized"])
         self.assertIn("heim-pc/recovery-contract.json", backup_module)
+        self.assertIn("heim-pc/critical-user-data-contract.json", backup_module)
+        self.assertIn("heim-pc/critical-user-home-data-contract.json", backup_module)
+        self.assertIn(
+            "heim-pc/critical-docker-volume-data-contract.json", backup_module
+        )
+        self.assertIn(
+            'builtins.hashFile "sha256" criticalUserDataPath', backup_module
+        )
+        self.assertIn(
+            'builtins.hashFile "sha256" criticalUserHomePath', backup_module
+        )
+        self.assertIn(
+            'builtins.hashFile "sha256" criticalDockerVolumesPath', backup_module
+        )
+        self.assertIn(
+            "contract.critical_user_data_scope.sha256 == criticalUserDataSha256",
+            flake,
+        )
+        self.assertIn(
+            "contract.critical_user_data_scope.aggregate_member_contracts_bound",
+            flake,
+        )
+        self.assertIn("heim-pc/critical-user-data-contract.json", flake)
+        self.assertIn("heim-pc/critical-user-home-data-contract.json", flake)
+        self.assertIn("heim-pc/critical-docker-volume-data-contract.json", flake)
         self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 
     def test_managed_root_entrypoint_exists(self):

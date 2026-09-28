@@ -275,14 +275,17 @@ def synthetic_readiness_path(
     *,
     recovery_path: Path | None = None,
     lifecycle_path: Path | None = None,
+    critical_path: Path | None = None,
 ) -> Path:
     root = Path(tempfile.mkdtemp(prefix="case-", dir=_READINESS_TEST_ROOT.name))
     recovery_path = recovery_path or prod.RECOVERY_CONTRACT_PATH
     lifecycle_path = lifecycle_path or prod.NIX_LIFECYCLE_CONTRACT_PATH
+    critical_path = critical_path or prod.CRITICAL_USER_DATA_CONTRACT_PATH
     recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
     observed_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
     lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    critical_sha = hashlib.sha256(critical_path.read_bytes()).hexdigest()
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
@@ -292,6 +295,11 @@ def synthetic_readiness_path(
             "kind": item["evidence_schema"],
             "result": "passed",
             "producer_receipt_sha256": "a" * 64,
+            "facts": (
+                {"critical_scope_sha256": critical_sha}
+                if item["id"] == "off-host-home-restore"
+                else {"synthetic_fact_sha256": "a" * 64}
+            ),
         }
         evidence_provenance = {
             "schema_version": 1,
@@ -325,6 +333,11 @@ def synthetic_readiness_path(
                 "kind": item["restore_test_schema"],
                 "result": "passed",
                 "producer_receipt_sha256": "b" * 64,
+                "facts": (
+                    {"critical_scope_sha256": critical_sha}
+                    if item["id"] == "off-host-home-restore"
+                    else {"synthetic_fact_sha256": "b" * 64}
+                ),
             }
             restore_provenance = {
                 "schema_version": 1,
@@ -405,6 +418,7 @@ def synthetic_readiness_path(
         "source_revision": REVISION,
         "recovery_contract_sha256": recovery_sha,
         "nix_lifecycle_contract_sha256": lifecycle_sha,
+        "critical_user_data_contract_sha256": critical_sha,
         "recovery_evidence_receipts": bindings,
         "observed_at": observed_at,
         "freshness_seconds": recovery["evidence_freshness"]["maximum_age_seconds"],
@@ -433,12 +447,15 @@ def plan(
         selected_readiness_path is None
         and selected_artifact["source_authority"] == "merged-main"
     ):
-        recovery_path, lifecycle_path = prod.readiness_contract_paths_for_source(
-            selected_flake_source
-        )
+        (
+            recovery_path,
+            lifecycle_path,
+            critical_path,
+        ) = prod.readiness_contract_paths_for_source(selected_flake_source)
         selected_readiness_path = synthetic_readiness_path(
             recovery_path=recovery_path,
             lifecycle_path=lifecycle_path,
+            critical_path=critical_path,
         )
     return prod.compile_plan(
         obs or observation(),
@@ -1136,6 +1153,7 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
         "readiness_bundle_sha256": None,
         "recovery_contract_sha256": None,
         "nix_lifecycle_contract_sha256": None,
+        "critical_user_data_contract_sha256": None,
         "recovery_evidence_count": 0,
     }
     assert "super-secret-material" not in json.dumps(summary)
@@ -5583,21 +5601,26 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
 
     recovery_path = production_root / "recovery-contract-v1.json"
     lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
-    expected_paths = (recovery_path, lifecycle_path)
+    critical_path = production_root / "critical-user-data-contract-v1.json"
+    expected_paths = (recovery_path, lifecycle_path, critical_path)
     assert prod.readiness_contract_paths_for_source(str(source_root)) == expected_paths
     assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
     recovery = json.loads(prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8"))
     lifecycle = json.loads(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    critical_payload = prod.CRITICAL_USER_DATA_CONTRACT_PATH.read_bytes()
     recovery["source_fixture_marker"] = "historical"
     lifecycle["source_fixture_marker"] = "historical"
     recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
     lifecycle_path.write_text(json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8")
+    critical_path.write_bytes(critical_payload)
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
+    critical_path.chmod(0o644)
 
     readiness_path = synthetic_readiness_path(
         recovery_path=recovery_path,
         lifecycle_path=lifecycle_path,
+        critical_path=critical_path,
     )
     compiled = plan(
         artifact=MERGED_ARTIFACT,
@@ -5607,8 +5630,10 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
     readiness = compiled["pre_cutover_readiness"]
     recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
     lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    critical_sha = hashlib.sha256(critical_path.read_bytes()).hexdigest()
     assert readiness["recovery_contract_sha256"] == recovery_sha
     assert readiness["nix_lifecycle_contract_sha256"] == lifecycle_sha
+    assert readiness["critical_user_data_contract_sha256"] == critical_sha
     assert recovery_sha != hashlib.sha256(prod.RECOVERY_CONTRACT_PATH.read_bytes()).hexdigest()
     assert lifecycle_sha != hashlib.sha256(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes()).hexdigest()
 
@@ -5618,6 +5643,7 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
     "receipt",
     "recovery-contract",
     "lifecycle-contract",
+    "critical-contract",
 ])
 def test_apply_readiness_tamper_is_explicitly_pre_mutation(
     monkeypatch, tmp_path, tamper_target
@@ -5629,14 +5655,18 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     recovery_path = production_root / "recovery-contract-v1.json"
     lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
+    critical_path = production_root / "critical-user-data-contract-v1.json"
     recovery_path.write_bytes(prod.RECOVERY_CONTRACT_PATH.read_bytes())
     lifecycle_path.write_bytes(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes())
+    critical_path.write_bytes(prod.CRITICAL_USER_DATA_CONTRACT_PATH.read_bytes())
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
+    critical_path.chmod(0o644)
 
     readiness_path = synthetic_readiness_path(
         recovery_path=recovery_path,
         lifecycle_path=lifecycle_path,
+        critical_path=critical_path,
     )
     compiled = plan(
         artifact=MERGED_ARTIFACT,
@@ -5659,10 +5689,14 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
         value = json.loads(recovery_path.read_text(encoding="utf-8"))
         value["tamper_marker"] = True
         recovery_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    else:
+    elif tamper_target == "lifecycle-contract":
         value = json.loads(lifecycle_path.read_text(encoding="utf-8"))
         value["tamper_marker"] = True
         lifecycle_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        value = json.loads(critical_path.read_text(encoding="utf-8"))
+        value["scope_semantics"] = "changed-after-plan"
+        critical_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
     _mock_historical_apply_until_final_gate(monkeypatch, compiled)
     monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))

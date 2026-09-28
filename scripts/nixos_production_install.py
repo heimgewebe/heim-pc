@@ -29,6 +29,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "nixos" / "production" / "contract-v1.json"
 RECOVERY_CONTRACT_PATH = ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+CRITICAL_USER_DATA_CONTRACT_PATH = ROOT / "nixos" / "production" / "critical-user-data-contract-v1.json"
 NIX_LIFECYCLE_CONTRACT_PATH = ROOT / "nixos" / "production" / "nix-lifecycle-contract-v1.json"
 FLAKE_SOURCE = ROOT / "nixos" / "system"
 MOUNT_ROOT = "/mnt/heim-pc-nixos-production"
@@ -370,7 +371,7 @@ def managed_build_receipt_path(artifact_path: Path) -> Path:
     return Path(str(artifact_path) + MANAGED_BUILD_RECEIPT_SUFFIX)
 
 
-def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path]:
+def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, Path]:
     source = Path(flake_source)
     if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
         raise ProductionInstallError("flake source must be a canonical absolute path")
@@ -390,6 +391,7 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path]:
     return (
         production_root / "recovery-contract-v1.json",
         production_root / "nix-lifecycle-contract-v1.json",
+        production_root / "critical-user-data-contract-v1.json",
     )
 
 
@@ -1618,15 +1620,18 @@ def compile_plan(
     source_revision = artifact["source_revision"]
     readiness_verification = None
     if pre_cutover_readiness_path is not None:
-        recovery_contract_path, lifecycle_contract_path = readiness_contract_paths_for_source(
-            flake_source
-        )
+        (
+            recovery_contract_path,
+            lifecycle_contract_path,
+            critical_user_data_contract_path,
+        ) = readiness_contract_paths_for_source(flake_source)
         try:
             readiness_verification = pre_cutover_readiness.validate_readiness(
                 Path(pre_cutover_readiness_path),
                 source_revision=source_revision,
                 recovery_contract_path=recovery_contract_path,
                 lifecycle_contract_path=lifecycle_contract_path,
+                critical_user_data_contract_path=critical_user_data_contract_path,
             )
         except pre_cutover_readiness.ReadinessError as exc:
             raise ProductionInstallError("pre-cutover readiness rejected") from exc
@@ -1769,6 +1774,7 @@ def plan_summary(_plan: dict[str, Any]) -> dict[str, Any]:
         "readiness_bundle_sha256": readiness.get("bundle_sha256") if validated else None,
         "recovery_contract_sha256": readiness.get("recovery_contract_sha256") if validated else None,
         "nix_lifecycle_contract_sha256": readiness.get("nix_lifecycle_contract_sha256") if validated else None,
+        "critical_user_data_contract_sha256": readiness.get("critical_user_data_contract_sha256") if validated else None,
         "recovery_evidence_count": len(evidence) if isinstance(evidence, list) else 0,
     }
 
@@ -4682,6 +4688,9 @@ def execute_plan(
                             ),
                             lifecycle_contract_path=Path(
                                 readiness_snapshot["nix_lifecycle_contract_path"]
+                            ),
+                            critical_user_data_contract_path=Path(
+                                readiness_snapshot["critical_user_data_contract_path"]
                             ),
                         )
                     except (

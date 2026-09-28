@@ -1,0 +1,331 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.critical_user_data_scope_contract",
+  "scope": "critical-user-data-home",
+  "scope_semantics": "whole-home-by-default",
+  "root": "/home/alex",
+  "logical_root": "/home/alex",
+  "inventory": {
+    "schema": "heim_pc.critical_user_data_inventory.v1",
+    "algorithm": "canonical-record-stream-sha256-v1",
+    "same_filesystem_only": true,
+    "follow_symlinks": false,
+    "regular_file_content_sha256": true,
+    "directory_mode_bound": true,
+    "regular_file_mode_bound": true,
+    "symlink_target_bound": true,
+    "special_files": "excluded-runtime-only",
+    "unreadable_included_path": "fail",
+    "changed_during_hash": "fail"
+  },
+  "exclusions": {
+    "top_level_prefixes": [
+      {
+        "prefix": ".grabowski-task-output-",
+        "class": "transient-agent-output",
+        "rationale": "bounded agent task outputs are transient execution products, not migration source data"
+      }
+    ],
+    "roots": [
+      {
+        "path": "/home/alex/.cache",
+        "class": "cache",
+        "rationale": "rebuildable application cache"
+      },
+      {
+        "path": "/home/alex/.npm",
+        "class": "package-cache",
+        "rationale": "rebuildable npm cache and downloaded package state"
+      },
+      {
+        "path": "/home/alex/.nvm",
+        "class": "toolchain-cache",
+        "rationale": "reinstallable Node toolchain distribution"
+      },
+      {
+        "path": "/home/alex/.rustup",
+        "class": "toolchain-cache",
+        "rationale": "reinstallable Rust toolchain distribution"
+      },
+      {
+        "path": "/home/alex/.venv",
+        "class": "build-environment",
+        "rationale": "rebuildable Python virtual environment"
+      },
+      {
+        "path": "/home/alex/.venvs",
+        "class": "build-environment",
+        "rationale": "rebuildable Python virtual environments"
+      },
+      {
+        "path": "/home/alex/.pytest_cache",
+        "class": "cache",
+        "rationale": "rebuildable test cache"
+      },
+      {
+        "path": "/home/alex/.ruff_cache",
+        "class": "cache",
+        "rationale": "rebuildable linter cache"
+      },
+      {
+        "path": "/home/alex/__pycache__",
+        "class": "cache",
+        "rationale": "rebuildable Python bytecode cache"
+      },
+      {
+        "path": "/home/alex/build",
+        "class": "build-output",
+        "rationale": "rebuildable top-level build output"
+      },
+      {
+        "path": "/home/alex/logs",
+        "class": "runtime-log",
+        "rationale": "operational logs are not required to reconstruct user data or host control"
+      },
+      {
+        "path": "/home/alex/tmp",
+        "class": "temporary-state",
+        "rationale": "temporary working state"
+      },
+      {
+        "path": "/home/alex/repoground-out",
+        "class": "generated-analysis",
+        "rationale": "generated repository analysis output"
+      },
+      {
+        "path": "/home/alex/.local/share/grabowski-mcp-releases",
+        "class": "runtime-release-cache",
+        "rationale": "verified Grabowski runtime releases are reinstallable from source"
+      },
+      {
+        "path": "/home/alex/.local/share/bureau/releases",
+        "class": "runtime-release-cache",
+        "rationale": "Bureau runtime releases are reinstallable from source"
+      },
+      {
+        "path": "/home/alex/.local/share/bureau/registry-snapshots",
+        "class": "generated-snapshot",
+        "rationale": "registry snapshots are regenerated from canonical registry state"
+      },
+      {
+        "path": "/home/alex/.local/share/Trash",
+        "class": "trash",
+        "rationale": "desktop trash is intentionally outside migration-critical data"
+      },
+      {
+        "path": "/home/alex/.local/state/grabowski/resources.sqlite3-shm",
+        "class": "transient-sqlite-wal-index",
+        "rationale": "SQLite WAL shared-memory index for the Grabowski resource database; it contains no database content and is reconstructed from the database/WAL, while resources.sqlite3 and resources.sqlite3-wal remain included"
+      },
+      {
+        "path": "/home/alex/.local/state/grabowski/jobs",
+        "class": "transient-job-state",
+        "rationale": "durable job execution logs are operational state, not cutover source data"
+      },
+      {
+        "path": "/home/alex/.local/state/bureau/heartbeat-roots",
+        "class": "transient-runtime-state",
+        "rationale": "heartbeat roots are recreated by the running controller"
+      },
+      {
+        "path": "/home/alex/artifacts/nixos-physical-preflight",
+        "class": "superseded-preflight-artifact",
+        "rationale": "historical privileged preflight artifacts are superseded; fresh recovery and cutover receipts are separately required and source-bound"
+      },
+      {
+        "path": "/home/alex/.cargo/registry",
+        "class": "package-cache",
+        "rationale": "rebuildable Cargo registry cache"
+      },
+      {
+        "path": "/home/alex/.cargo/git",
+        "class": "package-cache",
+        "rationale": "rebuildable Cargo Git dependency cache"
+      },
+      {
+        "path": "/home/alex/.ollama/models",
+        "class": "model-cache",
+        "rationale": "downloaded model blobs are reproducible external artifacts; local model configuration remains included"
+      },
+      {
+        "path": "/home/alex/artifacts/merges/repobrief-auto",
+        "class": "generated-analysis",
+        "rationale": "generated RepoBrief merge analysis"
+      },
+      {
+        "path": "/home/alex/artifacts/merges/.rlens-source-snapshots",
+        "class": "generated-analysis",
+        "rationale": "generated RepoLens source snapshots"
+      },
+      {
+        "path": "/home/alex/.codex/app-server-daemon",
+        "class": "transient-runtime-state",
+        "rationale": "live ChatGPT app-server daemon socket/update state; .codex credentials, configuration, history and persistent databases remain included"
+      }
+    ],
+    "directory_names_under": [
+      {
+        "root": "/home/alex/.local/state/grabowski/diagnostics",
+        "names": [
+          "fresh-store-root"
+        ],
+        "class": "generated-diagnostic-workspace",
+        "rationale": "fresh Nix store roots are disposable reproducibility-diagnostic working state; compact summaries, source bundles, path-info and other diagnostic evidence outside the subtree remain included"
+      },
+      {
+        "root": "/home/alex/repos",
+        "names": [
+          "node_modules",
+          ".venv",
+          "target",
+          "dist",
+          "build",
+          ".next",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache",
+          ".tox",
+          ".turbo",
+          "machine-readable.local"
+        ],
+        "class": "repository-generated-state",
+        "rationale": "generated dependency, build, test, and analysis state beneath canonical repositories"
+      },
+      {
+        "root": "/home/alex/worktrees",
+        "names": [
+          "node_modules",
+          ".venv",
+          "target",
+          "dist",
+          "build",
+          ".next",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache",
+          ".tox",
+          ".turbo",
+          "machine-readable.local"
+        ],
+        "class": "worktree-generated-state",
+        "rationale": "generated dependency/build/test state beneath secondary worktrees"
+      },
+      {
+        "root": "/home/alex/.weltgewebe-worktrees",
+        "names": [
+          "node_modules",
+          ".venv",
+          "target",
+          "dist",
+          "build",
+          ".next",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache",
+          ".tox",
+          ".turbo",
+          "machine-readable.local"
+        ],
+        "class": "worktree-generated-state",
+        "rationale": "generated dependency/build/test state beneath Weltgewebe worktrees"
+      },
+      {
+        "root": "/home/alex/grabowski-workspaces",
+        "names": [
+          "node_modules",
+          ".venv",
+          "target",
+          "dist",
+          "build",
+          ".next",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache",
+          ".tox",
+          ".turbo",
+          "machine-readable.local"
+        ],
+        "class": "workspace-generated-state",
+        "rationale": "generated dependency/build/test state beneath agent workspaces; unpublished workspace source remains included"
+      },
+      {
+        "root": "/home/alex/.grabowski-deploy-sources",
+        "names": [
+          "node_modules",
+          ".venv",
+          "target",
+          "dist",
+          "build",
+          ".next",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache",
+          ".tox",
+          ".turbo",
+          "machine-readable.local"
+        ],
+        "class": "deployment-generated-state",
+        "rationale": "generated dependency/build/test state beneath deployment source material; non-generated upload/source bytes remain included"
+      }
+    ],
+    "file_name_prefixes_under": [
+      {
+        "root": "/home/alex/.grok",
+        "prefixes": [
+          "sandbox-blocked."
+        ],
+        "required_size_bytes": 0,
+        "required_mode": 0,
+        "class": "transient-runtime-state",
+        "rationale": "Grok sandbox denial sentinels are zero-byte mode-000 runtime markers; all other .grok credentials, configuration, sessions and state remain included"
+      }
+    ],
+    "file_name_prefix_suffixes_under": [
+      {
+        "root": "/home/alex/.local/state/grabowski",
+        "prefixes": [
+          "resources.sqlite3",
+          "tasks.sqlite3",
+          "checkouts.sqlite3",
+          ".resources.sqlite3",
+          ".tasks.sqlite3",
+          ".checkouts.sqlite3"
+        ],
+        "suffixes": [
+          "-shm"
+        ],
+        "class": "transient-sqlite-wal-index",
+        "rationale": "SQLite WAL shared-memory indexes contain no persistent database content and are reconstructed from the main database and WAL; matching database and -wal files remain included"
+      }
+    ]
+  },
+  "required_classes": [
+    "user-data-under-home",
+    "documents-media-work-data",
+    "ssh-gpg-password-store-and-other-credentials",
+    "relevant-user-configuration",
+    "paperless-database-and-files",
+    "beszel-persistent-state",
+    "backrest-configuration-and-state",
+    "local-databases",
+    "non-reproducible-local-configuration",
+    "current-recovery-and-migration-evidence",
+    "local-source-repositories-and-unpublished-work"
+  ],
+  "off_host_restore": {
+    "backup_must_be_complete_for_scope": true,
+    "target_must_be_independent": true,
+    "disposable_restore_target_required": true,
+    "network_required_for_restore": false,
+    "source_and_restored_inventory_sha256_must_match": true
+  },
+  "does_not_establish": [
+    "coverage of persistent data outside /home/alex",
+    "existence of an off-host backup",
+    "sufficient off-host capacity",
+    "successful restore",
+    "permission to exclude an unreadable included path",
+    "permission to mutate HEIM_BACKUP or any production disk",
+    "permission to cross the point of no return"
+  ]
+}

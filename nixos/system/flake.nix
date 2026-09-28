@@ -473,16 +473,48 @@
 
         recovery-readiness-contract =
           let
-            contract = builtins.fromJSON (builtins.readFile ../production/recovery-contract-v1.json);
+            recoveryPath = ../production/recovery-contract-v1.json;
+            criticalUserDataPath = ../production/critical-user-data-contract-v1.json;
+            criticalUserHomePath = ../production/critical-user-home-data-contract-v1.json;
+            criticalDockerVolumesPath = ../production/critical-docker-volume-data-contract-v1.json;
+            contract = builtins.fromJSON (builtins.readFile recoveryPath);
+            criticalUserData = builtins.fromJSON (builtins.readFile criticalUserDataPath);
+            criticalUserDataSha256 = builtins.hashFile "sha256" criticalUserDataPath;
+            criticalUserHomeSha256 = builtins.hashFile "sha256" criticalUserHomePath;
+            criticalDockerVolumesSha256 = builtins.hashFile "sha256" criticalDockerVolumesPath;
+            homeMember = builtins.elemAt criticalUserData.members 0;
+            dockerVolumesMember = builtins.elemAt criticalUserData.members 1;
             target = self.nixosConfigurations.heim-pc-storage-target.config;
           in
           assert contract.status == "external-evidence-required";
           assert contract.admission.point_of_no_return_blocked_without_complete_evidence;
           assert contract.admission.production_storage_mutation_blocked_without_complete_evidence;
+          assert contract.critical_user_data_scope.contract_kind == "heim_pc.critical_user_data_scope_contract";
+          assert contract.critical_user_data_scope.scope == "critical-user-data";
+          assert contract.critical_user_data_scope.sha256 == criticalUserDataSha256;
+          assert contract.critical_user_data_scope.off_host_restore_critical_scope_sha256_bound;
+          assert contract.critical_user_data_scope.aggregate_member_contracts_bound;
+          assert criticalUserData.schema_version == 1;
+          assert criticalUserData.kind == "heim_pc.critical_user_data_scope_contract";
+          assert criticalUserData.scope == "critical-user-data";
+          assert criticalUserData.scope_semantics == "explicit-root-set-default-include";
+          assert builtins.length criticalUserData.members == 2;
+          assert homeMember.id == "home";
+          assert homeMember.contract_sha256 == criticalUserHomeSha256;
+          assert homeMember.destination.nixos_storage_domain == "@home";
+          assert dockerVolumesMember.id == "docker-volumes";
+          assert dockerVolumesMember.contract_sha256 == criticalDockerVolumesSha256;
+          assert dockerVolumesMember.destination.nixos_storage_domain == "@data";
           assert builtins.hasAttr "heim-pc/recovery-contract.json" target.environment.etc;
+          assert builtins.hasAttr "heim-pc/critical-user-data-contract.json" target.environment.etc;
+          assert builtins.hasAttr "heim-pc/critical-user-home-data-contract.json" target.environment.etc;
+          assert builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json" target.environment.etc;
           pkgs.runCommand "heim-pc-recovery-readiness-contract" { } ''
             mkdir -p "$out"
-            cp ${../production/recovery-contract-v1.json} "$out/recovery-contract-v1.json"
+            cp ${recoveryPath} "$out/recovery-contract-v1.json"
+            cp ${criticalUserDataPath} "$out/critical-user-data-contract-v1.json"
+            cp ${criticalUserHomePath} "$out/critical-user-home-data-contract-v1.json"
+            cp ${criticalDockerVolumesPath} "$out/critical-docker-volume-data-contract-v1.json"
           '';
 
         intentional-break-rejected =

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.critical_user_data_scope_contract",
+  "scope": "critical-user-data",
+  "scope_semantics": "explicit-root-set-default-include",
+  "members": [
+    {
+      "id": "home",
+      "contract_file": "critical-user-home-data-contract-v1.json",
+      "contract_sha256": "6982776c98586036ff95bab7269d4894c8d82e9dc4f51b84aa42b257a985621d",
+      "destination": {
+        "nixos_storage_domain": "@home",
+        "logical_path": "/home/alex"
+      },
+      "restore_mode": "active-user-data"
+    },
+    {
+      "id": "docker-volumes",
+      "contract_file": "critical-docker-volume-data-contract-v1.json",
+      "contract_sha256": "36ec1757bcfa7e9b9fbda241e2ef6bb1f52ee3ec421d543d786caddb60f6e1e8",
+      "destination": {
+        "nixos_storage_domain": "@data",
+        "logical_path": "/var/lib/heim-pc-data/legacy-docker-volumes"
+      },
+      "restore_mode": "staged-archive-not-active-docker-store"
+    }
+  ],
+  "inventory_implementation": {
+    "algorithm": "member-inventory-sha256-v1",
+    "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
+    "root_inventory_script_sha256": "8bcb6819262dd068f419976e5f8ea8b1fb676fe23de2249f8df8ed5fd8f725b3",
+    "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
+    "aggregate_inventory_script_sha256": "7c6dc86b869e42a8af7601f6807b95d5b7706cee8cda8b0df49d79d50a79329a",
+    "member_contract_digest_bound": true,
+    "source_and_restored_aggregate_inventory_sha256_must_match": true
+  },
+  "migration_policy": {
+    "system_state_recreated_from_nix": true,
+    "old_system_disk_preserved_as_independent_fallback": true,
+    "default_for_non_reproducible_data": "preserve",
+    "excluded_data_requires_explicit_contract_rule": true,
+    "docker_volume_tree_preserved_as_cold_data": true,
+    "docker_volume_tree_directly_activated_on_new_nixos": false,
+    "application_level_service_reconstruction_required": true
+  },
+  "required_classes": [
+    "user-data-under-home",
+    "documents-media-work-data",
+    "ssh-gpg-password-store-and-other-credentials",
+    "relevant-user-configuration",
+    "paperless-database-and-files",
+    "mattermost-database-and-persistent-app-data",
+    "unifi-database-and-configuration",
+    "beszel-persistent-state",
+    "backrest-configuration-and-state",
+    "local-databases",
+    "non-reproducible-local-configuration",
+    "current-recovery-and-migration-evidence",
+    "local-source-repositories-and-unpublished-work",
+    "other-docker-volume-state-not-proven-regenerable"
+  ],
+  "off_host_restore": {
+    "backup_must_be_complete_for_scope": true,
+    "target_must_be_independent": true,
+    "disposable_restore_target_required": true,
+    "network_required_for_restore": false,
+    "source_and_restored_inventory_sha256_must_match": true
+  },
+  "does_not_establish": [
+    "existence of an off-host backup",
+    "sufficient off-host capacity",
+    "successful aggregate restore",
+    "application-level service reconstruction on NixOS",
+    "permission to mutate HEIM_BACKUP or any production disk",
+    "permission to cross the point of no return"
+  ]
+}

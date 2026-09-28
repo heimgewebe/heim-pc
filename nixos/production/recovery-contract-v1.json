@@ -5,6 +5,13 @@
   "status": "external-evidence-required",
   "same_disk_recovery_partition_is_off_host_backup": false,
   "secrets_in_repository_forbidden": true,
+  "critical_user_data_scope": {
+    "contract_kind": "heim_pc.critical_user_data_scope_contract",
+    "scope": "critical-user-data",
+    "sha256": "af311f9a6f45108c5d1ba686baf65f1975429ff2db921976261bf030a6bce3e8",
+    "off_host_restore_critical_scope_sha256_bound": true,
+    "aggregate_member_contracts_bound": true
+  },
   "required_evidence": [
     {
       "id": "off-host-home-restore",
@@ -117,7 +124,8 @@
     "recovery_contract_sha256_bound": true,
     "nix_lifecycle_contract_sha256_bound": true,
     "evidence_freshness_bound": true,
-    "production_effects_authorized": false
+    "production_effects_authorized": false,
+    "critical_user_data_contract_sha256_bound": true
   },
   "evidence_attestation": {
     "status": "provisioned",
