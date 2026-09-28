@@ -37,6 +37,10 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         starttime_ticks: int = 100,
         rss_anon: int = 10 * 1024**3,
         mem_available: int = 32 * 1024**3,
+        dev_shm_used: int = 0,
+        t003_shm_entry_count: int = 0,
+        t003_loop_count: int = 0,
+        stale_t003_loop_count: int = 0,
     ) -> guard.Observation:
         return guard.Observation(
             observed_at_unix=now,
@@ -48,9 +52,51 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             rss_bytes=rss_anon + 16 * 1024**2,
             swap_bytes=256 * 1024**2,
             mem_available_bytes=mem_available,
+            dev_shm_used_bytes=dev_shm_used,
+            t003_shm_entry_count=t003_shm_entry_count,
+            t003_loop_count=t003_loop_count,
+            stale_t003_loop_count=stale_t003_loop_count,
             cgroup_memory_current_bytes=rss_anon + 4 * 1024**3,
             cgroup_swap_current_bytes=256 * 1024**2,
         )
+
+    def test_t003_shm_sampler_binds_live_and_deleted_loop_backings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dev_shm = root / "dev-shm"
+            dev_shm.mkdir()
+            (dev_shm / "heim-pc-t003-r2-evidence.json").write_text("{}")
+            (dev_shm / "heim-pc-t003-r2-scratch").mkdir()
+            (dev_shm / "unrelated").write_text("x")
+            sys_block = root / "sys-block"
+            for loop, backing in (
+                ("loop18", "/heim-pc-t003-r2-live.img"),
+                ("loop19", "/heim-pc-t003-r2-stale.img (deleted)"),
+                ("loop20", "/var/lib/snapd/snaps/core.snap"),
+            ):
+                path = sys_block / loop / "loop"
+                path.mkdir(parents=True)
+                (path / "backing_file").write_text(backing + "\n")
+
+            statvfs = type(
+                "StatVfs",
+                (),
+                {
+                    "f_frsize": 4096,
+                    "f_bsize": 4096,
+                    "f_blocks": 100,
+                    "f_bfree": 25,
+                },
+            )()
+            with patch.object(guard.os, "statvfs", return_value=statvfs):
+                used, entries, loops, stale = guard._read_t003_shm_state(
+                    dev_shm, sys_block
+                )
+
+        self.assertEqual(used, 75 * 4096)
+        self.assertEqual(entries, 2)
+        self.assertEqual(loops, 2)
+        self.assertEqual(stale, 1)
 
     def test_policy_matches_conservative_live_thresholds(self) -> None:
         self.assertEqual(self.policy["warn_rss_anon_bytes"], 18 * 1024**3)
@@ -154,6 +200,48 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.observation(rss_anon=18 * 1024**3),
         )
         self.assertEqual((action, reason), ("warn", "rss_warn_threshold"))
+
+    def test_stale_t003_loop_is_warn_only(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                dev_shm_used=18 * 1024**3,
+                t003_loop_count=1,
+                stale_t003_loop_count=1,
+            ),
+        )
+        self.assertEqual((action, reason), ("warn", "stale_t003_loop_backing"))
+
+    def test_large_t003_dev_shm_usage_is_warn_only(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                dev_shm_used=guard.T003_SHM_WARN_BYTES,
+                t003_shm_entry_count=1,
+                t003_loop_count=0,
+            ),
+        )
+        self.assertEqual((action, reason), ("warn", "t003_dev_shm_pressure"))
+
+    def test_t003_warning_never_suppresses_real_host_emergency(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=13 * 1024**3,
+                mem_available=7 * 1024**3,
+                dev_shm_used=20 * 1024**3,
+                t003_shm_entry_count=1,
+                t003_loop_count=1,
+                stale_t003_loop_count=1,
+            ),
+        )
+        self.assertEqual((action, reason), ("restart", "host_memory_emergency"))
 
     def test_host_emergency_restarts_immediately(self) -> None:
         state = guard.default_state(self.policy)
@@ -623,6 +711,35 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                     cgroup_root=cgroup,
                     now_unix=100,
                 )
+
+    def test_t003_sampler_failure_never_suppresses_real_host_emergency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(Path(temporary))
+            with patch.object(
+                guard,
+                "_read_t003_shm_state",
+                side_effect=guard.GuardError("synthetic optional sampler failure"),
+            ):
+                observation = guard.observe(
+                    self.policy,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    now_unix=100,
+                )
+
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIsNone(observation.dev_shm_used_bytes)
+        self.assertIsNone(observation.t003_shm_entry_count)
+        self.assertIsNone(observation.t003_loop_count)
+        self.assertIsNone(observation.stale_t003_loop_count)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            guard.default_state(self.policy),
+            observation,
+        )
+        self.assertEqual((action, reason), ("restart", "host_memory_emergency"))
 
     def test_observe_only_never_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
