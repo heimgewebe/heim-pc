@@ -84,6 +84,21 @@ def _contracts(tmp_path: Path, *, provisioned: bool = True) -> tuple[Path, Path]
     lifecycle = json.loads((ROOT / "nixos" / "production" / "nix-lifecycle-contract-v1.json").read_text())
     if provisioned:
         recovery["evidence_attestation"] = dict(TEST_ATTESTATION_POLICY)
+    else:
+        recovery["evidence_attestation"] = {
+            "status": "unprovisioned",
+            "trust_model": "github-artifact-attestation",
+            "repository": None,
+            "signer_workflow": None,
+            "signer_digest": None,
+            "source_digest": None,
+            "source_ref": None,
+            "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+            "deny_self_hosted_runners": True,
+            "attestation_predicate_source_revision_bound": True,
+            "producer_receipt_digest_bound": True,
+            "provisioning_authority": "later-cutover-process",
+        }
     recovery_path = tmp_path / "recovery-contract.json"
     lifecycle_path = tmp_path / "lifecycle-contract.json"
     recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
