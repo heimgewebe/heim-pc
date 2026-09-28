@@ -69,6 +69,24 @@ def _under(path: Path, parent: Path) -> bool:
 def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
     scope = value.get("scope")
     scope_semantics = value.get("scope_semantics")
+    expected_inventory = {
+        "schema": INVENTORY_KIND,
+        "algorithm": ALGORITHM,
+        "same_filesystem_only": True,
+        "follow_symlinks": False,
+        "regular_file_content_sha256": True,
+        "directory_mode_bound": True,
+        "regular_file_mode_bound": True,
+        "uid_gid_bound": True,
+        "symlink_target_bound": True,
+        "special_files": "excluded-runtime-only",
+        "unreadable_included_path": "fail",
+        "changed_during_hash": "fail",
+    }
+    explicit_path_set = (
+        scope == "critical-user-data-home"
+        and scope_semantics == "explicit-path-set"
+    )
     allowed_scopes = {
         "critical-user-data": "whole-home-by-default",
         "critical-user-data-home": "whole-home-by-default",
@@ -77,7 +95,7 @@ def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
     if (
         value.get("schema_version") != 1
         or value.get("kind") != CONTRACT_KIND
-        or allowed_scopes.get(scope) != scope_semantics
+        or not (explicit_path_set or allowed_scopes.get(scope) == scope_semantics)
     ):
         raise InventoryError("critical-user-data contract identity is invalid")
 
@@ -87,21 +105,63 @@ def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
         raise InventoryError("critical-user-data root/logical_root mismatch")
 
     inventory = value.get("inventory")
-    expected_inventory = {
-        "schema": INVENTORY_KIND,
-        "algorithm": ALGORITHM,
-        "same_filesystem_only": True,
-        "follow_symlinks": False,
-        "regular_file_content_sha256": True,
-        "directory_mode_bound": True,
-        "regular_file_mode_bound": True,
-        "symlink_target_bound": True,
-        "special_files": "excluded-runtime-only",
-        "unreadable_included_path": "fail",
-        "changed_during_hash": "fail",
-    }
     if inventory != expected_inventory:
         raise InventoryError("critical-user-data inventory policy is invalid")
+
+    if explicit_path_set:
+        includes = value.get("includes")
+        if not isinstance(includes, list) or not includes:
+            raise InventoryError("explicit path set is empty")
+        parsed_includes: list[dict[str, Any]] = []
+        for index, item in enumerate(includes):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "class", "rationale", "capture", "restore_mode"}
+            ):
+                raise InventoryError("explicit include entry is malformed")
+            included = _canonical_absolute(item["path"], "included path")
+            if included == root or not _under(included, root):
+                raise InventoryError("included path must be strictly beneath contract root")
+            capture = item["capture"]
+            if capture not in {"tree", "file", "sqlite-family"}:
+                raise InventoryError("included path capture mode is invalid")
+            parsed_includes.append(
+                {
+                    "rule": f"includes:{index}",
+                    "path": included,
+                    "class": _require_utf8(item["class"], "included path class"),
+                    "rationale": _require_utf8(item["rationale"], "included path rationale"),
+                    "capture": capture,
+                    "restore_mode": _require_utf8(
+                        item["restore_mode"], "included path restore mode"
+                    ),
+                }
+            )
+        paths = [item["path"] for item in parsed_includes]
+        if len(set(paths)) != len(paths):
+            raise InventoryError("explicit include paths must be unique")
+        for index, first in enumerate(paths):
+            for second in paths[index + 1 :]:
+                if _under(first, second) or _under(second, first):
+                    raise InventoryError("explicit include paths must not overlap")
+        return {
+            "scope": scope,
+            "scope_semantics": scope_semantics,
+            "root": root,
+            "include_paths": tuple(
+                sorted(parsed_includes, key=lambda item: str(item["path"]))
+            ),
+            "top_level_prefixes": (),
+            "roots": (),
+            "roots_by_top_level": {},
+            "file_name_prefixes_under": (),
+            "file_name_prefixes_by_top_level": {},
+            "file_name_prefix_suffixes_under": (),
+            "file_name_prefix_suffixes_by_top_level": {},
+            "directory_names_under": (),
+            "directory_names_by_top_level": {},
+            "directory_names_global_fallback": False,
+        }
 
     exclusions = value.get("exclusions")
     if not isinstance(exclusions, dict) or set(exclusions) != {
@@ -528,6 +588,8 @@ def _family_regular_record(
         "path": relative_path,
         "type": "regular",
         "mode": stat.S_IMODE(after.st_mode),
+        "uid": after.st_uid,
+        "gid": after.st_gid,
         "size_bytes": after.st_size,
     }
     if content_sha256 is not None:
@@ -875,6 +937,7 @@ def collect_inventory(
                 _require_utf8(entry.name, "directory entry name")
                 for entry in os.scandir(directory_fd)
             )
+            initial_names = tuple(names)
             names_set = frozenset(names)
             known_names = set(names)
         except OSError as exc:
@@ -969,6 +1032,8 @@ def collect_inventory(
                             "path": rel,
                             "type": "directory",
                             "mode": stat.S_IMODE(opened.st_mode),
+                            "uid": opened.st_uid,
+                            "gid": opened.st_gid,
                         }
                     )
                     walk(child_fd, full, root_device)
@@ -983,6 +1048,8 @@ def collect_inventory(
                             "path": rel,
                             "type": "regular",
                             "mode": stat.S_IMODE(observed.st_mode),
+                            "uid": observed.st_uid,
+                            "gid": observed.st_gid,
                             "size_bytes": observed.st_size,
                         }
                     )
@@ -1033,6 +1100,8 @@ def collect_inventory(
                         "path": rel,
                         "type": "regular",
                         "mode": stat.S_IMODE(after.st_mode),
+                        "uid": after.st_uid,
+                        "gid": after.st_gid,
                         "size_bytes": after.st_size,
                     }
                     if content_sha256 is not None:
@@ -1054,6 +1123,8 @@ def collect_inventory(
                     {
                         "path": rel,
                         "type": "symlink",
+                        "uid": after.st_uid,
+                        "gid": after.st_gid,
                         "target": _require_utf8(target, "symlink target"),
                     }
                 )
@@ -1078,18 +1149,195 @@ def collect_inventory(
                 f"included special file is not runtime-excluded: {rel}"
             )
 
+        try:
+            final_names = tuple(
+                sorted(
+                    _require_utf8(entry.name, "directory entry name")
+                    for entry in os.scandir(directory_fd)
+                )
+            )
+        except OSError as exc:
+            raise InventoryError(
+                f"included directory cannot be reread: {_relative(directory_path, root)}"
+            ) from exc
+        if final_names != initial_names:
+            raise InventoryError(
+                f"included directory membership changed during hashing: "
+                f"{_relative(directory_path, root)}"
+            )
+
+    def record_explicit_path(entry: dict[str, Any], root_device: int) -> None:
+        selected: Path = entry["path"]
+        rel = _relative(selected, root)
+        try:
+            observed = selected.lstat()
+        except OSError as exc:
+            raise InventoryError(f"included path cannot be read: {rel}") from exc
+        if observed.st_dev != root_device:
+            raise InventoryError(f"included path is on a foreign filesystem: {rel}")
+
+        capture = entry["capture"]
+        if capture == "tree":
+            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+                raise InventoryError(f"included tree is not a real directory: {rel}")
+            flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                fd = os.open(selected, flags)
+            except OSError as exc:
+                raise InventoryError(f"included tree cannot be opened safely: {rel}") from exc
+            try:
+                opened = os.fstat(fd)
+                if _identity(opened) != _identity(observed):
+                    raise InventoryError(f"included tree changed during open: {rel}")
+                accumulator.record(
+                    {
+                        "path": rel,
+                        "type": "directory",
+                        "mode": stat.S_IMODE(opened.st_mode),
+                        "uid": opened.st_uid,
+                        "gid": opened.st_gid,
+                    }
+                )
+                walk(fd, selected, root_device)
+            finally:
+                os.close(fd)
+            return
+
+        parent_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            parent_flags |= os.O_NOFOLLOW
+        try:
+            parent_fd = os.open(selected.parent, parent_flags)
+        except OSError as exc:
+            raise InventoryError(f"included path parent cannot be opened safely: {rel}") from exc
+        try:
+            if capture == "sqlite-family":
+                if not stat.S_ISREG(observed.st_mode):
+                    raise InventoryError(f"included SQLite family main is not regular: {rel}")
+                companions = tuple(
+                    f"{selected.name}{suffix}" for suffix in SQLITE_FAMILY_COMPANION_SUFFIXES
+                )
+                if classification_only:
+                    accumulator.record(
+                        {
+                            "path": rel,
+                            "type": "regular",
+                            "mode": stat.S_IMODE(observed.st_mode),
+                            "uid": observed.st_uid,
+                            "gid": observed.st_gid,
+                            "size_bytes": observed.st_size,
+                        }
+                    )
+                    for companion_name in companions:
+                        companion_path = selected.parent / companion_name
+                        companion_rel = _relative(companion_path, root)
+                        try:
+                            companion = os.stat(
+                                companion_name,
+                                dir_fd=parent_fd,
+                                follow_symlinks=False,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        except OSError as exc:
+                            raise InventoryError(
+                                f"included path cannot be read: {companion_rel}"
+                            ) from exc
+                        if not stat.S_ISREG(companion.st_mode):
+                            raise InventoryError(
+                                f"SQLite family companion is not a regular file: {companion_rel}"
+                            )
+                        accumulator.record(
+                            {
+                                "path": companion_rel,
+                                "type": "regular",
+                                "mode": stat.S_IMODE(companion.st_mode),
+                                "uid": companion.st_uid,
+                                "gid": companion.st_gid,
+                                "size_bytes": companion.st_size,
+                            }
+                        )
+                    return
+                main_record, companion_records = _capture_sqlite_family(
+                    parent_fd,
+                    selected.parent,
+                    main_name=selected.name,
+                    companion_names=companions,
+                    root=root,
+                    classification_only=False,
+                )
+                accumulator.record(main_record)
+                for companion_name in companions:
+                    companion_record = companion_records.get(companion_name)
+                    if companion_record is not None:
+                        accumulator.record(companion_record)
+                return
+
+            if capture != "file" or not stat.S_ISREG(observed.st_mode):
+                raise InventoryError(f"included file is not a regular file: {rel}")
+            if classification_only:
+                accumulator.record(
+                    {
+                        "path": rel,
+                        "type": "regular",
+                        "mode": stat.S_IMODE(observed.st_mode),
+                        "uid": observed.st_uid,
+                        "gid": observed.st_gid,
+                        "size_bytes": observed.st_size,
+                    }
+                )
+                return
+            flags = os.O_RDONLY | os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                fd = os.open(selected.name, flags, dir_fd=parent_fd)
+            except OSError as exc:
+                raise InventoryError(f"included file cannot be opened safely: {rel}") from exc
+            try:
+                opened = os.fstat(fd)
+                if _identity(opened) != _identity(observed):
+                    raise InventoryError(f"included file changed during open: {rel}")
+                content_sha256 = None if classification_only else _hash_fd(fd)
+                after = os.fstat(fd)
+                if _identity(after) != _identity(opened):
+                    raise InventoryError(f"included file changed during hashing: {rel}")
+                record: dict[str, Any] = {
+                    "path": rel,
+                    "type": "regular",
+                    "mode": stat.S_IMODE(after.st_mode),
+                    "uid": after.st_uid,
+                    "gid": after.st_gid,
+                    "size_bytes": after.st_size,
+                }
+                if content_sha256 is not None:
+                    record["sha256"] = content_sha256
+                accumulator.record(record)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent_fd)
+
     try:
         root_info = os.fstat(root_fd)
         if _identity(root_info) != _identity(linked):
             raise InventoryError("critical-user-data root changed during open")
-        accumulator.record(
-            {
-                "path": ".",
-                "type": "directory",
-                "mode": stat.S_IMODE(root_info.st_mode),
-            }
-        )
-        walk(root_fd, root, root_info.st_dev)
+        if policy["scope_semantics"] == "explicit-path-set":
+            for entry in policy["include_paths"]:
+                record_explicit_path(entry, root_info.st_dev)
+        else:
+            accumulator.record(
+                {
+                    "path": ".",
+                    "type": "directory",
+                    "mode": stat.S_IMODE(root_info.st_mode),
+                    "uid": root_info.st_uid,
+                    "gid": root_info.st_gid,
+                }
+            )
+            walk(root_fd, root, root_info.st_dev)
     finally:
         os.close(root_fd)
 

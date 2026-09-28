@@ -113,14 +113,14 @@ def collect_inventory(
         contract.get("schema_version") != 1
         or contract.get("kind") != SCOPE_KIND
         or contract.get("scope") != "critical-user-data"
-        or contract.get("scope_semantics") != "explicit-root-set-default-include"
+        or contract.get("scope_semantics") != "explicit-positive-selection"
     ):
         raise AggregateInventoryError("aggregate contract identity is invalid")
 
     members = contract.get("members")
     if not isinstance(members, list) or not members:
         raise AggregateInventoryError("aggregate contract members are missing")
-    expected_ids = {"home", "docker-volumes"}
+    expected_ids = {"home"}
     observed_ids = {item.get("id") for item in members if isinstance(item, dict)}
     if observed_ids != expected_ids or len(members) != len(expected_ids):
         raise AggregateInventoryError("aggregate contract member set is invalid")
@@ -184,20 +184,13 @@ def collect_inventory(
             raise AggregateInventoryError(f"{member_id} member contract digest mismatch")
         if member_contract.get("kind") != SCOPE_KIND:
             raise AggregateInventoryError(f"{member_id} member contract kind mismatch")
-        if member_id == "home":
-            if (
-                member_contract.get("scope") != "critical-user-data-home"
-                or member_contract.get("root") != "/home/alex"
-            ):
-                raise AggregateInventoryError("home member contract identity mismatch")
-        else:
-            if (
-                member_contract.get("scope") != "critical-user-data-docker-volumes"
-                or member_contract.get("root") != "/var/lib/docker/volumes"
-            ):
-                raise AggregateInventoryError("Docker-volume member contract identity mismatch")
-            if not classification_only:
-                _docker_quiesced()
+        if (
+            member_id != "home"
+            or member_contract.get("scope") != "critical-user-data-home"
+            or member_contract.get("scope_semantics") != "explicit-path-set"
+            or member_contract.get("root") != "/home/alex"
+        ):
+            raise AggregateInventoryError("home member contract identity mismatch")
 
         try:
             result = root_inventory.collect_inventory(
@@ -247,7 +240,7 @@ def collect_inventory(
         "schema_version": 1,
         "kind": AGGREGATE_KIND,
         "scope": "critical-user-data",
-        "scope_semantics": "explicit-root-set-default-include",
+        "scope_semantics": "explicit-positive-selection",
         "algorithm": AGGREGATE_ALGORITHM,
         "critical_scope_sha256": scope_sha,
         "contract_sha256": scope_sha,

@@ -16,7 +16,8 @@
     "symlink_target_bound": true,
     "special_files": "excluded-runtime-only",
     "unreadable_included_path": "fail",
-    "changed_during_hash": "fail"
+    "changed_during_hash": "fail",
+    "uid_gid_bound": true
   },
   "exclusions": {
     "top_level_prefixes": [],

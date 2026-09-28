@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d6bae3a6aaa8af2af1bd96e56e6e6c5058ef17d4b48b4fd2b0b6d7a481b2bf52"
+SOURCE_SNAPSHOT_SHA256 = "8ade5d8a9148817125ee82ee04d5e626457549dcc95b15961dd6f84740fc5006"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -391,41 +391,54 @@ class T(unittest.TestCase):
         self.assertEqual(critical["kind"], "heim_pc.critical_user_data_scope_contract")
         self.assertEqual(critical["scope"], "critical-user-data")
         self.assertEqual(
-            critical["scope_semantics"], "explicit-root-set-default-include"
+            critical["scope_semantics"], "explicit-positive-selection"
         )
         self.assertEqual(
             [member["id"] for member in critical["members"]],
-            ["home", "docker-volumes"],
+            ["home"],
         )
-        home_member, docker_member = critical["members"]
+        (home_member,) = critical["members"]
         self.assertEqual(home_member["contract_sha256"], critical_home_sha256)
         self.assertEqual(home_member["destination"]["nixos_storage_domain"], "@home")
-        self.assertEqual(home_member["restore_mode"], "active-user-data")
-        self.assertEqual(docker_member["contract_sha256"], critical_docker_sha256)
-        self.assertEqual(docker_member["destination"]["nixos_storage_domain"], "@data")
         self.assertEqual(
-            docker_member["restore_mode"], "staged-archive-not-active-docker-store"
+            home_member["restore_mode"],
+            "explicit-path-restore-with-authority-reconciliation",
         )
         self.assertEqual(critical_home["scope"], "critical-user-data-home")
         self.assertEqual(critical_home["root"], "/home/alex")
-        self.assertEqual(critical_home["scope_semantics"], "whole-home-by-default")
-        self.assertEqual(
-            critical_docker["scope"], "critical-user-data-docker-volumes"
-        )
-        self.assertEqual(critical_docker["root"], "/var/lib/docker/volumes")
-        self.assertEqual(
-            critical_docker["scope_semantics"], "whole-root-by-default"
-        )
-        self.assertTrue(
-            critical_docker["source_consistency"][
-                "full_authoritative_inventory_requires_docker_quiesced"
-            ]
-        )
+        self.assertEqual(critical_home["scope_semantics"], "explicit-path-set")
+        self.assertTrue(critical_home["inventory"]["uid_gid_bound"])
+        selected = {item["path"] for item in critical_home["includes"]}
+        for required in {
+            "/home/alex/collections/bibliothek",
+            "/home/alex/repos/schotter",
+            "/home/alex/repos/fotoatelier",
+            "/home/alex/.ssh",
+            "/home/alex/.local/state/grabowski/tasks.sqlite3",
+            "/home/alex/.local/state/bureau/bureau.sqlite3",
+            "/home/alex/.local/state/chronik/data",
+            "/home/alex/.local/state/grosser-adler/findings",
+        }:
+            self.assertIn(required, selected)
+        for excluded in {
+            "/home/alex/vault-gewebe",
+            "/home/alex/CZURScannerDoc",
+            "/home/alex/Digitalisierer",
+            "/home/alex/.local/share/heim-utilities/paperless",
+            "/home/alex/repos/arden-relaunch-demo",
+            "/home/alex/repos/wolf-drechsel-local-ai",
+            "/var/lib/docker/volumes",
+        }:
+            self.assertNotIn(excluded, selected)
+        self.assertEqual(critical_home["selection_policy"]["default"], "exclude")
         self.assertFalse(
-            critical_docker["destination_policy"][
-                "direct_restore_into_new_docker_volume_store"
-            ]
+            critical_home["selection_policy"]["unlisted_paths_are_migration_data"]
         )
+        self.assertEqual(
+            critical["migration_policy"]["selection_model"],
+            "explicit-positive-allowlist",
+        )
+        self.assertFalse(critical["migration_policy"]["unlisted_data_migrated"])
         self.assertTrue(
             critical["migration_policy"]["system_state_recreated_from_nix"]
         )
@@ -434,18 +447,29 @@ class T(unittest.TestCase):
                 "old_system_disk_preserved_as_independent_fallback"
             ]
         )
-        self.assertEqual(
-            critical["migration_policy"]["default_for_non_reproducible_data"],
-            "preserve",
+        self.assertTrue(
+            critical["migration_policy"]["remote_reproducible_repositories_excluded"]
         )
         self.assertTrue(
-            critical["migration_policy"]["docker_volume_tree_preserved_as_cold_data"]
+            critical["migration_policy"]["operator_state_restored_via_authority_reconcile"]
         )
         self.assertFalse(
+            critical["migration_policy"]["legacy_docker_volume_tree_migrated"]
+        )
+        self.assertFalse(
+            critical["migration_policy"]["root_owned_grabowski_runtime_state_migrated"]
+        )
+        self.assertTrue(
             critical["migration_policy"][
-                "docker_volume_tree_directly_activated_on_new_nixos"
+                "root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy"
             ]
         )
+        # The legacy Docker contract may remain documented, but it is not a member
+        # of the canonical migration scope.
+        self.assertEqual(
+            critical_docker["scope"], "critical-user-data-docker-volumes"
+        )
+        self.assertEqual(critical_docker["root"], "/var/lib/docker/volumes")
         self.assertEqual(
             recovery["critical_user_data_scope"],
             {

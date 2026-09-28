@@ -36,6 +36,7 @@ def _contract(path: Path, home: Path) -> Path:
             "regular_file_content_sha256": True,
             "directory_mode_bound": True,
             "regular_file_mode_bound": True,
+            "uid_gid_bound": True,
             "symlink_target_bound": True,
             "special_files": "excluded-runtime-only",
             "unreadable_included_path": "fail",
@@ -427,9 +428,10 @@ def test_sqlite_wal_created_after_listing_is_still_captured_in_order(
             return FilteredScandir(entries)
 
         monkeypatch.setattr(inventory.os, "scandir", hide_wal_from_initial_listing)
-        hidden_listing = inventory.collect_inventory(contract)
+        with pytest.raises(inventory.InventoryError, match="membership changed"):
+            inventory.collect_inventory(contract)
         assert hidden["done"] is True
-        assert hidden_listing == baseline
+        assert baseline["authoritative_inventory"] is True
     finally:
         connection.close()
 
@@ -652,3 +654,152 @@ def test_contract_rejects_exclusion_outside_home(tmp_path):
     contract.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(inventory.InventoryError, match="strictly beneath"):
         inventory.collect_inventory(contract)
+
+def _explicit_contract(path: Path, home: Path, includes: list[dict]) -> Path:
+    value = {
+        "schema_version": 1,
+        "kind": inventory.CONTRACT_KIND,
+        "scope": "critical-user-data-home",
+        "scope_semantics": "explicit-path-set",
+        "root": str(home),
+        "logical_root": str(home),
+        "inventory": {
+            "schema": inventory.INVENTORY_KIND,
+            "algorithm": inventory.ALGORITHM,
+            "same_filesystem_only": True,
+            "follow_symlinks": False,
+            "regular_file_content_sha256": True,
+            "directory_mode_bound": True,
+            "regular_file_mode_bound": True,
+            "uid_gid_bound": True,
+            "symlink_target_bound": True,
+            "special_files": "excluded-runtime-only",
+            "unreadable_included_path": "fail",
+            "changed_during_hash": "fail",
+        },
+        "includes": includes,
+    }
+    path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def test_explicit_path_set_excludes_unlisted_data_by_default(tmp_path):
+    home = tmp_path / "home"
+    keep = home / "keep"
+    drop = home / "drop"
+    keep.mkdir(parents=True)
+    drop.mkdir()
+    (keep / "value.txt").write_text("kept\n", encoding="utf-8")
+    (drop / "value.txt").write_text("unlisted-a\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(keep),
+            "class": "valuable",
+            "rationale": "selected test data",
+            "capture": "tree",
+            "restore_mode": "byte-identical",
+        }],
+    )
+
+    baseline = inventory.collect_inventory(contract)
+    (drop / "value.txt").write_text("unlisted-b\n", encoding="utf-8")
+    after_unlisted_change = inventory.collect_inventory(contract)
+    assert after_unlisted_change["inventory_sha256"] == baseline["inventory_sha256"]
+
+    (keep / "value.txt").write_text("changed\n", encoding="utf-8")
+    after_selected_change = inventory.collect_inventory(contract)
+    assert after_selected_change["inventory_sha256"] != baseline["inventory_sha256"]
+
+
+def test_explicit_records_bind_uid_and_gid(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    keep = home / "keep"
+    keep.mkdir(parents=True)
+    (keep / "value.txt").write_text("kept\n", encoding="utf-8")
+    (keep / "link").symlink_to("value.txt")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(keep),
+            "class": "valuable",
+            "rationale": "selected test data",
+            "capture": "tree",
+            "restore_mode": "byte-identical",
+        }],
+    )
+    seen = []
+    real = inventory._canonical_line
+
+    def capture(value):
+        if isinstance(value, dict) and value.get("type") in {"directory", "regular", "symlink"}:
+            seen.append(dict(value))
+        return real(value)
+
+    monkeypatch.setattr(inventory, "_canonical_line", capture)
+    inventory.collect_inventory(contract)
+    assert seen
+    assert all("uid" in item and "gid" in item for item in seen)
+
+
+def test_explicit_tree_fails_if_directory_membership_changes_during_hash(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    keep = home / "keep"
+    keep.mkdir(parents=True)
+    (keep / "a.txt").write_text("a\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(keep),
+            "class": "valuable",
+            "rationale": "selected test data",
+            "capture": "tree",
+            "restore_mode": "byte-identical",
+        }],
+    )
+    real_scandir = inventory.os.scandir
+    calls = {"count": 0}
+
+    def racing_scandir(target):
+        entries = list(real_scandir(target))
+        calls["count"] += 1
+        if calls["count"] == 1:
+            (keep / "late.txt").write_text("late\n", encoding="utf-8")
+        return iter(entries)
+
+    monkeypatch.setattr(inventory.os, "scandir", racing_scandir)
+    with pytest.raises(inventory.InventoryError, match="membership changed"):
+        inventory.collect_inventory(contract)
+
+
+def test_explicit_classification_does_not_open_selected_file_contents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "credential"
+    target.write_text("secret-ish\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "credential",
+            "rationale": "selected file",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    real_open = inventory.os.open
+    def guarded_open(path, flags, *args, **kwargs):
+        if path == target.name and kwargs.get("dir_fd") is not None:
+            raise AssertionError("classification-only opened selected file content")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(inventory.os, "open", guarded_open)
+    result = inventory.collect_inventory(contract, classification_only=True)
+    assert result["authoritative_inventory"] is False
+    assert result["inventory_sha256"] is None
+    assert result["record_count"] == 1

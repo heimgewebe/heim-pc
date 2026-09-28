@@ -26,27 +26,17 @@ def _write_contracts(tmp_path: Path) -> Path:
         "schema_version": 1,
         "kind": aggregate.SCOPE_KIND,
         "scope": "critical-user-data-home",
-        "scope_semantics": "whole-home-by-default",
+        "scope_semantics": "explicit-path-set",
         "root": "/home/alex",
         "logical_root": "/home/alex",
     }
-    docker = {
-        "schema_version": 1,
-        "kind": aggregate.SCOPE_KIND,
-        "scope": "critical-user-data-docker-volumes",
-        "scope_semantics": "whole-root-by-default",
-        "root": "/var/lib/docker/volumes",
-        "logical_root": "/var/lib/docker/volumes",
-    }
     home_path = tmp_path / "critical-user-home-data-contract-v1.json"
-    docker_path = tmp_path / "critical-docker-volume-data-contract-v1.json"
     home_path.write_text(json.dumps(home, sort_keys=True) + "\n", encoding="utf-8")
-    docker_path.write_text(json.dumps(docker, sort_keys=True) + "\n", encoding="utf-8")
     scope = {
         "schema_version": 1,
         "kind": aggregate.SCOPE_KIND,
         "scope": "critical-user-data",
-        "scope_semantics": "explicit-root-set-default-include",
+        "scope_semantics": "explicit-positive-selection",
         "members": [
             {
                 "id": "home",
@@ -56,18 +46,8 @@ def _write_contracts(tmp_path: Path) -> Path:
                     "nixos_storage_domain": "@home",
                     "logical_path": "/home/alex",
                 },
-                "restore_mode": "active-user-data",
-            },
-            {
-                "id": "docker-volumes",
-                "contract_file": docker_path.name,
-                "contract_sha256": _sha(docker_path),
-                "destination": {
-                    "nixos_storage_domain": "@data",
-                    "logical_path": "/var/lib/heim-pc-data/legacy-docker-volumes",
-                },
-                "restore_mode": "staged-archive-not-active-docker-store",
-            },
+                "restore_mode": "explicit-path-restore-with-authority-reconciliation",
+            }
         ],
         "inventory_implementation": {
             "algorithm": aggregate.AGGREGATE_ALGORITHM,
@@ -90,57 +70,46 @@ def _fake_root_inventory():
 
     def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
         value = json.loads(Path(path).read_text(encoding="utf-8"))
-        scope = value["scope"]
-        is_home = scope == "critical-user-data-home"
+        assert value["scope"] == "critical-user-data-home"
         return {
-            "scope": scope,
+            "scope": value["scope"],
             "authoritative_inventory": not classification_only,
-            "inventory_sha256": None if classification_only else (("a" if is_home else "b") * 64),
-            "record_count": 3 if is_home else 5,
-            "regular_file_bytes": 11 if is_home else 17,
-            "exclusion_boundary_count": 2 if is_home else 0,
+            "inventory_sha256": None if classification_only else ("a" * 64),
+            "record_count": 3,
+            "regular_file_bytes": 11,
+            "exclusion_boundary_count": 0,
         }
 
     return SimpleNamespace(InventoryError=InventoryError, collect_inventory=collect_inventory)
 
 
-def test_aggregate_inventory_binds_both_member_digests(monkeypatch, tmp_path):
+def test_aggregate_inventory_binds_explicit_member_digest(monkeypatch, tmp_path):
     contract = _write_contracts(tmp_path)
     monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
-    quiesced = {"count": 0}
-    monkeypatch.setattr(
-        aggregate,
-        "_docker_quiesced",
-        lambda: quiesced.__setitem__("count", quiesced["count"] + 1),
-    )
 
     result = aggregate.collect_inventory(contract)
 
-    expected = hashlib.sha256()
     scope = json.loads(contract.read_text(encoding="utf-8"))
-    for member, digest in zip(
-        sorted(scope["members"], key=lambda item: item["id"]),
-        ["b" * 64, "a" * 64],
-    ):
-        expected.update(
-            aggregate._canonical_line(
-                {
-                    "id": member["id"],
-                    "contract_sha256": member["contract_sha256"],
-                    "inventory_sha256": digest,
-                }
-            )
+    member = scope["members"][0]
+    expected = hashlib.sha256()
+    expected.update(
+        aggregate._canonical_line(
+            {
+                "id": "home",
+                "contract_sha256": member["contract_sha256"],
+                "inventory_sha256": "a" * 64,
+            }
         )
-
+    )
     assert result["authoritative_inventory"] is True
     assert result["inventory_sha256"] == expected.hexdigest()
-    assert result["member_count"] == 2
-    assert result["record_count"] == 8
-    assert result["regular_file_bytes"] == 28
-    assert quiesced["count"] == 1
+    assert result["scope_semantics"] == "explicit-positive-selection"
+    assert result["member_count"] == 1
+    assert result["record_count"] == 3
+    assert result["regular_file_bytes"] == 11
 
 
-def test_classification_does_not_claim_authoritative_digest_or_require_quiesce(
+def test_classification_does_not_claim_authoritative_digest_or_require_docker(
     monkeypatch, tmp_path
 ):
     contract = _write_contracts(tmp_path)
@@ -148,33 +117,61 @@ def test_classification_does_not_claim_authoritative_digest_or_require_quiesce(
     monkeypatch.setattr(
         aggregate,
         "_docker_quiesced",
-        lambda: (_ for _ in ()).throw(AssertionError("classification must not require outage")),
+        lambda: (_ for _ in ()).throw(AssertionError("Docker is outside canonical scope")),
     )
 
     result = aggregate.collect_inventory(contract, classification_only=True)
 
     assert result["authoritative_inventory"] is False
     assert result["inventory_sha256"] is None
-    assert all(member["inventory_sha256"] is None for member in result["members"])
+    assert result["members"] == [
+        {
+            "id": "home",
+            "scope": "critical-user-data-home",
+            "contract_sha256": json.loads(contract.read_text())["members"][0][
+                "contract_sha256"
+            ],
+            "inventory_sha256": None,
+            "record_count": 3,
+            "regular_file_bytes": 11,
+            "exclusion_boundary_count": 0,
+        }
+    ]
 
 
 def test_aggregate_rejects_member_contract_drift(monkeypatch, tmp_path):
     contract = _write_contracts(tmp_path)
     monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
-    docker = tmp_path / "critical-docker-volume-data-contract-v1.json"
-    docker.write_text(docker.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    home = tmp_path / "critical-user-home-data-contract-v1.json"
+    home.write_text(home.read_text(encoding="utf-8") + " ", encoding="utf-8")
 
     with pytest.raises(aggregate.AggregateInventoryError, match="digest mismatch"):
         aggregate.collect_inventory(contract, classification_only=True)
 
 
-def test_authoritative_inventory_fails_if_docker_is_not_quiesced(monkeypatch, tmp_path):
+def test_aggregate_rejects_old_default_include_semantics(monkeypatch, tmp_path):
     contract = _write_contracts(tmp_path)
     monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    value = json.loads(contract.read_text())
+    value["scope_semantics"] = "explicit-root-set-default-include"
+    contract.write_text(json.dumps(value) + "\n")
+    with pytest.raises(aggregate.AggregateInventoryError, match="identity"):
+        aggregate.collect_inventory(contract, classification_only=True)
 
-    def blocked():
-        raise aggregate.AggregateInventoryError("containers running")
 
-    monkeypatch.setattr(aggregate, "_docker_quiesced", blocked)
-    with pytest.raises(aggregate.AggregateInventoryError, match="containers running"):
-        aggregate.collect_inventory(contract)
+def test_aggregate_rejects_docker_member(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    value = json.loads(contract.read_text())
+    value["members"].append(
+        {
+            "id": "docker-volumes",
+            "contract_file": "critical-docker-volume-data-contract-v1.json",
+            "contract_sha256": "b" * 64,
+            "destination": {"nixos_storage_domain": "@data", "logical_path": "/legacy"},
+            "restore_mode": "staged",
+        }
+    )
+    contract.write_text(json.dumps(value) + "\n")
+    with pytest.raises(aggregate.AggregateInventoryError, match="member set"):
+        aggregate.collect_inventory(contract, classification_only=True)

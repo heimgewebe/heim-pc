@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kind": "heim_pc.critical_user_data_scope_contract",
   "scope": "critical-user-data-home",
-  "scope_semantics": "whole-home-by-default",
+  "scope_semantics": "explicit-path-set",
   "root": "/home/alex",
   "logical_root": "/home/alex",
   "inventory": {
@@ -13,305 +13,571 @@
     "regular_file_content_sha256": true,
     "directory_mode_bound": true,
     "regular_file_mode_bound": true,
+    "uid_gid_bound": true,
     "symlink_target_bound": true,
     "special_files": "excluded-runtime-only",
     "unreadable_included_path": "fail",
     "changed_during_hash": "fail"
   },
-  "exclusions": {
-    "top_level_prefixes": [
-      {
-        "prefix": ".grabowski-task-output-",
-        "class": "transient-agent-output",
-        "rationale": "bounded agent task outputs are transient execution products, not migration source data"
-      }
-    ],
-    "roots": [
-      {
-        "path": "/home/alex/.cache",
-        "class": "cache",
-        "rationale": "rebuildable application cache"
-      },
-      {
-        "path": "/home/alex/.npm",
-        "class": "package-cache",
-        "rationale": "rebuildable npm cache and downloaded package state"
-      },
-      {
-        "path": "/home/alex/.nvm",
-        "class": "toolchain-cache",
-        "rationale": "reinstallable Node toolchain distribution"
-      },
-      {
-        "path": "/home/alex/.rustup",
-        "class": "toolchain-cache",
-        "rationale": "reinstallable Rust toolchain distribution"
-      },
-      {
-        "path": "/home/alex/.venv",
-        "class": "build-environment",
-        "rationale": "rebuildable Python virtual environment"
-      },
-      {
-        "path": "/home/alex/.venvs",
-        "class": "build-environment",
-        "rationale": "rebuildable Python virtual environments"
-      },
-      {
-        "path": "/home/alex/.pytest_cache",
-        "class": "cache",
-        "rationale": "rebuildable test cache"
-      },
-      {
-        "path": "/home/alex/.ruff_cache",
-        "class": "cache",
-        "rationale": "rebuildable linter cache"
-      },
-      {
-        "path": "/home/alex/__pycache__",
-        "class": "cache",
-        "rationale": "rebuildable Python bytecode cache"
-      },
-      {
-        "path": "/home/alex/build",
-        "class": "build-output",
-        "rationale": "rebuildable top-level build output"
-      },
-      {
-        "path": "/home/alex/logs",
-        "class": "runtime-log",
-        "rationale": "operational logs are not required to reconstruct user data or host control"
-      },
-      {
-        "path": "/home/alex/tmp",
-        "class": "temporary-state",
-        "rationale": "temporary working state"
-      },
-      {
-        "path": "/home/alex/repoground-out",
-        "class": "generated-analysis",
-        "rationale": "generated repository analysis output"
-      },
-      {
-        "path": "/home/alex/.local/share/grabowski-mcp-releases",
-        "class": "runtime-release-cache",
-        "rationale": "verified Grabowski runtime releases are reinstallable from source"
-      },
-      {
-        "path": "/home/alex/.local/share/bureau/releases",
-        "class": "runtime-release-cache",
-        "rationale": "Bureau runtime releases are reinstallable from source"
-      },
-      {
-        "path": "/home/alex/.local/share/bureau/registry-snapshots",
-        "class": "generated-snapshot",
-        "rationale": "registry snapshots are regenerated from canonical registry state"
-      },
-      {
-        "path": "/home/alex/.local/share/Trash",
-        "class": "trash",
-        "rationale": "desktop trash is intentionally outside migration-critical data"
-      },
-      {
-        "path": "/home/alex/.local/state/grabowski/resources.sqlite3-shm",
-        "class": "transient-sqlite-wal-index",
-        "rationale": "SQLite WAL shared-memory index for the Grabowski resource database; it contains no database content and is reconstructed from the database/WAL, while resources.sqlite3 and resources.sqlite3-wal remain included"
-      },
-      {
-        "path": "/home/alex/.local/state/grabowski/jobs",
-        "class": "transient-job-state",
-        "rationale": "durable job execution logs are operational state, not cutover source data"
-      },
-      {
-        "path": "/home/alex/.local/state/bureau/heartbeat-roots",
-        "class": "transient-runtime-state",
-        "rationale": "heartbeat roots are recreated by the running controller"
-      },
-      {
-        "path": "/home/alex/artifacts/nixos-physical-preflight",
-        "class": "superseded-preflight-artifact",
-        "rationale": "historical privileged preflight artifacts are superseded; fresh recovery and cutover receipts are separately required and source-bound"
-      },
-      {
-        "path": "/home/alex/.cargo/registry",
-        "class": "package-cache",
-        "rationale": "rebuildable Cargo registry cache"
-      },
-      {
-        "path": "/home/alex/.cargo/git",
-        "class": "package-cache",
-        "rationale": "rebuildable Cargo Git dependency cache"
-      },
-      {
-        "path": "/home/alex/.ollama/models",
-        "class": "model-cache",
-        "rationale": "downloaded model blobs are reproducible external artifacts; local model configuration remains included"
-      },
-      {
-        "path": "/home/alex/artifacts/merges/repobrief-auto",
-        "class": "generated-analysis",
-        "rationale": "generated RepoBrief merge analysis"
-      },
-      {
-        "path": "/home/alex/artifacts/merges/.rlens-source-snapshots",
-        "class": "generated-analysis",
-        "rationale": "generated RepoLens source snapshots"
-      },
-      {
-        "path": "/home/alex/.codex/app-server-daemon",
-        "class": "transient-runtime-state",
-        "rationale": "live ChatGPT app-server daemon socket/update state; .codex credentials, configuration, history and persistent databases remain included"
-      }
-    ],
-    "directory_names_under": [
-      {
-        "root": "/home/alex/.local/state/grabowski/diagnostics",
-        "names": [
-          "fresh-store-root"
-        ],
-        "class": "generated-diagnostic-workspace",
-        "rationale": "fresh Nix store roots are disposable reproducibility-diagnostic working state; compact summaries, source bundles, path-info and other diagnostic evidence outside the subtree remain included"
-      },
-      {
-        "root": "/home/alex/repos",
-        "names": [
-          "node_modules",
-          ".venv",
-          "target",
-          "dist",
-          "build",
-          ".next",
-          ".mypy_cache",
-          ".pytest_cache",
-          ".ruff_cache",
-          ".tox",
-          ".turbo",
-          "machine-readable.local"
-        ],
-        "class": "repository-generated-state",
-        "rationale": "generated dependency, build, test, and analysis state beneath canonical repositories"
-      },
-      {
-        "root": "/home/alex/worktrees",
-        "names": [
-          "node_modules",
-          ".venv",
-          "target",
-          "dist",
-          "build",
-          ".next",
-          ".mypy_cache",
-          ".pytest_cache",
-          ".ruff_cache",
-          ".tox",
-          ".turbo",
-          "machine-readable.local"
-        ],
-        "class": "worktree-generated-state",
-        "rationale": "generated dependency/build/test state beneath secondary worktrees"
-      },
-      {
-        "root": "/home/alex/.weltgewebe-worktrees",
-        "names": [
-          "node_modules",
-          ".venv",
-          "target",
-          "dist",
-          "build",
-          ".next",
-          ".mypy_cache",
-          ".pytest_cache",
-          ".ruff_cache",
-          ".tox",
-          ".turbo",
-          "machine-readable.local"
-        ],
-        "class": "worktree-generated-state",
-        "rationale": "generated dependency/build/test state beneath Weltgewebe worktrees"
-      },
-      {
-        "root": "/home/alex/grabowski-workspaces",
-        "names": [
-          "node_modules",
-          ".venv",
-          "target",
-          "dist",
-          "build",
-          ".next",
-          ".mypy_cache",
-          ".pytest_cache",
-          ".ruff_cache",
-          ".tox",
-          ".turbo",
-          "machine-readable.local"
-        ],
-        "class": "workspace-generated-state",
-        "rationale": "generated dependency/build/test state beneath agent workspaces; unpublished workspace source remains included"
-      },
-      {
-        "root": "/home/alex/.grabowski-deploy-sources",
-        "names": [
-          "node_modules",
-          ".venv",
-          "target",
-          "dist",
-          "build",
-          ".next",
-          ".mypy_cache",
-          ".pytest_cache",
-          ".ruff_cache",
-          ".tox",
-          ".turbo",
-          "machine-readable.local"
-        ],
-        "class": "deployment-generated-state",
-        "rationale": "generated dependency/build/test state beneath deployment source material; non-generated upload/source bytes remain included"
-      }
-    ],
-    "file_name_prefixes_under": [
-      {
-        "root": "/home/alex/.grok",
-        "prefixes": [
-          "sandbox-blocked."
-        ],
-        "required_size_bytes": 0,
-        "required_mode": 0,
-        "class": "transient-runtime-state",
-        "rationale": "Grok sandbox denial sentinels are zero-byte mode-000 runtime markers; all other .grok credentials, configuration, sessions and state remain included"
-      }
-    ],
-    "file_name_prefix_suffixes_under": [
-      {
-        "root": "/home/alex/.local/state/grabowski",
-        "prefixes": [
-          "resources.sqlite3",
-          "tasks.sqlite3",
-          "checkouts.sqlite3",
-          ".resources.sqlite3",
-          ".tasks.sqlite3",
-          ".checkouts.sqlite3"
-        ],
-        "suffixes": [
-          "-shm"
-        ],
-        "class": "transient-sqlite-wal-index",
-        "rationale": "SQLite WAL shared-memory indexes contain no persistent database content and are reconstructed from the main database and WAL; matching database and -wal files remain included"
-      }
-    ]
-  },
-  "required_classes": [
-    "user-data-under-home",
-    "documents-media-work-data",
-    "ssh-gpg-password-store-and-other-credentials",
-    "relevant-user-configuration",
-    "paperless-database-and-files",
-    "beszel-persistent-state",
-    "backrest-configuration-and-state",
-    "local-databases",
-    "non-reproducible-local-configuration",
-    "current-recovery-and-migration-evidence",
-    "local-source-repositories-and-unpublished-work"
+  "includes": [
+    {
+      "path": "/home/alex/.claude/.credentials.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.claude/settings.json",
+      "class": "credentials-and-identity",
+      "rationale": "minimal operator client configuration paired with preserved authentication",
+      "capture": "file",
+      "restore_mode": "operator-client-config"
+    },
+    {
+      "path": "/home/alex/.codex/auth.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.codex/config.toml",
+      "class": "credentials-and-identity",
+      "rationale": "minimal operator client configuration paired with preserved authentication",
+      "capture": "file",
+      "restore_mode": "operator-client-config"
+    },
+    {
+      "path": "/home/alex/.config/Bitwarden CLI",
+      "class": "credentials-and-identity",
+      "rationale": "local Bitwarden CLI/device/session configuration supporting password access",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.config/bitwarden",
+      "class": "credentials-and-identity",
+      "rationale": "local Bitwarden CLI/device/session configuration supporting password access",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.config/gh",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.config/opencode/opencode.jsonc",
+      "class": "credentials-and-identity",
+      "rationale": "minimal operator client configuration paired with preserved authentication",
+      "capture": "file",
+      "restore_mode": "operator-client-config"
+    },
+    {
+      "path": "/home/alex/.config/rclone",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.config/restic",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.config/tunnel-client",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.docker",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.env",
+      "class": "credentials-and-identity",
+      "rationale": "small local credential-bearing configuration file",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.gemini/antigravity-cli/antigravity-oauth-token",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.gemini/google_accounts.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.gemini/oauth_creds.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.gemini/settings.json",
+      "class": "credentials-and-identity",
+      "rationale": "minimal operator client configuration paired with preserved authentication",
+      "capture": "file",
+      "restore_mode": "operator-client-config"
+    },
+    {
+      "path": "/home/alex/.gnupg",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.grok/auth.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.grok/config.toml",
+      "class": "credentials-and-identity",
+      "rationale": "minimal operator client configuration paired with preserved authentication",
+      "capture": "file",
+      "restore_mode": "operator-client-config"
+    },
+    {
+      "path": "/home/alex/.kube",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.local/share/keyrings",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.local/share/opencode/auth.json",
+      "class": "credentials-and-identity",
+      "rationale": "operator client authentication state required to re-establish the existing authenticated toolchain",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/acceptance-evidence",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/attempts",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/bureau.sqlite3",
+      "class": "bureau-authority-state",
+      "rationale": "canonical Bureau task/claim/control state; restore through Bureau recovery contract",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/claim-handoffs",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/claim-intents",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/closeout-evidence",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/completion-evidence",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/envelopes",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/intents",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/observations",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/operator-intake",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/operator-intake-handoffs",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/operator-intake-requests",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/receipts",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/recovery",
+      "class": "bureau-authority-state",
+      "rationale": "Bureau task/claim/receipt continuity required by the canonical authority state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/bureau/state.sqlite3",
+      "class": "bureau-authority-state",
+      "rationale": "canonical Bureau task/claim/control state; restore through Bureau recovery contract",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/chronik/data",
+      "class": "chronik-history-state",
+      "rationale": "Chronik append-only history, durable outbox, or integrity receipt",
+      "capture": "tree",
+      "restore_mode": "authority-restore"
+    },
+    {
+      "path": "/home/alex/.local/state/chronik/import-receipts",
+      "class": "chronik-history-state",
+      "rationale": "Chronik append-only history, durable outbox, or integrity receipt",
+      "capture": "tree",
+      "restore_mode": "authority-restore"
+    },
+    {
+      "path": "/home/alex/.local/state/chronik/outbox",
+      "class": "chronik-history-state",
+      "rationale": "Chronik append-only history, durable outbox, or integrity receipt",
+      "capture": "tree",
+      "restore_mode": "authority-restore"
+    },
+    {
+      "path": "/home/alex/.local/state/chronik/runtime-receipts",
+      "class": "chronik-history-state",
+      "rationale": "Chronik append-only history, durable outbox, or integrity receipt",
+      "capture": "tree",
+      "restore_mode": "authority-restore"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/audit-archive",
+      "class": "grabowski-audit-chain",
+      "rationale": "historical audit-chain segments",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/audit-rotation-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "audit-chain rotation continuity receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/audit-segment-manifests",
+      "class": "grabowski-audit-chain",
+      "rationale": "audit segment integrity manifests",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/audit-segments",
+      "class": "grabowski-audit-chain",
+      "rationale": "immutable audit-chain segments",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/captain-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "merge/captain receipts used by operator governance",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/checkout-archives",
+      "class": "grabowski-authority-state",
+      "rationale": "checkout lifecycle archives",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/checkouts.sqlite3",
+      "class": "grabowski-authority-state",
+      "rationale": "canonical Grabowski durable task, lease, or checkout state; restore only through authority reconciliation",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/chronik-outbox",
+      "class": "grabowski-durable-outbox",
+      "rationale": "undelivered durable Chronik events",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/coordination",
+      "class": "grabowski-authority-state",
+      "rationale": "durable operator coordination receipts and continuity state",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/decision-review-results",
+      "class": "grabowski-authority-state",
+      "rationale": "durable decision-review result receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/decision-review-role-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "role-bound decision-review receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/deliveries",
+      "class": "grabowski-authority-state",
+      "rationale": "durable operator delivery records",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/grip-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "typed operator grip receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/merge-deliveries",
+      "class": "grabowski-authority-state",
+      "rationale": "durable merge delivery receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/operator-obligations",
+      "class": "grabowski-authority-state",
+      "rationale": "operator follow-up and closure obligations",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/quarantine-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "quarantine lifecycle receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/reposkop-event-identity-index-v1.sqlite3",
+      "class": "grabowski-authority-state",
+      "rationale": "small durable repository-checkout identity continuity index used by the operator ecosystem",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/resources.sqlite3",
+      "class": "grabowski-authority-state",
+      "rationale": "canonical Grabowski durable task, lease, or checkout state; restore only through authority reconciliation",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/retention-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "retention lifecycle receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/role-receipts",
+      "class": "grabowski-authority-state",
+      "rationale": "role execution receipts",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/task-archives",
+      "class": "grabowski-authority-state",
+      "rationale": "immutable archived task evidence",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/tasks.attention-decisions",
+      "class": "grabowski-authority-state",
+      "rationale": "create-only attention decisions required to preserve operator follow-up continuity",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/tasks.outcomes",
+      "class": "grabowski-authority-state",
+      "rationale": "create-only task outcome receipts required to preserve attention and terminal outcome continuity",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/tasks.sqlite3",
+      "class": "grabowski-authority-state",
+      "rationale": "canonical Grabowski durable task, lease, or checkout state; restore only through authority reconciliation",
+      "capture": "sqlite-family",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/work-lanes",
+      "class": "grabowski-authority-state",
+      "rationale": "durable work-lane continuity",
+      "capture": "tree",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grabowski/write-audit.jsonl",
+      "class": "grabowski-audit-chain",
+      "rationale": "active tamper-evident Grabowski audit segment",
+      "capture": "file",
+      "restore_mode": "authority-reconcile"
+    },
+    {
+      "path": "/home/alex/.local/state/grosser-adler/findings",
+      "class": "observer-findings",
+      "rationale": "append-only independent observer findings",
+      "capture": "tree",
+      "restore_mode": "observer-state"
+    },
+    {
+      "path": "/home/alex/.npmrc",
+      "class": "credentials-and-identity",
+      "rationale": "small local credential-bearing configuration file",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
+      "path": "/home/alex/.password-store",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.pki",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/.ssh",
+      "class": "credentials-and-identity",
+      "rationale": "local credential, identity, or authenticated operator configuration",
+      "capture": "tree",
+      "restore_mode": "private-credential-tree"
+    },
+    {
+      "path": "/home/alex/collections/bibliothek",
+      "class": "canonical-digital-library",
+      "rationale": "canonical primary corpus for finalized and future digitized books",
+      "capture": "tree",
+      "restore_mode": "byte-identical"
+    },
+    {
+      "path": "/home/alex/repos/fotoatelier",
+      "class": "local-only-repository",
+      "rationale": "top-level Git repository has no configured remote and contains local untracked operational source material",
+      "capture": "tree",
+      "restore_mode": "byte-identical"
+    },
+    {
+      "path": "/home/alex/repos/schotter",
+      "class": "local-only-repository",
+      "rationale": "top-level Git repository has no configured remote and no same-name heimgewebe GitHub repository",
+      "capture": "tree",
+      "restore_mode": "byte-identical"
+    }
   ],
+  "required_classes": [
+    "credentials-and-identity",
+    "canonical-digital-library",
+    "local-only-repository",
+    "grabowski-authority-state",
+    "grabowski-audit-chain",
+    "grabowski-durable-outbox",
+    "bureau-authority-state",
+    "chronik-history-state",
+    "observer-findings"
+  ],
+  "selection_policy": {
+    "default": "exclude",
+    "unlisted_paths_are_migration_data": false,
+    "remote_reproducible_repositories_are_migration_data": false,
+    "personal_home_data_is_migration_data_unless_explicitly_listed": false,
+    "operator_runtime_artifacts_are_migration_data_unless_explicitly_listed": false
+  },
   "off_host_restore": {
     "backup_must_be_complete_for_scope": true,
     "target_must_be_independent": true,
@@ -320,12 +586,11 @@
     "source_and_restored_inventory_sha256_must_match": true
   },
   "does_not_establish": [
-    "coverage of persistent data outside /home/alex",
+    "coverage of unlisted /home/alex data",
+    "permission to restore active leases or tasks without authority reconciliation",
     "existence of an off-host backup",
-    "sufficient off-host capacity",
     "successful restore",
-    "permission to exclude an unreadable included path",
-    "permission to mutate HEIM_BACKUP or any production disk",
+    "permission to mutate production storage",
     "permission to cross the point of no return"
   ]
 }

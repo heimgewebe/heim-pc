@@ -517,32 +517,26 @@ def _validate_critical_user_data_contract(
         contract.get("schema_version") != 1
         or contract.get("kind") != CRITICAL_USER_DATA_CONTRACT_KIND
         or contract.get("scope") != "critical-user-data"
-        or contract.get("scope_semantics") != "explicit-root-set-default-include"
+        or contract.get("scope_semantics") != "explicit-positive-selection"
     ):
         raise ReadinessError("critical-user-data contract identity is invalid")
 
     members = contract.get("members")
-    if not isinstance(members, list) or len(members) != 2:
+    if not isinstance(members, list) or len(members) != 1:
         raise ReadinessError("critical-user-data member set is invalid")
     by_id = {
         item.get("id"): item
         for item in members
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    if set(by_id) != {"home", "docker-volumes"}:
+    if set(by_id) != {"home"}:
         raise ReadinessError("critical-user-data member identities are invalid")
     expected_members = {
         "home": (
             "critical-user-home-data-contract-v1.json",
             "@home",
             "/home/alex",
-            "active-user-data",
-        ),
-        "docker-volumes": (
-            "critical-docker-volume-data-contract-v1.json",
-            "@data",
-            "/var/lib/heim-pc-data/legacy-docker-volumes",
-            "staged-archive-not-active-docker-store",
+            "explicit-path-restore-with-authority-reconciliation",
         ),
     }
     for member_id, expected in expected_members.items():
@@ -593,16 +587,16 @@ def _validate_critical_user_data_contract(
     migration = contract.get("migration_policy")
     if (
         not isinstance(migration, dict)
+        or migration.get("selection_model") != "explicit-positive-allowlist"
+        or migration.get("unlisted_data_migrated") is not False
         or migration.get("system_state_recreated_from_nix") is not True
-        or migration.get("old_system_disk_preserved_as_independent_fallback")
-        is not True
-        or migration.get("default_for_non_reproducible_data") != "preserve"
-        or migration.get("excluded_data_requires_explicit_contract_rule") is not True
-        or migration.get("docker_volume_tree_preserved_as_cold_data") is not True
-        or migration.get("docker_volume_tree_directly_activated_on_new_nixos")
-        is not False
-        or migration.get("application_level_service_reconstruction_required")
-        is not True
+        or migration.get("old_system_disk_preserved_as_independent_fallback") is not True
+        or migration.get("remote_reproducible_repositories_excluded") is not True
+        or migration.get("operator_state_restored_via_authority_reconcile") is not True
+        or migration.get("legacy_docker_volume_tree_migrated") is not False
+        or migration.get("root_owned_grabowski_runtime_state_migrated") is not False
+        or migration.get("root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy") is not True
+        or migration.get("application_level_service_reconstruction_required") is not True
     ):
         raise ReadinessError("critical-user-data migration policy is invalid")
 
