@@ -23,6 +23,10 @@ DEFAULT_STATE_DIR = Path("/var/lib/heim-pc/grabowski-memory-guard")
 SYSTEMCTL = "/usr/bin/systemctl"
 PROC_ROOT = Path("/proc")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+DEV_SHM_ROOT = Path("/dev/shm")
+SYS_BLOCK_ROOT = Path("/sys/block")
+T003_SHM_PREFIX = "heim-pc-t003-"
+T003_SHM_WARN_BYTES = 16 * 1024**3
 SYSTEMCTL_SHOW_TIMEOUT_SECONDS = 10
 SYSTEMCTL_RESTART_TIMEOUT_SECONDS = 45
 SYSTEMCTL_STOP_TIMEOUT_SECONDS = 25
@@ -53,6 +57,10 @@ class Observation:
     rss_bytes: int
     swap_bytes: int
     mem_available_bytes: int
+    dev_shm_used_bytes: int
+    t003_shm_entry_count: int
+    t003_loop_count: int
+    stale_t003_loop_count: int
     cgroup_memory_current_bytes: int | None
     cgroup_swap_current_bytes: int | None
 
@@ -301,6 +309,51 @@ def _read_mem_available(proc_root: Path) -> int:
     raise GuardError("MemAvailable is missing")
 
 
+def _read_t003_shm_state(
+    dev_shm_root: Path = DEV_SHM_ROOT,
+    sys_block_root: Path = SYS_BLOCK_ROOT,
+) -> tuple[int, int, int, int]:
+    """Return /dev/shm usage, visible T003 entries and loop-backing counts."""
+    try:
+        fs = os.statvfs(dev_shm_root)
+    except OSError as exc:
+        raise GuardError(f"cannot read /dev/shm usage: {exc}") from exc
+    block_size = fs.f_frsize or fs.f_bsize
+    used_bytes = (fs.f_blocks - fs.f_bfree) * block_size
+
+    try:
+        t003_entry_count = sum(
+            1 for entry in os.scandir(dev_shm_root)
+            if entry.name.startswith(T003_SHM_PREFIX)
+        )
+    except OSError as exc:
+        raise GuardError(f"cannot enumerate T003 /dev/shm entries: {exc}") from exc
+
+    loop_count = 0
+    stale_loop_count = 0
+    try:
+        backing_paths = list(sys_block_root.glob("loop*/loop/backing_file"))
+    except OSError as exc:
+        raise GuardError(f"cannot enumerate loop backing files: {exc}") from exc
+    for backing_path in backing_paths:
+        try:
+            backing = backing_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+        except FileNotFoundError:
+            # Loop teardown can remove sysfs entries while the guard samples.
+            continue
+        except OSError:
+            # One unreadable/transient loop must not blind the target guard.
+            continue
+        if T003_SHM_PREFIX not in backing:
+            continue
+        loop_count += 1
+        if backing.endswith(" (deleted)"):
+            stale_loop_count += 1
+    return used_bytes, t003_entry_count, loop_count, stale_loop_count
+
+
 def _read_optional_int(path: Path) -> int | None:
     try:
         return int(path.read_text(encoding="ascii").strip())
@@ -370,6 +423,12 @@ def observe(
 
     relative = policy["expected_control_group"].lstrip("/")
     cgroup = cgroup_root / relative
+    (
+        dev_shm_used,
+        t003_shm_entries,
+        t003_loops,
+        stale_t003_loops,
+    ) = _read_t003_shm_state()
     return Observation(
         observed_at_unix=int(time.time()) if now_unix is None else int(now_unix),
         pid=pid,
@@ -380,6 +439,10 @@ def observe(
         rss_bytes=status["rss_bytes"],
         swap_bytes=status["swap_bytes"],
         mem_available_bytes=_read_mem_available(proc_root),
+        dev_shm_used_bytes=dev_shm_used,
+        t003_shm_entry_count=t003_shm_entries,
+        t003_loop_count=t003_loops,
+        stale_t003_loop_count=stale_t003_loops,
         cgroup_memory_current_bytes=_read_optional_int(cgroup / "memory.current"),
         cgroup_swap_current_bytes=_read_optional_int(cgroup / "memory.swap.current"),
     )
@@ -605,6 +668,18 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
             return next_state, "warn", "rss_restart_confirmation_pending"
         if observation.rss_anon_bytes >= policy["warn_rss_anon_bytes"]:
             return next_state, "warn", "rss_warn_threshold"
+        # These host/T003 findings are diagnostic only.  They must never
+        # trigger or substitute for the target-process restart gates above.
+        if observation.stale_t003_loop_count > 0:
+            return next_state, "warn", "stale_t003_loop_backing"
+        if (
+            (
+                observation.t003_shm_entry_count > 0
+                or observation.t003_loop_count > 0
+            )
+            and observation.dev_shm_used_bytes >= T003_SHM_WARN_BYTES
+        ):
+            return next_state, "warn", "t003_dev_shm_pressure"
         return next_state, "none", "healthy"
 
     if len(history) >= policy["max_restarts_per_window"]:
@@ -843,6 +918,10 @@ def _event(observation: Observation | None, *, action: str, reason: str, result:
             "swap_bytes": observation.swap_bytes,
             "anon_pressure_bytes": observation.anon_pressure_bytes,
             "mem_available_bytes": observation.mem_available_bytes,
+            "dev_shm_used_bytes": observation.dev_shm_used_bytes,
+            "t003_shm_entry_count": observation.t003_shm_entry_count,
+            "t003_loop_count": observation.t003_loop_count,
+            "stale_t003_loop_count": observation.stale_t003_loop_count,
             "cgroup_memory_current_bytes": observation.cgroup_memory_current_bytes,
             "cgroup_swap_current_bytes": observation.cgroup_swap_current_bytes,
         }

@@ -638,6 +638,17 @@ def compile_effect_plan(
         {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]},
         {"effect": "luks-close", "argv": ["cryptsetup", "close", mapper_name]},
     ])
+    # A disposable loop target remains kernel-pinned after unlinking its backing
+    # file until every descendant mapping is closed and the loop itself is
+    # detached.  T003 owns the admitted whole-device target, so detach only
+    # that exact loop after mounts and dm-crypt have been torn down.  NBD
+    # lifecycle remains outside this plan because its producer is not bound by
+    # the loop-target authority.
+    if preflight["device_kind"] == "loop":
+        teardown_commands.append({
+            "effect": "loop-detach",
+            "argv": ["/usr/sbin/losetup", "-d", target],
+        })
 
     material = {
         "schema_version": 1,

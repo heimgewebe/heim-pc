@@ -487,10 +487,29 @@ def test_plan_declares_same_luks_secret_binding_and_teardown():
     teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
     assert "btrfs-stage-unmount" in teardown_effects
     assert teardown_effects.index("btrfs-stage-unmount") < teardown_effects.index("luks-close")
+    assert teardown_effects.index("luks-close") < teardown_effects.index("loop-detach")
     stage = next(item for item in plan["teardown_commands"] if item["effect"] == "btrfs-stage-unmount")
     assert stage["argv"] == ["umount", m.BTRFS_STAGE_ROOT]
-    assert plan["teardown_commands"][-1]["effect"] == "luks-close"
-    assert all(item["argv"][0] in {"umount", "cryptsetup"} for item in plan["teardown_commands"])
+    loop_detach = next(item for item in plan["teardown_commands"] if item["effect"] == "loop-detach")
+    assert loop_detach["argv"] == ["/usr/sbin/losetup", "-d", "/dev/loop7"]
+    assert plan["teardown_commands"][-1]["effect"] == "loop-detach"
+    assert all(
+        item["argv"][0] in {"umount", "cryptsetup", "/usr/sbin/losetup"}
+        for item in plan["teardown_commands"]
+    )
+
+
+def test_nbd_target_does_not_claim_loop_detach_lifecycle():
+    evidence = target_evidence(
+        path="/dev/nbd3",
+        device_kind="nbd",
+        device_identity="nbd:/var/tmp/heim-pc-t005.img:12345",
+        backing_file="/var/tmp/heim-pc-t005.img",
+    )
+    plan = m.compile_effect_plan(evidence, sandbox_authority(evidence), now=NOW)
+    teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
+    assert "loop-detach" not in teardown_effects
+    assert teardown_effects[-1] == "luks-close"
 
 
 def test_topology_readback_rejects_fixed_partition_size_drift():
