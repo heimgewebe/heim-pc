@@ -57,10 +57,10 @@ class Observation:
     rss_bytes: int
     swap_bytes: int
     mem_available_bytes: int
-    dev_shm_used_bytes: int
-    t003_shm_entry_count: int
-    t003_loop_count: int
-    stale_t003_loop_count: int
+    dev_shm_used_bytes: int | None
+    t003_shm_entry_count: int | None
+    t003_loop_count: int | None
+    stale_t003_loop_count: int | None
     cgroup_memory_current_bytes: int | None
     cgroup_swap_current_bytes: int | None
 
@@ -423,12 +423,21 @@ def observe(
 
     relative = policy["expected_control_group"].lstrip("/")
     cgroup = cgroup_root / relative
-    (
-        dev_shm_used,
-        t003_shm_entries,
-        t003_loops,
-        stale_t003_loops,
-    ) = _read_t003_shm_state()
+    try:
+        (
+            dev_shm_used,
+            t003_shm_entries,
+            t003_loops,
+            stale_t003_loops,
+        ) = _read_t003_shm_state()
+    except GuardError:
+        # T003 /dev/shm telemetry is diagnostic-only.  Sampling failure must
+        # never blind the primary RSS/MemAvailable restart logic, and unknown
+        # values stay explicit instead of being misreported as zero.
+        dev_shm_used = None
+        t003_shm_entries = None
+        t003_loops = None
+        stale_t003_loops = None
     return Observation(
         observed_at_unix=int(time.time()) if now_unix is None else int(now_unix),
         pid=pid,
@@ -670,10 +679,16 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
             return next_state, "warn", "rss_warn_threshold"
         # These host/T003 findings are diagnostic only.  They must never
         # trigger or substitute for the target-process restart gates above.
-        if observation.stale_t003_loop_count > 0:
+        if (
+            observation.stale_t003_loop_count is not None
+            and observation.stale_t003_loop_count > 0
+        ):
             return next_state, "warn", "stale_t003_loop_backing"
         if (
-            (
+            observation.dev_shm_used_bytes is not None
+            and observation.t003_shm_entry_count is not None
+            and observation.t003_loop_count is not None
+            and (
                 observation.t003_shm_entry_count > 0
                 or observation.t003_loop_count > 0
             )

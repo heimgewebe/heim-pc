@@ -712,6 +712,35 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
                     now_unix=100,
                 )
 
+    def test_t003_sampler_failure_never_suppresses_real_host_emergency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(Path(temporary))
+            with patch.object(
+                guard,
+                "_read_t003_shm_state",
+                side_effect=guard.GuardError("synthetic optional sampler failure"),
+            ):
+                observation = guard.observe(
+                    self.policy,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    now_unix=100,
+                )
+
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIsNone(observation.dev_shm_used_bytes)
+        self.assertIsNone(observation.t003_shm_entry_count)
+        self.assertIsNone(observation.t003_loop_count)
+        self.assertIsNone(observation.stale_t003_loop_count)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            guard.default_state(self.policy),
+            observation,
+        )
+        self.assertEqual((action, reason), ("restart", "host_memory_emergency"))
+
     def test_observe_only_never_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

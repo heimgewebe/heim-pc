@@ -503,6 +503,15 @@ def _scratch_run_token(run_id: str) -> str:
     return token
 
 
+def _scratch_name_matches_run_token(name: str, run_token: str) -> bool:
+    prefix = f"{T003_SCRATCH_PREFIX}{run_token}"
+    lowered = name.lower()
+    if not lowered.startswith(prefix):
+        return False
+    suffix = lowered[len(prefix):]
+    return not suffix or suffix[0] in {"-", "."}
+
+
 def _canonical_scratch_path(value: Any, label: str) -> str:
     text = _nonempty_text(value, label, 1024)
     path = PurePosixPath(text)
@@ -603,7 +612,10 @@ def validate_scratch_manifest(
         if disposition == "remove":
             if kind not in SCRATCH_REMOVE_KINDS:
                 raise RehearsalError("only declared scratch kinds may be removed")
-            if run_token not in PurePosixPath(path).name.lower():
+            if not _scratch_name_matches_run_token(
+                PurePosixPath(path).name,
+                run_token,
+            ):
                 raise RehearsalError("removable scratch path is not bound to the T003 run token")
         elif kind != "evidence":
             raise RehearsalError("only evidence artifacts may be retained")

@@ -414,6 +414,18 @@ def test_scratch_manifest_rejects_foreign_or_untokenized_cleanup_path():
         effect_plan(evidence, authority, manifest)
 
 
+def test_scratch_manifest_rejects_run_token_prefix_collision():
+    evidence = target_evidence()
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+    manifest["artifacts"][1]["path"] = (
+        f"/dev/shm/heim-pc-t003-{RUN_TOKEN}00-overlay-upper"
+    )
+    manifest = _digest(manifest, "manifest_sha256")
+    with pytest.raises(m.RehearsalError, match="run token"):
+        effect_plan(evidence, authority, manifest)
+
+
 def test_scratch_manifest_rejects_cleanup_outside_direct_dev_shm_entry():
     evidence = target_evidence()
     authority = sandbox_authority(evidence)
