@@ -411,16 +411,25 @@ class T(unittest.TestCase):
             else:
                 self.assertIsNone(item["restore_test_schema"])
         attestation = recovery["evidence_attestation"]
-        self.assertEqual(attestation["status"], "unprovisioned")
+        self.assertEqual(attestation["status"], "provisioned")
         self.assertEqual(attestation["trust_model"], "github-artifact-attestation")
-        for key in (
-            "repository",
-            "signer_workflow",
-            "signer_digest",
-            "source_digest",
-            "source_ref",
-        ):
-            self.assertIsNone(attestation[key])
+        self.assertEqual(
+            attestation["repository"],
+            "heimgewebe/recovery-evidence-authority",
+        )
+        self.assertEqual(
+            attestation["signer_workflow"],
+            "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml",
+        )
+        self.assertEqual(
+            attestation["signer_digest"],
+            "ec61ef05c6467e02941ada789adb2250c63a8b48",
+        )
+        self.assertEqual(
+            attestation["source_digest"],
+            "ec61ef05c6467e02941ada789adb2250c63a8b48",
+        )
+        self.assertEqual(attestation["source_ref"], "refs/heads/main")
         self.assertEqual(
             attestation["predicate_type"],
             "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
