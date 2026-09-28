@@ -37,6 +37,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         starttime_ticks: int = 100,
         rss_anon: int = 10 * 1024**3,
         mem_available: int = 32 * 1024**3,
+        system_swap_total: int = 20 * 1024**3,
+        system_swap_free: int = 4 * 1024**3,
     ) -> guard.Observation:
         return guard.Observation(
             observed_at_unix=now,
@@ -48,12 +50,15 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             rss_bytes=rss_anon + 16 * 1024**2,
             swap_bytes=256 * 1024**2,
             mem_available_bytes=mem_available,
+            system_swap_total_bytes=system_swap_total,
+            system_swap_free_bytes=system_swap_free,
             cgroup_memory_current_bytes=rss_anon + 4 * 1024**3,
             cgroup_swap_current_bytes=256 * 1024**2,
         )
 
     def test_policy_matches_conservative_live_thresholds(self) -> None:
         self.assertEqual(self.policy["warn_rss_anon_bytes"], 18 * 1024**3)
+        self.assertEqual(self.policy["warn_system_swap_free_bytes"], 1 * 1024**3)
         self.assertEqual(self.policy["restart_rss_anon_bytes"], 24 * 1024**3)
         self.assertEqual(self.policy["emergency_mem_available_bytes"], 8 * 1024**3)
         self.assertEqual(self.policy["emergency_rss_anon_bytes"], 12 * 1024**3)
@@ -154,6 +159,34 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.observation(rss_anon=18 * 1024**3),
         )
         self.assertEqual((action, reason), ("warn", "rss_warn_threshold"))
+
+    def test_low_system_swap_warns_without_restart(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                mem_available=32 * 1024**3,
+                system_swap_total=20 * 1024**3,
+                system_swap_free=512 * 1024**2,
+            ),
+        )
+        self.assertEqual((action, reason), ("warn", "system_swap_low"))
+
+    def test_disabled_system_swap_does_not_warn(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                mem_available=32 * 1024**3,
+                system_swap_total=0,
+                system_swap_free=0,
+            ),
+        )
+        self.assertEqual((action, reason), ("none", "healthy"))
 
     def test_host_emergency_restarts_immediately(self) -> None:
         state = guard.default_state(self.policy)
@@ -587,6 +620,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         (proc / "meminfo").write_text(
             "MemTotal:       65740408 kB\n"
             f"MemAvailable:   {mem_available_kib} kB\n"
+            "SwapTotal:      20970996 kB\n"
+            "SwapFree:        4194304 kB\n"
         )
         unit_cgroup = cgroup / "system.slice/grabowski-operator.service"
         unit_cgroup.mkdir(parents=True)

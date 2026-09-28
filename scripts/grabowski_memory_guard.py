@@ -53,6 +53,8 @@ class Observation:
     rss_bytes: int
     swap_bytes: int
     mem_available_bytes: int
+    system_swap_total_bytes: int
+    system_swap_free_bytes: int
     cgroup_memory_current_bytes: int | None
     cgroup_swap_current_bytes: int | None
 
@@ -88,6 +90,7 @@ def load_policy(path: Path) -> dict[str, Any]:
         "expected_control_group",
         "sample_interval_seconds",
         "warn_rss_anon_bytes",
+        "warn_system_swap_free_bytes",
         "restart_rss_anon_bytes",
         "confirm_samples",
         "emergency_mem_available_bytes",
@@ -115,6 +118,12 @@ def load_policy(path: Path) -> dict[str, Any]:
         ),
         "warn_rss_anon_bytes": _bounded_int(
             guard["warn_rss_anon_bytes"], name="grabowski_guard.warn_rss_anon_bytes", minimum=1024**3, maximum=64 * 1024**3
+        ),
+        "warn_system_swap_free_bytes": _bounded_int(
+            guard["warn_system_swap_free_bytes"],
+            name="grabowski_guard.warn_system_swap_free_bytes",
+            minimum=64 * 1024**2,
+            maximum=64 * 1024**3,
         ),
         "restart_rss_anon_bytes": _bounded_int(
             guard["restart_rss_anon_bytes"], name="grabowski_guard.restart_rss_anon_bytes", minimum=1024**3, maximum=64 * 1024**3
@@ -286,19 +295,36 @@ def _read_process_starttime(pid: int, proc_root: Path) -> int:
         raise GuardError("target process starttime is invalid") from exc
 
 
-def _read_mem_available(proc_root: Path) -> int:
+def _read_host_memory(proc_root: Path) -> dict[str, int]:
     try:
         lines = (proc_root / "meminfo").read_text(encoding="ascii").splitlines()
     except OSError as exc:
         raise GuardError(f"cannot read meminfo: {exc}") from exc
+
+    required = {"MemAvailable", "SwapTotal", "SwapFree"}
+    values: dict[str, int] = {}
     for line in lines:
-        if line.startswith("MemAvailable:"):
-            parts = line.split()
-            try:
-                return int(parts[1]) * 1024
-            except (IndexError, ValueError) as exc:
-                raise GuardError("MemAvailable is invalid") from exc
-    raise GuardError("MemAvailable is missing")
+        if ":" not in line:
+            continue
+        name, raw = line.split(":", 1)
+        if name not in required:
+            continue
+        parts = raw.split()
+        if len(parts) != 2 or parts[1] != "kB":
+            raise GuardError(f"{name} is invalid")
+        try:
+            values[name] = int(parts[0]) * 1024
+        except ValueError as exc:
+            raise GuardError(f"{name} is invalid") from exc
+
+    missing = sorted(required - set(values))
+    if missing:
+        raise GuardError(f"meminfo lacks required fields: {', '.join(missing)}")
+    return {
+        "mem_available_bytes": values["MemAvailable"],
+        "system_swap_total_bytes": values["SwapTotal"],
+        "system_swap_free_bytes": values["SwapFree"],
+    }
 
 
 def _read_optional_int(path: Path) -> int | None:
@@ -370,6 +396,7 @@ def observe(
 
     relative = policy["expected_control_group"].lstrip("/")
     cgroup = cgroup_root / relative
+    host_memory = _read_host_memory(proc_root)
     return Observation(
         observed_at_unix=int(time.time()) if now_unix is None else int(now_unix),
         pid=pid,
@@ -379,7 +406,9 @@ def observe(
         rss_anon_bytes=status["rss_anon_bytes"],
         rss_bytes=status["rss_bytes"],
         swap_bytes=status["swap_bytes"],
-        mem_available_bytes=_read_mem_available(proc_root),
+        mem_available_bytes=host_memory["mem_available_bytes"],
+        system_swap_total_bytes=host_memory["system_swap_total_bytes"],
+        system_swap_free_bytes=host_memory["system_swap_free_bytes"],
         cgroup_memory_current_bytes=_read_optional_int(cgroup / "memory.current"),
         cgroup_swap_current_bytes=_read_optional_int(cgroup / "memory.swap.current"),
     )
@@ -605,6 +634,12 @@ def evaluate(policy: dict[str, Any], state: dict[str, Any], observation: Observa
             return next_state, "warn", "rss_restart_confirmation_pending"
         if observation.rss_anon_bytes >= policy["warn_rss_anon_bytes"]:
             return next_state, "warn", "rss_warn_threshold"
+        if (
+            observation.system_swap_total_bytes > 0
+            and observation.system_swap_free_bytes
+            <= policy["warn_system_swap_free_bytes"]
+        ):
+            return next_state, "warn", "system_swap_low"
         return next_state, "none", "healthy"
 
     if len(history) >= policy["max_restarts_per_window"]:
@@ -843,6 +878,8 @@ def _event(observation: Observation | None, *, action: str, reason: str, result:
             "swap_bytes": observation.swap_bytes,
             "anon_pressure_bytes": observation.anon_pressure_bytes,
             "mem_available_bytes": observation.mem_available_bytes,
+            "system_swap_total_bytes": observation.system_swap_total_bytes,
+            "system_swap_free_bytes": observation.system_swap_free_bytes,
             "cgroup_memory_current_bytes": observation.cgroup_memory_current_bytes,
             "cgroup_swap_current_bytes": observation.cgroup_swap_current_bytes,
         }
