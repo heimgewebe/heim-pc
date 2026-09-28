@@ -708,6 +708,23 @@ def test_plan_declares_same_luks_secret_binding_and_teardown():
     )
 
 
+def test_nbd_target_with_t003_tmpfs_backing_is_rejected_without_disconnect_authority():
+    evidence = target_evidence(
+        path="/dev/nbd3",
+        device_kind="nbd",
+        device_identity=f"nbd:/run/shm/heim-pc-t003-{RUN_TOKEN}.img:12345",
+        backing_file=f"/run/shm/heim-pc-t003-{RUN_TOKEN}.img",
+    )
+    authority = sandbox_authority(evidence)
+    manifest = scratch_manifest(evidence, authority)
+
+    with pytest.raises(
+        m.RehearsalError,
+        match="NBD target with T003 tmpfs backing requires explicit disconnect authority",
+    ):
+        m.compile_effect_plan(evidence, authority, manifest, now=NOW)
+
+
 def test_nbd_target_does_not_claim_loop_detach_lifecycle():
     evidence = target_evidence(
         path="/dev/nbd3",

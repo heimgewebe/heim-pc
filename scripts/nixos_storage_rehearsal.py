@@ -644,6 +644,10 @@ def validate_scratch_manifest(
         for item in artifacts
         if item["kind"] == "backing-image" and item["disposition"] == "remove"
     ]
+    if preflight["device_kind"] == "nbd" and backing_path is not None:
+        raise RehearsalError(
+            "NBD target with T003 tmpfs backing requires explicit disconnect authority"
+        )
     if backing_path is not None:
         if len(backing_items) != 1:
             raise RehearsalError("T003 tmpfs backing image must have exactly one cleanup binding")
