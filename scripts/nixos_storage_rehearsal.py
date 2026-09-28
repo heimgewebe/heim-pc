@@ -863,6 +863,17 @@ def compile_effect_plan(
             "effect": "loop-detach",
             "argv": ["/usr/sbin/losetup", "-d", target],
         })
+        # losetup -d may return success after only marking a busy loop for
+        # autoclear.  Scratch unlink is unsafe until the kernel backing
+        # association itself is gone, so make that readback part of the
+        # release stream whose complete success gates cleanup.
+        loop_backing_sysfs = (
+            f"/sys/block/{PurePosixPath(target).name}/loop/backing_file"
+        )
+        teardown_commands.append({
+            "effect": "loop-detach-readback",
+            "argv": ["/usr/bin/test", "!", "-e", loop_backing_sysfs],
+        })
     # Keep path removal out of the release command stream. If an unmount,
     # dm-crypt close or loop detach fails for a reason other than "already
     # absent", unlinking the backing image would recreate the deleted-but-pinned

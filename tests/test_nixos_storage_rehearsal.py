@@ -467,7 +467,7 @@ def test_scratch_cleanup_contract_covers_success_error_abort_and_retry():
     }
     assert {item["kind"] for item in plan["scratch_cleanup"]["retained_evidence"]} == {"evidence"}
     teardown_effects = [item["effect"] for item in plan["teardown_commands"]]
-    assert teardown_effects[-1] == "loop-detach"
+    assert teardown_effects[-1] == "loop-detach-readback"
     assert not any(effect.startswith("scratch-") for effect in teardown_effects)
     cleanup_effects = [item["effect"] for item in plan["scratch_cleanup_commands"]]
     assert cleanup_effects
@@ -693,13 +693,24 @@ def test_plan_declares_same_luks_secret_binding_and_teardown():
     assert "btrfs-stage-unmount" in teardown_effects
     assert teardown_effects.index("btrfs-stage-unmount") < teardown_effects.index("luks-close")
     assert teardown_effects.index("luks-close") < teardown_effects.index("loop-detach")
+    assert teardown_effects.index("loop-detach") < teardown_effects.index("loop-detach-readback")
     stage = next(item for item in plan["teardown_commands"] if item["effect"] == "btrfs-stage-unmount")
     assert stage["argv"] == ["umount", m.BTRFS_STAGE_ROOT]
     loop_detach = next(item for item in plan["teardown_commands"] if item["effect"] == "loop-detach")
     assert loop_detach["argv"] == ["/usr/sbin/losetup", "-d", "/dev/loop7"]
-    assert plan["teardown_commands"][-1]["effect"] == "loop-detach"
+    loop_readback = next(
+        item for item in plan["teardown_commands"]
+        if item["effect"] == "loop-detach-readback"
+    )
+    assert loop_readback["argv"] == [
+        "/usr/bin/test",
+        "!",
+        "-e",
+        "/sys/block/loop7/loop/backing_file",
+    ]
+    assert plan["teardown_commands"][-1]["effect"] == "loop-detach-readback"
     assert all(
-        item["argv"][0] in {"umount", "cryptsetup", "/usr/sbin/losetup"}
+        item["argv"][0] in {"umount", "cryptsetup", "/usr/sbin/losetup", "/usr/bin/test"}
         for item in plan["teardown_commands"]
     )
     assert all(
