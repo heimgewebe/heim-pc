@@ -549,11 +549,17 @@ def _open_stable_regular_at(
         raise
 
 
-def _sqlite_read_guard(path: Path) -> sqlite3.Connection | None:
+def _sqlite_read_guard(
+    directory_fd: int,
+    name: str,
+    *,
+    relative_path: str,
+) -> sqlite3.Connection | None:
     connection: sqlite3.Connection | None = None
+    anchored = Path(f"/proc/self/fd/{directory_fd}") / name
     try:
         connection = sqlite3.connect(
-            f"{path.as_uri()}?mode=ro",
+            f"{anchored.as_uri()}?mode=ro",
             uri=True,
             timeout=0.25,
             isolation_level=None,
@@ -605,6 +611,7 @@ def _capture_sqlite_family(
     companion_names: tuple[str, ...],
     root: Path,
     classification_only: bool,
+    require_read_guard: bool = False,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any] | None]]:
     main_path = directory_path / main_name
     main_relative = _relative(main_path, root)
@@ -625,7 +632,15 @@ def _capture_sqlite_family(
             main_fd, main_opened = main
             opened_fds.append(main_fd)
 
-            guard = _sqlite_read_guard(main_path)
+            guard = _sqlite_read_guard(
+                directory_fd,
+                main_name,
+                relative_path=main_relative,
+            )
+            if require_read_guard and guard is None:
+                raise _RetrySqliteFamily(
+                    f"SQLite read guard unavailable: {main_relative}"
+                )
             try:
                 current_main = os.stat(
                     main_name,
@@ -1166,58 +1181,120 @@ def collect_inventory(
                 f"{_relative(directory_path, root)}"
             )
 
-    def record_explicit_path(entry: dict[str, Any], root_device: int) -> None:
-        selected: Path = entry["path"]
-        rel = _relative(selected, root)
+    def open_explicit_parent(
+        selected: Path,
+        *,
+        relative_path: str,
+        root_device: int,
+    ) -> tuple[int, str]:
         try:
-            observed = selected.lstat()
-        except OSError as exc:
-            raise InventoryError(f"included path cannot be read: {rel}") from exc
-        if observed.st_dev != root_device:
-            raise InventoryError(f"included path is on a foreign filesystem: {rel}")
-
-        capture = entry["capture"]
-        if capture == "tree":
-            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
-                raise InventoryError(f"included tree is not a real directory: {rel}")
-            flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            try:
-                fd = os.open(selected, flags)
-            except OSError as exc:
-                raise InventoryError(f"included tree cannot be opened safely: {rel}") from exc
-            try:
-                opened = os.fstat(fd)
-                if _identity(opened) != _identity(observed):
-                    raise InventoryError(f"included tree changed during open: {rel}")
-                accumulator.record(
-                    {
-                        "path": rel,
-                        "type": "directory",
-                        "mode": stat.S_IMODE(opened.st_mode),
-                        "uid": opened.st_uid,
-                        "gid": opened.st_gid,
-                    }
-                )
-                walk(fd, selected, root_device)
-            finally:
-                os.close(fd)
-            return
+            parts = selected.relative_to(root).parts
+        except ValueError as exc:
+            raise InventoryError(
+                f"included path is outside contract root: {relative_path}"
+            ) from exc
+        if not parts:
+            raise InventoryError(
+                f"included path must be beneath contract root: {relative_path}"
+            )
 
         parent_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
         if hasattr(os, "O_NOFOLLOW"):
             parent_flags |= os.O_NOFOLLOW
+
+        current_fd = os.dup(root_fd)
         try:
-            parent_fd = os.open(selected.parent, parent_flags)
-        except OSError as exc:
-            raise InventoryError(f"included path parent cannot be opened safely: {rel}") from exc
+            for component in parts[:-1]:
+                try:
+                    next_fd = os.open(
+                        component,
+                        parent_flags,
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    raise InventoryError(
+                        f"included path ancestor cannot be opened safely: {relative_path}"
+                    ) from exc
+                try:
+                    opened = os.fstat(next_fd)
+                    if opened.st_dev != root_device:
+                        raise InventoryError(
+                            f"included path ancestor is on a foreign filesystem: "
+                            f"{relative_path}"
+                        )
+                except BaseException:
+                    os.close(next_fd)
+                    raise
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd, parts[-1]
+        except BaseException:
+            os.close(current_fd)
+            raise
+
+    def record_explicit_path(entry: dict[str, Any], root_device: int) -> None:
+        selected: Path = entry["path"]
+        rel = _relative(selected, root)
+        parent_fd, selected_name = open_explicit_parent(
+            selected,
+            relative_path=rel,
+            root_device=root_device,
+        )
         try:
+            try:
+                observed = os.stat(
+                    selected_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise InventoryError(f"included path cannot be read: {rel}") from exc
+            if observed.st_dev != root_device:
+                raise InventoryError(f"included path is on a foreign filesystem: {rel}")
+
+            capture = entry["capture"]
+            if capture == "tree":
+                if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+                    raise InventoryError(f"included tree is not a real directory: {rel}")
+                flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                try:
+                    fd = os.open(selected_name, flags, dir_fd=parent_fd)
+                except OSError as exc:
+                    raise InventoryError(
+                        f"included tree cannot be opened safely: {rel}"
+                    ) from exc
+                try:
+                    opened = os.fstat(fd)
+                    if _identity(opened) != _identity(observed):
+                        raise InventoryError(f"included tree changed during open: {rel}")
+                    if opened.st_dev != root_device:
+                        raise InventoryError(
+                            f"included tree is on a foreign filesystem: {rel}"
+                        )
+                    accumulator.record(
+                        {
+                            "path": rel,
+                            "type": "directory",
+                            "mode": stat.S_IMODE(opened.st_mode),
+                            "uid": opened.st_uid,
+                            "gid": opened.st_gid,
+                        }
+                    )
+                    walk(fd, selected, root_device)
+                finally:
+                    os.close(fd)
+                return
+
             if capture == "sqlite-family":
                 if not stat.S_ISREG(observed.st_mode):
-                    raise InventoryError(f"included SQLite family main is not regular: {rel}")
+                    raise InventoryError(
+                        f"included SQLite family main is not regular: {rel}"
+                    )
                 companions = tuple(
-                    f"{selected.name}{suffix}" for suffix in SQLITE_FAMILY_COMPANION_SUFFIXES
+                    f"{selected.name}{suffix}"
+                    for suffix in SQLITE_FAMILY_COMPANION_SUFFIXES
                 )
                 if classification_only:
                     accumulator.record(
@@ -1247,7 +1324,13 @@ def collect_inventory(
                             ) from exc
                         if not stat.S_ISREG(companion.st_mode):
                             raise InventoryError(
-                                f"SQLite family companion is not a regular file: {companion_rel}"
+                                f"SQLite family companion is not a regular file: "
+                                f"{companion_rel}"
+                            )
+                        if companion.st_dev != root_device:
+                            raise InventoryError(
+                                f"SQLite family companion is on a foreign filesystem: "
+                                f"{companion_rel}"
                             )
                         accumulator.record(
                             {
@@ -1267,6 +1350,7 @@ def collect_inventory(
                     companion_names=companions,
                     root=root,
                     classification_only=False,
+                    require_read_guard=True,
                 )
                 accumulator.record(main_record)
                 for companion_name in companions:
@@ -1293,28 +1377,30 @@ def collect_inventory(
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             try:
-                fd = os.open(selected.name, flags, dir_fd=parent_fd)
+                fd = os.open(selected_name, flags, dir_fd=parent_fd)
             except OSError as exc:
-                raise InventoryError(f"included file cannot be opened safely: {rel}") from exc
+                raise InventoryError(
+                    f"included file cannot be opened safely: {rel}"
+                ) from exc
             try:
                 opened = os.fstat(fd)
                 if _identity(opened) != _identity(observed):
                     raise InventoryError(f"included file changed during open: {rel}")
-                content_sha256 = None if classification_only else _hash_fd(fd)
+                content_sha256 = _hash_fd(fd)
                 after = os.fstat(fd)
                 if _identity(after) != _identity(opened):
                     raise InventoryError(f"included file changed during hashing: {rel}")
-                record: dict[str, Any] = {
-                    "path": rel,
-                    "type": "regular",
-                    "mode": stat.S_IMODE(after.st_mode),
-                    "uid": after.st_uid,
-                    "gid": after.st_gid,
-                    "size_bytes": after.st_size,
-                }
-                if content_sha256 is not None:
-                    record["sha256"] = content_sha256
-                accumulator.record(record)
+                accumulator.record(
+                    {
+                        "path": rel,
+                        "type": "regular",
+                        "mode": stat.S_IMODE(after.st_mode),
+                        "uid": after.st_uid,
+                        "gid": after.st_gid,
+                        "size_bytes": after.st_size,
+                        "sha256": content_sha256,
+                    }
+                )
             finally:
                 os.close(fd)
         finally:

@@ -436,6 +436,46 @@ def test_sqlite_wal_created_after_listing_is_still_captured_in_order(
         connection.close()
 
 
+def test_explicit_sqlite_family_fails_closed_when_read_guard_unavailable(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    database = home / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE payload(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO payload VALUES ('alpha')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(database),
+            "class": "authority",
+            "rationale": "consistent SQLite snapshot required",
+            "capture": "sqlite-family",
+            "restore_mode": "authority-reconcile",
+        }],
+    )
+
+    attempts = {"count": 0}
+
+    def unavailable_guard(*_args, **_kwargs):
+        attempts["count"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(inventory.sqlite3, "connect", unavailable_guard)
+    monkeypatch.setattr(inventory.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(inventory.InventoryError, match="SQLite family did not stabilize"):
+        inventory.collect_inventory(contract)
+    assert attempts["count"] == inventory.SQLITE_FAMILY_MAX_ATTEMPTS
+
+
 def test_sqlite_wal_family_fails_closed_when_companion_never_stabilizes(
     tmp_path, monkeypatch
 ):
@@ -681,6 +721,30 @@ def _explicit_contract(path: Path, home: Path, includes: list[dict]) -> Path:
     }
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def test_explicit_path_set_rejects_symlinked_ancestor(tmp_path):
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    (outside / "value.txt").write_text("outside\n", encoding="utf-8")
+    (home / "alias").symlink_to(outside, target_is_directory=True)
+    selected = home / "alias" / "value.txt"
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(selected),
+            "class": "valuable",
+            "rationale": "must not traverse symlinked ancestor",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    with pytest.raises(inventory.InventoryError, match="ancestor cannot be opened safely"):
+        inventory.collect_inventory(contract)
 
 
 def test_explicit_path_set_excludes_unlisted_data_by_default(tmp_path):
