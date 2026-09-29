@@ -176,7 +176,7 @@ def _write_contracts(tmp_path: Path) -> Path:
     return scope_path
 
 
-def _fake_root_inventory():
+def _fake_root_inventory(_payload: bytes | None = None):
     class InventoryError(ValueError):
         pass
 
@@ -204,6 +204,20 @@ def _fake_root_inventory():
         }
 
     return SimpleNamespace(InventoryError=InventoryError, collect_inventory=collect_inventory)
+
+
+def test_root_inventory_loader_executes_verified_payload_not_current_path(
+    monkeypatch, tmp_path
+):
+    script = tmp_path / "nixos_critical_user_data_inventory.py"
+    verified_payload = b"MARKER = 'verified'\n"
+    script.write_bytes(b"MARKER = 'replacement'\n")
+    monkeypatch.setattr(aggregate, "ROOT_INVENTORY_SCRIPT", script)
+
+    loaded = aggregate._load_root_inventory_module(verified_payload)
+
+    assert loaded.MARKER == "verified"
+    assert loaded.__file__ == str(script)
 
 
 def test_aggregate_inventory_binds_explicit_member_digest(monkeypatch, tmp_path):
@@ -254,7 +268,7 @@ def test_aggregate_rejects_authoritative_member_without_source_stability(
     monkeypatch.setattr(
         aggregate,
         "_load_root_inventory_module",
-        lambda: SimpleNamespace(
+        lambda _payload: SimpleNamespace(
             InventoryError=fake.InventoryError,
             collect_inventory=collect_inventory,
         ),
@@ -335,7 +349,7 @@ def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_
     monkeypatch.setattr(
         aggregate,
         "_load_root_inventory_module",
-        lambda: SimpleNamespace(
+        lambda _payload: SimpleNamespace(
             InventoryError=InventoryError,
             collect_inventory=collect_inventory,
         ),

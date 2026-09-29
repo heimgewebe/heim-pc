@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import stat
+import types
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +58,14 @@ def _load_regular_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
     return value, payload
 
 
-def _load_root_inventory_module():
-    spec = importlib.util.spec_from_file_location(
-        "nixos_critical_user_data_inventory", ROOT_INVENTORY_SCRIPT
-    )
-    if spec is None or spec.loader is None:
-        raise AggregateInventoryError("root inventory implementation is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def _load_root_inventory_module(payload: bytes):
+    try:
+        code = compile(payload, str(ROOT_INVENTORY_SCRIPT), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise AggregateInventoryError("root inventory implementation is invalid") from exc
+    module = types.ModuleType("nixos_critical_user_data_inventory")
+    module.__file__ = str(ROOT_INVENTORY_SCRIPT)
+    exec(code, module.__dict__)
     return module
 
 
@@ -282,7 +282,7 @@ def collect_inventory(
     if _sha256_bytes(aggregate_script_bytes) != expected_aggregate_script:
         raise AggregateInventoryError("aggregate inventory implementation digest mismatch")
 
-    root_inventory = _load_root_inventory_module()
+    root_inventory = _load_root_inventory_module(root_script_bytes)
     aggregate_digest = hashlib.sha256() if not classification_only else None
     member_results: list[dict[str, Any]] = []
     total_records = 0

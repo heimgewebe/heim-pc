@@ -20,7 +20,7 @@
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
     "root_inventory_script_sha256": "a785f595b4c4650ba0dda89c46a79b1d08c89ffeabea6513c235d0785c575e5f",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
-    "aggregate_inventory_script_sha256": "5b6d4370847ec0aa6dde861d3d4bc28b221c8cabf6ed3ba2b2e791aa6e9c476f",
+    "aggregate_inventory_script_sha256": "eba43a74f28f8bbd9b52dafacd3017090f537d61eba5a017992275d262f2f942",
     "member_contract_digest_bound": true,
     "source_and_restored_aggregate_inventory_sha256_must_match": true,
     "authoritative_member_source_stability": "kernel-direct-block-readonly-mountinfo-v2"
