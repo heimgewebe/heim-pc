@@ -7,7 +7,7 @@
     {
       "id": "home",
       "contract_file": "critical-user-home-data-contract-v1.json",
-      "contract_sha256": "9d11b3e60afe5e01767e385d82f32a4b6aa0151842ff155f8b78d0317c2dd2c4",
+      "contract_sha256": "3fadc770b0d8c09447bc07eae668fc50d973da8a13f700e9cc085c87b5a8c757",
       "destination": {
         "nixos_storage_domain": "per-entry-policy",
         "logical_path": "materialization-policy"
@@ -18,12 +18,12 @@
   "inventory_implementation": {
     "algorithm": "member-inventory-sha256-v1",
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
-    "root_inventory_script_sha256": "2b5dfa2f19dfe9da18d5df3bdaa68379af3a950aa9b4bf85510d12ccc1f6b7dc",
+    "root_inventory_script_sha256": "a785f595b4c4650ba0dda89c46a79b1d08c89ffeabea6513c235d0785c575e5f",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
-    "aggregate_inventory_script_sha256": "e58662c7af09ac578983887314bf5e6ad252a669ba13aad561bae3db6e811e40",
+    "aggregate_inventory_script_sha256": "5b6d4370847ec0aa6dde861d3d4bc28b221c8cabf6ed3ba2b2e791aa6e9c476f",
     "member_contract_digest_bound": true,
     "source_and_restored_aggregate_inventory_sha256_must_match": true,
-    "authoritative_member_source_stability": "kernel-block-readonly-mountinfo-v1"
+    "authoritative_member_source_stability": "kernel-direct-block-readonly-mountinfo-v2"
   },
   "migration_policy": {
     "selection_model": "explicit-positive-allowlist",

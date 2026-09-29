@@ -259,7 +259,7 @@ def collect_inventory(
         )
         is not True
         or implementation.get("authoritative_member_source_stability")
-        != "kernel-block-readonly-mountinfo-v1"
+        != "kernel-direct-block-readonly-mountinfo-v2"
     ):
         raise AggregateInventoryError(
             "aggregate inventory implementation binding is invalid"

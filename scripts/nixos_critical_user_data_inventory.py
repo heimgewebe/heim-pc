@@ -17,8 +17,11 @@ from typing import Any
 CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 INVENTORY_KIND = "heim_pc.critical_user_data_inventory.v1"
 OBSERVATION_KIND = "heim_pc.critical_user_data_inventory_observation.v1"
-ALGORITHM = "canonical-record-stream-sha256-v4"
-SOURCE_STABILITY_MODE = "kernel-block-readonly-mountinfo-v1"
+ALGORITHM = "canonical-record-stream-sha256-v5"
+SOURCE_STABILITY_MODE = "kernel-direct-block-readonly-mountinfo-v2"
+SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
+SYS_DEVICES_ROOT = Path("/sys/devices")
+VIRTUAL_BLOCK_ROOT = SYS_DEVICES_ROOT / "virtual" / "block"
 MAX_CONTRACT_BYTES = 256 * 1024
 DEFAULT_EXCLUSION_SAMPLES = 64
 SQLITE_FAMILY_COMPANION_SUFFIXES = ("-journal", "-wal")
@@ -459,20 +462,75 @@ def _decode_mountinfo_path(value: str) -> Path:
     return Path(decoded)
 
 
-def _block_device_is_read_only(device: tuple[int, int]) -> bool:
-    major, minor = device
-    path = Path(f"/sys/dev/block/{major}:{minor}/ro")
+def _read_sysfs_ro_flag(path: Path, label: str) -> bool:
     try:
         value = path.read_text(encoding="ascii", errors="strict").strip()
     except (OSError, UnicodeError) as exc:
-        raise InventoryError(
-            "authoritative source block-device read-only state is unavailable"
-        ) from exc
+        raise InventoryError(f"{label} is unavailable") from exc
     if value not in {"0", "1"}:
-        raise InventoryError(
-            "authoritative source block-device read-only state is malformed"
-        )
+        raise InventoryError(f"{label} is malformed")
     return value == "1"
+
+
+def _block_device_is_read_only(device: tuple[int, int]) -> bool:
+    major, minor = device
+    return _read_sysfs_ro_flag(
+        SYS_DEV_BLOCK_ROOT / f"{major}:{minor}" / "ro",
+        "authoritative source block-device read-only state",
+    )
+
+
+def _verify_authoritative_block_device_backing(device: tuple[int, int]) -> None:
+    major, minor = device
+    link = SYS_DEV_BLOCK_ROOT / f"{major}:{minor}"
+    try:
+        resolved = link.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise InventoryError(
+            "authoritative source block-device topology is unavailable"
+        ) from exc
+    try:
+        resolved.relative_to(SYS_DEVICES_ROOT)
+    except ValueError as exc:
+        raise InventoryError(
+            "authoritative source block-device topology escaped sysfs devices"
+        ) from exc
+    try:
+        resolved.relative_to(VIRTUAL_BLOCK_ROOT)
+    except ValueError:
+        pass
+    else:
+        raise InventoryError(
+            "authoritative source block device has virtual or indirect backing"
+        )
+
+    for relation in ("slaves", "holders"):
+        relation_dir = resolved / relation
+        try:
+            entries = tuple(relation_dir.iterdir())
+        except FileNotFoundError:
+            entries = ()
+        except OSError as exc:
+            raise InventoryError(
+                "authoritative source block-device topology is unreadable"
+            ) from exc
+        if entries:
+            raise InventoryError(
+                "authoritative source block device has stacked or aliased backing"
+            )
+
+    partition_marker = resolved / "partition"
+    try:
+        is_partition = partition_marker.is_file()
+    except OSError as exc:
+        raise InventoryError(
+            "authoritative source block-device partition topology is unavailable"
+        ) from exc
+    if is_partition and not _read_sysfs_ro_flag(
+        resolved.parent / "ro",
+        "authoritative source parent block-device read-only state",
+    ):
+        raise InventoryError("authoritative source parent block device is writable")
 
 
 def _read_mountinfo() -> list[dict[str, Any]]:
@@ -547,6 +605,7 @@ def _verify_authoritative_source_stability(policy: dict[str, Any]) -> None:
                 f"authoritative source path is unavailable: {_relative(selected, policy['root'])}"
             ) from exc
         device = (os.major(observed.st_dev), os.minor(observed.st_dev))
+        _verify_authoritative_block_device_backing(device)
         if not _block_device_is_read_only(device):
             raise InventoryError(
                 f"authoritative source block device is writable: "

@@ -813,6 +813,129 @@ def test_explicit_path_set_fails_if_ancestor_is_replaced_during_hash(
 
 
 
+
+def _configure_fake_sysfs_block_device(
+    tmp_path,
+    monkeypatch,
+    *,
+    device: tuple[int, int],
+    name: str,
+    virtual: bool,
+    partition: bool = False,
+    read_only: bool = True,
+    parent_read_only: bool = True,
+) -> Path:
+    sys_root = tmp_path / "sys"
+    devices_root = sys_root / "devices"
+    dev_block_root = sys_root / "dev" / "block"
+    virtual_root = devices_root / "virtual" / "block"
+    dev_block_root.mkdir(parents=True)
+    if virtual:
+        target = virtual_root / name
+    else:
+        target = (
+            devices_root
+            / "pci0000:00"
+            / "0000:00:01.0"
+            / "nvme"
+            / "nvme0"
+            / ("nvme0n1p3" if partition else name)
+        )
+    target.mkdir(parents=True)
+    (target / "ro").write_text("1\n" if read_only else "0\n", encoding="ascii")
+    (target / "holders").mkdir()
+    (target / "slaves").mkdir()
+    if partition:
+        (target / "partition").write_text("3\n", encoding="ascii")
+        (target.parent / "ro").write_text(
+            "1\n" if parent_read_only else "0\n",
+            encoding="ascii",
+        )
+    major, minor = device
+    (dev_block_root / f"{major}:{minor}").symlink_to(
+        target,
+        target_is_directory=True,
+    )
+    monkeypatch.setattr(inventory, "SYS_DEV_BLOCK_ROOT", dev_block_root)
+    monkeypatch.setattr(inventory, "SYS_DEVICES_ROOT", devices_root)
+    monkeypatch.setattr(inventory, "VIRTUAL_BLOCK_ROOT", virtual_root)
+    return target
+
+
+@pytest.mark.parametrize(
+    ("device", "name"),
+    [
+        ((7, 0), "loop0"),
+        ((43, 0), "nbd0"),
+        ((253, 0), "dm-0"),
+        ((9, 0), "md0"),
+    ],
+)
+def test_authoritative_block_device_backing_rejects_virtual_devices(
+    tmp_path,
+    monkeypatch,
+    device,
+    name,
+):
+    _configure_fake_sysfs_block_device(
+        tmp_path,
+        monkeypatch,
+        device=device,
+        name=name,
+        virtual=True,
+        read_only=True,
+    )
+    assert inventory._block_device_is_read_only(device) is True
+    with pytest.raises(
+        inventory.InventoryError,
+        match="virtual or indirect backing",
+    ):
+        inventory._verify_authoritative_block_device_backing(device)
+
+
+def test_authoritative_block_device_backing_accepts_read_only_physical_partition(
+    tmp_path,
+    monkeypatch,
+):
+    device = (259, 4)
+    target = _configure_fake_sysfs_block_device(
+        tmp_path,
+        monkeypatch,
+        device=device,
+        name="nvme0n1",
+        virtual=False,
+        partition=True,
+        read_only=True,
+        parent_read_only=True,
+    )
+    (target / "slaves").rmdir()
+    assert inventory._block_device_is_read_only(device) is True
+    inventory._verify_authoritative_block_device_backing(device)
+
+
+def test_authoritative_block_device_backing_rejects_writable_parent_device(
+    tmp_path,
+    monkeypatch,
+):
+    device = (259, 4)
+    _configure_fake_sysfs_block_device(
+        tmp_path,
+        monkeypatch,
+        device=device,
+        name="nvme0n1",
+        virtual=False,
+        partition=True,
+        read_only=True,
+        parent_read_only=False,
+    )
+    assert inventory._block_device_is_read_only(device) is True
+    with pytest.raises(
+        inventory.InventoryError,
+        match="parent block device is writable",
+    ):
+        inventory._verify_authoritative_block_device_backing(device)
+
+
 def test_authoritative_inventory_rejects_writable_block_device_before_hash(
     tmp_path, monkeypatch
 ):
@@ -820,6 +943,11 @@ def test_authoritative_inventory_rejects_writable_block_device_before_hash(
         inventory,
         "_verify_authoritative_source_stability",
         REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_block_device_backing",
+        lambda _device: None,
     )
     home = tmp_path / "home"
     home.mkdir()
@@ -875,6 +1003,11 @@ def test_authoritative_inventory_rejects_writable_covering_mount(
         "_verify_authoritative_source_stability",
         REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
     )
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_block_device_backing",
+        lambda _device: None,
+    )
     home = tmp_path / "home"
     home.mkdir()
     target = home / "value.txt"
@@ -924,6 +1057,11 @@ def test_authoritative_tree_rejects_any_writable_alias_for_source_device(
         inventory,
         "_verify_authoritative_source_stability",
         REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_block_device_backing",
+        lambda _device: None,
     )
     home = tmp_path / "home"
     tree = home / "tree"
@@ -975,6 +1113,11 @@ def test_classification_does_not_require_source_quiescence(
         inventory,
         "_verify_authoritative_source_stability",
         REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_block_device_backing",
+        lambda _device: None,
     )
     home = tmp_path / "home"
     home.mkdir()

@@ -168,7 +168,7 @@ def _write_contracts(tmp_path: Path) -> Path:
             "aggregate_inventory_script_sha256": _sha(MODULE),
             "member_contract_digest_bound": True,
             "source_and_restored_aggregate_inventory_sha256_must_match": True,
-            "authoritative_member_source_stability": "kernel-block-readonly-mountinfo-v1",
+            "authoritative_member_source_stability": "kernel-direct-block-readonly-mountinfo-v2",
         },
     }
     scope_path = tmp_path / "critical-user-data-contract-v1.json"
@@ -190,7 +190,7 @@ def _fake_root_inventory():
             "inventory_sha256": None if classification_only else ("a" * 64),
             "source_stability_verified": False if classification_only else True,
             "source_stability_proof": (
-                None if classification_only else "kernel-block-readonly-mountinfo-v1"
+                None if classification_only else "kernel-direct-block-readonly-mountinfo-v2"
             ),
             "stability_pass_count": 1 if classification_only else 2,
             "stability_proof": (
@@ -319,7 +319,7 @@ def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_
             "inventory_sha256": None if classification_only else ("a" * 64),
             "source_stability_verified": False if classification_only else True,
             "source_stability_proof": (
-                None if classification_only else "kernel-block-readonly-mountinfo-v1"
+                None if classification_only else "kernel-direct-block-readonly-mountinfo-v2"
             ),
             "stability_pass_count": 1 if classification_only else 2,
             "stability_proof": (
