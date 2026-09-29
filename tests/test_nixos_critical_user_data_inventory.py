@@ -29,11 +29,14 @@ REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY = (
 @pytest.fixture(autouse=True)
 def _bypass_authoritative_source_stability_for_low_level_unit_tests():
     original = inventory._verify_authoritative_source_stability
+    original_verified_execution = inventory._VERIFIED_EXECUTION
     inventory._verify_authoritative_source_stability = lambda _policy: None
+    inventory._VERIFIED_EXECUTION = True
     try:
         yield
     finally:
         inventory._verify_authoritative_source_stability = original
+        inventory._VERIFIED_EXECUTION = original_verified_execution
 
 
 def _contract(path: Path, home: Path) -> Path:
@@ -833,14 +836,15 @@ def _configure_fake_sysfs_block_device(
     if virtual:
         target = virtual_root / name
     else:
-        target = (
+        namespace = (
             devices_root
             / "pci0000:00"
             / "0000:00:01.0"
             / "nvme"
             / "nvme0"
-            / ("nvme0n1p3" if partition else name)
+            / "nvme0n1"
         )
+        target = namespace / "nvme0n1p3" if partition else namespace
     target.mkdir(parents=True)
     (target / "ro").write_text("1\n" if read_only else "0\n", encoding="ascii")
     (target / "holders").mkdir()
@@ -911,6 +915,46 @@ def test_authoritative_block_device_backing_accepts_read_only_physical_partition
     (target / "slaves").rmdir()
     assert inventory._block_device_is_read_only(device) is True
     inventory._verify_authoritative_block_device_backing(device)
+
+
+def test_authoritative_block_device_backing_rejects_direct_remote_scsi_partition(
+    tmp_path,
+    monkeypatch,
+):
+    device = (8, 3)
+    sys_root = tmp_path / "sys"
+    devices_root = sys_root / "devices"
+    dev_block_root = sys_root / "dev" / "block"
+    virtual_root = devices_root / "virtual" / "block"
+    dev_block_root.mkdir(parents=True)
+    target = (
+        devices_root
+        / "pci0000:00"
+        / "0000:00:02.0"
+        / "host6"
+        / "session1"
+        / "target6:0:0"
+        / "6:0:0:0"
+        / "block"
+        / "sda"
+        / "sda3"
+    )
+    target.mkdir(parents=True)
+    (target / "ro").write_text("1\n", encoding="ascii")
+    (target / "partition").write_text("3\n", encoding="ascii")
+    (target / "holders").mkdir()
+    (target / "slaves").mkdir()
+    (target.parent / "ro").write_text("1\n", encoding="ascii")
+    (dev_block_root / "8:3").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(inventory, "SYS_DEV_BLOCK_ROOT", dev_block_root)
+    monkeypatch.setattr(inventory, "SYS_DEVICES_ROOT", devices_root)
+    monkeypatch.setattr(inventory, "VIRTUAL_BLOCK_ROOT", virtual_root)
+
+    with pytest.raises(
+        inventory.InventoryError,
+        match="not a local PCI NVMe partition",
+    ):
+        inventory._verify_authoritative_block_device_backing(device)
 
 
 def test_authoritative_block_device_backing_rejects_writable_parent_device(

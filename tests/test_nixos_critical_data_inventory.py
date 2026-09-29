@@ -19,6 +19,13 @@ spec.loader.exec_module(aggregate)
 COLD_ROOT = "/var/lib/heim-pc-data/import/legacy-2026"
 
 
+@pytest.fixture(autouse=True)
+def _verified_aggregate_execution_for_unit_tests(monkeypatch):
+    monkeypatch.setattr(aggregate, "_VERIFIED_EXECUTION", True)
+
+
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -166,9 +173,10 @@ def _write_contracts(tmp_path: Path) -> Path:
             "root_inventory_script_sha256": _sha(ROOT_INVENTORY),
             "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
             "aggregate_inventory_script_sha256": _sha(MODULE),
+            "aggregate_execution_mode": aggregate.AGGREGATE_EXECUTION_MODE,
             "member_contract_digest_bound": True,
             "source_and_restored_aggregate_inventory_sha256_must_match": True,
-            "authoritative_member_source_stability": "kernel-direct-block-readonly-mountinfo-v2",
+            "authoritative_member_source_stability": "kernel-local-pci-nvme-readonly-mountinfo-v3",
         },
     }
     scope_path = tmp_path / "critical-user-data-contract-v1.json"
@@ -180,7 +188,13 @@ def _fake_root_inventory(_payload: bytes | None = None):
     class InventoryError(ValueError):
         pass
 
-    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+    def collect_inventory(
+        path,
+        *,
+        classification_only=False,
+        max_exclusion_samples=0,
+        _contract_payload=None,
+    ):
         value = json.loads(Path(path).read_text(encoding="utf-8"))
         assert value["scope"] == "critical-user-data-home"
         return {
@@ -190,7 +204,7 @@ def _fake_root_inventory(_payload: bytes | None = None):
             "inventory_sha256": None if classification_only else ("a" * 64),
             "source_stability_verified": False if classification_only else True,
             "source_stability_proof": (
-                None if classification_only else "kernel-direct-block-readonly-mountinfo-v2"
+                None if classification_only else "kernel-local-pci-nvme-readonly-mountinfo-v3"
             ),
             "stability_pass_count": 1 if classification_only else 2,
             "stability_proof": (
@@ -204,6 +218,65 @@ def _fake_root_inventory(_payload: bytes | None = None):
         }
 
     return SimpleNamespace(InventoryError=InventoryError, collect_inventory=collect_inventory)
+
+
+def test_aggregate_inventory_loader_executes_verified_payload_not_current_path(
+    monkeypatch, tmp_path
+):
+    script = tmp_path / "nixos_critical_data_inventory.py"
+    verified_payload = b"MARKER = 'verified'\n"
+    script.write_bytes(b"MARKER = 'replacement'\n")
+    monkeypatch.setattr(aggregate, "__file__", str(script))
+
+    loaded = aggregate._load_aggregate_inventory_module(verified_payload)
+
+    assert loaded.MARKER == "verified"
+    assert loaded.__file__ == str(script)
+
+
+def test_main_executes_verified_payload_instead_of_loaded_module(
+    monkeypatch, tmp_path, capsys
+):
+    contract = _write_contracts(tmp_path)
+    payload = b"""def collect_inventory(
+    path,
+    *,
+    classification_only=False,
+    max_exclusion_samples=0,
+    _contract_snapshot=None,
+    _aggregate_script_bytes=None,
+):
+    return {
+        "execution_marker": "verified-payload",
+        "authoritative_inventory": not classification_only,
+    }
+"""
+    script = tmp_path / "nixos_critical_data_inventory.py"
+    script.write_bytes(payload)
+    monkeypatch.setattr(aggregate, "__file__", str(script))
+
+    def forbidden_collect(*_args, **_kwargs):
+        raise AssertionError("already-loaded aggregate module executed inventory")
+
+    monkeypatch.setattr(aggregate, "collect_inventory", forbidden_collect)
+    result = aggregate.main(
+        [
+            "--contract",
+            str(contract),
+            "--classification-only",
+            "--expected-script-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--expected-contract-sha256",
+            _sha(contract),
+            "--verified-payload-bootstrap",
+            aggregate.AGGREGATE_EXECUTION_MODE,
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["execution_marker"] == "verified-payload"
+    assert output["authoritative_inventory"] is False
 
 
 def test_root_inventory_loader_executes_verified_payload_not_current_path(
@@ -224,22 +297,33 @@ def test_main_reuses_pinned_aggregate_contract_payload(monkeypatch, tmp_path):
     contract = _write_contracts(tmp_path)
     expected_script = _sha(MODULE)
     expected_contract = _sha(contract)
+    observed = {}
 
-    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+    def collect_inventory(
+        path,
+        *,
+        classification_only=False,
+        max_exclusion_samples=0,
+        _contract_snapshot=None,
+        _aggregate_script_bytes=None,
+    ):
         replacement = json.loads(Path(path).read_text(encoding="utf-8"))
         replacement["scope"] = "replacement-scope"
         Path(path).write_text(
             json.dumps(replacement, sort_keys=True) + "\n", encoding="utf-8"
         )
-        loaded, payload = aggregate._load_regular_json(
-            Path(path), "aggregate contract"
-        )
+        observed["contract_snapshot"] = _contract_snapshot
+        observed["script_payload"] = _aggregate_script_bytes
+        loaded, payload = _contract_snapshot
         assert loaded["scope"] == "critical-user-data"
         assert hashlib.sha256(payload).hexdigest() == expected_contract
         return {"scope": loaded["scope"], "contract_sha256": expected_contract}
 
-    monkeypatch.setattr(aggregate, "collect_inventory", collect_inventory)
-    original_load_regular_json = aggregate._load_regular_json
+    monkeypatch.setattr(
+        aggregate,
+        "_load_aggregate_inventory_module",
+        lambda _payload: SimpleNamespace(collect_inventory=collect_inventory),
+    )
 
     result = aggregate.main(
         [
@@ -250,11 +334,134 @@ def test_main_reuses_pinned_aggregate_contract_payload(monkeypatch, tmp_path):
             expected_script,
             "--expected-contract-sha256",
             expected_contract,
+            "--verified-payload-bootstrap",
+            aggregate.AGGREGATE_EXECUTION_MODE,
         ]
     )
 
     assert result == 0
-    assert aggregate._load_regular_json is original_load_regular_json
+    assert observed["script_payload"] == MODULE.read_bytes()
+
+
+def test_verified_payload_failure_is_normalized_to_cli_safety_block(
+    monkeypatch, tmp_path, capsys
+):
+    contract = _write_contracts(tmp_path)
+    expected_script = _sha(MODULE)
+    expected_contract = _sha(contract)
+
+    class VerifiedAggregateInventoryError(ValueError):
+        pass
+
+    def fail_closed(*_args, **_kwargs):
+        raise VerifiedAggregateInventoryError("verified module failed closed")
+
+    monkeypatch.setattr(
+        aggregate,
+        "_load_aggregate_inventory_module",
+        lambda _payload: SimpleNamespace(
+            AggregateInventoryError=VerifiedAggregateInventoryError,
+            collect_inventory=fail_closed,
+        ),
+    )
+
+    result = aggregate.main(
+        [
+            "--contract",
+            str(contract),
+            "--classification-only",
+            "--expected-script-sha256",
+            expected_script,
+            "--expected-contract-sha256",
+            expected_contract,
+            "--verified-payload-bootstrap",
+            aggregate.AGGREGATE_EXECUTION_MODE,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "blocked by a safety check" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_pinned_aggregate_cli_requires_verified_payload_bootstrap(
+    monkeypatch, tmp_path, capsys
+):
+    contract = _write_contracts(tmp_path)
+    called = {"value": False}
+
+    def forbidden_loader(_payload):
+        called["value"] = True
+        raise AssertionError("unverified bootstrap reached payload execution")
+
+    monkeypatch.setattr(aggregate, "_load_aggregate_inventory_module", forbidden_loader)
+    result = aggregate.main(
+        [
+            "--contract",
+            str(contract),
+            "--classification-only",
+            "--expected-script-sha256",
+            _sha(MODULE),
+            "--expected-contract-sha256",
+            _sha(contract),
+        ]
+    )
+
+    assert result == 2
+    assert called["value"] is False
+    assert "blocked by a safety check" in capsys.readouterr().err
+
+
+def test_aggregate_passes_verified_member_contract_payload_to_root(
+    monkeypatch, tmp_path
+):
+    contract = _write_contracts(tmp_path)
+    scope = json.loads(contract.read_text(encoding="utf-8"))
+    member_path = tmp_path / scope["members"][0]["contract_file"]
+    expected_payload = member_path.read_bytes()
+    expected_sha = hashlib.sha256(expected_payload).hexdigest()
+
+    class InventoryError(ValueError):
+        pass
+
+    def collect_inventory(
+        path,
+        *,
+        classification_only=False,
+        max_exclusion_samples=0,
+        _contract_payload=None,
+    ):
+        Path(path).write_text("{}\n", encoding="utf-8")
+        assert _contract_payload == expected_payload
+        value = json.loads(_contract_payload.decode("utf-8"))
+        return {
+            "scope": value["scope"],
+            "contract_sha256": expected_sha,
+            "authoritative_inventory": False,
+            "inventory_sha256": None,
+            "source_stability_verified": False,
+            "source_stability_proof": None,
+            "stability_pass_count": 1,
+            "stability_proof": "classification-only-single-pass",
+            "record_count": 0,
+            "regular_file_bytes": 0,
+            "exclusion_boundary_count": 0,
+        }
+
+    monkeypatch.setattr(
+        aggregate,
+        "_load_root_inventory_module",
+        lambda _payload: SimpleNamespace(
+            InventoryError=InventoryError,
+            collect_inventory=collect_inventory,
+        ),
+    )
+
+    result = aggregate.collect_inventory(contract, classification_only=True)
+
+    assert result["members"][0]["contract_sha256"] == expected_sha
 
 
 def test_aggregate_inventory_binds_explicit_member_digest(monkeypatch, tmp_path):
@@ -292,7 +499,13 @@ def test_aggregate_rejects_authoritative_member_without_source_stability(
     fake = _fake_root_inventory()
     real_collect = fake.collect_inventory
 
-    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+    def collect_inventory(
+        path,
+        *,
+        classification_only=False,
+        max_exclusion_samples=0,
+        _contract_payload=None,
+    ):
         result = real_collect(
             path,
             classification_only=classification_only,
@@ -361,7 +574,13 @@ def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_
     class InventoryError(ValueError):
         pass
 
-    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+    def collect_inventory(
+        path,
+        *,
+        classification_only=False,
+        max_exclusion_samples=0,
+        _contract_payload=None,
+    ):
         value = json.loads(Path(path).read_text(encoding="utf-8"))
         return {
             "scope": value["scope"],
@@ -370,7 +589,7 @@ def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_
             "inventory_sha256": None if classification_only else ("a" * 64),
             "source_stability_verified": False if classification_only else True,
             "source_stability_proof": (
-                None if classification_only else "kernel-direct-block-readonly-mountinfo-v2"
+                None if classification_only else "kernel-local-pci-nvme-readonly-mountinfo-v3"
             ),
             "stability_pass_count": 1 if classification_only else 2,
             "stability_proof": (

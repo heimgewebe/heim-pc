@@ -17,8 +17,9 @@ from typing import Any
 CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 INVENTORY_KIND = "heim_pc.critical_user_data_inventory.v1"
 OBSERVATION_KIND = "heim_pc.critical_user_data_inventory_observation.v1"
-ALGORITHM = "canonical-record-stream-sha256-v5"
-SOURCE_STABILITY_MODE = "kernel-direct-block-readonly-mountinfo-v2"
+ALGORITHM = "canonical-record-stream-sha256-v6"
+SOURCE_STABILITY_MODE = "kernel-local-pci-nvme-readonly-mountinfo-v3"
+_VERIFIED_EXECUTION = False
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
 SYS_DEVICES_ROOT = Path("/sys/devices")
 VIRTUAL_BLOCK_ROOT = SYS_DEVICES_ROOT / "virtual" / "block"
@@ -526,8 +527,34 @@ def _verify_authoritative_block_device_backing(device: tuple[int, int]) -> None:
         raise InventoryError(
             "authoritative source block-device partition topology is unavailable"
         ) from exc
-    if is_partition and not _read_sysfs_ro_flag(
-        resolved.parent / "ro",
+    relative = resolved.relative_to(SYS_DEVICES_ROOT)
+    namespace = resolved.parent
+    controller = namespace.parent
+    namespace_suffix = (
+        namespace.name[len(controller.name) + 1 :]
+        if namespace.name.startswith(controller.name + "n")
+        else ""
+    )
+    partition_suffix = (
+        resolved.name[len(namespace.name) + 1 :]
+        if resolved.name.startswith(namespace.name + "p")
+        else ""
+    )
+    if (
+        not is_partition
+        or not relative.parts
+        or not relative.parts[0].startswith("pci")
+        or controller.parent.name != "nvme"
+        or not controller.name.startswith("nvme")
+        or not controller.name[4:].isdigit()
+        or not namespace_suffix.isdigit()
+        or not partition_suffix.isdigit()
+    ):
+        raise InventoryError(
+            "authoritative source block device is not a local PCI NVMe partition"
+        )
+    if not _read_sysfs_ro_flag(
+        namespace / "ro",
         "authoritative source parent block-device read-only state",
     ):
         raise InventoryError("authoritative source parent block device is writable")
@@ -627,6 +654,21 @@ def _verify_authoritative_source_stability(policy: dict[str, Any]) -> None:
             )
 
 
+def load_contract_payload(
+    payload: bytes,
+) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_CONTRACT_BYTES:
+        raise InventoryError("critical-user-data contract size is invalid")
+    try:
+        value = json.loads(payload.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InventoryError("critical-user-data contract is invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise InventoryError("critical-user-data contract must be an object")
+    normalized = _validate_contract(value)
+    return value, payload, normalized
+
+
 def load_contract(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     path = Path(path)
     try:
@@ -639,13 +681,9 @@ def load_contract(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
         raise InventoryError("critical-user-data contract size is invalid")
     try:
         payload = path.read_bytes()
-        value = json.loads(payload.decode("utf-8", "strict"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         raise InventoryError("critical-user-data contract is invalid JSON") from exc
-    if not isinstance(value, dict):
-        raise InventoryError("critical-user-data contract must be an object")
-    normalized = _validate_contract(value)
-    return value, payload, normalized
+    return load_contract_payload(payload)
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -1110,10 +1148,14 @@ def _collect_inventory_once(
     *,
     classification_only: bool = False,
     max_exclusion_samples: int = DEFAULT_EXCLUSION_SAMPLES,
+    _loaded_contract: tuple[dict[str, Any], bytes, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if isinstance(max_exclusion_samples, bool) or max_exclusion_samples < 0:
         raise InventoryError("max exclusion samples is invalid")
-    _contract, contract_bytes, policy = load_contract(contract_path)
+    if _loaded_contract is None:
+        _contract, contract_bytes, policy = load_contract(contract_path)
+    else:
+        _contract, contract_bytes, policy = _loaded_contract
     root: Path = policy["root"]
     try:
         linked = root.lstat()
@@ -1761,12 +1803,17 @@ def collect_inventory(
     *,
     classification_only: bool = False,
     max_exclusion_samples: int = DEFAULT_EXCLUSION_SAMPLES,
+    _contract_payload: bytes | None = None,
 ) -> dict[str, Any]:
+    loaded_contract = (
+        None if _contract_payload is None else load_contract_payload(_contract_payload)
+    )
     if classification_only:
         first = _collect_inventory_once(
             contract_path,
             classification_only=True,
             max_exclusion_samples=max_exclusion_samples,
+            _loaded_contract=loaded_contract,
         )
         first["stability_pass_count"] = 1
         first["stability_proof"] = "classification-only-single-pass"
@@ -1774,18 +1821,26 @@ def collect_inventory(
         first["source_stability_proof"] = None
         return first
 
-    _contract, _contract_bytes, policy = load_contract(contract_path)
+    if not _VERIFIED_EXECUTION:
+        raise InventoryError(
+            "authoritative inventory requires verified aggregate execution"
+        )
+    if loaded_contract is None:
+        loaded_contract = load_contract(contract_path)
+    _contract, _contract_bytes, policy = loaded_contract
     _verify_authoritative_source_stability(policy)
     first = _collect_inventory_once(
         contract_path,
         classification_only=False,
         max_exclusion_samples=max_exclusion_samples,
+        _loaded_contract=loaded_contract,
     )
     _verify_authoritative_source_stability(policy)
     confirmation = _collect_inventory_once(
         contract_path,
         classification_only=False,
         max_exclusion_samples=max_exclusion_samples,
+        _loaded_contract=loaded_contract,
     )
     _verify_authoritative_source_stability(policy)
     stability_fields = (
@@ -1841,9 +1896,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    original_load_contract = load_contract
-    pinned_contract: tuple[dict[str, Any], bytes, dict[str, Any]] | None = None
+    pinned_contract_payload: bytes | None = None
     try:
+        if not args.classification_only:
+            raise InventoryError(
+                "authoritative root inventory must run through verified aggregate execution"
+            )
         pin_values = (
             args.expected_script_sha256,
             args.expected_contract_sha256,
@@ -1866,30 +1924,20 @@ def main(argv: list[str] | None = None) -> int:
                 raise InventoryError("inventory script source cannot be pinned") from exc
             if _sha256_bytes(script_payload) != expected_script:
                 raise InventoryError("inventory script source digest mismatch")
-            pinned_contract = original_load_contract(args.contract)
+            pinned_contract = load_contract(args.contract)
             if _sha256_bytes(pinned_contract[1]) != expected_contract:
                 raise InventoryError("critical-user-data contract digest mismatch")
-
-            def pinned_load_contract(
-                path: Path,
-            ) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
-                if Path(path) == args.contract:
-                    assert pinned_contract is not None
-                    return pinned_contract
-                return original_load_contract(path)
-
-            globals()["load_contract"] = pinned_load_contract
+            pinned_contract_payload = pinned_contract[1]
 
         result = collect_inventory(
             args.contract,
-            classification_only=args.classification_only,
+            classification_only=True,
             max_exclusion_samples=args.max_exclusion_samples,
+            _contract_payload=pinned_contract_payload,
         )
     except InventoryError:
         print("critical-user-data inventory blocked by a safety check", file=os.sys.stderr)
         return 2
-    finally:
-        globals()["load_contract"] = original_load_contract
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

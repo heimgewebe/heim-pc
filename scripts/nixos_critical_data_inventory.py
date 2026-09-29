@@ -18,6 +18,8 @@ ROOT_INVENTORY_SCRIPT = Path(__file__).with_name("nixos_critical_user_data_inven
 SCOPE_KIND = "heim_pc.critical_user_data_scope_contract"
 AGGREGATE_KIND = "heim_pc.critical_user_data_aggregate_inventory.v1"
 AGGREGATE_ALGORITHM = "member-inventory-sha256-v1"
+AGGREGATE_EXECUTION_MODE = "verified-payload-self-bootstrap-v1"
+_VERIFIED_EXECUTION = False
 MAX_CONTRACT_BYTES = 256 * 1024
 
 
@@ -66,6 +68,20 @@ def _load_root_inventory_module(payload: bytes):
     module = types.ModuleType("nixos_critical_user_data_inventory")
     module.__file__ = str(ROOT_INVENTORY_SCRIPT)
     exec(code, module.__dict__)
+    module._VERIFIED_EXECUTION = True
+    return module
+
+
+def _load_aggregate_inventory_module(payload: bytes):
+    path = Path(__file__)
+    try:
+        code = compile(payload, str(path), "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise AggregateInventoryError("aggregate inventory implementation is invalid") from exc
+    module = types.ModuleType("nixos_critical_data_inventory_verified")
+    module.__file__ = str(path)
+    exec(code, module.__dict__)
+    module._VERIFIED_EXECUTION = True
     return module
 
 
@@ -215,9 +231,20 @@ def collect_inventory(
     *,
     classification_only: bool = False,
     max_exclusion_samples: int = 0,
+    _contract_snapshot: tuple[dict[str, Any], bytes] | None = None,
+    _aggregate_script_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     contract_path = Path(contract_path)
-    contract, contract_bytes = _load_regular_json(contract_path, "aggregate contract")
+    if not classification_only and not _VERIFIED_EXECUTION:
+        raise AggregateInventoryError(
+            "authoritative aggregate inventory requires verified payload execution"
+        )
+    if _contract_snapshot is None:
+        contract, contract_bytes = _load_regular_json(
+            contract_path, "aggregate contract"
+        )
+    else:
+        contract, contract_bytes = _contract_snapshot
     if (
         contract.get("schema_version") != 1
         or contract.get("kind") != SCOPE_KIND
@@ -241,6 +268,7 @@ def collect_inventory(
         "root_inventory_script_sha256",
         "aggregate_inventory_script",
         "aggregate_inventory_script_sha256",
+        "aggregate_execution_mode",
         "member_contract_digest_bound",
         "source_and_restored_aggregate_inventory_sha256_must_match",
         "authoritative_member_source_stability",
@@ -253,13 +281,15 @@ def collect_inventory(
         != "scripts/nixos_critical_user_data_inventory.py"
         or implementation.get("aggregate_inventory_script")
         != "scripts/nixos_critical_data_inventory.py"
+        or implementation.get("aggregate_execution_mode")
+        != AGGREGATE_EXECUTION_MODE
         or implementation.get("member_contract_digest_bound") is not True
         or implementation.get(
             "source_and_restored_aggregate_inventory_sha256_must_match"
         )
         is not True
         or implementation.get("authoritative_member_source_stability")
-        != "kernel-direct-block-readonly-mountinfo-v2"
+        != "kernel-local-pci-nvme-readonly-mountinfo-v3"
     ):
         raise AggregateInventoryError(
             "aggregate inventory implementation binding is invalid"
@@ -274,7 +304,11 @@ def collect_inventory(
     )
     try:
         root_script_bytes = ROOT_INVENTORY_SCRIPT.read_bytes()
-        aggregate_script_bytes = Path(__file__).read_bytes()
+        aggregate_script_bytes = (
+            Path(__file__).read_bytes()
+            if _aggregate_script_bytes is None
+            else _aggregate_script_bytes
+        )
     except OSError as exc:
         raise AggregateInventoryError("inventory implementation cannot be read") from exc
     if _sha256_bytes(root_script_bytes) != expected_root_script:
@@ -334,6 +368,7 @@ def collect_inventory(
                 member_path,
                 classification_only=classification_only,
                 max_exclusion_samples=max_exclusion_samples,
+                _contract_payload=member_bytes,
             )
         except root_inventory.InventoryError as exc:
             raise AggregateInventoryError(
@@ -423,51 +458,74 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--classification-only", action="store_true")
     parser.add_argument("--expected-script-sha256")
     parser.add_argument("--expected-contract-sha256")
+    parser.add_argument("--verified-payload-bootstrap")
     parser.add_argument("--max-exclusion-samples", type=int, default=0)
     args = parser.parse_args(argv)
 
-    original_load_regular_json = _load_regular_json
-    pinned_contract: tuple[dict[str, Any], bytes] | None = None
     try:
-        if bool(args.expected_script_sha256) != bool(args.expected_contract_sha256):
+        pin_values = (
+            args.expected_script_sha256,
+            args.expected_contract_sha256,
+        )
+        if any(pin_values) and not all(pin_values):
             raise AggregateInventoryError(
                 "source pinning requires both expected SHA-256 values"
             )
-        if args.expected_script_sha256:
+        if all(pin_values):
+            if args.verified_payload_bootstrap != AGGREGATE_EXECUTION_MODE:
+                raise AggregateInventoryError(
+                    "source pinning requires verified payload bootstrap"
+                )
             expected_script = _require_sha(
                 args.expected_script_sha256, "expected script digest"
             )
             expected_contract = _require_sha(
                 args.expected_contract_sha256, "expected contract digest"
             )
-            if _sha256_bytes(Path(__file__).read_bytes()) != expected_script:
-                raise AggregateInventoryError("aggregate inventory script digest mismatch")
-            pinned_contract = original_load_regular_json(
+            try:
+                script_payload = Path(__file__).read_bytes()
+            except OSError as exc:
+                raise AggregateInventoryError(
+                    "aggregate inventory implementation cannot be read"
+                ) from exc
+            if _sha256_bytes(script_payload) != expected_script:
+                raise AggregateInventoryError(
+                    "aggregate inventory script digest mismatch"
+                )
+            pinned_contract = _load_regular_json(
                 args.contract, "aggregate contract"
             )
             if _sha256_bytes(pinned_contract[1]) != expected_contract:
                 raise AggregateInventoryError("aggregate contract digest mismatch")
 
-            def pinned_load_regular_json(
-                path: Path, label: str
-            ) -> tuple[dict[str, Any], bytes]:
-                if Path(path) == args.contract:
-                    assert pinned_contract is not None
-                    return pinned_contract
-                return original_load_regular_json(path, label)
-
-            globals()["_load_regular_json"] = pinned_load_regular_json
-
-        result = collect_inventory(
-            args.contract,
-            classification_only=args.classification_only,
-            max_exclusion_samples=args.max_exclusion_samples,
-        )
+            verified_module = _load_aggregate_inventory_module(script_payload)
+            try:
+                result = verified_module.collect_inventory(
+                    args.contract,
+                    classification_only=args.classification_only,
+                    max_exclusion_samples=args.max_exclusion_samples,
+                    _contract_snapshot=pinned_contract,
+                    _aggregate_script_bytes=script_payload,
+                )
+            except verified_module.AggregateInventoryError as exc:
+                raise AggregateInventoryError(str(exc)) from exc
+        else:
+            if args.verified_payload_bootstrap:
+                raise AggregateInventoryError(
+                    "verified payload bootstrap requires source pinning"
+                )
+            if not args.classification_only:
+                raise AggregateInventoryError(
+                    "authoritative aggregate CLI requires verified payload bootstrap"
+                )
+            result = collect_inventory(
+                args.contract,
+                classification_only=True,
+                max_exclusion_samples=args.max_exclusion_samples,
+            )
     except (AggregateInventoryError, OSError):
         print("critical aggregate inventory blocked by a safety check", file=os.sys.stderr)
         return 2
-    finally:
-        globals()["_load_regular_json"] = original_load_regular_json
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 
