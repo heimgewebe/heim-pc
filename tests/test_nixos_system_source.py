@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "ead1608f459e79b9b7ce9d44380611046991b8a70b9ff02446ddd46b39462ed2"
+SOURCE_SNAPSHOT_SHA256 = "614571f54b6a91b11fc2f298e0f4bbe296561f75f394103c0a2fdcebed335b73"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -270,6 +270,12 @@ class T(unittest.TestCase):
         trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
         lifecycle = json.loads((ROOT / "nixos/production/nix-lifecycle-contract-v1.json").read_text())
         recovery = json.loads((ROOT / "nixos/production/recovery-contract-v1.json").read_text())
+        critical_path = ROOT / "nixos/production/critical-user-data-contract-v1.json"
+        critical_home_path = ROOT / "nixos/production/critical-user-home-data-contract-v1.json"
+        critical = json.loads(critical_path.read_text())
+        critical_home = json.loads(critical_home_path.read_text())
+        critical_sha256 = hashlib.sha256(critical_path.read_bytes()).hexdigest()
+        critical_home_sha256 = hashlib.sha256(critical_home_path.read_bytes()).hexdigest()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         trust_module = (SOURCE / "modules/nix-trust.nix").read_text()
         lifecycle_module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
@@ -378,6 +384,143 @@ class T(unittest.TestCase):
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
         self.assertIn("../../modules/nix-lifecycle.nix", host)
 
+        self.assertEqual(critical["schema_version"], 1)
+        self.assertEqual(critical["kind"], "heim_pc.critical_user_data_scope_contract")
+        self.assertEqual(critical["scope"], "critical-user-data")
+        self.assertEqual(critical["scope_semantics"], "explicit-positive-selection")
+        implementation = critical["inventory_implementation"]
+        self.assertEqual(
+            implementation["root_inventory_script_sha256"],
+            hashlib.sha256(
+                (ROOT / "scripts/nixos_critical_user_data_inventory.py").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            implementation["aggregate_inventory_script_sha256"],
+            hashlib.sha256(
+                (ROOT / "scripts/nixos_critical_data_inventory.py").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(implementation["aggregate_execution_mode"], "external-verified-payload-exec-v1")
+        self.assertEqual(
+            implementation["authoritative_member_source_stability"],
+            "kernel-local-pci-nvme-readonly-mountinfo-v3",
+        )
+        self.assertEqual([member["id"] for member in critical["members"]], ["home"])
+        (home_member,) = critical["members"]
+        self.assertEqual(home_member["contract_file"], "critical-user-home-data-contract-v1.json")
+        self.assertEqual(home_member["contract_sha256"], critical_home_sha256)
+        self.assertEqual(home_member["destination"], {"nixos_storage_domain": "per-entry-policy", "logical_path": "materialization-policy"})
+        self.assertEqual(home_member["restore_mode"], "source-scope-with-role-specific-materialization")
+        self.assertEqual(critical_home["scope"], "critical-user-data-home")
+        self.assertEqual(critical_home["root"], "/home/alex")
+        self.assertEqual(critical_home["scope_semantics"], "explicit-path-set")
+        self.assertEqual(
+            critical_home["inventory"]["algorithm"],
+            "canonical-record-stream-sha256-v7",
+        )
+        self.assertTrue(critical_home["inventory"]["uid_gid_bound"])
+        self.assertTrue(
+            critical_home["inventory"]["explicit_ancestor_metadata_bound"]
+        )
+        self.assertTrue(critical_home["inventory"]["xattrs_sha256_bound"])
+        selected = {item["path"] for item in critical_home["includes"]}
+        for required in {
+            "/home/alex/collections/bibliothek",
+            "/home/alex/repos/schotter",
+            "/home/alex/repos/fotoatelier",
+            "/home/alex/.ssh",
+            "/home/alex/.config/grabowski/review-evidence-signing-ed25519",
+            "/home/alex/.local/state/grabowski/tasks.sqlite3",
+            "/home/alex/.local/state/bureau/bureau.sqlite3",
+            "/home/alex/.local/state/chronik/data",
+            "/home/alex/.local/state/grosser-adler/findings",
+        }:
+            self.assertIn(required, selected)
+        for excluded in {
+            "/home/alex/vault-gewebe",
+            "/home/alex/CZURScannerDoc",
+            "/home/alex/Digitalisierer",
+            "/home/alex/.local/share/heim-utilities/paperless",
+            "/home/alex/repos/arden-relaunch-demo",
+            "/home/alex/repos/wolf-drechsel-local-ai",
+            "/var/lib/docker/volumes",
+        }:
+            self.assertNotIn(excluded, selected)
+        by_source = {item["path"]: item for item in critical_home["includes"]}
+        recovery_signer = by_source[
+            "/home/alex/.config/grabowski/review-evidence-signing-ed25519"
+        ]
+        self.assertEqual(recovery_signer["class"], "credentials-and-identity")
+        self.assertEqual(recovery_signer["capture"], "file")
+        self.assertEqual(recovery_signer["restore_mode"], "private-credential-file")
+        self.assertEqual(by_source["/home/alex/collections/bibliothek"]["class"], "legacy-library-preservation")
+        self.assertEqual(by_source["/home/alex/collections/bibliothek"]["restore_mode"], "cold-preservation-tree")
+        for repo_name in ("schotter", "fotoatelier"):
+            self.assertEqual(by_source[f"/home/alex/repos/{repo_name}"]["restore_mode"], "cold-preservation-git-capsule")
+
+        materialization = critical_home["materialization_policy"]
+        cold_root = "/var/lib/heim-pc-data/import/legacy-2026"
+        self.assertEqual(materialization["kind"], "heim_pc.critical_user_data_materialization_policy")
+        self.assertTrue(materialization["source_scope_and_nixos_target_layout_are_separate"])
+        self.assertTrue(materialization["source_equivalent_disposable_restore_required"])
+        self.assertEqual(materialization["cold_import_root"], cold_root)
+        self.assertEqual(materialization["schema_version"], 1)
+        self.assertFalse(materialization["first_productive_boot_requires_cold_import_completion"])
+        self.assertTrue(materialization["roles"]["bootstrap-direct"]["source_path_is_live_target_path"])
+        self.assertFalse(materialization["roles"]["authority-reconcile"]["source_path_is_live_target_path"])
+        self.assertTrue(materialization["roles"]["authority-reconcile"]["direct_activation_forbidden"])
+        self.assertFalse(materialization["roles"]["cold-preservation"]["required_before_first_productive_boot"])
+        cold = {item["source_path"]: item for item in materialization["cold_entries"]}
+        self.assertEqual(cold["/home/alex/collections/bibliothek"]["target_path"], cold_root + "/bibliothek")
+        self.assertFalse(cold["/home/alex/collections/bibliothek"]["old_source_path_becomes_active_path"])
+        self.assertTrue(cold["/home/alex/collections/bibliothek"]["future_importer_required"])
+        for repo_name in ("schotter", "fotoatelier"):
+            capsule = cold[f"/home/alex/repos/{repo_name}"]
+            self.assertEqual(capsule["capsule_kind"], "git-bundle-plus-working-tree-overlay")
+            self.assertEqual(capsule["bundle_path"], f"{cold_root}/repos/{repo_name}.gitbundle")
+            self.assertEqual(capsule["bundle_mode"], "--all")
+            self.assertEqual(capsule["working_tree_overlay_policy"], "required-iff-tracked-dirty-or-untracked")
+            self.assertFalse(capsule["active_checkout_created_automatically"])
+
+        self.assertIn('"d ${coldImportRoot}/authority 0700 root root -"', backup_module)
+        self.assertIn('"d ${coldImportRoot}/repos 0700 root root -"', backup_module)
+        self.assertEqual(critical_home["selection_policy"]["default"], "exclude")
+        self.assertFalse(critical_home["selection_policy"]["unlisted_paths_are_migration_data"])
+        self.assertEqual(critical["migration_policy"]["selection_model"], "explicit-positive-allowlist")
+        self.assertFalse(critical["migration_policy"]["unlisted_data_migrated"])
+        self.assertTrue(critical["migration_policy"]["system_state_recreated_from_nix"])
+        self.assertTrue(critical["migration_policy"]["old_system_disk_preserved_as_independent_fallback"])
+        self.assertTrue(critical["migration_policy"]["remote_reproducible_repositories_excluded"])
+        self.assertTrue(critical["migration_policy"]["operator_state_restored_via_authority_reconcile"])
+        self.assertFalse(critical["migration_policy"]["legacy_docker_volume_tree_migrated"])
+        self.assertFalse(critical["migration_policy"]["root_owned_grabowski_runtime_state_migrated"])
+        self.assertTrue(critical["migration_policy"]["root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy"])
+        self.assertFalse(critical["migration_policy"]["source_paths_define_nixos_target_layout"])
+        self.assertEqual(critical["migration_policy"]["cold_preservation_storage_domain"], "@data")
+        self.assertEqual(critical["migration_policy"]["cold_preservation_import_root"], cold_root)
+        self.assertFalse(critical["migration_policy"]["cold_preservation_required_before_first_productive_boot"])
+        self.assertFalse(critical["migration_policy"]["local_only_repository_auto_checkout"])
+        self.assertFalse(critical["migration_policy"]["legacy_library_source_path_restored"])
+        self.assertTrue(critical["migration_policy"]["operator_state_direct_restore_forbidden"])
+        self.assertFalse((ROOT / "nixos/production/critical-docker-volume-data-contract-v1.json").exists())
+        self.assertEqual(
+            recovery["critical_user_data_scope"],
+            {
+                "contract_kind": "heim_pc.critical_user_data_scope_contract",
+                "scope": "critical-user-data",
+                "sha256": critical_sha256,
+                "off_host_restore_critical_scope_sha256_bound": True,
+                "off_host_restore_source_inventory_sha256_bound": True,
+                "off_host_restore_restored_inventory_sha256_bound": True,
+                "off_host_restore_inventory_sha256_equality_required": True,
+                "aggregate_member_contracts_bound": True,
+            },
+        )
+
+        self.assertTrue(
+            recovery["readiness_bundle"]["critical_user_data_contract_sha256_bound"]
+        )
         self.assertEqual(recovery["status"], "external-evidence-required")
         self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
         self.assertTrue(
@@ -475,8 +618,33 @@ class T(unittest.TestCase):
             "heim_pc.nixos_pre_cutover_readiness",
         )
         self.assertTrue(recovery["readiness_bundle"]["evidence_freshness_bound"])
+        self.assertTrue(
+            recovery["readiness_bundle"][
+                "critical_user_data_contract_sha256_bound"
+            ]
+        )
         self.assertFalse(recovery["readiness_bundle"]["production_effects_authorized"])
         self.assertIn("heim-pc/recovery-contract.json", backup_module)
+        self.assertIn("heim-pc/critical-user-data-contract.json", backup_module)
+        self.assertIn("heim-pc/critical-user-home-data-contract.json", backup_module)
+        self.assertNotIn("criticalDockerVolumesPath", backup_module)
+        self.assertIn('builtins.hashFile "sha256" criticalUserDataPath', backup_module)
+        self.assertIn('builtins.hashFile "sha256" criticalUserHomePath', backup_module)
+        self.assertIn("/var/lib/heim-pc-data/import/legacy-2026", backup_module)
+        self.assertIn("contract.critical_user_data_scope.sha256 == criticalUserDataSha256", flake)
+        self.assertIn("contract.critical_user_data_scope.aggregate_member_contracts_bound", flake)
+        self.assertIn(
+            "off_host_restore_inventory_sha256_equality_required",
+            backup_module,
+        )
+        self.assertIn(
+            "off_host_restore_inventory_sha256_equality_required",
+            flake,
+        )
+        self.assertIn("heim-pc/critical-user-data-contract.json", flake)
+        self.assertIn("heim-pc/critical-user-home-data-contract.json", flake)
+        self.assertNotIn("criticalDockerVolumesPath", flake)
+        self.assertIn('!builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json"', flake)
         self.assertGreaterEqual(validate_workflow.count("persist-credentials: false"), 2)
 
     def test_managed_root_entrypoint_exists(self):
