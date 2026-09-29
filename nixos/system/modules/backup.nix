@@ -27,6 +27,9 @@ in
         && recovery.critical_user_data_scope.scope == "critical-user-data"
         && recovery.critical_user_data_scope.sha256 == criticalUserDataSha256
         && recovery.critical_user_data_scope.off_host_restore_critical_scope_sha256_bound
+        && recovery.critical_user_data_scope.off_host_restore_source_inventory_sha256_bound
+        && recovery.critical_user_data_scope.off_host_restore_restored_inventory_sha256_bound
+        && recovery.critical_user_data_scope.off_host_restore_inventory_sha256_equality_required
         && recovery.critical_user_data_scope.aggregate_member_contracts_bound
         && criticalUserData.schema_version == 1
         && criticalUserData.kind == "heim_pc.critical_user_data_scope_contract"

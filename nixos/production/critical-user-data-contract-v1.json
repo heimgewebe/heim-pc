@@ -20,7 +20,7 @@
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
     "root_inventory_script_sha256": "b3b1b83a5369a890422ecd5b3ad72d0614bef27112a8d22f6e9b18e61e437f65",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
-    "aggregate_inventory_script_sha256": "0cc8538c4293a0fc1fc4cdf81aa12c854ceabe80ae84dfbf368e097ce923b8c9",
+    "aggregate_inventory_script_sha256": "03d433c9d4d9cbb114e3ac32d19ae577be63da99fdd94e18cd40fff0a705c402",
     "member_contract_digest_bound": true,
     "source_and_restored_aggregate_inventory_sha256_must_match": true
   },

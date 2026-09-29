@@ -315,6 +315,14 @@ def collect_inventory(
 
         if result.get("scope") != member_contract.get("scope"):
             raise AggregateInventoryError(f"{member_id} member inventory scope mismatch")
+        result_contract_sha = _require_sha(
+            result.get("contract_sha256"),
+            f"{member_id} member inventory contract digest",
+        )
+        if result_contract_sha != expected_member_sha:
+            raise AggregateInventoryError(
+                f"{member_id} member inventory contract digest mismatch"
+            )
         if not classification_only:
             member_digest = _require_sha(
                 result.get("inventory_sha256"), f"{member_id} member inventory digest"

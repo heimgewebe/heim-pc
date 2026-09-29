@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "ec1beb346f7dd27c4329f16149594c6099f324cd1f7dbfc31a418b3ca6cae289"
+SOURCE_SNAPSHOT_SHA256 = "d89a235bc4216729d0a7369e6fdd72225fae16c08986fe7b1357004964ad8cf3"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -474,6 +474,9 @@ class T(unittest.TestCase):
                 "scope": "critical-user-data",
                 "sha256": critical_sha256,
                 "off_host_restore_critical_scope_sha256_bound": True,
+                "off_host_restore_source_inventory_sha256_bound": True,
+                "off_host_restore_restored_inventory_sha256_bound": True,
+                "off_host_restore_inventory_sha256_equality_required": True,
                 "aggregate_member_contracts_bound": True,
             },
         )
@@ -590,6 +593,14 @@ class T(unittest.TestCase):
         self.assertIn("/var/lib/heim-pc-data/import/legacy-2026", backup_module)
         self.assertIn("contract.critical_user_data_scope.sha256 == criticalUserDataSha256", flake)
         self.assertIn("contract.critical_user_data_scope.aggregate_member_contracts_bound", flake)
+        self.assertIn(
+            "off_host_restore_inventory_sha256_equality_required",
+            backup_module,
+        )
+        self.assertIn(
+            "off_host_restore_inventory_sha256_equality_required",
+            flake,
+        )
         self.assertIn("heim-pc/critical-user-data-contract.json", flake)
         self.assertIn("heim-pc/critical-user-home-data-contract.json", flake)
         self.assertNotIn("criticalDockerVolumesPath", flake)

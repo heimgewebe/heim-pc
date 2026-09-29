@@ -617,12 +617,18 @@ def _validate_critical_user_data_contract(
             "scope",
             "sha256",
             "off_host_restore_critical_scope_sha256_bound",
+            "off_host_restore_source_inventory_sha256_bound",
+            "off_host_restore_restored_inventory_sha256_bound",
+            "off_host_restore_inventory_sha256_equality_required",
             "aggregate_member_contracts_bound",
         }
         or binding.get("contract_kind") != CRITICAL_USER_DATA_CONTRACT_KIND
         or binding.get("scope") != "critical-user-data"
         or binding.get("sha256") != contract_sha256
         or binding.get("off_host_restore_critical_scope_sha256_bound") is not True
+        or binding.get("off_host_restore_source_inventory_sha256_bound") is not True
+        or binding.get("off_host_restore_restored_inventory_sha256_bound") is not True
+        or binding.get("off_host_restore_inventory_sha256_equality_required") is not True
         or binding.get("aggregate_member_contracts_bound") is not True
     ):
         raise ReadinessError("recovery contract critical-user-data binding is invalid")
@@ -742,6 +748,15 @@ def _validate_provenance_object(
         if facts.get("critical_scope_sha256") != critical_scope_sha256:
             raise ReadinessError(
                 f"{label} critical-user-data scope digest mismatch"
+            )
+        _sha(
+            facts.get("source_inventory_sha256"),
+            f"{label} source inventory digest",
+        )
+        if expected_kind == RECOVERY_RESTORE_TEST_PROVENANCE_KIND:
+            _sha(
+                facts.get("restored_inventory_sha256"),
+                f"{label} restored inventory digest",
             )
     if value.get("observed_at") != observed_at:
         raise ReadinessError(f"{label} observation mismatch")
@@ -1015,6 +1030,25 @@ def _validate_receipt(
             expected_owner_uid=expected_owner_uid,
             runner=attestation_verifier,
         )
+        if evidence_id == "off-host-home-restore":
+            source_inventory_sha256 = evidence_provenance["facts"][
+                "source_inventory_sha256"
+            ]
+            restore_source_inventory_sha256 = restore_provenance["facts"][
+                "source_inventory_sha256"
+            ]
+            restored_inventory_sha256 = restore_provenance["facts"][
+                "restored_inventory_sha256"
+            ]
+            if restore_source_inventory_sha256 != source_inventory_sha256:
+                raise ReadinessError(
+                    "off-host-home-restore restore source inventory digest mismatch"
+                )
+            if restored_inventory_sha256 != source_inventory_sha256:
+                raise ReadinessError(
+                    "off-host-home-restore source/restored aggregate inventory "
+                    "digest mismatch"
+                )
         restore_observed_at = restore_test["observed_at"]
         restore_status = "passed"
     else:

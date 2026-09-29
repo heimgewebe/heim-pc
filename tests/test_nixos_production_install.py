@@ -296,7 +296,10 @@ def synthetic_readiness_path(
             "result": "passed",
             "producer_receipt_sha256": "a" * 64,
             "facts": (
-                {"critical_scope_sha256": critical_sha}
+                {
+                    "critical_scope_sha256": critical_sha,
+                    "source_inventory_sha256": "c" * 64,
+                }
                 if item["id"] == "off-host-home-restore"
                 else {"synthetic_fact_sha256": "a" * 64}
             ),
@@ -334,7 +337,11 @@ def synthetic_readiness_path(
                 "result": "passed",
                 "producer_receipt_sha256": "b" * 64,
                 "facts": (
-                    {"critical_scope_sha256": critical_sha}
+                    {
+                        "critical_scope_sha256": critical_sha,
+                        "source_inventory_sha256": "c" * 64,
+                        "restored_inventory_sha256": "c" * 64,
+                    }
                     if item["id"] == "off-host-home-restore"
                     else {"synthetic_fact_sha256": "b" * 64}
                 ),

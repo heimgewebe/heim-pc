@@ -141,7 +141,15 @@ def _provenance(
             "result": "passed",
             "producer_receipt_sha256": receipt_digit * 64,
             "facts": (
-                {"critical_scope_sha256": critical_scope_sha256}
+                {
+                    "critical_scope_sha256": critical_scope_sha256,
+                    "source_inventory_sha256": "c" * 64,
+                    **(
+                        {"restored_inventory_sha256": "c" * 64}
+                        if kind == ready.RECOVERY_RESTORE_TEST_PROVENANCE_KIND
+                        else {}
+                    ),
+                }
                 if requirement["id"] == "off-host-home-restore"
                 else {"synthetic_fact_sha256": receipt_digit * 64}
             ),
@@ -400,6 +408,81 @@ def test_off_host_home_restore_critical_scope_digest_mismatch_is_rejected(
         ready.ReadinessError,
         match="critical-user-data scope digest mismatch",
     ):
+        _validate(fx)
+
+
+@pytest.mark.parametrize(
+    ("provenance_kind", "field", "message"),
+    [
+        ("primary", "source_inventory_sha256", "source inventory digest"),
+        ("restore", "source_inventory_sha256", "source inventory digest"),
+        ("restore", "restored_inventory_sha256", "restored inventory digest"),
+    ],
+)
+def test_off_host_home_restore_inventory_digest_fact_is_required(
+    tmp_path, provenance_kind, field, message
+):
+    fx = _fixture(tmp_path)
+    receipt_path = fx[3]["off-host-home-restore"]
+    receipt = json.loads(receipt_path.read_text())
+    if provenance_kind == "primary":
+        provenance_path = Path(receipt["evidence_provenance_path"])
+        digest_owner = receipt
+        digest_field = "evidence_provenance_sha256"
+    else:
+        provenance_path = Path(
+            receipt["restore_test"]["evidence_provenance_path"]
+        )
+        digest_owner = receipt["restore_test"]
+        digest_field = "evidence_provenance_sha256"
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence"]["facts"].pop(field)
+    _write_private(provenance_path, provenance)
+    digest_owner[digest_field] = _sha(provenance_path)
+    _write_private(receipt_path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == "off-host-home-restore":
+            binding["sha256"] = _sha(receipt_path)
+    _write_private(fx[0], bundle)
+
+    with pytest.raises(ready.ReadinessError, match=message):
+        _validate(fx)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("source_inventory_sha256", "restore source inventory digest mismatch"),
+        (
+            "restored_inventory_sha256",
+            "source/restored aggregate inventory digest mismatch",
+        ),
+    ],
+)
+def test_off_host_home_restore_inventory_digest_mismatch_is_rejected(
+    tmp_path, field, message
+):
+    fx = _fixture(tmp_path)
+    receipt_path = fx[3]["off-host-home-restore"]
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(
+        receipt["restore_test"]["evidence_provenance_path"]
+    )
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence"]["facts"][field] = "d" * 64
+    _write_private(provenance_path, provenance)
+    receipt["restore_test"]["evidence_provenance_sha256"] = _sha(
+        provenance_path
+    )
+    _write_private(receipt_path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == "off-host-home-restore":
+            binding["sha256"] = _sha(receipt_path)
+    _write_private(fx[0], bundle)
+
+    with pytest.raises(ready.ReadinessError, match=message):
         _validate(fx)
 
 

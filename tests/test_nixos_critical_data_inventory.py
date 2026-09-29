@@ -184,6 +184,7 @@ def _fake_root_inventory():
         assert value["scope"] == "critical-user-data-home"
         return {
             "scope": value["scope"],
+            "contract_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
             "authoritative_inventory": not classification_only,
             "inventory_sha256": None if classification_only else ("a" * 64),
             "record_count": 3,
@@ -239,6 +240,40 @@ def test_classification_does_not_claim_authoritative_digest(monkeypatch, tmp_pat
             "exclusion_boundary_count": 0,
         }
     ]
+
+
+def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+
+    class InventoryError(ValueError):
+        pass
+
+    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        return {
+            "scope": value["scope"],
+            "contract_sha256": "b" * 64,
+            "authoritative_inventory": not classification_only,
+            "inventory_sha256": None if classification_only else ("a" * 64),
+            "record_count": 3,
+            "regular_file_bytes": 11,
+            "exclusion_boundary_count": 0,
+        }
+
+    monkeypatch.setattr(
+        aggregate,
+        "_load_root_inventory_module",
+        lambda: SimpleNamespace(
+            InventoryError=InventoryError,
+            collect_inventory=collect_inventory,
+        ),
+    )
+
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="member inventory contract digest mismatch",
+    ):
+        aggregate.collect_inventory(contract, classification_only=True)
 
 
 def test_aggregate_rejects_member_contract_drift(monkeypatch, tmp_path):
