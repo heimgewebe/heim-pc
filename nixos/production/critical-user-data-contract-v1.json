@@ -18,7 +18,7 @@
   "inventory_implementation": {
     "algorithm": "member-inventory-sha256-v1",
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
-    "root_inventory_script_sha256": "08d150a48a84aa3ea1ac461d503dcc43fd134f762be33e98f4d4ad34b1d76f44",
+    "root_inventory_script_sha256": "5f3b9aa1e2ad49da932ac699023f7f020e562d1d6ec0584a8c9dafb6ffaef572",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
     "aggregate_inventory_script_sha256": "f71996ac1b3722a0785465e9504c2cfd23878d1b85597ddaff7a5bebf0a49d84",
     "aggregate_execution_mode": "external-verified-payload-exec-v1",

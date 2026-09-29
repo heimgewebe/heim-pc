@@ -476,19 +476,15 @@ def test_sqlite_wal_created_after_listing_is_still_captured_in_order(
         connection.close()
 
 
-def test_explicit_sqlite_family_fails_closed_when_read_guard_unavailable(
+def test_explicit_sqlite_family_uses_frozen_bytes_when_read_guard_unavailable(
     tmp_path, monkeypatch
 ):
     home = tmp_path / "home"
     home.mkdir()
     database = home / "state.sqlite3"
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute("CREATE TABLE payload(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO payload VALUES ('alpha')")
-        connection.commit()
-    finally:
-        connection.close()
+    wal = home / "state.sqlite3-wal"
+    database.write_bytes(b"main-bytes")
+    wal.write_bytes(b"wal-bytes")
 
     contract = _explicit_contract(
         tmp_path / "explicit.json",
@@ -496,7 +492,7 @@ def test_explicit_sqlite_family_fails_closed_when_read_guard_unavailable(
         [{
             "path": str(database),
             "class": "authority",
-            "rationale": "consistent SQLite snapshot required",
+            "rationale": "frozen SQLite family bytes required",
             "capture": "sqlite-family",
             "restore_mode": "authority-reconcile",
         }],
@@ -506,14 +502,15 @@ def test_explicit_sqlite_family_fails_closed_when_read_guard_unavailable(
 
     def unavailable_guard(*_args, **_kwargs):
         attempts["count"] += 1
-        raise sqlite3.OperationalError("database is locked")
+        raise sqlite3.OperationalError("read-only restore has no SHM")
 
     monkeypatch.setattr(inventory.sqlite3, "connect", unavailable_guard)
-    monkeypatch.setattr(inventory.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(inventory.InventoryError, match="SQLite family did not stabilize"):
-        inventory.collect_inventory(contract)
-    assert attempts["count"] == inventory.SQLITE_FAMILY_MAX_ATTEMPTS
+    result = inventory.collect_inventory(contract)
+
+    assert result["authoritative_inventory"] is True
+    assert result["type_counts"]["regular"] == 2
+    assert attempts["count"] == 2
 
 
 def test_sqlite_wal_family_fails_closed_when_companion_never_stabilizes(

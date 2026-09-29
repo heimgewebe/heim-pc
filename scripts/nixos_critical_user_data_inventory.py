@@ -1819,7 +1819,6 @@ def _collect_inventory_once(
                     root=root,
                     root_device=root_device,
                     classification_only=False,
-                    require_read_guard=True,
                 )
                 accumulator.record(main_record)
                 for companion_name in companions:
