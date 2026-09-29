@@ -747,6 +747,49 @@ def test_explicit_path_set_rejects_symlinked_ancestor(tmp_path):
         inventory.collect_inventory(contract)
 
 
+
+def test_explicit_path_set_fails_if_ancestor_is_replaced_during_hash(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    parent = home / "parent"
+    parent.mkdir(parents=True)
+    target = parent / "value.txt"
+    target.write_text("old-bytes\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "valuable",
+            "rationale": "path binding must remain stable",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    real_hash = inventory._hash_fd
+    changed = {"done": False}
+
+    def replace_ancestor_after_hash(fd):
+        digest = real_hash(fd)
+        if not changed["done"]:
+            old_parent = home / "parent-old"
+            parent.rename(old_parent)
+            parent.mkdir()
+            (parent / "value.txt").write_text("new-bytes\n", encoding="utf-8")
+            changed["done"] = True
+        return digest
+
+    monkeypatch.setattr(inventory, "_hash_fd", replace_ancestor_after_hash)
+    with pytest.raises(
+        inventory.InventoryError,
+        match="ancestor binding changed during capture",
+    ):
+        inventory.collect_inventory(contract)
+    assert changed["done"] is True
+
+
 def test_explicit_path_set_excludes_unlisted_data_by_default(tmp_path):
     home = tmp_path / "home"
     keep = home / "keep"

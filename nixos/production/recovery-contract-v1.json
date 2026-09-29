@@ -8,7 +8,7 @@
   "critical_user_data_scope": {
     "contract_kind": "heim_pc.critical_user_data_scope_contract",
     "scope": "critical-user-data",
-    "sha256": "d1c391304b0e593bc1bbfc59007f4923be7e9828b8001781767f9901b587e265",
+    "sha256": "cdaa04c0ac07075cdfe70706baa2ddbf5151f1d8160269f180f78f3add27a4d3",
     "off_host_restore_critical_scope_sha256_bound": true,
     "aggregate_member_contracts_bound": true,
     "off_host_restore_source_inventory_sha256_bound": true,

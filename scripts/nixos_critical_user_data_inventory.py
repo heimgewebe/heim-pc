@@ -488,6 +488,10 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _path_binding_identity(info: os.stat_result) -> tuple[int, int, int]:
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+
+
 def _hash_fd(fd: int) -> str:
     digest = hashlib.sha256()
     while True:
@@ -1186,7 +1190,7 @@ def collect_inventory(
         *,
         relative_path: str,
         root_device: int,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, tuple[tuple[str, tuple[int, int, int]], ...]]:
         try:
             parts = selected.relative_to(root).parts
         except ValueError as exc:
@@ -1203,6 +1207,7 @@ def collect_inventory(
             parent_flags |= os.O_NOFOLLOW
 
         current_fd = os.dup(root_fd)
+        ancestor_bindings: list[tuple[str, tuple[int, int, int]]] = []
         try:
             for component in parts[:-1]:
                 try:
@@ -1222,20 +1227,101 @@ def collect_inventory(
                             f"included path ancestor is on a foreign filesystem: "
                             f"{relative_path}"
                         )
+                    ancestor_bindings.append(
+                        (component, _path_binding_identity(opened))
+                    )
                 except BaseException:
                     os.close(next_fd)
                     raise
                 os.close(current_fd)
                 current_fd = next_fd
-            return current_fd, parts[-1]
+            return current_fd, parts[-1], tuple(ancestor_bindings)
         except BaseException:
             os.close(current_fd)
             raise
 
-    def record_explicit_path(entry: dict[str, Any], root_device: int) -> None:
+    def revalidate_explicit_binding(
+        *,
+        relative_path: str,
+        ancestor_bindings: tuple[tuple[str, tuple[int, int, int]], ...],
+        selected_name: str,
+        selected_binding: tuple[int, int, int],
+        root_binding: tuple[int, int, int],
+        root_device: int,
+    ) -> None:
+        parent_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            parent_flags |= os.O_NOFOLLOW
+        try:
+            current_fd = os.open(root, parent_flags)
+        except OSError as exc:
+            raise InventoryError(
+                f"contract root cannot be revalidated after capture: {relative_path}"
+            ) from exc
+        try:
+            current_root = os.fstat(current_fd)
+            if (
+                current_root.st_dev != root_device
+                or _path_binding_identity(current_root) != root_binding
+            ):
+                raise InventoryError(
+                    f"contract root binding changed during capture: {relative_path}"
+                )
+            for component, expected_binding in ancestor_bindings:
+                try:
+                    next_fd = os.open(
+                        component,
+                        parent_flags,
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    raise InventoryError(
+                        f"included path ancestor binding changed during capture: "
+                        f"{relative_path}"
+                    ) from exc
+                try:
+                    current = os.fstat(next_fd)
+                    if (
+                        current.st_dev != root_device
+                        or _path_binding_identity(current) != expected_binding
+                    ):
+                        raise InventoryError(
+                            f"included path ancestor binding changed during capture: "
+                            f"{relative_path}"
+                        )
+                except BaseException:
+                    os.close(next_fd)
+                    raise
+                os.close(current_fd)
+                current_fd = next_fd
+            try:
+                current_selected = os.stat(
+                    selected_name,
+                    dir_fd=current_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise InventoryError(
+                    f"included path binding changed during capture: {relative_path}"
+                ) from exc
+            if (
+                current_selected.st_dev != root_device
+                or _path_binding_identity(current_selected) != selected_binding
+            ):
+                raise InventoryError(
+                    f"included path binding changed during capture: {relative_path}"
+                )
+        finally:
+            os.close(current_fd)
+
+    def record_explicit_path(
+        entry: dict[str, Any],
+        root_device: int,
+        root_binding: tuple[int, int, int],
+    ) -> None:
         selected: Path = entry["path"]
         rel = _relative(selected, root)
-        parent_fd, selected_name = open_explicit_parent(
+        parent_fd, selected_name, ancestor_bindings = open_explicit_parent(
             selected,
             relative_path=rel,
             root_device=root_device,
@@ -1283,6 +1369,14 @@ def collect_inventory(
                         }
                     )
                     walk(fd, selected, root_device)
+                    revalidate_explicit_binding(
+                        relative_path=rel,
+                        ancestor_bindings=ancestor_bindings,
+                        selected_name=selected_name,
+                        selected_binding=_path_binding_identity(opened),
+                        root_binding=root_binding,
+                        root_device=root_device,
+                    )
                 finally:
                     os.close(fd)
                 return
@@ -1357,6 +1451,14 @@ def collect_inventory(
                     companion_record = companion_records.get(companion_name)
                     if companion_record is not None:
                         accumulator.record(companion_record)
+                revalidate_explicit_binding(
+                    relative_path=rel,
+                    ancestor_bindings=ancestor_bindings,
+                    selected_name=selected_name,
+                    selected_binding=_path_binding_identity(observed),
+                    root_binding=root_binding,
+                    root_device=root_device,
+                )
                 return
 
             if capture != "file" or not stat.S_ISREG(observed.st_mode):
@@ -1371,6 +1473,14 @@ def collect_inventory(
                         "gid": observed.st_gid,
                         "size_bytes": observed.st_size,
                     }
+                )
+                revalidate_explicit_binding(
+                    relative_path=rel,
+                    ancestor_bindings=ancestor_bindings,
+                    selected_name=selected_name,
+                    selected_binding=_path_binding_identity(observed),
+                    root_binding=root_binding,
+                    root_device=root_device,
                 )
                 return
             flags = os.O_RDONLY | os.O_CLOEXEC
@@ -1401,6 +1511,14 @@ def collect_inventory(
                         "sha256": content_sha256,
                     }
                 )
+                revalidate_explicit_binding(
+                    relative_path=rel,
+                    ancestor_bindings=ancestor_bindings,
+                    selected_name=selected_name,
+                    selected_binding=_path_binding_identity(after),
+                    root_binding=root_binding,
+                    root_device=root_device,
+                )
             finally:
                 os.close(fd)
         finally:
@@ -1411,8 +1529,9 @@ def collect_inventory(
         if _identity(root_info) != _identity(linked):
             raise InventoryError("critical-user-data root changed during open")
         if policy["scope_semantics"] == "explicit-path-set":
+            root_binding = _path_binding_identity(root_info)
             for entry in policy["include_paths"]:
-                record_explicit_path(entry, root_info.st_dev)
+                record_explicit_path(entry, root_info.st_dev, root_binding)
         else:
             accumulator.record(
                 {
