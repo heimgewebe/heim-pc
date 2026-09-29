@@ -37,6 +37,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         starttime_ticks: int = 100,
         rss_anon: int = 10 * 1024**3,
         mem_available: int = 32 * 1024**3,
+        system_swap_total: int | None = 20 * 1024**3,
+        system_swap_free: int | None = 4 * 1024**3,
         dev_shm_used: int = 0,
         t003_shm_entry_count: int = 0,
         t003_loop_count: int = 0,
@@ -52,6 +54,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             rss_bytes=rss_anon + 16 * 1024**2,
             swap_bytes=256 * 1024**2,
             mem_available_bytes=mem_available,
+            system_swap_total_bytes=system_swap_total,
+            system_swap_free_bytes=system_swap_free,
             dev_shm_used_bytes=dev_shm_used,
             t003_shm_entry_count=t003_shm_entry_count,
             t003_loop_count=t003_loop_count,
@@ -100,6 +104,7 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
 
     def test_policy_matches_conservative_live_thresholds(self) -> None:
         self.assertEqual(self.policy["warn_rss_anon_bytes"], 18 * 1024**3)
+        self.assertEqual(self.policy["warn_system_swap_free_bytes"], 1 * 1024**3)
         self.assertEqual(self.policy["restart_rss_anon_bytes"], 24 * 1024**3)
         self.assertEqual(self.policy["emergency_mem_available_bytes"], 8 * 1024**3)
         self.assertEqual(self.policy["emergency_rss_anon_bytes"], 12 * 1024**3)
@@ -200,6 +205,89 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             self.observation(rss_anon=18 * 1024**3),
         )
         self.assertEqual((action, reason), ("warn", "rss_warn_threshold"))
+
+    def test_low_system_swap_warns_without_restart(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                mem_available=32 * 1024**3,
+                system_swap_total=20 * 1024**3,
+                system_swap_free=512 * 1024**2,
+            ),
+        )
+        self.assertEqual((action, reason), ("warn", "system_swap_low"))
+
+    def test_system_swap_warning_threshold_boundaries(self) -> None:
+        state = guard.default_state(self.policy)
+        threshold = self.policy["warn_system_swap_free_bytes"]
+        _, at_action, at_reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                system_swap_total=20 * 1024**3,
+                system_swap_free=threshold,
+            ),
+        )
+        _, above_action, above_reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                system_swap_total=20 * 1024**3,
+                system_swap_free=threshold + 1,
+            ),
+        )
+        self.assertEqual((at_action, at_reason), ("warn", "system_swap_low"))
+        self.assertEqual((above_action, above_reason), ("none", "healthy"))
+
+    def test_small_or_disabled_system_swap_does_not_warn(self) -> None:
+        state = guard.default_state(self.policy)
+        for total, free in ((1 * 1024**3, 0), (0, 0)):
+            with self.subTest(total=total, free=free):
+                _, action, reason = guard.evaluate(
+                    self.policy,
+                    state,
+                    self.observation(
+                        rss_anon=6 * 1024**3,
+                        system_swap_total=total,
+                        system_swap_free=free,
+                    ),
+                )
+                self.assertEqual((action, reason), ("none", "healthy"))
+
+    def test_unknown_system_swap_does_not_warn(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                system_swap_total=None,
+                system_swap_free=None,
+            ),
+        )
+        self.assertEqual((action, reason), ("none", "healthy"))
+
+    def test_system_swap_warning_precedes_t003_diagnostics(self) -> None:
+        state = guard.default_state(self.policy)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            state,
+            self.observation(
+                rss_anon=6 * 1024**3,
+                system_swap_total=20 * 1024**3,
+                system_swap_free=512 * 1024**2,
+                dev_shm_used=20 * 1024**3,
+                t003_shm_entry_count=1,
+                t003_loop_count=1,
+                stale_t003_loop_count=1,
+            ),
+        )
+        self.assertEqual((action, reason), ("warn", "system_swap_low"))
 
     def test_stale_t003_loop_is_warn_only(self) -> None:
         state = guard.default_state(self.policy)
@@ -657,6 +745,8 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         process_cgroup: str = "/system.slice/grabowski-operator.service",
         rss_anon_kib: int = 13 * 1024**2,
         mem_available_kib: int = 7 * 1024**2,
+        swap_total_kib: int | None = 20 * 1024**2,
+        swap_free_kib: int | None = 4 * 1024**2,
     ) -> tuple[Path, Path]:
         proc = base / "proc"
         cgroup = base / "cgroup"
@@ -672,10 +762,15 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
         (process / "stat").write_text(
             f"{pid} (python) S 1 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 100\n"
         )
-        (proc / "meminfo").write_text(
+        meminfo = (
             "MemTotal:       65740408 kB\n"
             f"MemAvailable:   {mem_available_kib} kB\n"
         )
+        if swap_total_kib is not None:
+            meminfo += f"SwapTotal:      {swap_total_kib} kB\n"
+        if swap_free_kib is not None:
+            meminfo += f"SwapFree:       {swap_free_kib} kB\n"
+        (proc / "meminfo").write_text(meminfo)
         unit_cgroup = cgroup / "system.slice/grabowski-operator.service"
         unit_cgroup.mkdir(parents=True)
         (unit_cgroup / "memory.current").write_text(str(17 * 1024**3))
@@ -693,6 +788,102 @@ class GrabowskiMemoryGuardTests(unittest.TestCase):
             "ControlGroup=/system.slice/grabowski-operator.service\n",
             "",
         )
+
+    def test_observe_parses_system_swap_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(
+                Path(temporary),
+                rss_anon_kib=6 * 1024**2,
+                mem_available_kib=32 * 1024**2,
+                swap_total_kib=20 * 1024**2,
+                swap_free_kib=3 * 1024**2,
+            )
+            with patch.object(
+                guard,
+                "_read_t003_shm_state",
+                return_value=(0, 0, 0, 0),
+            ):
+                observation = guard.observe(
+                    self.policy,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    now_unix=100,
+                )
+
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.system_swap_total_bytes, 20 * 1024**3)
+        self.assertEqual(observation.system_swap_free_bytes, 3 * 1024**3)
+
+    def test_missing_system_swap_does_not_blind_primary_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, cgroup = self._fake_proc(
+                Path(temporary),
+                swap_free_kib=None,
+            )
+            with patch.object(
+                guard,
+                "_read_t003_shm_state",
+                return_value=(0, 0, 0, 0),
+            ):
+                observation = guard.observe(
+                    self.policy,
+                    runner=self.active_show,
+                    proc_root=proc,
+                    cgroup_root=cgroup,
+                    now_unix=100,
+                )
+
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIsNone(observation.system_swap_total_bytes)
+        self.assertIsNone(observation.system_swap_free_bytes)
+        _, action, reason = guard.evaluate(
+            self.policy,
+            guard.default_state(self.policy),
+            observation,
+        )
+        self.assertEqual((action, reason), ("restart", "host_memory_emergency"))
+
+    def test_system_swap_parser_rejects_missing_or_malformed_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _ = self._fake_proc(Path(temporary), swap_free_kib=None)
+            with self.assertRaisesRegex(guard.GuardError, "required swap fields"):
+                guard._read_system_swap(proc)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _ = self._fake_proc(Path(temporary))
+            (proc / "meminfo").write_text(
+                "MemAvailable:   33554432 kB\n"
+                "SwapTotal:      20971520 kB\n"
+                "SwapFree:       invalid kB\n"
+            )
+            with self.assertRaisesRegex(guard.GuardError, "SwapFree is invalid"):
+                guard._read_system_swap(proc)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            proc, _ = self._fake_proc(Path(temporary))
+            (proc / "meminfo").write_text(
+                "MemAvailable:   33554432 kB\n"
+                "SwapTotal:      1048576 kB\n"
+                "SwapFree:       1048577 kB\n"
+            )
+            with self.assertRaisesRegex(guard.GuardError, "SwapFree exceeds SwapTotal"):
+                guard._read_system_swap(proc)
+
+    def test_swap_metrics_are_recorded_in_events(self) -> None:
+        event = guard._event(
+            self.observation(
+                system_swap_total=20 * 1024**3,
+                system_swap_free=512 * 1024**2,
+            ),
+            action="warn",
+            reason="system_swap_low",
+            result="observed",
+        )
+        self.assertEqual(event["observation"]["system_swap_total_bytes"], 20 * 1024**3)
+        self.assertEqual(event["observation"]["system_swap_free_bytes"], 512 * 1024**2)
 
     def test_observe_rejects_process_cgroup_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

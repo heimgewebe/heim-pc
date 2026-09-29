@@ -6,6 +6,7 @@
     "expected_control_group": "/system.slice/grabowski-operator.service",
     "sample_interval_seconds": 15,
     "warn_rss_anon_bytes": 19327352832,
+    "warn_system_swap_free_bytes": 1073741824,
     "restart_rss_anon_bytes": 25769803776,
     "confirm_samples": 2,
     "emergency_mem_available_bytes": 8589934592,
@@ -20,6 +21,7 @@
   "does_not_establish": [
     "the_internal_root_cause_of_grabowski_memory_growth",
     "that_a_high_rss_grabowski_process_is_faulty",
+    "system_swap_exhaustion_is_caused_by_grabowski",
     "absence_of_future_global_oom_from_other_processes",
     "permanent_optimality_of_guard_thresholds"
   ]
