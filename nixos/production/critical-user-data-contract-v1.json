@@ -7,7 +7,7 @@
     {
       "id": "home",
       "contract_file": "critical-user-home-data-contract-v1.json",
-      "contract_sha256": "dbf35b2bf3123c7979c0ff36f09d1bec065e71d9018b94413fe5d43d4b2239f8",
+      "contract_sha256": "ed8d816d98311d719e68760367b7a8d5b09ef759aac5182b46d2f17b76a87ec7",
       "destination": {
         "nixos_storage_domain": "per-entry-policy",
         "logical_path": "materialization-policy"
@@ -18,7 +18,7 @@
   "inventory_implementation": {
     "algorithm": "member-inventory-sha256-v1",
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
-    "root_inventory_script_sha256": "f5fe3247bec4d6e210e20ddd1622e00c65cc9c339bc399a60cdf10280fab0fb8",
+    "root_inventory_script_sha256": "dc2f158595aee1897e679c75920da235814e02936f6252ca5e7e8bade5592508",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
     "aggregate_inventory_script_sha256": "03d433c9d4d9cbb114e3ac32d19ae577be63da99fdd94e18cd40fff0a705c402",
     "member_contract_digest_bound": true,

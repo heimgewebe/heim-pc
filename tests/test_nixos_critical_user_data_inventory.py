@@ -790,6 +790,123 @@ def test_explicit_path_set_fails_if_ancestor_is_replaced_during_hash(
     assert changed["done"] is True
 
 
+
+
+def test_authoritative_inventory_rejects_tree_same_name_replace_between_passes(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    tree = home / "tree"
+    tree.mkdir(parents=True)
+    early = tree / "a-early.txt"
+    late = tree / "z-late.txt"
+    early.write_text("early-a\n", encoding="utf-8")
+    late.write_text("late\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(tree),
+            "class": "valuable",
+            "rationale": "tree capture must converge across full passes",
+            "capture": "tree",
+            "restore_mode": "byte-identical",
+        }],
+    )
+
+    real_hash = inventory._hash_fd
+    calls = {"count": 0}
+
+    def replace_early_after_late_hash(fd):
+        digest = real_hash(fd)
+        calls["count"] += 1
+        if calls["count"] == 2:
+            replacement = tree / ".replacement"
+            replacement.write_text("early-b\n", encoding="utf-8")
+            replacement.replace(early)
+        return digest
+
+    monkeypatch.setattr(inventory, "_hash_fd", replace_early_after_late_hash)
+    with pytest.raises(
+        inventory.InventoryError,
+        match="did not converge across full stability passes",
+    ):
+        inventory.collect_inventory(contract)
+    assert calls["count"] == 4
+
+
+def test_authoritative_inventory_rejects_cross_pass_content_drift(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    early = home / "a-early.txt"
+    late = home / "z-late.txt"
+    early.write_text("early-a\n", encoding="utf-8")
+    late.write_text("late\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [
+            {
+                "path": str(early),
+                "class": "valuable",
+                "rationale": "captured before later work",
+                "capture": "file",
+                "restore_mode": "private",
+            },
+            {
+                "path": str(late),
+                "class": "valuable",
+                "rationale": "later capture creates the race window",
+                "capture": "file",
+                "restore_mode": "private",
+            },
+        ],
+    )
+
+    real_hash = inventory._hash_fd
+    calls = {"count": 0}
+
+    def mutate_early_after_late_hash(fd):
+        digest = real_hash(fd)
+        calls["count"] += 1
+        if calls["count"] == 2:
+            early.write_text("early-b\n", encoding="utf-8")
+        return digest
+
+    monkeypatch.setattr(inventory, "_hash_fd", mutate_early_after_late_hash)
+    with pytest.raises(
+        inventory.InventoryError,
+        match="did not converge across full stability passes",
+    ):
+        inventory.collect_inventory(contract)
+    assert calls["count"] == 4
+
+
+def test_authoritative_inventory_reports_two_pass_stability_proof(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "value.txt"
+    target.write_text("stable\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "valuable",
+            "rationale": "stable source",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    result = inventory.collect_inventory(contract)
+    assert result["authoritative_inventory"] is True
+    assert result["stability_pass_count"] == 2
+    assert result["stability_proof"] == "two-consecutive-identical-full-captures"
+
+
 def test_explicit_path_set_excludes_unlisted_data_by_default(tmp_path):
     home = tmp_path / "home"
     keep = home / "keep"
@@ -910,3 +1027,5 @@ def test_explicit_classification_does_not_open_selected_file_contents(tmp_path, 
     assert result["authoritative_inventory"] is False
     assert result["inventory_sha256"] is None
     assert result["record_count"] == 1
+    assert result["stability_pass_count"] == 1
+    assert result["stability_proof"] == "classification-only-single-pass"

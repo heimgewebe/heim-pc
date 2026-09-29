@@ -17,7 +17,7 @@ from typing import Any
 CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 INVENTORY_KIND = "heim_pc.critical_user_data_inventory.v1"
 OBSERVATION_KIND = "heim_pc.critical_user_data_inventory_observation.v1"
-ALGORITHM = "canonical-record-stream-sha256-v1"
+ALGORITHM = "canonical-record-stream-sha256-v2"
 MAX_CONTRACT_BYTES = 256 * 1024
 DEFAULT_EXCLUSION_SAMPLES = 64
 SQLITE_FAMILY_COMPANION_SUFFIXES = ("-journal", "-wal")
@@ -921,7 +921,7 @@ class _Accumulator:
             self.exclusion_samples.append(value)
 
 
-def collect_inventory(
+def _collect_inventory_once(
     contract_path: Path,
     *,
     classification_only: bool = False,
@@ -1547,7 +1547,7 @@ def collect_inventory(
         os.close(root_fd)
 
     contract_sha256 = _sha256_bytes(contract_bytes)
-    return {
+    result = {
         "schema_version": 1,
         "kind": OBSERVATION_KIND if classification_only else INVENTORY_KIND,
         "scope": policy["scope"],
@@ -1568,6 +1568,58 @@ def collect_inventory(
         "exclusion_samples": accumulator.exclusion_samples,
         "production_effects_authorized": False,
     }
+
+    return result
+
+
+def collect_inventory(
+    contract_path: Path,
+    *,
+    classification_only: bool = False,
+    max_exclusion_samples: int = DEFAULT_EXCLUSION_SAMPLES,
+) -> dict[str, Any]:
+    first = _collect_inventory_once(
+        contract_path,
+        classification_only=classification_only,
+        max_exclusion_samples=max_exclusion_samples,
+    )
+    if classification_only:
+        first["stability_pass_count"] = 1
+        first["stability_proof"] = "classification-only-single-pass"
+        return first
+
+    confirmation = _collect_inventory_once(
+        contract_path,
+        classification_only=False,
+        max_exclusion_samples=max_exclusion_samples,
+    )
+    stability_fields = (
+        "scope",
+        "root",
+        "algorithm",
+        "critical_scope_sha256",
+        "contract_sha256",
+        "inventory_sha256",
+        "record_count",
+        "type_counts",
+        "regular_file_bytes",
+        "exclusion_boundary_count",
+        "exclusion_boundary_sha256",
+        "exclusion_class_counts",
+    )
+    mismatched = [
+        field
+        for field in stability_fields
+        if first.get(field) != confirmation.get(field)
+    ]
+    if mismatched:
+        raise InventoryError(
+            "authoritative inventory did not converge across full stability passes: "
+            + ", ".join(mismatched)
+        )
+    first["stability_pass_count"] = 2
+    first["stability_proof"] = "two-consecutive-identical-full-captures"
+    return first
 
 
 def _default_contract() -> Path:
