@@ -7,7 +7,7 @@
     {
       "id": "home",
       "contract_file": "critical-user-home-data-contract-v1.json",
-      "contract_sha256": "3fadc770b0d8c09447bc07eae668fc50d973da8a13f700e9cc085c87b5a8c757",
+      "contract_sha256": "2a5a04811feb52fec23fc525a5efaea9268cb44c7906c01e508ac3e93e9ed880",
       "destination": {
         "nixos_storage_domain": "per-entry-policy",
         "logical_path": "materialization-policy"

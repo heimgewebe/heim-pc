@@ -71,6 +71,13 @@
       "restore_mode": "private-credential-tree"
     },
     {
+      "path": "/home/alex/.config/grabowski/review-evidence-signing-ed25519",
+      "class": "credentials-and-identity",
+      "rationale": "local-only Ed25519 signer trusted for Heim-PC recovery-producer receipts and review-evidence continuity",
+      "capture": "file",
+      "restore_mode": "private-credential-file"
+    },
+    {
       "path": "/home/alex/.config/opencode/opencode.jsonc",
       "class": "credentials-and-identity",
       "rationale": "minimal operator client configuration paired with preserved authentication",

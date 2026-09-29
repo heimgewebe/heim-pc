@@ -403,6 +403,7 @@ class T(unittest.TestCase):
             "/home/alex/repos/schotter",
             "/home/alex/repos/fotoatelier",
             "/home/alex/.ssh",
+            "/home/alex/.config/grabowski/review-evidence-signing-ed25519",
             "/home/alex/.local/state/grabowski/tasks.sqlite3",
             "/home/alex/.local/state/bureau/bureau.sqlite3",
             "/home/alex/.local/state/chronik/data",
@@ -420,6 +421,12 @@ class T(unittest.TestCase):
         }:
             self.assertNotIn(excluded, selected)
         by_source = {item["path"]: item for item in critical_home["includes"]}
+        recovery_signer = by_source[
+            "/home/alex/.config/grabowski/review-evidence-signing-ed25519"
+        ]
+        self.assertEqual(recovery_signer["class"], "credentials-and-identity")
+        self.assertEqual(recovery_signer["capture"], "file")
+        self.assertEqual(recovery_signer["restore_mode"], "private-credential-file")
         self.assertEqual(by_source["/home/alex/collections/bibliothek"]["class"], "legacy-library-preservation")
         self.assertEqual(by_source["/home/alex/collections/bibliothek"]["restore_mode"], "cold-preservation-tree")
         for repo_name in ("schotter", "fotoatelier"):
