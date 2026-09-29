@@ -51,7 +51,10 @@ in
         && criticalUserHome.scope == "critical-user-data-home"
         && criticalUserHome.scope_semantics == "explicit-path-set"
         && criticalUserHome.root == "/home/alex"
+        && criticalUserHome.inventory.algorithm == "canonical-record-stream-sha256-v7"
         && criticalUserHome.inventory.uid_gid_bound
+        && criticalUserHome.inventory.explicit_ancestor_metadata_bound
+        && criticalUserHome.inventory.xattrs_sha256_bound
         && criticalUserHome.selection_policy.default == "exclude"
         && !criticalUserHome.selection_policy.unlisted_paths_are_migration_data
         && materialization.schema_version == 1

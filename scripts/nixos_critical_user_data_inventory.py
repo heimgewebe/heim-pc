@@ -18,7 +18,7 @@ from typing import Any
 CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 INVENTORY_KIND = "heim_pc.critical_user_data_inventory.v1"
 OBSERVATION_KIND = "heim_pc.critical_user_data_inventory_observation.v1"
-ALGORITHM = "canonical-record-stream-sha256-v6"
+ALGORITHM = "canonical-record-stream-sha256-v7"
 SOURCE_STABILITY_MODE = "kernel-local-pci-nvme-readonly-mountinfo-v3"
 _VERIFIED_EXECUTION = False
 SYS_DEV_BLOCK_ROOT = Path("/sys/dev/block")
@@ -84,6 +84,8 @@ def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
         "directory_mode_bound": True,
         "regular_file_mode_bound": True,
         "uid_gid_bound": True,
+        "explicit_ancestor_metadata_bound": True,
+        "xattrs_sha256_bound": True,
         "symlink_target_bound": True,
         "special_files": "excluded-runtime-only",
         "unreadable_included_path": "fail",
@@ -725,6 +727,121 @@ def _hash_fd(fd: int) -> str:
     return digest.hexdigest()
 
 
+
+def _xattr_fields(
+    target: Any,
+    *,
+    relative_path: str,
+    follow_symlinks: bool = True,
+) -> dict[str, Any]:
+    try:
+        names = sorted(
+            _require_utf8(name, "extended attribute name")
+            for name in os.listxattr(target, follow_symlinks=follow_symlinks)
+        )
+    except OSError as exc:
+        raise InventoryError(
+            f"included path extended attributes cannot be listed: {relative_path}"
+        ) from exc
+    digest = hashlib.sha256()
+    for name in names:
+        try:
+            value = os.getxattr(
+                target,
+                name,
+                follow_symlinks=follow_symlinks,
+            )
+        except OSError as exc:
+            raise InventoryError(
+                f"included path extended attribute cannot be read: {relative_path}"
+            ) from exc
+        digest.update(
+            _canonical_line(
+                {
+                    "name": name,
+                    "sha256": hashlib.sha256(value).hexdigest(),
+                }
+            )
+        )
+    return {
+        "xattr_count": len(names),
+        "xattrs_sha256": digest.hexdigest(),
+    }
+
+
+def _xattr_fields_at(
+    directory_fd: int,
+    name: str,
+    *,
+    relative_path: str,
+) -> dict[str, Any]:
+    anchored = Path(f"/proc/self/fd/{directory_fd}") / name
+    return _xattr_fields(
+        anchored,
+        relative_path=relative_path,
+        follow_symlinks=False,
+    )
+
+
+def _directory_record_from_fd(
+    fd: int,
+    *,
+    relative_path: str,
+    opened: os.stat_result,
+) -> dict[str, Any]:
+    xattr_fields = _xattr_fields(fd, relative_path=relative_path)
+    after = os.fstat(fd)
+    if _identity(after) != _identity(opened):
+        raise InventoryError(
+            f"included directory metadata changed during read: {relative_path}"
+        )
+    return {
+        "path": relative_path,
+        "type": "directory",
+        "mode": stat.S_IMODE(after.st_mode),
+        "uid": after.st_uid,
+        "gid": after.st_gid,
+        **xattr_fields,
+    }
+
+
+def _regular_metadata_record_at(
+    directory_fd: int,
+    name: str,
+    *,
+    relative_path: str,
+    observed: os.stat_result,
+) -> dict[str, Any]:
+    xattr_fields = _xattr_fields_at(
+        directory_fd,
+        name,
+        relative_path=relative_path,
+    )
+    try:
+        after = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise InventoryError(
+            f"included regular file metadata cannot be revalidated: {relative_path}"
+        ) from exc
+    if _identity(after) != _identity(observed):
+        raise InventoryError(
+            f"included regular file metadata changed during read: {relative_path}"
+        )
+    return {
+        "path": relative_path,
+        "type": "regular",
+        "mode": stat.S_IMODE(after.st_mode),
+        "uid": after.st_uid,
+        "gid": after.st_gid,
+        "size_bytes": after.st_size,
+        **xattr_fields,
+    }
+
+
 def _sqlite_family_companions(name: str, names: frozenset[str]) -> tuple[str, ...]:
     if name.endswith(SQLITE_FAMILY_COMPANION_SUFFIXES + ("-shm",)):
         return ()
@@ -812,6 +929,7 @@ def _family_regular_record(
         content_sha256 = None
     else:
         content_sha256 = _hash_fd(fd)
+    xattr_fields = _xattr_fields(fd, relative_path=relative_path)
     after = os.fstat(fd)
     if _identity(after) != _identity(opened):
         raise _RetrySqliteFamily(
@@ -824,11 +942,11 @@ def _family_regular_record(
         "uid": after.st_uid,
         "gid": after.st_gid,
         "size_bytes": after.st_size,
+        **xattr_fields,
     }
     if content_sha256 is not None:
         record["sha256"] = content_sha256
     return record, after
-
 
 def _capture_sqlite_family(
     directory_fd: int,
@@ -1274,13 +1392,11 @@ def _collect_inventory_once(
                     if _identity(opened) != _identity(observed):
                         raise InventoryError(f"included directory changed during open: {rel}")
                     accumulator.record(
-                        {
-                            "path": rel,
-                            "type": "directory",
-                            "mode": stat.S_IMODE(opened.st_mode),
-                            "uid": opened.st_uid,
-                            "gid": opened.st_gid,
-                        }
+                        _directory_record_from_fd(
+                            child_fd,
+                            relative_path=rel,
+                            opened=opened,
+                        )
                     )
                     walk(child_fd, full, root_device)
                 finally:
@@ -1290,14 +1406,12 @@ def _collect_inventory_once(
             if stat.S_ISREG(observed.st_mode):
                 if classification_only:
                     accumulator.record(
-                        {
-                            "path": rel,
-                            "type": "regular",
-                            "mode": stat.S_IMODE(observed.st_mode),
-                            "uid": observed.st_uid,
-                            "gid": observed.st_gid,
-                            "size_bytes": observed.st_size,
-                        }
+                        _regular_metadata_record_at(
+                            directory_fd,
+                            name,
+                            relative_path=rel,
+                            observed=observed,
+                        )
                     )
                     continue
                 sqlite_companions = _sqlite_family_companions(name, names_set)
@@ -1337,6 +1451,7 @@ def _collect_inventory_once(
                         content_sha256 = None
                     else:
                         content_sha256 = _hash_fd(fd)
+                    xattr_fields = _xattr_fields(fd, relative_path=rel)
                     after = os.fstat(fd)
                     if _identity(after) != _identity(opened):
                         raise InventoryError(
@@ -1349,6 +1464,7 @@ def _collect_inventory_once(
                         "uid": after.st_uid,
                         "gid": after.st_gid,
                         "size_bytes": after.st_size,
+                        **xattr_fields,
                     }
                     if content_sha256 is not None:
                         record["sha256"] = content_sha256
@@ -1360,6 +1476,11 @@ def _collect_inventory_once(
             if stat.S_ISLNK(observed.st_mode):
                 try:
                     target = os.readlink(name, dir_fd=directory_fd)
+                    xattr_fields = _xattr_fields_at(
+                        directory_fd,
+                        name,
+                        relative_path=rel,
+                    )
                     after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                 except OSError as exc:
                     raise InventoryError(f"included symlink cannot be read: {rel}") from exc
@@ -1372,6 +1493,7 @@ def _collect_inventory_once(
                         "uid": after.st_uid,
                         "gid": after.st_gid,
                         "target": _require_utf8(target, "symlink target"),
+                        **xattr_fields,
                     }
                 )
                 continue
@@ -1412,6 +1534,25 @@ def _collect_inventory_once(
                 f"{_relative(directory_path, root)}"
             )
 
+    recorded_explicit_ancestor_paths: set[str] = set()
+
+    def record_explicit_ancestor(
+        fd: int,
+        path: Path,
+        opened: os.stat_result,
+    ) -> None:
+        relative_path = _relative(path, root)
+        if relative_path in recorded_explicit_ancestor_paths:
+            return
+        accumulator.record(
+            _directory_record_from_fd(
+                fd,
+                relative_path=relative_path,
+                opened=opened,
+            )
+        )
+        recorded_explicit_ancestor_paths.add(relative_path)
+
     def open_explicit_parent(
         selected: Path,
         *,
@@ -1434,9 +1575,11 @@ def _collect_inventory_once(
             parent_flags |= os.O_NOFOLLOW
 
         current_fd = os.dup(root_fd)
+        current_path = root
         ancestor_bindings: list[tuple[str, tuple[int, int, int]]] = []
         try:
             for component in parts[:-1]:
+                current_path = current_path / component
                 try:
                     next_fd = os.open(
                         component,
@@ -1454,6 +1597,7 @@ def _collect_inventory_once(
                             f"included path ancestor is on a foreign filesystem: "
                             f"{relative_path}"
                         )
+                    record_explicit_ancestor(next_fd, current_path, opened)
                     ancestor_bindings.append(
                         (component, _path_binding_identity(opened))
                     )
@@ -1587,13 +1731,11 @@ def _collect_inventory_once(
                             f"included tree is on a foreign filesystem: {rel}"
                         )
                     accumulator.record(
-                        {
-                            "path": rel,
-                            "type": "directory",
-                            "mode": stat.S_IMODE(opened.st_mode),
-                            "uid": opened.st_uid,
-                            "gid": opened.st_gid,
-                        }
+                        _directory_record_from_fd(
+                            fd,
+                            relative_path=rel,
+                            opened=opened,
+                        )
                     )
                     walk(fd, selected, root_device)
                     revalidate_explicit_binding(
@@ -1619,14 +1761,12 @@ def _collect_inventory_once(
                 )
                 if classification_only:
                     accumulator.record(
-                        {
-                            "path": rel,
-                            "type": "regular",
-                            "mode": stat.S_IMODE(observed.st_mode),
-                            "uid": observed.st_uid,
-                            "gid": observed.st_gid,
-                            "size_bytes": observed.st_size,
-                        }
+                        _regular_metadata_record_at(
+                            parent_fd,
+                            selected.name,
+                            relative_path=rel,
+                            observed=observed,
+                        )
                     )
                     for companion_name in companions:
                         companion_path = selected.parent / companion_name
@@ -1654,14 +1794,12 @@ def _collect_inventory_once(
                                 f"{companion_rel}"
                             )
                         accumulator.record(
-                            {
-                                "path": companion_rel,
-                                "type": "regular",
-                                "mode": stat.S_IMODE(companion.st_mode),
-                                "uid": companion.st_uid,
-                                "gid": companion.st_gid,
-                                "size_bytes": companion.st_size,
-                            }
+                            _regular_metadata_record_at(
+                                parent_fd,
+                                companion_name,
+                                relative_path=companion_rel,
+                                observed=companion,
+                            )
                         )
                     return
                 main_record, companion_records = _capture_sqlite_family(
@@ -1692,14 +1830,12 @@ def _collect_inventory_once(
                 raise InventoryError(f"included file is not a regular file: {rel}")
             if classification_only:
                 accumulator.record(
-                    {
-                        "path": rel,
-                        "type": "regular",
-                        "mode": stat.S_IMODE(observed.st_mode),
-                        "uid": observed.st_uid,
-                        "gid": observed.st_gid,
-                        "size_bytes": observed.st_size,
-                    }
+                    _regular_metadata_record_at(
+                        parent_fd,
+                        selected_name,
+                        relative_path=rel,
+                        observed=observed,
+                    )
                 )
                 revalidate_explicit_binding(
                     relative_path=rel,
@@ -1724,6 +1860,7 @@ def _collect_inventory_once(
                 if _identity(opened) != _identity(observed):
                     raise InventoryError(f"included file changed during open: {rel}")
                 content_sha256 = _hash_fd(fd)
+                xattr_fields = _xattr_fields(fd, relative_path=rel)
                 after = os.fstat(fd)
                 if _identity(after) != _identity(opened):
                     raise InventoryError(f"included file changed during hashing: {rel}")
@@ -1736,6 +1873,7 @@ def _collect_inventory_once(
                         "gid": after.st_gid,
                         "size_bytes": after.st_size,
                         "sha256": content_sha256,
+                        **xattr_fields,
                     }
                 )
                 revalidate_explicit_binding(
@@ -1757,17 +1895,16 @@ def _collect_inventory_once(
             raise InventoryError("critical-user-data root changed during open")
         if policy["scope_semantics"] == "explicit-path-set":
             root_binding = _path_binding_identity(root_info)
+            record_explicit_ancestor(root_fd, root, root_info)
             for entry in policy["include_paths"]:
                 record_explicit_path(entry, root_info.st_dev, root_binding)
         else:
             accumulator.record(
-                {
-                    "path": ".",
-                    "type": "directory",
-                    "mode": stat.S_IMODE(root_info.st_mode),
-                    "uid": root_info.st_uid,
-                    "gid": root_info.st_gid,
-                }
+                _directory_record_from_fd(
+                    root_fd,
+                    relative_path=".",
+                    opened=root_info,
+                )
             )
             walk(root_fd, root, root_info.st_dev)
     finally:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -56,6 +57,8 @@ def _contract(path: Path, home: Path) -> Path:
             "directory_mode_bound": True,
             "regular_file_mode_bound": True,
             "uid_gid_bound": True,
+            "explicit_ancestor_metadata_bound": True,
+            "xattrs_sha256_bound": True,
             "symlink_target_bound": True,
             "special_files": "excluded-runtime-only",
             "unreadable_included_path": "fail",
@@ -732,6 +735,8 @@ def _explicit_contract(path: Path, home: Path, includes: list[dict]) -> Path:
             "directory_mode_bound": True,
             "regular_file_mode_bound": True,
             "uid_gid_bound": True,
+            "explicit_ancestor_metadata_bound": True,
+            "xattrs_sha256_bound": True,
             "symlink_target_bound": True,
             "special_files": "excluded-runtime-only",
             "unreadable_included_path": "fail",
@@ -1369,6 +1374,103 @@ def test_explicit_records_bind_uid_and_gid(tmp_path, monkeypatch):
     assert all("uid" in item and "gid" in item for item in seen)
 
 
+def test_explicit_file_ancestor_metadata_changes_inventory_digest(tmp_path):
+    home = tmp_path / "home"
+    parent = home / ".claude"
+    parent.mkdir(parents=True)
+    target = parent / "credential"
+    target.write_text("secret-ish\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "credential",
+            "rationale": "selected credential",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    baseline = inventory.collect_inventory(contract)
+    parent.chmod(0o777)
+    changed = inventory.collect_inventory(contract)
+
+    assert changed["inventory_sha256"] != baseline["inventory_sha256"]
+
+
+def test_explicit_file_xattr_changes_inventory_digest(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "credential"
+    target.write_text("secret-ish\n", encoding="utf-8")
+    try:
+        os.setxattr(target, "user.heim-pc-inventory-test", b"one")
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM}:
+            pytest.skip("test filesystem does not support user xattrs")
+        raise
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "credential",
+            "rationale": "selected credential",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+
+    baseline = inventory.collect_inventory(contract)
+    os.setxattr(target, "user.heim-pc-inventory-test", b"two")
+    changed = inventory.collect_inventory(contract)
+
+    assert changed["inventory_sha256"] != baseline["inventory_sha256"]
+
+
+def test_explicit_ancestor_records_are_deduplicated(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    parent = home / ".claude"
+    parent.mkdir(parents=True)
+    first = parent / "a"
+    second = parent / "b"
+    first.write_text("a\n", encoding="utf-8")
+    second.write_text("b\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [
+            {
+                "path": str(first),
+                "class": "credential",
+                "rationale": "first credential",
+                "capture": "file",
+                "restore_mode": "private",
+            },
+            {
+                "path": str(second),
+                "class": "credential",
+                "rationale": "second credential",
+                "capture": "file",
+                "restore_mode": "private",
+            },
+        ],
+    )
+    seen = []
+    real = inventory._canonical_line
+
+    def capture(value):
+        if isinstance(value, dict) and value.get("type") == "directory":
+            seen.append(value.get("path"))
+        return real(value)
+
+    monkeypatch.setattr(inventory, "_canonical_line", capture)
+    inventory.collect_inventory(contract)
+
+    assert seen.count(".claude") == 2
+
+
 def test_explicit_tree_fails_if_directory_membership_changes_during_hash(tmp_path, monkeypatch):
     home = tmp_path / "home"
     keep = home / "keep"
@@ -1427,6 +1529,6 @@ def test_explicit_classification_does_not_open_selected_file_contents(tmp_path, 
     result = inventory.collect_inventory(contract, classification_only=True)
     assert result["authoritative_inventory"] is False
     assert result["inventory_sha256"] is None
-    assert result["record_count"] == 1
+    assert result["record_count"] == 2
     assert result["stability_pass_count"] == 1
     assert result["stability_proof"] == "classification-only-single-pass"

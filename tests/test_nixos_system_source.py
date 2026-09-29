@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9814d79c8aa5c75dd077d33866491f0389449d9df3d7adad103c79af9550d565"
+SOURCE_SNAPSHOT_SHA256 = "614571f54b6a91b11fc2f298e0f4bbe296561f75f394103c0a2fdcebed335b73"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -403,7 +403,15 @@ class T(unittest.TestCase):
         self.assertEqual(critical_home["scope"], "critical-user-data-home")
         self.assertEqual(critical_home["root"], "/home/alex")
         self.assertEqual(critical_home["scope_semantics"], "explicit-path-set")
+        self.assertEqual(
+            critical_home["inventory"]["algorithm"],
+            "canonical-record-stream-sha256-v7",
+        )
         self.assertTrue(critical_home["inventory"]["uid_gid_bound"])
+        self.assertTrue(
+            critical_home["inventory"]["explicit_ancestor_metadata_bound"]
+        )
+        self.assertTrue(critical_home["inventory"]["xattrs_sha256_bound"])
         selected = {item["path"] for item in critical_home["includes"]}
         for required in {
             "/home/alex/collections/bibliothek",

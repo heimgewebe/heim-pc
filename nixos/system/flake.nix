@@ -520,7 +520,10 @@
           assert criticalUserHome.scope == "critical-user-data-home";
           assert criticalUserHome.scope_semantics == "explicit-path-set";
           assert criticalUserHome.root == "/home/alex";
+          assert criticalUserHome.inventory.algorithm == "canonical-record-stream-sha256-v7";
           assert criticalUserHome.inventory.uid_gid_bound;
+          assert criticalUserHome.inventory.explicit_ancestor_metadata_bound;
+          assert criticalUserHome.inventory.xattrs_sha256_bound;
           assert criticalUserHome.selection_policy.default == "exclude";
           assert !criticalUserHome.selection_policy.unlisted_paths_are_migration_data;
           assert materialization.schema_version == 1;
