@@ -856,6 +856,7 @@ def _open_stable_regular_at(
     name: str,
     *,
     relative_path: str,
+    root_device: int,
 ) -> tuple[int, os.stat_result] | None:
     try:
         observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -866,6 +867,10 @@ def _open_stable_regular_at(
     if not stat.S_ISREG(observed.st_mode):
         raise InventoryError(
             f"SQLite family companion is not a regular file: {relative_path}"
+        )
+    if observed.st_dev != root_device:
+        raise InventoryError(
+            f"SQLite family path is on a foreign filesystem: {relative_path}"
         )
 
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -955,6 +960,7 @@ def _capture_sqlite_family(
     main_name: str,
     companion_names: tuple[str, ...],
     root: Path,
+    root_device: int,
     classification_only: bool,
     require_read_guard: bool = False,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any] | None]]:
@@ -969,6 +975,7 @@ def _capture_sqlite_family(
                 directory_fd,
                 main_name,
                 relative_path=main_relative,
+                root_device=root_device,
             )
             if main is None:
                 raise _RetrySqliteFamily(
@@ -1011,6 +1018,7 @@ def _capture_sqlite_family(
                     directory_fd,
                     companion_name,
                     relative_path=companion_relative,
+                    root_device=root_device,
                 )
                 companions[companion_name] = companion
                 if companion is not None:
@@ -1422,6 +1430,7 @@ def _collect_inventory_once(
                         main_name=name,
                         companion_names=sqlite_companions,
                         root=root,
+                        root_device=root_device,
                         classification_only=classification_only,
                     )
                     accumulator.record(main_record)
@@ -1808,6 +1817,7 @@ def _collect_inventory_once(
                     main_name=selected.name,
                     companion_names=companions,
                     root=root,
+                    root_device=root_device,
                     classification_only=False,
                     require_read_guard=True,
                 )

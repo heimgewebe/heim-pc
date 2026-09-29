@@ -209,6 +209,56 @@ def _validate_home_materialization_policy(contract: dict[str, Any]) -> None:
     includes = contract.get("includes")
     if not isinstance(includes, list):
         raise AggregateInventoryError("home include set is invalid")
+
+    expected_restore_modes = {
+        "credentials-and-identity": {
+            "operator-client-config",
+            "private-credential-file",
+            "private-credential-tree",
+        },
+        "grabowski-authority-state": {"authority-reconcile"},
+        "grabowski-audit-chain": {"authority-reconcile"},
+        "grabowski-durable-outbox": {"authority-reconcile"},
+        "bureau-authority-state": {"authority-reconcile"},
+        "chronik-history-state": {"authority-restore"},
+        "observer-findings": {"observer-state"},
+        "legacy-library-preservation": {"cold-preservation-tree"},
+        "local-only-repository": {"cold-preservation-git-capsule"},
+    }
+    materialization_classes = (
+        set(bootstrap["classes"]) | set(authority["classes"]) | set(cold["classes"])
+    )
+    required_classes = contract.get("required_classes")
+    if (
+        not isinstance(required_classes, list)
+        or len(required_classes) != len(set(required_classes))
+        or set(required_classes) != materialization_classes
+        or materialization_classes != set(expected_restore_modes)
+    ):
+        raise AggregateInventoryError(
+            "home required classes do not match materialization roles"
+        )
+    include_classes: set[str] = set()
+    for item in includes:
+        if not isinstance(item, dict):
+            raise AggregateInventoryError("home include entry is invalid")
+        klass = item.get("class")
+        restore_mode = item.get("restore_mode")
+        allowed_modes = expected_restore_modes.get(klass)
+        if allowed_modes is None:
+            raise AggregateInventoryError(
+                "home include class is not assigned to a materialization role"
+            )
+        include_classes.add(klass)
+        if restore_mode not in allowed_modes:
+            raise AggregateInventoryError(
+                "home include restore mode is invalid for its materialization class"
+            )
+    if include_classes != materialization_classes:
+        raise AggregateInventoryError(
+            "home include classes do not match materialization roles"
+        )
+
     by_path = {
         item.get("path"): item
         for item in includes
@@ -261,6 +311,13 @@ def collect_inventory(
     observed_ids = {item.get("id") for item in members if isinstance(item, dict)}
     if observed_ids != expected_ids or len(members) != len(expected_ids):
         raise AggregateInventoryError("aggregate contract member set is invalid")
+
+    aggregate_required_classes = contract.get("required_classes")
+    if (
+        not isinstance(aggregate_required_classes, list)
+        or len(aggregate_required_classes) != len(set(aggregate_required_classes))
+    ):
+        raise AggregateInventoryError("aggregate required classes are invalid")
 
     implementation = contract.get("inventory_implementation")
     expected_implementation_keys = {
@@ -363,6 +420,11 @@ def collect_inventory(
         ):
             raise AggregateInventoryError("home member contract identity mismatch")
         _validate_home_materialization_policy(member_contract)
+        member_required_classes = member_contract.get("required_classes")
+        if set(aggregate_required_classes) != set(member_required_classes):
+            raise AggregateInventoryError(
+                "aggregate required classes do not match member materialization classes"
+            )
 
         try:
             result = root_inventory.collect_inventory(

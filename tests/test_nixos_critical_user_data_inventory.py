@@ -324,6 +324,23 @@ def test_file_name_prefix_suffix_exclusion_keeps_sqlite_db_and_wal_critical(
     assert vanished["exclusion_class_counts"]["transient-sqlite-wal-index"] == 1
 
 
+def test_sqlite_family_open_rejects_foreign_filesystem(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    database.write_bytes(b"sqlite-bytes")
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        root_device = database.stat().st_dev
+        with pytest.raises(inventory.InventoryError, match="foreign filesystem"):
+            inventory._open_stable_regular_at(
+                directory_fd,
+                database.name,
+                relative_path=database.name,
+                root_device=root_device + 1,
+            )
+    finally:
+        os.close(directory_fd)
+
+
 def test_sqlite_wal_family_retries_transient_companion_disappearance(
     tmp_path, monkeypatch
 ):

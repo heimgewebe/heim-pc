@@ -17,6 +17,17 @@ assert spec.loader is not None
 spec.loader.exec_module(aggregate)
 
 COLD_ROOT = "/var/lib/heim-pc-data/import/legacy-2026"
+REQUIRED_CLASSES = (
+    "credentials-and-identity",
+    "legacy-library-preservation",
+    "local-only-repository",
+    "grabowski-authority-state",
+    "grabowski-audit-chain",
+    "grabowski-durable-outbox",
+    "bureau-authority-state",
+    "chronik-history-state",
+    "observer-findings",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +51,55 @@ def _home_contract() -> dict:
         "logical_root": "/home/alex",
         "includes": [
             {
+                "path": "/home/alex/.ssh",
+                "class": "credentials-and-identity",
+                "rationale": "test credentials",
+                "capture": "tree",
+                "restore_mode": "private-credential-tree",
+            },
+            {
+                "path": "/home/alex/.local/state/grabowski/tasks.sqlite3",
+                "class": "grabowski-authority-state",
+                "rationale": "test authority state",
+                "capture": "sqlite-family",
+                "restore_mode": "authority-reconcile",
+            },
+            {
+                "path": "/home/alex/.local/state/grabowski/audit-segments",
+                "class": "grabowski-audit-chain",
+                "rationale": "test audit chain",
+                "capture": "tree",
+                "restore_mode": "authority-reconcile",
+            },
+            {
+                "path": "/home/alex/.local/state/grabowski/chronik-outbox",
+                "class": "grabowski-durable-outbox",
+                "rationale": "test durable outbox",
+                "capture": "tree",
+                "restore_mode": "authority-reconcile",
+            },
+            {
+                "path": "/home/alex/.local/state/bureau/state.sqlite3",
+                "class": "bureau-authority-state",
+                "rationale": "test bureau state",
+                "capture": "sqlite-family",
+                "restore_mode": "authority-reconcile",
+            },
+            {
+                "path": "/home/alex/.local/state/chronik/data",
+                "class": "chronik-history-state",
+                "rationale": "test history state",
+                "capture": "tree",
+                "restore_mode": "authority-restore",
+            },
+            {
+                "path": "/home/alex/.local/state/grosser-adler/findings",
+                "class": "observer-findings",
+                "rationale": "test observer state",
+                "capture": "tree",
+                "restore_mode": "observer-state",
+            },
+            {
                 "path": "/home/alex/collections/bibliothek",
                 "class": "legacy-library-preservation",
                 "rationale": "test library",
@@ -61,6 +121,7 @@ def _home_contract() -> dict:
                 "restore_mode": "cold-preservation-git-capsule",
             },
         ],
+        "required_classes": list(REQUIRED_CLASSES),
         "materialization_policy": {
             "schema_version": 1,
             "kind": "heim_pc.critical_user_data_materialization_policy",
@@ -167,6 +228,7 @@ def _write_contracts(tmp_path: Path) -> Path:
                 "restore_mode": "source-scope-with-role-specific-materialization",
             }
         ],
+        "required_classes": list(REQUIRED_CLASSES),
         "inventory_implementation": {
             "algorithm": aggregate.AGGREGATE_ALGORITHM,
             "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
@@ -666,6 +728,85 @@ def test_aggregate_rejects_materialization_back_to_legacy_library_path(monkeypat
     scope["members"][0]["contract_sha256"] = _sha(home_path)
     contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
     with pytest.raises(aggregate.AggregateInventoryError, match="library preservation policy"):
+        aggregate.collect_inventory(contract, classification_only=True)
+
+
+def test_aggregate_rejects_unmapped_materialization_class(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    scope = json.loads(contract.read_text())
+    home_path = tmp_path / scope["members"][0]["contract_file"]
+    home = json.loads(home_path.read_text())
+    home["includes"][0]["class"] = "grabowski-runtime-cache"
+    home_path.write_text(json.dumps(home, sort_keys=True) + "\n")
+    scope["members"][0]["contract_sha256"] = _sha(home_path)
+    contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
+    with pytest.raises(aggregate.AggregateInventoryError, match="not assigned"):
+        aggregate.collect_inventory(contract, classification_only=True)
+
+
+def test_aggregate_rejects_restore_mode_outside_materialization_class(
+    monkeypatch, tmp_path
+):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    scope = json.loads(contract.read_text())
+    home_path = tmp_path / scope["members"][0]["contract_file"]
+    home = json.loads(home_path.read_text())
+    home["includes"][0]["restore_mode"] = "authority-reconcile"
+    home_path.write_text(json.dumps(home, sort_keys=True) + "\n")
+    scope["members"][0]["contract_sha256"] = _sha(home_path)
+    contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="invalid for its materialization class",
+    ):
+        aggregate.collect_inventory(contract, classification_only=True)
+
+
+def test_aggregate_rejects_missing_required_include_class(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    scope = json.loads(contract.read_text())
+    home_path = tmp_path / scope["members"][0]["contract_file"]
+    home = json.loads(home_path.read_text())
+    home["includes"] = [
+        item for item in home["includes"] if item["class"] != "observer-findings"
+    ]
+    home_path.write_text(json.dumps(home, sort_keys=True) + "\n")
+    scope["members"][0]["contract_sha256"] = _sha(home_path)
+    contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="include classes do not match materialization roles",
+    ):
+        aggregate.collect_inventory(contract, classification_only=True)
+
+
+def test_aggregate_rejects_home_required_class_drift(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    scope = json.loads(contract.read_text())
+    home_path = tmp_path / scope["members"][0]["contract_file"]
+    home = json.loads(home_path.read_text())
+    home["required_classes"] = home["required_classes"][:-1]
+    home_path.write_text(json.dumps(home, sort_keys=True) + "\n")
+    scope["members"][0]["contract_sha256"] = _sha(home_path)
+    contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
+    with pytest.raises(aggregate.AggregateInventoryError, match="required classes"):
+        aggregate.collect_inventory(contract, classification_only=True)
+
+
+def test_aggregate_rejects_aggregate_required_class_drift(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    scope = json.loads(contract.read_text())
+    scope["required_classes"] = scope["required_classes"][:-1]
+    contract.write_text(json.dumps(scope, sort_keys=True) + "\n")
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="do not match member materialization classes",
+    ):
         aggregate.collect_inventory(contract, classification_only=True)
 
 

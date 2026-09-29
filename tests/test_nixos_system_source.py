@@ -389,6 +389,18 @@ class T(unittest.TestCase):
         self.assertEqual(critical["scope"], "critical-user-data")
         self.assertEqual(critical["scope_semantics"], "explicit-positive-selection")
         implementation = critical["inventory_implementation"]
+        self.assertEqual(
+            implementation["root_inventory_script_sha256"],
+            hashlib.sha256(
+                (ROOT / "scripts/nixos_critical_user_data_inventory.py").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            implementation["aggregate_inventory_script_sha256"],
+            hashlib.sha256(
+                (ROOT / "scripts/nixos_critical_data_inventory.py").read_bytes()
+            ).hexdigest(),
+        )
         self.assertEqual(implementation["aggregate_execution_mode"], "external-verified-payload-exec-v1")
         self.assertEqual(
             implementation["authoritative_member_source_stability"],
