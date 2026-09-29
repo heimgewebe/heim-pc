@@ -94,7 +94,9 @@ werden ausschließlich folgende Entscheidungsdaten frisch gelesen:
 
 * MainPID, ActiveState und ControlGroup von grabowski-operator.service;
 * RssAnon, VmRSS und VmSwap des exakten MainPID;
-* MemAvailable des Hosts;
+* MemAvailable, SwapTotal und SwapFree des Hosts;
+* /dev/shm-Belegung sowie sichtbare heim-pc-t003-*-Einträge und zugehörige
+  Loop-Backings einschließlich bereits gelöschter Backing-Dateien;
 * memory.current und memory.swap.current der Operator-Cgroup.
 
 Vor jeder Bewertung muss sowohl systemd als auch /proc/<pid>/cgroup exakt
@@ -114,6 +116,15 @@ Sample 1. Älterer Schema-v1-State ohne persistierte Startzeit wird mit Startzei
 Die konservative Anfangspolicy lautet:
 
 * ab 18 GiB RssAnon: Warnereignis, keine Mutation;
+* bei mehr als 1 GiB konfiguriertem Host-Swap und höchstens 1 GiB SwapFree:
+  Warnereignis system_swap_low, keine Mutation. Die Schwelle ist eine
+  hostgebundene Reservewarnung und keine Attribution der Swap-Belegung auf
+  Grabowski. Fehlt oder widerspricht die Swap-Telemetrie, bleibt dieser reine
+  Diagnosepfad unbekannt und der primäre RSS-/MemAvailable-Schutz aktiv;
+* verbleibende T003-Loop-Backings auf bereits gelöschte heim-pc-t003-*-
+  Dateien: Warnereignis stale_t003_loop_backing, keine Mutation;
+* ab 16 GiB /dev/shm-Belegung bei sichtbaren T003-Einträgen oder T003-
+  Loop-Backings: Warnereignis t003_dev_shm_pressure, keine Mutation;
 * ab 24 GiB RssAnon in zwei aufeinanderfolgenden Stichproben:
   kontrollierter systemctl restart grabowski-operator.service;
 * bei höchstens 8 GiB MemAvailable und mindestens 12 GiB Grabowski-RssAnon:
