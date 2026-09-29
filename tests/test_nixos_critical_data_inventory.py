@@ -220,6 +220,43 @@ def test_root_inventory_loader_executes_verified_payload_not_current_path(
     assert loaded.__file__ == str(script)
 
 
+def test_main_reuses_pinned_aggregate_contract_payload(monkeypatch, tmp_path):
+    contract = _write_contracts(tmp_path)
+    expected_script = _sha(MODULE)
+    expected_contract = _sha(contract)
+
+    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+        replacement = json.loads(Path(path).read_text(encoding="utf-8"))
+        replacement["scope"] = "replacement-scope"
+        Path(path).write_text(
+            json.dumps(replacement, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        loaded, payload = aggregate._load_regular_json(
+            Path(path), "aggregate contract"
+        )
+        assert loaded["scope"] == "critical-user-data"
+        assert hashlib.sha256(payload).hexdigest() == expected_contract
+        return {"scope": loaded["scope"], "contract_sha256": expected_contract}
+
+    monkeypatch.setattr(aggregate, "collect_inventory", collect_inventory)
+    original_load_regular_json = aggregate._load_regular_json
+
+    result = aggregate.main(
+        [
+            "--contract",
+            str(contract),
+            "--classification-only",
+            "--expected-script-sha256",
+            expected_script,
+            "--expected-contract-sha256",
+            expected_contract,
+        ]
+    )
+
+    assert result == 0
+    assert aggregate._load_regular_json is original_load_regular_json
+
+
 def test_aggregate_inventory_binds_explicit_member_digest(monkeypatch, tmp_path):
     contract = _write_contracts(tmp_path)
     monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)

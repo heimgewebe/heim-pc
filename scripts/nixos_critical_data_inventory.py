@@ -425,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-contract-sha256")
     parser.add_argument("--max-exclusion-samples", type=int, default=0)
     args = parser.parse_args(argv)
+
+    original_load_regular_json = _load_regular_json
+    pinned_contract: tuple[dict[str, Any], bytes] | None = None
     try:
         if bool(args.expected_script_sha256) != bool(args.expected_contract_sha256):
             raise AggregateInventoryError(
@@ -439,8 +442,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             if _sha256_bytes(Path(__file__).read_bytes()) != expected_script:
                 raise AggregateInventoryError("aggregate inventory script digest mismatch")
-            if _sha256_bytes(args.contract.read_bytes()) != expected_contract:
+            pinned_contract = original_load_regular_json(
+                args.contract, "aggregate contract"
+            )
+            if _sha256_bytes(pinned_contract[1]) != expected_contract:
                 raise AggregateInventoryError("aggregate contract digest mismatch")
+
+            def pinned_load_regular_json(
+                path: Path, label: str
+            ) -> tuple[dict[str, Any], bytes]:
+                if Path(path) == args.contract:
+                    assert pinned_contract is not None
+                    return pinned_contract
+                return original_load_regular_json(path, label)
+
+            globals()["_load_regular_json"] = pinned_load_regular_json
+
         result = collect_inventory(
             args.contract,
             classification_only=args.classification_only,
@@ -449,6 +466,8 @@ def main(argv: list[str] | None = None) -> int:
     except (AggregateInventoryError, OSError):
         print("critical aggregate inventory blocked by a safety check", file=os.sys.stderr)
         return 2
+    finally:
+        globals()["_load_regular_json"] = original_load_regular_json
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 
