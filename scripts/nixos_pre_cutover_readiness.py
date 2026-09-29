@@ -21,7 +21,6 @@ RECOVERY_EVIDENCE_PROVENANCE_KIND = "heim_pc.nixos_recovery_evidence_provenance"
 RECOVERY_RESTORE_TEST_PROVENANCE_KIND = "heim_pc.nixos_recovery_restore_test_provenance"
 RECOVERY_CONTRACT_KIND = "heim_pc.nixos_recovery_readiness_contract"
 LIFECYCLE_CONTRACT_KIND = "heim_pc.nixos_store_lifecycle_contract"
-CRITICAL_USER_DATA_CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 RECOVERY_ATTESTATION_KIND = "heim_pc.nixos_recovery_provenance_attestation"
 GH_BIN = "/usr/bin/gh"
 TRUSTED_PATH = "/usr/bin:/bin"
@@ -507,153 +506,6 @@ def _recovery_policy(
     return requirements, max_age, skew, _copy_json(attestation_policy)
 
 
-def _validate_critical_user_data_contract(
-    contract: dict[str, Any],
-    *,
-    recovery_contract: dict[str, Any],
-    contract_sha256: str,
-) -> str:
-    if (
-        contract.get("schema_version") != 1
-        or contract.get("kind") != CRITICAL_USER_DATA_CONTRACT_KIND
-        or contract.get("scope") != "critical-user-data"
-        or contract.get("scope_semantics") != "explicit-positive-selection"
-    ):
-        raise ReadinessError("critical-user-data contract identity is invalid")
-
-    members = contract.get("members")
-    if not isinstance(members, list) or len(members) != 1:
-        raise ReadinessError("critical-user-data member set is invalid")
-    by_id = {
-        item.get("id"): item
-        for item in members
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    if set(by_id) != {"home"}:
-        raise ReadinessError("critical-user-data member identities are invalid")
-    expected_members = {
-        "home": (
-            "critical-user-home-data-contract-v1.json",
-            "per-entry-policy",
-            "materialization-policy",
-            "source-scope-with-role-specific-materialization",
-        ),
-    }
-    for member_id, expected in expected_members.items():
-        item = by_id[member_id]
-        if set(item) != {
-            "id",
-            "contract_file",
-            "contract_sha256",
-            "destination",
-            "restore_mode",
-        }:
-            raise ReadinessError("critical-user-data member shape is invalid")
-        contract_file, storage_domain, logical_path, restore_mode = expected
-        destination = item.get("destination")
-        if (
-            item.get("contract_file") != contract_file
-            or item.get("restore_mode") != restore_mode
-            or not isinstance(destination, dict)
-            or destination
-            != {
-                "nixos_storage_domain": storage_domain,
-                "logical_path": logical_path,
-            }
-        ):
-            raise ReadinessError("critical-user-data member policy is invalid")
-        _sha(item.get("contract_sha256"), f"{member_id} member contract digest")
-
-    implementation = contract.get("inventory_implementation")
-    expected_implementation_keys = {
-        "algorithm",
-        "root_inventory_script",
-        "root_inventory_script_sha256",
-        "aggregate_inventory_script",
-        "aggregate_inventory_script_sha256",
-        "aggregate_execution_mode",
-        "member_contract_digest_bound",
-        "source_and_restored_aggregate_inventory_sha256_must_match",
-        "authoritative_member_source_stability",
-    }
-    if (
-        not isinstance(implementation, dict)
-        or set(implementation) != expected_implementation_keys
-        or implementation.get("algorithm") != "member-inventory-sha256-v1"
-        or implementation.get("root_inventory_script")
-        != "scripts/nixos_critical_user_data_inventory.py"
-        or implementation.get("aggregate_inventory_script")
-        != "scripts/nixos_critical_data_inventory.py"
-        or implementation.get("aggregate_execution_mode")
-        != "external-verified-payload-exec-v1"
-        or implementation.get("member_contract_digest_bound") is not True
-        or implementation.get(
-            "source_and_restored_aggregate_inventory_sha256_must_match"
-        )
-        is not True
-        or implementation.get("authoritative_member_source_stability")
-        != "kernel-local-pci-nvme-readonly-mountinfo-v3"
-    ):
-        raise ReadinessError("critical-user-data aggregate inventory policy is invalid")
-    _sha(
-        implementation.get("root_inventory_script_sha256"),
-        "root inventory implementation digest",
-    )
-    _sha(
-        implementation.get("aggregate_inventory_script_sha256"),
-        "aggregate inventory implementation digest",
-    )
-
-    migration = contract.get("migration_policy")
-    if (
-        not isinstance(migration, dict)
-        or migration.get("selection_model") != "explicit-positive-allowlist"
-        or migration.get("unlisted_data_migrated") is not False
-        or migration.get("system_state_recreated_from_nix") is not True
-        or migration.get("old_system_disk_preserved_as_independent_fallback") is not True
-        or migration.get("remote_reproducible_repositories_excluded") is not True
-        or migration.get("operator_state_restored_via_authority_reconcile") is not True
-        or migration.get("legacy_docker_volume_tree_migrated") is not False
-        or migration.get("root_owned_grabowski_runtime_state_migrated") is not False
-        or migration.get("root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy") is not True
-        or migration.get("source_paths_define_nixos_target_layout") is not False
-        or migration.get("cold_preservation_storage_domain") != "@data"
-        or migration.get("cold_preservation_import_root")
-        != "/var/lib/heim-pc-data/import/legacy-2026"
-        or migration.get("cold_preservation_required_before_first_productive_boot") is not False
-        or migration.get("local_only_repository_auto_checkout") is not False
-        or migration.get("legacy_library_source_path_restored") is not False
-        or migration.get("operator_state_direct_restore_forbidden") is not True
-        or migration.get("application_level_service_reconstruction_required") is not True
-    ):
-        raise ReadinessError("critical-user-data migration policy is invalid")
-
-    binding = recovery_contract.get("critical_user_data_scope")
-    if (
-        not isinstance(binding, dict)
-        or set(binding)
-        != {
-            "contract_kind",
-            "scope",
-            "sha256",
-            "off_host_restore_critical_scope_sha256_bound",
-            "off_host_restore_source_inventory_sha256_bound",
-            "off_host_restore_restored_inventory_sha256_bound",
-            "off_host_restore_inventory_sha256_equality_required",
-            "aggregate_member_contracts_bound",
-        }
-        or binding.get("contract_kind") != CRITICAL_USER_DATA_CONTRACT_KIND
-        or binding.get("scope") != "critical-user-data"
-        or binding.get("sha256") != contract_sha256
-        or binding.get("off_host_restore_critical_scope_sha256_bound") is not True
-        or binding.get("off_host_restore_source_inventory_sha256_bound") is not True
-        or binding.get("off_host_restore_restored_inventory_sha256_bound") is not True
-        or binding.get("off_host_restore_inventory_sha256_equality_required") is not True
-        or binding.get("aggregate_member_contracts_bound") is not True
-    ):
-        raise ReadinessError("recovery contract critical-user-data binding is invalid")
-    return contract_sha256
-
 def _validate_lifecycle_contract(contract: dict[str, Any]) -> None:
     if (
         contract.get("schema_version") != 1
@@ -686,7 +538,6 @@ def _validate_provenance_object(
     expected_owner_uid: int,
     expected_producer: str,
     expected_schema: str,
-    critical_scope_sha256: str,
 ) -> dict[str, Any]:
     if not isinstance(path_value, str):
         raise ReadinessError(f"{label} path must be canonical and absolute")
@@ -745,13 +596,7 @@ def _validate_provenance_object(
     evidence = value.get("evidence")
     if (
         not isinstance(evidence, dict)
-        or set(evidence) != {
-            "schema_version",
-            "kind",
-            "result",
-            "producer_receipt_sha256",
-            "facts",
-        }
+        or set(evidence) != {"schema_version", "kind", "result", "producer_receipt_sha256"}
         or evidence.get("schema_version") != 1
         or evidence.get("kind") != expected_schema
         or evidence.get("result") != "passed"
@@ -761,23 +606,6 @@ def _validate_provenance_object(
         evidence.get("producer_receipt_sha256"),
         f"{label} producer receipt digest",
     )
-    facts = evidence.get("facts")
-    if not isinstance(facts, dict) or not facts:
-        raise ReadinessError(f"{label} evidence facts are missing")
-    if evidence_id == "off-host-home-restore":
-        if facts.get("critical_scope_sha256") != critical_scope_sha256:
-            raise ReadinessError(
-                f"{label} critical-user-data scope digest mismatch"
-            )
-        _sha(
-            facts.get("source_inventory_sha256"),
-            f"{label} source inventory digest",
-        )
-        if expected_kind == RECOVERY_RESTORE_TEST_PROVENANCE_KIND:
-            _sha(
-                facts.get("restored_inventory_sha256"),
-                f"{label} restored inventory digest",
-            )
     if value.get("observed_at") != observed_at:
         raise ReadinessError(f"{label} observation mismatch")
     _utc(value.get("observed_at"), f"{label}.observed_at")
@@ -792,7 +620,6 @@ def _validate_provenance_object(
         "evidence_schema": evidence_schema,
         "evidence_sha256": _sha256_json(evidence),
         "producer_receipt_sha256": producer_receipt_sha256,
-        "facts": _copy_json(facts),
     }
 
 
@@ -932,7 +759,6 @@ def _validate_receipt(
     future_skew_seconds: int,
     expected_owner_uid: int,
     attestation_policy: dict[str, Any],
-    critical_scope_sha256: str,
     attestation_verifier=None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     evidence_id = requirement["id"]
@@ -975,7 +801,6 @@ def _validate_receipt(
         expected_owner_uid=expected_owner_uid,
         expected_producer=requirement["producer"],
         expected_schema=requirement["evidence_schema"],
-        critical_scope_sha256=critical_scope_sha256,
     )
     evidence_provenance["external_attestation"] = _validate_provenance_attestation(
         provenance=evidence_provenance,
@@ -1033,7 +858,6 @@ def _validate_receipt(
             expected_owner_uid=expected_owner_uid,
             expected_producer=requirement["producer"],
             expected_schema=requirement["restore_test_schema"],
-            critical_scope_sha256=critical_scope_sha256,
         )
         restore_provenance["external_attestation"] = _validate_provenance_attestation(
             provenance=restore_provenance,
@@ -1050,25 +874,6 @@ def _validate_receipt(
             expected_owner_uid=expected_owner_uid,
             runner=attestation_verifier,
         )
-        if evidence_id == "off-host-home-restore":
-            source_inventory_sha256 = evidence_provenance["facts"][
-                "source_inventory_sha256"
-            ]
-            restore_source_inventory_sha256 = restore_provenance["facts"][
-                "source_inventory_sha256"
-            ]
-            restored_inventory_sha256 = restore_provenance["facts"][
-                "restored_inventory_sha256"
-            ]
-            if restore_source_inventory_sha256 != source_inventory_sha256:
-                raise ReadinessError(
-                    "off-host-home-restore restore source inventory digest mismatch"
-                )
-            if restored_inventory_sha256 != source_inventory_sha256:
-                raise ReadinessError(
-                    "off-host-home-restore source/restored aggregate inventory "
-                    "digest mismatch"
-                )
         restore_observed_at = restore_test["observed_at"]
         restore_status = "passed"
     else:
@@ -1096,7 +901,6 @@ def validate_readiness(
     source_revision: str,
     recovery_contract_path: Path,
     lifecycle_contract_path: Path,
-    critical_user_data_contract_path: Path,
     now: datetime | None = None,
     expected_snapshot: dict[str, Any] | None = None,
     attestation_verifier=None,
@@ -1109,14 +913,6 @@ def validate_readiness(
     )
     lifecycle_contract, lifecycle_meta = _load_contract(
         lifecycle_contract_path, label="Nix lifecycle contract"
-    )
-    critical_contract, critical_meta = _load_contract(
-        critical_user_data_contract_path, label="critical-user-data contract"
-    )
-    critical_scope_sha256 = _validate_critical_user_data_contract(
-        critical_contract,
-        recovery_contract=recovery_contract,
-        contract_sha256=critical_meta["sha256"],
     )
     requirements, max_age, skew, attestation_policy = _recovery_policy(recovery_contract)
     required_ids = [item["id"] for item in requirements]
@@ -1162,8 +958,6 @@ def validate_readiness(
         raise ReadinessError("pre-cutover readiness recovery contract digest mismatch")
     if bundle.get("nix_lifecycle_contract_sha256") != lifecycle_meta["sha256"]:
         raise ReadinessError("pre-cutover readiness lifecycle contract digest mismatch")
-    if bundle.get("critical_user_data_contract_sha256") != critical_scope_sha256:
-        raise ReadinessError("pre-cutover readiness critical-user-data contract digest mismatch")
     if bundle.get("freshness_seconds") != max_age:
         raise ReadinessError("pre-cutover readiness freshness policy mismatch")
     observed_bundle = _fresh(
@@ -1182,7 +976,6 @@ def validate_readiness(
         bundle_meta["path"],
         recovery_meta["path"],
         lifecycle_meta["path"],
-        critical_meta["path"],
     }
     for item in entries:
         if not isinstance(item, dict) or set(item) != {"evidence_id", "path", "sha256"}:
@@ -1238,7 +1031,6 @@ def validate_readiness(
             future_skew_seconds=skew,
             expected_owner_uid=meta["owner_uid"],
             attestation_policy=attestation_policy,
-            critical_scope_sha256=critical_scope_sha256,
             attestation_verifier=attestation_verifier,
         )
         for provenance in (evidence_provenance, restore_provenance):
@@ -1278,9 +1070,6 @@ def validate_readiness(
         "nix_lifecycle_contract_path": lifecycle_meta["path"],
         "nix_lifecycle_contract_sha256": lifecycle_meta["sha256"],
         "nix_lifecycle_contract_file_identity": _identity_binding(lifecycle_meta),
-        "critical_user_data_contract_path": critical_meta["path"],
-        "critical_user_data_contract_sha256": critical_scope_sha256,
-        "critical_user_data_contract_file_identity": _identity_binding(critical_meta),
         "observed_at": bundle["observed_at"],
         "freshness_seconds": max_age,
         "receipts": normalized_receipts,
@@ -1298,7 +1087,6 @@ def revalidate_readiness(
     source_revision: str,
     recovery_contract_path: Path,
     lifecycle_contract_path: Path,
-    critical_user_data_contract_path: Path,
     now: datetime | None = None,
     attestation_verifier=None,
 ) -> dict[str, Any]:
@@ -1309,7 +1097,6 @@ def revalidate_readiness(
         source_revision=source_revision,
         recovery_contract_path=recovery_contract_path,
         lifecycle_contract_path=lifecycle_contract_path,
-        critical_user_data_contract_path=critical_user_data_contract_path,
         now=now,
         expected_snapshot=snapshot,
         attestation_verifier=attestation_verifier,
