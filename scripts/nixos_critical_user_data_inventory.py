@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -1919,7 +1920,7 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise InventoryError("source pinning SHA-256 value is invalid")
             try:
-                script_payload = Path(__file__).read_bytes()
+                script_payload = Path(__file__).resolve().read_bytes()
             except OSError as exc:
                 raise InventoryError("inventory script source cannot be pinned") from exc
             if _sha256_bytes(script_payload) != expected_script:
@@ -1936,7 +1937,7 @@ def main(argv: list[str] | None = None) -> int:
             _contract_payload=pinned_contract_payload,
         )
     except InventoryError:
-        print("critical-user-data inventory blocked by a safety check", file=os.sys.stderr)
+        print("critical-user-data inventory blocked by a safety check", file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

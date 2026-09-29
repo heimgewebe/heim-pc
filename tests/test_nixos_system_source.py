@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d89a235bc4216729d0a7369e6fdd72225fae16c08986fe7b1357004964ad8cf3"
+SOURCE_SNAPSHOT_SHA256 = "9814d79c8aa5c75dd077d33866491f0389449d9df3d7adad103c79af9550d565"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -388,8 +388,15 @@ class T(unittest.TestCase):
         self.assertEqual(critical["kind"], "heim_pc.critical_user_data_scope_contract")
         self.assertEqual(critical["scope"], "critical-user-data")
         self.assertEqual(critical["scope_semantics"], "explicit-positive-selection")
+        implementation = critical["inventory_implementation"]
+        self.assertEqual(implementation["aggregate_execution_mode"], "external-verified-payload-exec-v1")
+        self.assertEqual(
+            implementation["authoritative_member_source_stability"],
+            "kernel-local-pci-nvme-readonly-mountinfo-v3",
+        )
         self.assertEqual([member["id"] for member in critical["members"]], ["home"])
         (home_member,) = critical["members"]
+        self.assertEqual(home_member["contract_file"], "critical-user-home-data-contract-v1.json")
         self.assertEqual(home_member["contract_sha256"], critical_home_sha256)
         self.assertEqual(home_member["destination"], {"nixos_storage_domain": "per-entry-policy", "logical_path": "materialization-policy"})
         self.assertEqual(home_member["restore_mode"], "source-scope-with-role-specific-materialization")
@@ -438,6 +445,7 @@ class T(unittest.TestCase):
         self.assertTrue(materialization["source_scope_and_nixos_target_layout_are_separate"])
         self.assertTrue(materialization["source_equivalent_disposable_restore_required"])
         self.assertEqual(materialization["cold_import_root"], cold_root)
+        self.assertEqual(materialization["schema_version"], 1)
         self.assertFalse(materialization["first_productive_boot_requires_cold_import_completion"])
         self.assertTrue(materialization["roles"]["bootstrap-direct"]["source_path_is_live_target_path"])
         self.assertFalse(materialization["roles"]["authority-reconcile"]["source_path_is_live_target_path"])
@@ -455,6 +463,8 @@ class T(unittest.TestCase):
             self.assertEqual(capsule["working_tree_overlay_policy"], "required-iff-tracked-dirty-or-untracked")
             self.assertFalse(capsule["active_checkout_created_automatically"])
 
+        self.assertIn('"d ${coldImportRoot}/authority 0700 root root -"', backup_module)
+        self.assertIn('"d ${coldImportRoot}/repos 0700 root root -"', backup_module)
         self.assertEqual(critical_home["selection_policy"]["default"], "exclude")
         self.assertFalse(critical_home["selection_policy"]["unlisted_paths_are_migration_data"])
         self.assertEqual(critical["migration_policy"]["selection_model"], "explicit-positive-allowlist")
@@ -488,6 +498,9 @@ class T(unittest.TestCase):
             },
         )
 
+        self.assertTrue(
+            recovery["readiness_bundle"]["critical_user_data_contract_sha256_bound"]
+        )
         self.assertEqual(recovery["status"], "external-evidence-required")
         self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
         self.assertTrue(

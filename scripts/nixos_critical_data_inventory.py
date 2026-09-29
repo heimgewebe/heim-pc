@@ -8,17 +8,18 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import types
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCOPE_CONTRACT = ROOT / "nixos" / "production" / "critical-user-data-contract-v1.json"
-ROOT_INVENTORY_SCRIPT = Path(__file__).with_name("nixos_critical_user_data_inventory.py")
+ROOT_INVENTORY_SCRIPT = Path(__file__).resolve().with_name("nixos_critical_user_data_inventory.py")
 SCOPE_KIND = "heim_pc.critical_user_data_scope_contract"
 AGGREGATE_KIND = "heim_pc.critical_user_data_aggregate_inventory.v1"
 AGGREGATE_ALGORITHM = "member-inventory-sha256-v1"
-AGGREGATE_EXECUTION_MODE = "verified-payload-self-bootstrap-v1"
+AGGREGATE_EXECUTION_MODE = "external-verified-payload-exec-v1"
 _VERIFIED_EXECUTION = False
 MAX_CONTRACT_BYTES = 256 * 1024
 
@@ -73,7 +74,7 @@ def _load_root_inventory_module(payload: bytes):
 
 
 def _load_aggregate_inventory_module(payload: bytes):
-    path = Path(__file__)
+    path = Path(__file__).resolve()
     try:
         code = compile(payload, str(path), "exec")
     except (SyntaxError, ValueError) as exc:
@@ -305,7 +306,7 @@ def collect_inventory(
     try:
         root_script_bytes = ROOT_INVENTORY_SCRIPT.read_bytes()
         aggregate_script_bytes = (
-            Path(__file__).read_bytes()
+            Path(__file__).resolve().read_bytes()
             if _aggregate_script_bytes is None
             else _aggregate_script_bytes
         )
@@ -458,11 +459,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--classification-only", action="store_true")
     parser.add_argument("--expected-script-sha256")
     parser.add_argument("--expected-contract-sha256")
-    parser.add_argument("--verified-payload-bootstrap")
     parser.add_argument("--max-exclusion-samples", type=int, default=0)
     args = parser.parse_args(argv)
 
     try:
+        if not args.classification_only:
+            raise AggregateInventoryError(
+                "authoritative aggregate inventory requires external verified payload executor"
+            )
         pin_values = (
             args.expected_script_sha256,
             args.expected_contract_sha256,
@@ -472,10 +476,6 @@ def main(argv: list[str] | None = None) -> int:
                 "source pinning requires both expected SHA-256 values"
             )
         if all(pin_values):
-            if args.verified_payload_bootstrap != AGGREGATE_EXECUTION_MODE:
-                raise AggregateInventoryError(
-                    "source pinning requires verified payload bootstrap"
-                )
             expected_script = _require_sha(
                 args.expected_script_sha256, "expected script digest"
             )
@@ -483,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.expected_contract_sha256, "expected contract digest"
             )
             try:
-                script_payload = Path(__file__).read_bytes()
+                script_payload = Path(__file__).resolve().read_bytes()
             except OSError as exc:
                 raise AggregateInventoryError(
                     "aggregate inventory implementation cannot be read"
@@ -502,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = verified_module.collect_inventory(
                     args.contract,
-                    classification_only=args.classification_only,
+                    classification_only=True,
                     max_exclusion_samples=args.max_exclusion_samples,
                     _contract_snapshot=pinned_contract,
                     _aggregate_script_bytes=script_payload,
@@ -510,21 +510,13 @@ def main(argv: list[str] | None = None) -> int:
             except verified_module.AggregateInventoryError as exc:
                 raise AggregateInventoryError(str(exc)) from exc
         else:
-            if args.verified_payload_bootstrap:
-                raise AggregateInventoryError(
-                    "verified payload bootstrap requires source pinning"
-                )
-            if not args.classification_only:
-                raise AggregateInventoryError(
-                    "authoritative aggregate CLI requires verified payload bootstrap"
-                )
             result = collect_inventory(
                 args.contract,
                 classification_only=True,
                 max_exclusion_samples=args.max_exclusion_samples,
             )
     except (AggregateInventoryError, OSError):
-        print("critical aggregate inventory blocked by a safety check", file=os.sys.stderr)
+        print("critical aggregate inventory blocked by a safety check", file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

@@ -269,6 +269,33 @@ def _validate(fx, *, verifier=_synthetic_attestation_verifier):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("aggregate_execution_mode", "verified-payload-self-bootstrap-v1"),
+        ("authoritative_member_source_stability", "kernel-block-readonly-mountinfo-v1"),
+    ],
+)
+def test_critical_user_data_validator_rejects_inventory_implementation_drift(
+    field, value
+):
+    contract_path = ROOT / "nixos" / "production" / "critical-user-data-contract-v1.json"
+    recovery_path = ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+    contract["inventory_implementation"][field] = value
+
+    with pytest.raises(
+        ready.ReadinessError,
+        match="aggregate inventory policy is invalid",
+    ):
+        ready._validate_critical_user_data_contract(
+            contract,
+            recovery_contract=recovery,
+            contract_sha256=recovery["critical_user_data_scope"]["sha256"],
+        )
+
+
 def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
     fx = _fixture(tmp_path, provisioned=False)
     with pytest.raises(

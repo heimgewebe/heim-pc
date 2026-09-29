@@ -565,14 +565,34 @@ def _validate_critical_user_data_contract(
         _sha(item.get("contract_sha256"), f"{member_id} member contract digest")
 
     implementation = contract.get("inventory_implementation")
+    expected_implementation_keys = {
+        "algorithm",
+        "root_inventory_script",
+        "root_inventory_script_sha256",
+        "aggregate_inventory_script",
+        "aggregate_inventory_script_sha256",
+        "aggregate_execution_mode",
+        "member_contract_digest_bound",
+        "source_and_restored_aggregate_inventory_sha256_must_match",
+        "authoritative_member_source_stability",
+    }
     if (
         not isinstance(implementation, dict)
+        or set(implementation) != expected_implementation_keys
         or implementation.get("algorithm") != "member-inventory-sha256-v1"
+        or implementation.get("root_inventory_script")
+        != "scripts/nixos_critical_user_data_inventory.py"
+        or implementation.get("aggregate_inventory_script")
+        != "scripts/nixos_critical_data_inventory.py"
+        or implementation.get("aggregate_execution_mode")
+        != "external-verified-payload-exec-v1"
         or implementation.get("member_contract_digest_bound") is not True
         or implementation.get(
             "source_and_restored_aggregate_inventory_sha256_must_match"
         )
         is not True
+        or implementation.get("authoritative_member_source_stability")
+        != "kernel-local-pci-nvme-readonly-mountinfo-v3"
     ):
         raise ReadinessError("critical-user-data aggregate inventory policy is invalid")
     _sha(

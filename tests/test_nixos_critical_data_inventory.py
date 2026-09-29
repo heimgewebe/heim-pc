@@ -268,8 +268,6 @@ def test_main_executes_verified_payload_instead_of_loaded_module(
             hashlib.sha256(payload).hexdigest(),
             "--expected-contract-sha256",
             _sha(contract),
-            "--verified-payload-bootstrap",
-            aggregate.AGGREGATE_EXECUTION_MODE,
         ]
     )
 
@@ -334,8 +332,6 @@ def test_main_reuses_pinned_aggregate_contract_payload(monkeypatch, tmp_path):
             expected_script,
             "--expected-contract-sha256",
             expected_contract,
-            "--verified-payload-bootstrap",
-            aggregate.AGGREGATE_EXECUTION_MODE,
         ]
     )
 
@@ -374,8 +370,6 @@ def test_verified_payload_failure_is_normalized_to_cli_safety_block(
             expected_script,
             "--expected-contract-sha256",
             expected_contract,
-            "--verified-payload-bootstrap",
-            aggregate.AGGREGATE_EXECUTION_MODE,
         ]
     )
 
@@ -386,7 +380,7 @@ def test_verified_payload_failure_is_normalized_to_cli_safety_block(
     assert "Traceback" not in captured.err
 
 
-def test_pinned_aggregate_cli_requires_verified_payload_bootstrap(
+def test_authoritative_cli_requires_external_verified_payload_executor(
     monkeypatch, tmp_path, capsys
 ):
     contract = _write_contracts(tmp_path)
@@ -394,14 +388,13 @@ def test_pinned_aggregate_cli_requires_verified_payload_bootstrap(
 
     def forbidden_loader(_payload):
         called["value"] = True
-        raise AssertionError("unverified bootstrap reached payload execution")
+        raise AssertionError("authoritative CLI reached in-process payload execution")
 
     monkeypatch.setattr(aggregate, "_load_aggregate_inventory_module", forbidden_loader)
     result = aggregate.main(
         [
             "--contract",
             str(contract),
-            "--classification-only",
             "--expected-script-sha256",
             _sha(MODULE),
             "--expected-contract-sha256",
@@ -411,6 +404,7 @@ def test_pinned_aggregate_cli_requires_verified_payload_bootstrap(
 
     assert result == 2
     assert called["value"] is False
+    assert aggregate.AGGREGATE_EXECUTION_MODE == "external-verified-payload-exec-v1"
     assert "blocked by a safety check" in capsys.readouterr().err
 
 

@@ -31,10 +31,16 @@ in
         && recovery.critical_user_data_scope.off_host_restore_restored_inventory_sha256_bound
         && recovery.critical_user_data_scope.off_host_restore_inventory_sha256_equality_required
         && recovery.critical_user_data_scope.aggregate_member_contracts_bound
+        && recovery.readiness_bundle.critical_user_data_contract_sha256_bound
         && criticalUserData.schema_version == 1
         && criticalUserData.kind == "heim_pc.critical_user_data_scope_contract"
         && criticalUserData.scope == "critical-user-data"
         && criticalUserData.scope_semantics == "explicit-positive-selection"
+        && criticalUserData.inventory_implementation.algorithm == "member-inventory-sha256-v1"
+        && criticalUserData.inventory_implementation.root_inventory_script == "scripts/nixos_critical_user_data_inventory.py"
+        && criticalUserData.inventory_implementation.aggregate_inventory_script == "scripts/nixos_critical_data_inventory.py"
+        && criticalUserData.inventory_implementation.aggregate_execution_mode == "external-verified-payload-exec-v1"
+        && criticalUserData.inventory_implementation.authoritative_member_source_stability == "kernel-local-pci-nvme-readonly-mountinfo-v3"
         && builtins.length criticalUserData.members == 1
         && homeMember.id == "home"
         && homeMember.contract_file == "critical-user-home-data-contract-v1.json"
@@ -94,5 +100,7 @@ in
     "d /var/lib/heim-pc/backup 0700 root root -"
     "d /var/lib/heim-pc-data/import 0700 root root -"
     "d ${coldImportRoot} 0700 root root -"
+    "d ${coldImportRoot}/authority 0700 root root -"
+    "d ${coldImportRoot}/repos 0700 root root -"
   ];
 }

@@ -1055,7 +1055,7 @@ def test_authoritative_inventory_rejects_writable_covering_mount(
     home = tmp_path / "home"
     home.mkdir()
     target = home / "value.txt"
-    target.write_text("stable\\n", encoding="utf-8")
+    target.write_text("stable\n", encoding="utf-8")
     contract = _explicit_contract(
         tmp_path / "explicit.json",
         home,
@@ -1110,7 +1110,7 @@ def test_authoritative_tree_rejects_any_writable_alias_for_source_device(
     home = tmp_path / "home"
     tree = home / "tree"
     tree.mkdir(parents=True)
-    (tree / "value.txt").write_text("stable\\n", encoding="utf-8")
+    (tree / "value.txt").write_text("stable\n", encoding="utf-8")
     contract = _explicit_contract(
         tmp_path / "explicit.json",
         home,
@@ -1166,7 +1166,7 @@ def test_classification_does_not_require_source_quiescence(
     home = tmp_path / "home"
     home.mkdir()
     target = home / "value.txt"
-    target.write_text("stable\\n", encoding="utf-8")
+    target.write_text("stable\n", encoding="utf-8")
     contract = _explicit_contract(
         tmp_path / "explicit.json",
         home,

@@ -18,10 +18,10 @@
   "inventory_implementation": {
     "algorithm": "member-inventory-sha256-v1",
     "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
-    "root_inventory_script_sha256": "a6efa2f9c5ada2146dace47c69b41e64d43306cc4ab300ea673ea703fd38f5f9",
+    "root_inventory_script_sha256": "b27acca12ae9ecc120d2e7a1ef6e814aa7401a3e3ab780c5bb89f4d0a0ec2ba9",
     "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
-    "aggregate_inventory_script_sha256": "3a9ffd2ed7e2d2518cc150de50bbb7ca42320755e0482fbbdb1275bc29aeae1c",
-    "aggregate_execution_mode": "verified-payload-self-bootstrap-v1",
+    "aggregate_inventory_script_sha256": "6e1a88bd58a584744829cca14d28f7c0d1c3f35477ffd3f0ffc1fa0d9ddff4b9",
+    "aggregate_execution_mode": "external-verified-payload-exec-v1",
     "member_contract_digest_bound": true,
     "source_and_restored_aggregate_inventory_sha256_must_match": true,
     "authoritative_member_source_stability": "kernel-local-pci-nvme-readonly-mountinfo-v3"
