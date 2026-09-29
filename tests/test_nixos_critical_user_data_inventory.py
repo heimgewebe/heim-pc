@@ -20,6 +20,22 @@ assert spec.loader is not None
 spec.loader.exec_module(inventory)
 
 
+
+REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY = (
+    inventory._verify_authoritative_source_stability
+)
+
+
+@pytest.fixture(autouse=True)
+def _bypass_authoritative_source_stability_for_low_level_unit_tests():
+    original = inventory._verify_authoritative_source_stability
+    inventory._verify_authoritative_source_stability = lambda _policy: None
+    try:
+        yield
+    finally:
+        inventory._verify_authoritative_source_stability = original
+
+
 def _contract(path: Path, home: Path) -> Path:
     value = {
         "schema_version": 1,
@@ -41,6 +57,7 @@ def _contract(path: Path, home: Path) -> Path:
             "special_files": "excluded-runtime-only",
             "unreadable_included_path": "fail",
             "changed_during_hash": "fail",
+            "authoritative_source_stability": inventory.SOURCE_STABILITY_MODE,
         },
         "exclusions": {
             "top_level_prefixes": [
@@ -716,6 +733,7 @@ def _explicit_contract(path: Path, home: Path, includes: list[dict]) -> Path:
             "special_files": "excluded-runtime-only",
             "unreadable_included_path": "fail",
             "changed_during_hash": "fail",
+            "authoritative_source_stability": inventory.SOURCE_STABILITY_MODE,
         },
         "includes": includes,
     }
@@ -790,6 +808,200 @@ def test_explicit_path_set_fails_if_ancestor_is_replaced_during_hash(
     assert changed["done"] is True
 
 
+
+
+
+
+
+def test_authoritative_inventory_rejects_writable_block_device_before_hash(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_source_stability",
+        REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "value.txt"
+    target.write_text("stable\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "valuable",
+            "rationale": "kernel block device must be read-only",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+    device = target.lstat().st_dev
+    dev = (os.major(device), os.minor(device))
+    monkeypatch.setattr(
+        inventory,
+        "_read_mountinfo",
+        lambda: [{
+            "device": dev,
+            "root": Path("/"),
+            "mount_point": Path("/"),
+            "read_only": True,
+        }],
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_block_device_is_read_only",
+        lambda _device: False,
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_hash_fd",
+        lambda _fd: (_ for _ in ()).throw(
+            AssertionError("writable block device reached content hashing")
+        ),
+    )
+    with pytest.raises(
+        inventory.InventoryError,
+        match="block device is writable",
+    ):
+        inventory.collect_inventory(contract)
+
+
+def test_authoritative_inventory_rejects_writable_covering_mount(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_source_stability",
+        REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "value.txt"
+    target.write_text("stable\\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "valuable",
+            "rationale": "authoritative source must be quiesced",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+    device = target.lstat().st_dev
+    dev = (os.major(device), os.minor(device))
+    monkeypatch.setattr(inventory, "_block_device_is_read_only", lambda _device: True)
+    monkeypatch.setattr(
+        inventory,
+        "_read_mountinfo",
+        lambda: [{
+            "device": dev,
+            "root": Path("/"),
+            "mount_point": Path("/"),
+            "read_only": False,
+        }],
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_hash_fd",
+        lambda _fd: (_ for _ in ()).throw(
+            AssertionError("writable source reached content hashing")
+        ),
+    )
+    with pytest.raises(
+        inventory.InventoryError,
+        match="writable in current mount view",
+    ):
+        inventory.collect_inventory(contract)
+
+
+def test_authoritative_tree_rejects_any_writable_alias_for_source_device(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_source_stability",
+        REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    home = tmp_path / "home"
+    tree = home / "tree"
+    tree.mkdir(parents=True)
+    (tree / "value.txt").write_text("stable\\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(tree),
+            "class": "valuable",
+            "rationale": "tree must have no writable alias",
+            "capture": "tree",
+            "restore_mode": "byte-identical",
+        }],
+    )
+    device = tree.lstat().st_dev
+    dev = (os.major(device), os.minor(device))
+    monkeypatch.setattr(inventory, "_block_device_is_read_only", lambda _device: True)
+    monkeypatch.setattr(
+        inventory,
+        "_read_mountinfo",
+        lambda: [
+            {
+                "device": dev,
+                "root": Path("/"),
+                "mount_point": Path("/"),
+                "read_only": True,
+            },
+            {
+                "device": dev,
+                "root": Path("/unrelated-rw-subtree"),
+                "mount_point": tmp_path / "rw-alias",
+                "read_only": False,
+            },
+        ],
+    )
+    with pytest.raises(
+        inventory.InventoryError,
+        match="writable mount alias",
+    ):
+        inventory.collect_inventory(contract)
+
+
+def test_classification_does_not_require_source_quiescence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        inventory,
+        "_verify_authoritative_source_stability",
+        REAL_VERIFY_AUTHORITATIVE_SOURCE_STABILITY,
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "value.txt"
+    target.write_text("stable\\n", encoding="utf-8")
+    contract = _explicit_contract(
+        tmp_path / "explicit.json",
+        home,
+        [{
+            "path": str(target),
+            "class": "valuable",
+            "rationale": "classification remains live-safe",
+            "capture": "file",
+            "restore_mode": "private",
+        }],
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_read_mountinfo",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("classification consulted mount topology")
+        ),
+    )
+    result = inventory.collect_inventory(contract, classification_only=True)
+    assert result["authoritative_inventory"] is False
+    assert result["source_stability_verified"] is False
+    assert result["source_stability_proof"] is None
 
 
 def test_authoritative_inventory_rejects_tree_same_name_replace_between_passes(
@@ -905,6 +1117,8 @@ def test_authoritative_inventory_reports_two_pass_stability_proof(tmp_path):
     assert result["authoritative_inventory"] is True
     assert result["stability_pass_count"] == 2
     assert result["stability_proof"] == "two-consecutive-identical-full-captures"
+    assert result["source_stability_verified"] is True
+    assert result["source_stability_proof"] == inventory.SOURCE_STABILITY_MODE
 
 
 def test_explicit_path_set_excludes_unlisted_data_by_default(tmp_path):

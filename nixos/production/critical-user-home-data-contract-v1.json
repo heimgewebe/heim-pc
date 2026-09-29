@@ -7,7 +7,7 @@
   "logical_root": "/home/alex",
   "inventory": {
     "schema": "heim_pc.critical_user_data_inventory.v1",
-    "algorithm": "canonical-record-stream-sha256-v2",
+    "algorithm": "canonical-record-stream-sha256-v4",
     "same_filesystem_only": true,
     "follow_symlinks": false,
     "regular_file_content_sha256": true,
@@ -17,7 +17,8 @@
     "symlink_target_bound": true,
     "special_files": "excluded-runtime-only",
     "unreadable_included_path": "fail",
-    "changed_during_hash": "fail"
+    "changed_during_hash": "fail",
+    "authoritative_source_stability": "kernel-block-readonly-mountinfo-v1"
   },
   "includes": [
     {

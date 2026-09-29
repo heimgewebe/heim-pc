@@ -17,7 +17,8 @@ from typing import Any
 CONTRACT_KIND = "heim_pc.critical_user_data_scope_contract"
 INVENTORY_KIND = "heim_pc.critical_user_data_inventory.v1"
 OBSERVATION_KIND = "heim_pc.critical_user_data_inventory_observation.v1"
-ALGORITHM = "canonical-record-stream-sha256-v2"
+ALGORITHM = "canonical-record-stream-sha256-v4"
+SOURCE_STABILITY_MODE = "kernel-block-readonly-mountinfo-v1"
 MAX_CONTRACT_BYTES = 256 * 1024
 DEFAULT_EXCLUSION_SAMPLES = 64
 SQLITE_FAMILY_COMPANION_SUFFIXES = ("-journal", "-wal")
@@ -82,6 +83,7 @@ def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
         "special_files": "excluded-runtime-only",
         "unreadable_included_path": "fail",
         "changed_during_hash": "fail",
+        "authoritative_source_stability": SOURCE_STABILITY_MODE,
     }
     explicit_path_set = (
         scope == "critical-user-data-home"
@@ -441,6 +443,129 @@ def _validate_contract(value: dict[str, Any]) -> dict[str, Any]:
         },
         "directory_names_global_fallback": directory_names_global_fallback,
     }
+
+
+
+
+def _decode_mountinfo_path(value: str) -> Path:
+    decoded = value
+    for escaped, literal in (
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ):
+        decoded = decoded.replace(escaped, literal)
+    return Path(decoded)
+
+
+def _block_device_is_read_only(device: tuple[int, int]) -> bool:
+    major, minor = device
+    path = Path(f"/sys/dev/block/{major}:{minor}/ro")
+    try:
+        value = path.read_text(encoding="ascii", errors="strict").strip()
+    except (OSError, UnicodeError) as exc:
+        raise InventoryError(
+            "authoritative source block-device read-only state is unavailable"
+        ) from exc
+    if value not in {"0", "1"}:
+        raise InventoryError(
+            "authoritative source block-device read-only state is malformed"
+        )
+    return value == "1"
+
+
+def _read_mountinfo() -> list[dict[str, Any]]:
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8", errors="strict"
+        ).splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise InventoryError("authoritative source mount topology is unavailable") from exc
+
+    mounts: list[dict[str, Any]] = []
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError as exc:
+            raise InventoryError("authoritative source mount topology is malformed") from exc
+        if separator < 6 or len(fields) <= separator + 3:
+            raise InventoryError("authoritative source mount topology is malformed")
+        device_text = fields[2]
+        if ":" not in device_text:
+            raise InventoryError("authoritative source mount device is malformed")
+        major_text, minor_text = device_text.split(":", 1)
+        try:
+            device = (int(major_text), int(minor_text))
+        except ValueError as exc:
+            raise InventoryError("authoritative source mount device is malformed") from exc
+        options = frozenset(fields[5].split(","))
+        if ("ro" in options) == ("rw" in options):
+            raise InventoryError("authoritative source mount mode is ambiguous")
+        mounts.append(
+            {
+                "device": device,
+                "root": _decode_mountinfo_path(fields[3]),
+                "mount_point": _decode_mountinfo_path(fields[4]),
+                "read_only": "ro" in options,
+            }
+        )
+    return mounts
+
+
+def _covering_mount(
+    path: Path,
+    *,
+    device: tuple[int, int],
+    mounts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    candidates = [
+        mount
+        for mount in mounts
+        if mount["device"] == device and _under(path, mount["mount_point"])
+    ]
+    if not candidates:
+        raise InventoryError(
+            f"authoritative source path has no mount topology binding: {path}"
+        )
+    return max(candidates, key=lambda item: len(item["mount_point"].parts))
+
+
+def _verify_authoritative_source_stability(policy: dict[str, Any]) -> None:
+    if policy["scope_semantics"] != "explicit-path-set":
+        raise InventoryError(
+            "authoritative inventory requires explicit-path-set source semantics"
+        )
+    mounts = _read_mountinfo()
+    for entry in policy["include_paths"]:
+        selected: Path = entry["path"]
+        try:
+            observed = selected.lstat()
+        except OSError as exc:
+            raise InventoryError(
+                f"authoritative source path is unavailable: {_relative(selected, policy['root'])}"
+            ) from exc
+        device = (os.major(observed.st_dev), os.minor(observed.st_dev))
+        if not _block_device_is_read_only(device):
+            raise InventoryError(
+                f"authoritative source block device is writable: "
+                f"{_relative(selected, policy['root'])}"
+            )
+        covering = _covering_mount(selected, device=device, mounts=mounts)
+        if not covering["read_only"]:
+            raise InventoryError(
+                f"authoritative source path is writable in current mount view: "
+                f"{_relative(selected, policy['root'])}"
+            )
+        if any(
+            mount["device"] == device and not mount["read_only"]
+            for mount in mounts
+        ):
+            raise InventoryError(
+                f"authoritative source device has writable mount alias: "
+                f"{_relative(selected, policy['root'])}"
+            )
 
 
 def load_contract(path: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
@@ -1578,21 +1703,32 @@ def collect_inventory(
     classification_only: bool = False,
     max_exclusion_samples: int = DEFAULT_EXCLUSION_SAMPLES,
 ) -> dict[str, Any]:
-    first = _collect_inventory_once(
-        contract_path,
-        classification_only=classification_only,
-        max_exclusion_samples=max_exclusion_samples,
-    )
     if classification_only:
+        first = _collect_inventory_once(
+            contract_path,
+            classification_only=True,
+            max_exclusion_samples=max_exclusion_samples,
+        )
         first["stability_pass_count"] = 1
         first["stability_proof"] = "classification-only-single-pass"
+        first["source_stability_verified"] = False
+        first["source_stability_proof"] = None
         return first
 
+    _contract, _contract_bytes, policy = load_contract(contract_path)
+    _verify_authoritative_source_stability(policy)
+    first = _collect_inventory_once(
+        contract_path,
+        classification_only=False,
+        max_exclusion_samples=max_exclusion_samples,
+    )
+    _verify_authoritative_source_stability(policy)
     confirmation = _collect_inventory_once(
         contract_path,
         classification_only=False,
         max_exclusion_samples=max_exclusion_samples,
     )
+    _verify_authoritative_source_stability(policy)
     stability_fields = (
         "scope",
         "root",
@@ -1619,6 +1755,8 @@ def collect_inventory(
         )
     first["stability_pass_count"] = 2
     first["stability_proof"] = "two-consecutive-identical-full-captures"
+    first["source_stability_verified"] = True
+    first["source_stability_proof"] = SOURCE_STABILITY_MODE
     return first
 
 

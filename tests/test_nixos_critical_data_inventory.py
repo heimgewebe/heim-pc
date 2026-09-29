@@ -168,6 +168,7 @@ def _write_contracts(tmp_path: Path) -> Path:
             "aggregate_inventory_script_sha256": _sha(MODULE),
             "member_contract_digest_bound": True,
             "source_and_restored_aggregate_inventory_sha256_must_match": True,
+            "authoritative_member_source_stability": "kernel-block-readonly-mountinfo-v1",
         },
     }
     scope_path = tmp_path / "critical-user-data-contract-v1.json"
@@ -187,6 +188,16 @@ def _fake_root_inventory():
             "contract_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
             "authoritative_inventory": not classification_only,
             "inventory_sha256": None if classification_only else ("a" * 64),
+            "source_stability_verified": False if classification_only else True,
+            "source_stability_proof": (
+                None if classification_only else "kernel-block-readonly-mountinfo-v1"
+            ),
+            "stability_pass_count": 1 if classification_only else 2,
+            "stability_proof": (
+                "classification-only-single-pass"
+                if classification_only
+                else "two-consecutive-identical-full-captures"
+            ),
             "record_count": 3,
             "regular_file_bytes": 11,
             "exclusion_boundary_count": 0,
@@ -219,6 +230,57 @@ def test_aggregate_inventory_binds_explicit_member_digest(monkeypatch, tmp_path)
     assert result["member_count"] == 1
     assert result["record_count"] == 3
     assert result["regular_file_bytes"] == 11
+
+
+
+
+def test_aggregate_rejects_authoritative_member_without_source_stability(
+    monkeypatch, tmp_path
+):
+    contract = _write_contracts(tmp_path)
+    fake = _fake_root_inventory()
+    real_collect = fake.collect_inventory
+
+    def collect_inventory(path, *, classification_only=False, max_exclusion_samples=0):
+        result = real_collect(
+            path,
+            classification_only=classification_only,
+            max_exclusion_samples=max_exclusion_samples,
+        )
+        result["source_stability_verified"] = False
+        result["source_stability_proof"] = None
+        return result
+
+    monkeypatch.setattr(
+        aggregate,
+        "_load_root_inventory_module",
+        lambda: SimpleNamespace(
+            InventoryError=fake.InventoryError,
+            collect_inventory=collect_inventory,
+        ),
+    )
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="source stability proof is invalid",
+    ):
+        aggregate.collect_inventory(contract)
+
+
+def test_aggregate_rejects_weakened_source_stability_binding(
+    monkeypatch, tmp_path
+):
+    contract = _write_contracts(tmp_path)
+    monkeypatch.setattr(aggregate, "_load_root_inventory_module", _fake_root_inventory)
+    value = json.loads(contract.read_text())
+    value["inventory_implementation"]["authoritative_member_source_stability"] = (
+        "caller-asserted"
+    )
+    contract.write_text(json.dumps(value, sort_keys=True) + "\n")
+    with pytest.raises(
+        aggregate.AggregateInventoryError,
+        match="implementation binding is invalid",
+    ):
+        aggregate.collect_inventory(contract, classification_only=True)
 
 
 def test_classification_does_not_claim_authoritative_digest(monkeypatch, tmp_path):
@@ -255,6 +317,16 @@ def test_aggregate_rejects_member_result_contract_digest_drift(monkeypatch, tmp_
             "contract_sha256": "b" * 64,
             "authoritative_inventory": not classification_only,
             "inventory_sha256": None if classification_only else ("a" * 64),
+            "source_stability_verified": False if classification_only else True,
+            "source_stability_proof": (
+                None if classification_only else "kernel-block-readonly-mountinfo-v1"
+            ),
+            "stability_pass_count": 1 if classification_only else 2,
+            "stability_proof": (
+                "classification-only-single-pass"
+                if classification_only
+                else "two-consecutive-identical-full-captures"
+            ),
             "record_count": 3,
             "regular_file_bytes": 11,
             "exclusion_boundary_count": 0,

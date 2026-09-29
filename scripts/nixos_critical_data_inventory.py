@@ -235,8 +235,35 @@ def collect_inventory(
         raise AggregateInventoryError("aggregate contract member set is invalid")
 
     implementation = contract.get("inventory_implementation")
-    if not isinstance(implementation, dict):
-        raise AggregateInventoryError("aggregate inventory implementation binding is missing")
+    expected_implementation_keys = {
+        "algorithm",
+        "root_inventory_script",
+        "root_inventory_script_sha256",
+        "aggregate_inventory_script",
+        "aggregate_inventory_script_sha256",
+        "member_contract_digest_bound",
+        "source_and_restored_aggregate_inventory_sha256_must_match",
+        "authoritative_member_source_stability",
+    }
+    if (
+        not isinstance(implementation, dict)
+        or set(implementation) != expected_implementation_keys
+        or implementation.get("algorithm") != AGGREGATE_ALGORITHM
+        or implementation.get("root_inventory_script")
+        != "scripts/nixos_critical_user_data_inventory.py"
+        or implementation.get("aggregate_inventory_script")
+        != "scripts/nixos_critical_data_inventory.py"
+        or implementation.get("member_contract_digest_bound") is not True
+        or implementation.get(
+            "source_and_restored_aggregate_inventory_sha256_must_match"
+        )
+        is not True
+        or implementation.get("authoritative_member_source_stability")
+        != "kernel-block-readonly-mountinfo-v1"
+    ):
+        raise AggregateInventoryError(
+            "aggregate inventory implementation binding is invalid"
+        )
     expected_root_script = _require_sha(
         implementation.get("root_inventory_script_sha256"),
         "root inventory implementation digest",
@@ -324,6 +351,21 @@ def collect_inventory(
                 f"{member_id} member inventory contract digest mismatch"
             )
         if not classification_only:
+            if result.get("authoritative_inventory") is not True:
+                raise AggregateInventoryError(
+                    f"{member_id} member did not establish authoritative inventory"
+                )
+            if (
+                result.get("source_stability_verified") is not True
+                or result.get("source_stability_proof")
+                != implementation["authoritative_member_source_stability"]
+                or result.get("stability_pass_count") != 2
+                or result.get("stability_proof")
+                != "two-consecutive-identical-full-captures"
+            ):
+                raise AggregateInventoryError(
+                    f"{member_id} member source stability proof is invalid"
+                )
             member_digest = _require_sha(
                 result.get("inventory_sha256"), f"{member_id} member inventory digest"
             )
