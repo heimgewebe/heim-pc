@@ -37,6 +37,8 @@ The existing `managed_cargo_maintenance.py` and `managed_cargo_gc.py` remain the
 
 `config/docker-storage-hygiene.v1.json` authorizes only age-filtered cleanup of stopped containers, unused images, builder cache and unused networks after seven days. Volume cleanup is not an available operation. Both policy and runtime plan fail if a volume command enters the operation set. Named volumes are preserved.
 
+Digest-pinned host-critical images listed in `protected_image_refs` are an explicit exception to unused-image cleanup. After stopped-container pruning and before `image prune -a`, the hygiene runner creates short-lived, never-started protection containers with pulling disabled. Docker therefore sees those exact local images as referenced while the image-prune step runs. If any protected image is absent or cannot be pinned, image pruning is skipped fail-closed; protection containers are removed afterward, and cleanup failure makes the receipt unsuccessful. Other age-eligible unused images remain subject to the existing cleanup policy.
+
 ### Host logs
 
 The commit-bound host installer owns the canonical journald and rsyslog retention files. Journald is limited to 512 MiB persistent and 256 MiB runtime storage, preserves 20 GiB free space and retains at most seven days. Rsyslog files rotate when they reach 100 MiB, retain three compressed rotations and are checked hourly.

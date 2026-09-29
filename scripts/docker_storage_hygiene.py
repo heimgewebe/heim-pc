@@ -7,6 +7,8 @@ from typing import Any
 
 class DockerHygieneError(RuntimeError): pass
 
+PROTECTION_LABEL = "heim-pc.docker-storage-hygiene.protected-image"
+
 def canonical(value: Any)->bytes: return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
 def digest(value: Any)->str: return hashlib.sha256(canonical(value)).hexdigest()
 
@@ -22,13 +24,25 @@ def atomic_json(path: Path,value: dict[str,Any])->None:
         try: tmp.unlink()
         except FileNotFoundError: pass
 
+def valid_protected_image_ref(value: Any)->bool:
+    if not isinstance(value,str) or not value or value.strip()!=value or len(value)>512:
+        return False
+    marker="@sha256:"
+    if marker not in value:
+        return False
+    name,image_digest=value.rsplit(marker,1)
+    return bool(name) and len(image_digest)==64 and all(c in "0123456789abcdef" for c in image_digest)
+
 def load_policy(path: Path)->dict[str,Any]:
     try: value=json.loads(path.read_text())
     except (OSError,json.JSONDecodeError) as exc: raise DockerHygieneError(f"cannot load policy: {exc}") from exc
-    expected={"schema_version","kind","minimum_unused_age_hours","automatic_gc_authorized","operations","volume_prune_authorized","named_volumes_preserved","max_output_bytes_per_command","command_timeout_seconds","max_receipts"}
+    expected={"schema_version","kind","minimum_unused_age_hours","automatic_gc_authorized","operations","protected_image_refs","volume_prune_authorized","named_volumes_preserved","max_output_bytes_per_command","command_timeout_seconds","max_receipts"}
     if set(value)!=expected or value["schema_version"]!=1 or value["kind"]!="heim_pc.docker_storage_hygiene_policy": raise DockerHygieneError("unexpected Docker hygiene policy")
     if value["operations"] != ["container","image","builder","network"]: raise DockerHygieneError("Docker operations differ from the bounded contract")
     if value["automatic_gc_authorized"] is not True or value["volume_prune_authorized"] is not False or value["named_volumes_preserved"] is not True: raise DockerHygieneError("Docker volume-preservation contract is invalid")
+    protected=value["protected_image_refs"]
+    if not isinstance(protected,list) or len(protected)>32 or len(set(item for item in protected if isinstance(item,str)))!=len(protected) or any(not valid_protected_image_ref(item) for item in protected):
+        raise DockerHygieneError("Docker protected-image contract is invalid")
     for key in ("minimum_unused_age_hours","max_output_bytes_per_command","command_timeout_seconds","max_receipts"):
         item=value[key]
         if isinstance(item,bool) or not isinstance(item,int) or item<1: raise DockerHygieneError(f"invalid policy value: {key}")
@@ -43,7 +57,7 @@ def plan(policy: dict[str,Any], docker: str)->dict[str,Any]:
         [docker,"network","prune","-f","--filter",age],
     ]
     if any("volume" in command for argv in commands for command in argv): raise DockerHygieneError("volume prune entered the Docker plan")
-    material={"schema_version":1,"kind":"heim_pc.docker_storage_hygiene_plan","policy_sha256":digest(policy),"commands":commands,"volume_prune_authorized":False,"named_volumes_preserved":True}
+    material={"schema_version":1,"kind":"heim_pc.docker_storage_hygiene_plan","policy_sha256":digest(policy),"commands":commands,"protected_image_refs":list(policy["protected_image_refs"]),"volume_prune_authorized":False,"named_volumes_preserved":True}
     return {**material,"plan_sha256":digest(material)}
 
 def validate_plan(plan_value:dict[str,Any],policy:dict[str,Any])->None:
@@ -74,12 +88,56 @@ def run_command(argv:list[str],policy:dict[str,Any])->dict[str,Any]:
     limit=policy["max_output_bytes_per_command"]
     return {"argv":argv,"returncode":result.returncode,"stdout":result.stdout[:limit],"stderr":result.stderr[:limit],"stdout_truncated":len(result.stdout)>limit,"stderr_truncated":len(result.stderr)>limit}
 
+def protection_container_name(image_ref:str,index:int)->str:
+    suffix=hashlib.sha256(image_ref.encode()).hexdigest()[:12]
+    return f"heim-pc-docker-pin-{os.getpid()}-{index}-{suffix}"
+
 def apply(plan_value:dict[str,Any],policy:dict[str,Any],state:Path)->dict[str,Any]:
     validate_plan(plan_value,policy)
-    before=run_command([plan_value["commands"][0][0],"system","df"],policy)
-    commands=[run_command(list(argv),policy) for argv in plan_value["commands"]]
-    after=run_command([plan_value["commands"][0][0],"system","df"],policy)
-    receipt={"schema_version":1,"kind":"heim_pc.docker_storage_hygiene_receipt","completed_at_unix":int(time.time()),"plan_sha256":plan_value["plan_sha256"],"commands":commands,"before":before,"after":after,"named_volumes_preserved":True,"volume_prune_executed":False,"success":all(item.get("returncode")==0 for item in commands)}
+    docker=plan_value["commands"][0][0]
+    before=run_command([docker,"system","df"],policy)
+    commands=[run_command(list(plan_value["commands"][0]),policy)]
+    image_protection:list[dict[str,Any]]=[]
+    protected_containers:list[tuple[str,dict[str,Any]]]=[]
+    protection_ready=True
+    protection_cleanup_ok=True
+    for index,image_ref in enumerate(plan_value["protected_image_refs"]):
+        inspected=run_command([docker,"image","inspect",image_ref],policy)
+        record:dict[str,Any]={"image_ref":image_ref,"inspect":inspected}
+        image_protection.append(record)
+        if inspected.get("returncode")!=0:
+            record["status"]="image_unavailable"
+            protection_ready=False
+            break
+        name=protection_container_name(image_ref,index)
+        created=run_command([docker,"container","create","--pull=never","--name",name,"--label",f"{PROTECTION_LABEL}=true",image_ref],policy)
+        record["container_name"]=name
+        record["create"]=created
+        if created.get("returncode")!=0:
+            record["status"]="container_create_failed"
+            protection_ready=False
+            break
+        record["status"]="protected"
+        protected_containers.append((name,record))
+    image_command=list(plan_value["commands"][1])
+    try:
+        if protection_ready:
+            image_result=run_command(image_command,policy)
+        else:
+            image_result={"argv":image_command,"returncode":None,"skipped":True,"reason":"protected_image_unavailable"}
+    finally:
+        for name,record in reversed(protected_containers):
+            removed=run_command([docker,"container","rm",name],policy)
+            record["remove"]=removed
+            if removed.get("returncode")==0:
+                record["status"]="released"
+            else:
+                record["status"]="release_failed"
+                protection_cleanup_ok=False
+    commands.append(image_result)
+    commands.extend(run_command(list(argv),policy) for argv in plan_value["commands"][2:])
+    after=run_command([docker,"system","df"],policy)
+    receipt={"schema_version":1,"kind":"heim_pc.docker_storage_hygiene_receipt","completed_at_unix":int(time.time()),"plan_sha256":plan_value["plan_sha256"],"commands":commands,"image_protection":image_protection,"protected_images_ready":protection_ready,"protected_images_released":protection_cleanup_ok,"before":before,"after":after,"named_volumes_preserved":True,"volume_prune_executed":False,"success":protection_ready and protection_cleanup_ok and all(item.get("returncode")==0 for item in commands)}
     receipt["receipt_sha256"]=digest(receipt); atomic_json(state/f"{receipt['completed_at_unix']}.json",receipt)
     return receipt
 
