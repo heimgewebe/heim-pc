@@ -325,6 +325,7 @@ in
     description = "One-shot offline authoritative Heim-PC critical-user-data inventory";
     wantedBy = [ "multi-user.target" ];
     requires = [ "heim-pc-live-safety.service" ];
+    wants = [ "systemd-udev-settle.service" ];
     after = [
       "heim-pc-live-safety.service"
       "systemd-udev-settle.service"
@@ -338,7 +339,10 @@ in
       User = "root";
       Group = "root";
       UMask = "0077";
-      RuntimeDirectory = "heim-pc-offline-inventory";
+      RuntimeDirectory = [
+        "heim-pc-offline-inventory"
+        "heim-pc-recovery-evidence"
+      ];
       RuntimeDirectoryMode = "0700";
       RuntimeDirectoryPreserve = "yes";
       TimeoutStartSec = "6h";

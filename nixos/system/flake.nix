@@ -413,6 +413,12 @@
           assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.User == "root";
           assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.unitConfig.ConditionPathExists
             == "/dev/disk/by-label/HEIMPC_EVIDENCE";
+          assert builtins.elem "systemd-udev-settle.service"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.wants;
+          assert builtins.elem "heim-pc-offline-inventory"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.RuntimeDirectory;
+          assert builtins.elem "heim-pc-recovery-evidence"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.RuntimeDirectory;
           assert !inventory.virtualisation.podman.enable
             && inventory.fileSystems."/".fsType == "tmpfs";
           assert targetCredentialsUnset;

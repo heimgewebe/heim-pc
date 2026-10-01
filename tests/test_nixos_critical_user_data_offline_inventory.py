@@ -124,6 +124,15 @@ def test_source_tree_requires_exact_private_identity_and_unmounted_partitions(tm
     with pytest.raises(offline.OfflineInventoryError, match="mounted"):
         offline._validate_source_tree(contract, Path("/dev/nvme9n1"), mounted)
 
+    nested_mounted = source_tree(contract)
+    nested_mounted["children"][2]["children"] = [
+        {"type": "crypt", "mountpoints": ["/legacy"]}
+    ]
+    with pytest.raises(offline.OfflineInventoryError, match="mounted device alias"):
+        offline._validate_source_tree(
+            contract, Path("/dev/nvme9n1"), nested_mounted
+        )
+
     wrong_serial = source_tree(contract)
     wrong_serial["serial"] = "OTHER"
     with pytest.raises(offline.OfflineInventoryError, match="identity mismatch"):
@@ -148,6 +157,15 @@ def test_evidence_must_be_ext4_removable_usb():
     assert offline._validate_evidence_trees(
         Path("/dev/sdz1"), partition, Path("/dev/sdz"), parent
     ) == {"partition": "/dev/sdz1", "parent_disk": "/dev/sdz"}
+
+    mounted_parent = dict(parent)
+    mounted_parent["children"] = [
+        {"path": "/dev/sdz2", "type": "part", "mountpoints": ["/mnt/other"]}
+    ]
+    with pytest.raises(offline.OfflineInventoryError, match="mounted descendant"):
+        offline._validate_evidence_trees(
+            Path("/dev/sdz1"), partition, Path("/dev/sdz"), mounted_parent
+        )
 
     parent["tran"] = "nvme"
     with pytest.raises(offline.OfflineInventoryError, match="removable USB"):
@@ -258,8 +276,19 @@ def test_nixos_target_must_match_private_identity_and_be_unmounted(tmp_path):
 
     mounted = target_tree(contract)
     mounted["children"] = [{"mountpoints": ["/nixos"], "type": "part"}]
-    with pytest.raises(offline.OfflineInventoryError, match="mounted child"):
+    with pytest.raises(offline.OfflineInventoryError, match="mounted descendant"):
         offline._validate_target_tree(contract, Path("/dev/nvme8n1"), mounted)
+
+    nested_mounted = target_tree(contract)
+    nested_mounted["children"] = [{
+        "mountpoints": [None],
+        "type": "part",
+        "children": [{"mountpoints": ["/nixos"], "type": "crypt"}],
+    }]
+    with pytest.raises(offline.OfflineInventoryError, match="mounted descendant"):
+        offline._validate_target_tree(
+            contract, Path("/dev/nvme8n1"), nested_mounted
+        )
 
 
 @pytest.mark.parametrize("which", ["source", "target"])

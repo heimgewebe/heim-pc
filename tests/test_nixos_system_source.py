@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "49c8a752ae0c6738d517758f6fca7946c754c2eefb69d359722b292b97a85cb1"
+SOURCE_SNAPSHOT_SHA256 = "2df557b771354c59e853a776a0e685f7606e5e30a9fb2520048f1e5959ec4b64"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -760,6 +760,9 @@ class T(unittest.TestCase):
         self.assertIn('Restart = "no";', live)
         self.assertIn('User = "root";', live)
         self.assertIn('ConditionPathExists = "/dev/disk/by-label/HEIMPC_EVIDENCE";', live)
+        self.assertIn('wants = [ "systemd-udev-settle.service" ];', live)
+        self.assertIn('"heim-pc-offline-inventory"', live)
+        self.assertIn('"heim-pc-recovery-evidence"', live)
         self.assertIn('users.users.root.hashedPassword = "!";', live)
         self.assertIn("security.sudo.enable = lib.mkForce false;", live)
         self.assertIn("openssh.enable = lib.mkForce false;", live)

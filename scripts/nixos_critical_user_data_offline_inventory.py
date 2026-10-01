@@ -223,6 +223,22 @@ def _mountpoints(item: dict[str, Any]) -> list[str]:
     return [str(value) for value in values if value]
 
 
+def _tree_has_mounts(item: dict[str, Any]) -> bool:
+    if _mountpoints(item):
+        return True
+    children = item.get("children", [])
+    if children is None:
+        return False
+    if not isinstance(children, list):
+        raise OfflineInventoryError("lsblk children shape is invalid")
+    for child in children:
+        if not isinstance(child, dict):
+            raise OfflineInventoryError("lsblk child shape is invalid")
+        if _tree_has_mounts(child):
+            return True
+    return False
+
+
 def _resolve_block_authority(path: Path, label: str) -> Path:
     if not path.is_absolute() or not path.is_symlink():
         raise OfflineInventoryError(f"{label} stable authority is unavailable")
@@ -304,9 +320,10 @@ def _validate_source_tree(
         or str(tree.get("wwn") or "") != str(protected.get("wwn") or "")
         or int(tree.get("size") or -1) != int(protected.get("size_bytes") or -2)
         or tree.get("tran") != "nvme"
-        or _mountpoints(tree)
     ):
         raise OfflineInventoryError("protected fallback live disk identity mismatch")
+    if _tree_has_mounts(tree):
+        raise OfflineInventoryError("protected fallback has a mounted device alias")
 
     expected_parts = protected.get("partition_table_fingerprint")
     expected = {
@@ -326,8 +343,8 @@ def _validate_source_tree(
             number = int(item.get("partn"))
         except (TypeError, ValueError) as exc:
             raise OfflineInventoryError("protected fallback partition number is invalid") from exc
-        if number in observed or _mountpoints(item):
-            raise OfflineInventoryError("protected fallback partition is mounted or duplicated")
+        if number in observed:
+            raise OfflineInventoryError("protected fallback partition number is duplicated")
         observed[number] = item
     if set(observed) != set(expected):
         raise OfflineInventoryError("protected fallback partition numbers do not match contract")
@@ -389,15 +406,10 @@ def _validate_target_tree(
         or str(tree.get("wwn") or "") != str(target.get("exact_wwn") or "")
         or int(tree.get("size") or -1) != int(target.get("exact_size_bytes") or -2)
         or tree.get("tran") != "nvme"
-        or _mountpoints(tree)
     ):
         raise OfflineInventoryError("NixOS target live disk identity mismatch")
-    children = tree.get("children", [])
-    if not isinstance(children, list):
-        raise OfflineInventoryError("NixOS target partition inventory is invalid")
-    for child in children:
-        if not isinstance(child, dict) or _mountpoints(child):
-            raise OfflineInventoryError("NixOS target has an unsafe mounted child")
+    if _tree_has_mounts(tree):
+        raise OfflineInventoryError("NixOS target has an unsafe mounted descendant")
     return {"disk": str(resolved_disk), "target_by_id": target["exact_by_id"]}
 
 
@@ -451,19 +463,21 @@ def _validate_evidence_trees(
         or Path(str(partition_tree.get("path"))) != partition
         or partition_tree.get("fstype") != "ext4"
         or partition_tree.get("label") != EVIDENCE_LABEL
-        or _mountpoints(partition_tree)
     ):
         raise OfflineInventoryError("recovery evidence partition identity is invalid")
+    if _tree_has_mounts(partition_tree):
+        raise OfflineInventoryError("recovery evidence partition is mounted")
     if (
         parent_tree.get("type") != "disk"
         or Path(str(parent_tree.get("path"))) != parent
         or parent_tree.get("tran") != "usb"
         or int(parent_tree.get("rm") or 0) != 1
-        or _mountpoints(parent_tree)
     ):
         raise OfflineInventoryError(
-            "recovery evidence must be an unmounted removable USB disk"
+            "recovery evidence must be a removable USB disk"
         )
+    if _tree_has_mounts(parent_tree):
+        raise OfflineInventoryError("recovery evidence disk has a mounted descendant")
     return {"partition": str(partition), "parent_disk": str(parent)}
 
 
