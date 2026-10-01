@@ -167,6 +167,29 @@
         ];
       };
 
+      # Dedicated non-installing offline inventory live media. The shared live
+      # module keeps Gate A/B defaults unchanged and narrows this variant to the
+      # root-owned one-shot inventory service with networking and desktop off.
+      nixosConfigurations.heim-pc-live-inventory = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcSourceRevision = sourceRevision;
+          heimPcLiveProfile = {
+            nvidiaOpen = false;
+            edition = "inventory";
+            inventoryMode = true;
+          };
+        };
+        modules = [
+          (nixpkgs + "/nixos/modules/installer/cd-dvd/iso-image.nix")
+          ./modules/desktop.nix
+          ./modules/nvidia.nix
+          ./modules/physical-gates.nix
+          ./modules/live-media.nix
+        ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -243,6 +266,7 @@
         physical-gate-open-system = self.nixosConfigurations.heim-pc-physical-gate-open.config.system.build.toplevel;
         physical-gate-live-proprietary-iso = self.nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.isoImage;
         physical-gate-live-open-iso = self.nixosConfigurations.heim-pc-live-gate-open.config.system.build.isoImage;
+        physical-gate-live-inventory-iso = self.nixosConfigurations.heim-pc-live-inventory.config.system.build.isoImage;
         vm = self.nixosConfigurations.heim-pc-vm.config.system.build.vm;
         provenance-guard = provenanceGuard;
         provenance-bundle = provenanceBundle;
@@ -318,6 +342,7 @@
             live = map (name: configs.${name}.config) [
               "heim-pc-live-gate-proprietary" "heim-pc-live-gate-open"
             ];
+            inventory = configs.heim-pc-live-inventory.config;
             contract = builtins.fromJSON (builtins.readFile ../production/contract-v1.json);
             topology = contract.topology;
             byRole = role: builtins.head (builtins.filter (p: p.role == role) topology.partitions);
@@ -359,6 +384,37 @@
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;
+          assert builtins.all (c:
+            c.networking.networkmanager.enable
+            && c.security.polkit.enable
+            && c.services.displayManager.autoLogin.enable
+            && c.heimPc.desktop.enable
+            && c.heimPc.hardware.nvidia.enable
+            && c.heimPc.physicalGates.enable
+          ) live;
+          assert !inventory.networking.networkmanager.enable;
+          assert !inventory.networking.useDHCP;
+          assert !inventory.security.polkit.enable;
+          assert !inventory.security.rtkit.enable;
+          assert !inventory.services.pipewire.enable;
+          assert !inventory.services.displayManager.autoLogin.enable;
+          assert !inventory.heimPc.desktop.enable;
+          assert !inventory.heimPc.hardware.nvidia.enable;
+          assert !inventory.heimPc.physicalGates.enable;
+          assert inventory.users.users.root.hashedPassword == "!";
+          assert !(builtins.elem "wheel" inventory.users.users.alex.extraGroups);
+          assert !(builtins.elem "disk" inventory.users.users.alex.extraGroups);
+          assert builtins.hasAttr "heim-pc-offline-critical-user-data-inventory"
+            inventory.systemd.services;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.Restart == "no";
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.PrivateNetwork;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.PrivateMounts;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.NoNewPrivileges;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.User == "root";
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.unitConfig.ConditionPathExists
+            == "/dev/disk/by-label/HEIMPC_EVIDENCE";
+          assert !inventory.virtualisation.podman.enable
+            && inventory.fileSystems."/".fsType == "tmpfs";
           assert targetCredentialsUnset;
           assert !credentialConflictEval.success;
           assert !missingPersistConflictEval.success;
