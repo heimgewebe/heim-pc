@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "614571f54b6a91b11fc2f298e0f4bbe296561f75f394103c0a2fdcebed335b73"
+SOURCE_SNAPSHOT_SHA256 = "2df557b771354c59e853a776a0e685f7606e5e30a9fb2520048f1e5959ec4b64"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -737,6 +737,73 @@ class T(unittest.TestCase):
         self.assertIn("lib.optional cfg.modelRuntime llamaCuda", gates)
         self.assertIn("services.ollama = lib.mkIf cfg.modelRuntime", gates)
         self.assertNotIn("mesa-demos", live)
+
+    def test_offline_inventory_live_variant_is_dedicated_and_headless(self):
+        flake = (SOURCE / "flake.nix").read_text()
+        live = (SOURCE / "modules/live-media.nix").read_text()
+        self.assertIn("nixosConfigurations.heim-pc-live-inventory", flake)
+        self.assertIn("physical-gate-live-inventory-iso", flake)
+        self.assertIn("inventoryMode = true;", flake)
+        self.assertIn("heimPcSourceRevision = sourceRevision;", flake)
+        inventory_config = flake.split(
+            "nixosConfigurations.heim-pc-live-inventory =",
+            1,
+        )[1].split("nixosConfigurations.heim-pc-vm =", 1)[0]
+        self.assertNotIn("./modules/audio.nix", inventory_config)
+        self.assertIn("networkmanager.enable = !inventoryMode;", live)
+        self.assertIn("useDHCP = lib.mkIf inventoryMode false;", live)
+        self.assertIn("security.polkit.enable = !inventoryMode;", live)
+        self.assertIn("desktop.enable = !inventoryMode;", live)
+        self.assertIn("enable = !inventoryMode;", live)
+        self.assertIn("PrivateNetwork = true;", live)
+        self.assertIn("PrivateMounts = true;", live)
+        self.assertIn('Restart = "no";', live)
+        self.assertIn('User = "root";', live)
+        self.assertIn('ConditionPathExists = "/dev/disk/by-label/HEIMPC_EVIDENCE";', live)
+        self.assertIn('wants = [ "systemd-udev-settle.service" ];', live)
+        self.assertIn('"heim-pc-offline-inventory"', live)
+        self.assertIn('"heim-pc-recovery-evidence"', live)
+        self.assertIn('users.users.root.hashedPassword = "!";', live)
+        self.assertIn("security.sudo.enable = lib.mkForce false;", live)
+        self.assertIn("openssh.enable = lib.mkForce false;", live)
+        self.assertIn("udisks2.enable = lib.mkForce false;", live)
+        self.assertNotIn("polkit.addRule", live)
+        self.assertNotIn("CAP_SYS_BOOT", live)
+        self.assertNotIn("CAP_SYS_RAWIO", live)
+
+    def test_offline_inventory_live_payload_and_service_are_fail_closed(self):
+        live = (SOURCE / "modules/live-media.nix").read_text()
+        runner = (ROOT / "scripts/nixos_critical_user_data_offline_inventory.py").read_text()
+        for path in (
+            "nixos_production_identity.py",
+            "nixos_critical_user_data_inventory.py",
+            "nixos_critical_data_inventory.py",
+            "critical-user-data-contract-v1.json",
+            "critical-user-home-data-contract-v1.json",
+        ):
+            self.assertIn(path, live)
+        self.assertIn("--expected-source-revision", live)
+        self.assertIn("--apply", live)
+        self.assertIn("RuntimeDirectoryPreserve", live)
+        self.assertIn("private-storage-identity.json", runner)
+        self.assertIn("authority.json", runner)
+        self.assertIn('"automatic_retry_authorized": False', runner)
+        self.assertIn('"production_effects_authorized": False', runner)
+        self.assertIn("blockdev", runner)
+        self.assertIn("--setro", runner)
+        self.assertNotIn("--setrw", runner)
+        self.assertIn("ro,noload,nodev,nosuid,noexec", runner)
+        for forbidden in (
+            "nixos-install",
+            "switch-to-configuration",
+            "mkfs",
+            "wipefs",
+            "sgdisk",
+            "parted ",
+            "efibootmgr",
+        ):
+            self.assertNotIn(forbidden, live)
+            self.assertNotIn(forbidden, runner)
 
     def test_declarative_nixos_system_source_remains_non_destructive(self):
         content = "\n".join(
