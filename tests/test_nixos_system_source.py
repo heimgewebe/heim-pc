@@ -112,6 +112,7 @@ class T(unittest.TestCase):
         self.assertIn(".#packages.x86_64-linux.physical-gate-open-system", workflow)
         self.assertIn(".#packages.x86_64-linux.physical-gate-live-proprietary-iso", workflow)
         self.assertIn(".#packages.x86_64-linux.physical-gate-live-open-iso", workflow)
+        self.assertIn(".#packages.x86_64-linux.physical-gate-live-inventory-iso", workflow)
         self.assertIn(".#packages.x86_64-linux.agent-vsock-proof-microvm", workflow)
         self.assertIn(".#checks.x86_64-linux.firstboot-credentials", workflow)
 
