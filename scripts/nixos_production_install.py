@@ -234,6 +234,19 @@ def load_contract(
         )
     except storage_identity.IdentityContractError as exc:
         raise ProductionInstallError("production storage identity contract rejected") from exc
+    if value.get("migration_mode") != "isolated-parallel-disk-dual-os":
+        raise ProductionInstallError("production migration mode must be isolated dual-OS")
+    source_preservation = value.get("source_preservation")
+    if (
+        not isinstance(source_preservation, dict)
+        or source_preservation.get("mode") != "retained-protected-source"
+        or source_preservation.get("destructive_source_cutover") is not False
+        or not isinstance(source_preservation.get("pre_cutover_readiness_required"), bool)
+        or source_preservation.get("protected_source_bootability_required") is not True
+        or source_preservation.get("protected_source_bootability_proof")
+        != "bootcurrent-protected-esp-loader-v1"
+    ):
+        raise ProductionInstallError("retained-source dual-OS policy is incomplete")
     target = value.get("target_identity")
     if not isinstance(target, dict):
         raise ProductionInstallError("target_identity is missing")
@@ -243,8 +256,14 @@ def load_contract(
     _require_by_id(target["exact_by_id"], "target exact_by_id")
     if target.get("transport") != "nvme" or target.get("kernel_name_authoritative") is not False:
         raise ProductionInstallError("target transport/kernel-name policy mismatch")
-    if not target.get("requires_blank") or not target.get("requires_unmounted"):
-        raise ProductionInstallError("production target must require blank and unmounted state")
+    if (
+        target.get("requires_blank") is not False
+        or target.get("requires_unmounted") is not True
+        or target.get("requires_no_active_descendants") is not True
+        or target.get("existing_state_policy") != "replace-exact-private-preimage"
+        or not isinstance(target.get("private_preimage"), dict)
+    ):
+        raise ProductionInstallError("production target must require exact private preimage replacement and unmounted state")
     protected = value.get("protected_disks")
     if not isinstance(protected, list) or len(protected) != 1:
         raise ProductionInstallError("exactly one protected fallback disk is required")
@@ -312,6 +331,46 @@ def load_contract(
     ):
         raise ProductionInstallError("production identity binding is incomplete")
     return value
+
+
+def pre_cutover_readiness_required(contract: dict[str, Any]) -> bool:
+    policy = contract.get("source_preservation")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("mode") != "retained-protected-source"
+        or policy.get("destructive_source_cutover") is not False
+        or not isinstance(policy.get("pre_cutover_readiness_required"), bool)
+        or policy.get("protected_source_bootability_required") is not True
+        or policy.get("protected_source_bootability_proof")
+        != "bootcurrent-protected-esp-loader-v1"
+    ):
+        raise ProductionInstallError("retained-source dual-OS policy is incomplete")
+    required = policy["pre_cutover_readiness_required"]
+    if required is False:
+        protected = contract.get("protected_disks")
+        boot = contract.get("boot")
+        if (
+            contract.get("migration_mode") != "isolated-parallel-disk-dual-os"
+            or not isinstance(protected, list)
+            or len(protected) != 1
+            or not isinstance(protected[0], dict)
+            or not all(
+                protected[0].get(key) is True
+                for key in (
+                    "partition_table_must_remain_unchanged",
+                    "esp_must_remain_unchanged",
+                    "filesystem_signatures_must_remain_unchanged",
+                )
+            )
+            or not isinstance(boot, dict)
+            or boot.get("own_esp_required") is not True
+            or boot.get("shared_esp_forbidden") is not True
+            or boot.get("touch_efi_variables") is not False
+        ):
+            raise ProductionInstallError(
+                "pre-cutover readiness may be skipped only for isolated retained-source dual-OS"
+            )
+    return required
 
 
 def validate_install_artifact(value: Any) -> dict[str, Any]:
@@ -1418,6 +1477,72 @@ def _identity_tuple(value: dict[str, Any]) -> tuple[Any, ...]:
     return (value.get("model"), value.get("serial"), value.get("wwn"), value.get("size_bytes"), value.get("transport"))
 
 
+def _nested_block_descendants(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ProductionInstallError("lsblk descendant inventory is invalid")
+    result: list[dict[str, Any]] = []
+    for child in value:
+        if not isinstance(child, dict):
+            raise ProductionInstallError("lsblk descendant record is invalid")
+        path = child.get("path")
+        child_type = child.get("type")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/dev/")
+            or not isinstance(child_type, str)
+            or not child_type
+        ):
+            raise ProductionInstallError("lsblk descendant identity is invalid")
+        result.append({
+            "path": path,
+            "type": child_type,
+            "mountpoints": _normalize_mounts(child.get("mountpoints")),
+        })
+        result.extend(_nested_block_descendants(child.get("children")))
+    return result
+
+
+def _block_holders(path: str) -> list[str]:
+    if KERNEL_NVME_RE.fullmatch(path) is None:
+        raise ProductionInstallError("holder observation requires one direct NVMe disk or partition")
+    holder_dir = Path("/sys/class/block") / Path(path).name / "holders"
+    try:
+        if not holder_dir.is_dir():
+            raise ProductionInstallError("block holder inventory is unavailable")
+        holders = sorted(item.name for item in holder_dir.iterdir())
+    except OSError as exc:
+        raise ProductionInstallError("cannot read block holder inventory") from exc
+    if any(not item or "/" in item for item in holders):
+        raise ProductionInstallError("block holder inventory is invalid")
+    return holders
+
+
+def _validate_target_quiescent(target: dict[str, Any]) -> None:
+    holders = target.get("holders")
+    if not isinstance(holders, list) or any(not isinstance(item, str) for item in holders):
+        raise ProductionInstallError("Seagate target holder inventory is missing or invalid")
+    if holders:
+        raise ProductionInstallError("Seagate target has active block-device holders")
+    partitions = target.get("partitions")
+    if not isinstance(partitions, list):
+        raise ProductionInstallError("Seagate target partition activity inventory is missing")
+    for partition in partitions:
+        if not isinstance(partition, dict):
+            raise ProductionInstallError("Seagate target partition activity inventory is invalid")
+        part_holders = partition.get("holders")
+        descendants = partition.get("descendants")
+        if (
+            not isinstance(part_holders, list)
+            or any(not isinstance(item, str) for item in part_holders)
+            or not isinstance(descendants, list)
+        ):
+            raise ProductionInstallError("Seagate target partition activity inventory is incomplete")
+        if part_holders or descendants:
+            raise ProductionInstallError("Seagate target has active block-device descendants")
+
+
 def validate_protected_state(observation: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     protected_contract = contract["protected_disks"][0]
     protected = observation.get("protected")
@@ -1503,6 +1628,40 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         raise ProductionInstallError("current root is not the protected WD root partition")
     if observation.get("efi_source") != expected_paths.get("popos-esp"):
         raise ProductionInstallError("current EFI mount is not the protected WD ESP")
+    bootability = observation.get("protected_bootability")
+    expected_esp = next(
+        (item for item in protected_contract["partition_table_fingerprint"] if item.get("role") == "popos-esp"),
+        None,
+    )
+    if not isinstance(expected_esp, dict):
+        raise ProductionInstallError("protected Pop!_OS ESP contract is missing")
+    required_bootability_keys = {
+        "schema_version", "proof", "boot_current", "entry", "active",
+        "partition_number", "esp_partuuid", "loader_relative_path",
+        "loader_size_bytes", "efi_nvram_sha256",
+    }
+    if not isinstance(bootability, dict) or set(bootability) != required_bootability_keys:
+        raise ProductionInstallError("protected firmware bootability proof is missing or malformed")
+    if (
+        bootability.get("schema_version") != 1
+        or bootability.get("proof") != "bootcurrent-protected-esp-loader-v1"
+        or not isinstance(bootability.get("boot_current"), str)
+        or re.fullmatch(r"[0-9A-F]{4}", bootability["boot_current"]) is None
+        or bootability.get("entry") != f"Boot{bootability['boot_current']}"
+        or bootability.get("active") is not True
+        or bootability.get("partition_number") != expected_esp.get("number")
+        or str(bootability.get("esp_partuuid") or "").lower()
+        != str(expected_esp.get("partuuid") or "").lower()
+        or not isinstance(bootability.get("loader_relative_path"), str)
+        or PurePosixPath(bootability["loader_relative_path"]).is_absolute()
+        or ".." in PurePosixPath(bootability["loader_relative_path"]).parts
+        or isinstance(bootability.get("loader_size_bytes"), bool)
+        or not isinstance(bootability.get("loader_size_bytes"), int)
+        or bootability["loader_size_bytes"] <= 0
+        or not isinstance(bootability.get("efi_nvram_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", bootability["efi_nvram_sha256"]) is None
+    ):
+        raise ProductionInstallError("protected firmware bootability proof does not bind the WD ESP")
     return {
         "requested_path": protected_contract["by_id"],
         "resolved_path": protected.get("resolved_path"),
@@ -1518,6 +1677,7 @@ def validate_protected_state(observation: dict[str, Any], contract: dict[str, An
         "root_source": observation["root_source"],
         "efi_source": observation["efi_source"],
         "efi_content_sha256": efi_content_sha256,
+        "firmware_bootability": dict(bootability),
     }
 
 
@@ -1540,18 +1700,93 @@ def validate_preflight(observation: dict[str, Any], contract: dict[str, Any]) ->
         raise ProductionInstallError("Seagate target identity mismatch")
     if target.get("mounted") is not False or _normalize_mounts(target.get("mountpoints")):
         raise ProductionInstallError("Seagate target must be unmounted")
-    if target.get("partitions") not in ([], None):
-        raise ProductionInstallError("Seagate target is not blank: partitions exist")
-    if target.get("partition_table") not in (None, ""):
-        raise ProductionInstallError("Seagate target is not blank: partition table exists")
-    if target.get("filesystem") not in (None, "") or target.get("signatures") not in ([], None):
-        raise ProductionInstallError("Seagate target is not blank: filesystem/signatures exist")
+    _validate_target_quiescent(target)
+    expected_preimage = target_contract.get("private_preimage")
+    actual_preimage = target_preimage_fingerprint(target)
+    if actual_preimage != expected_preimage:
+        raise ProductionInstallError("Seagate target preimage no longer matches the private replacement authority")
     protected = validate_protected_state(observation, contract)
     if target.get("resolved_path") == protected.get("resolved_path"):
         raise ProductionInstallError("target/protected disk alias collision")
     if requested == protected["requested_path"]:
         raise ProductionInstallError("target/protected authority path collision")
     return {"target": dict(target), "protected": protected}
+
+
+def _target_signature_preimage(value: Any, label: str) -> list[dict[str, str | None]]:
+    records = _normalize_signature_records(value, label)
+    result = []
+    for record in records:
+        sig_type = record.get("type")
+        sig_uuid = record.get("uuid")
+        if (
+            not isinstance(sig_type, str)
+            or not sig_type
+            or "uuid" not in record
+            or (sig_uuid is not None and not isinstance(sig_uuid, str))
+            or (
+                sig_uuid is None
+                and sig_type not in storage_identity.NULL_UUID_SIGNATURE_TYPES
+            )
+        ):
+            raise ProductionInstallError(f"{label} signature identity is invalid")
+        result.append({"type": sig_type, "uuid": sig_uuid})
+    result.sort(key=lambda item: (item["type"], item["uuid"] or ""))
+    return result
+
+
+def target_preimage_fingerprint(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("partition_table") != "gpt":
+        raise ProductionInstallError("Seagate replacement target must retain the expected GPT preimage before apply")
+    gpt_disk_guid = str(value.get("gpt_disk_guid") or "").lower()
+    if storage_identity.GPT_GUID_RE.fullmatch(gpt_disk_guid) is None:
+        raise ProductionInstallError("Seagate target GPT GUID is unavailable")
+    logical_sector_size = value.get("logical_sector_size")
+    if isinstance(logical_sector_size, bool) or not isinstance(logical_sector_size, int) or logical_sector_size <= 0:
+        raise ProductionInstallError("Seagate target logical sector size is unavailable")
+    partitions = value.get("partitions")
+    if not isinstance(partitions, list) or len(partitions) != 3:
+        raise ProductionInstallError("Seagate replacement target must contain the exact three-partition private preimage")
+    normalized = []
+    numbers = set()
+    for item in partitions:
+        if not isinstance(item, dict):
+            raise ProductionInstallError("Seagate target preimage partition is invalid")
+        number = item.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or number not in {1, 2, 3} or number in numbers:
+            raise ProductionInstallError("Seagate target preimage partition numbers are invalid")
+        size_bytes = item.get("size_bytes")
+        start_sector = item.get("start_sector")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise ProductionInstallError("Seagate target preimage partition size is invalid")
+        if isinstance(start_sector, bool) or not isinstance(start_sector, int) or start_sector < 0:
+            raise ProductionInstallError("Seagate target preimage partition start is invalid")
+        partuuid = str(item.get("partuuid") or "").lower()
+        type_guid = str(item.get("type_guid") or "").lower()
+        if storage_identity.GPT_GUID_RE.fullmatch(partuuid) is None or storage_identity.GPT_GUID_RE.fullmatch(type_guid) is None:
+            raise ProductionInstallError("Seagate target preimage partition GUID is invalid")
+        numbers.add(number)
+        normalized.append({
+            "number": number,
+            "size_bytes": size_bytes,
+            "start_sector": start_sector,
+            "partuuid": partuuid,
+            "type_guid": type_guid,
+            "partlabel": str(item.get("partlabel") or ""),
+            "fstype": str(item.get("fstype") or ""),
+            "uuid": str(item.get("uuid") or ""),
+            "signatures": _target_signature_preimage(item.get("signatures"), "Seagate target partition"),
+        })
+    normalized.sort(key=lambda item: item["number"])
+    if value.get("filesystem") not in (None, ""):
+        raise ProductionInstallError("Seagate target disk carries an unexpected direct filesystem")
+    return {
+        "partition_table": "gpt",
+        "gpt_disk_guid": gpt_disk_guid,
+        "logical_sector_size": logical_sector_size,
+        "signatures": _target_signature_preimage(value.get("signatures"), "Seagate target disk"),
+        "partitions": normalized,
+    }
 
 
 def protected_fingerprint(value: dict[str, Any]) -> str:
@@ -1618,6 +1853,7 @@ def compile_plan(
         managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
     )
     source_revision = artifact["source_revision"]
+    readiness_required = pre_cutover_readiness_required(contract)
     readiness_verification = None
     if pre_cutover_readiness_path is not None:
         (
@@ -1637,7 +1873,7 @@ def compile_plan(
             raise ProductionInstallError("pre-cutover readiness rejected") from exc
     attestation_verification = None
     if artifact["source_authority"] == "merged-main":
-        if readiness_verification is None:
+        if readiness_required and readiness_verification is None:
             raise ProductionInstallError("merged-main artifact requires validated pre-cutover readiness")
         if managed_build_attestation_verification is None:
             raise ProductionInstallError("merged-main artifact requires independent managed-build attestation")
@@ -1734,7 +1970,9 @@ def compile_plan(
         "managed_build_attestation_verification": attestation_verification,
         "source_revision": source_revision,
         "source_authority": artifact["source_authority"],
-        "pre_cutover_readiness_required": artifact["source_authority"] == "merged-main",
+        "pre_cutover_readiness_required": (
+            artifact["source_authority"] == "merged-main" and readiness_required
+        ),
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
         "flake_source": flake,
@@ -2748,8 +2986,8 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         raise ProductionInstallError(f"by-id authority is missing: {authority_path}")
     resolved = os.path.realpath(authority_path)
     data = _json_command([
-        "lsblk", "--json", "--bytes", "--paths", "-o",
-        "PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PTUUID,LOG-SEC,PARTUUID,PARTTYPE,PARTLABEL,PARTFLAGS,MOUNTPOINTS",
+        "lsblk", "--json", "--bytes", "--paths", "--tree", "-o",
+        "NAME,PATH,PKNAME,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,FSTYPE,UUID,PTTYPE,PTUUID,LOG-SEC,PARTUUID,PARTTYPE,PARTLABEL,PARTFLAGS,MOUNTPOINTS",
         resolved,
     ])
     devices = data.get("blockdevices") or []
@@ -2796,9 +3034,17 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
                 "fstype": str(child.get("fstype") or ""),
                 "uuid": str(child.get("uuid") or ""),
                 "signatures": _wipefs_signatures(partition_authority),
+                "holders": _block_holders(path),
+                "descendants": _nested_block_descendants(child.get("children")),
             })
     mounts = _normalize_mounts(disk.get("mountpoints"))
     mounts += [m for child in children for m in _normalize_mounts(child.get("mountpoints"))]
+    mounts += [
+        mount
+        for partition in parts
+        for descendant in partition["descendants"]
+        for mount in descendant["mountpoints"]
+    ]
     return {
         "requested_path": authority_path,
         "resolved_path": resolved,
@@ -2811,6 +3057,7 @@ def _disk_observation(authority_path: str) -> dict[str, Any]:
         "partition_table": disk.get("pttype"),
         "gpt_disk_guid": str(disk.get("ptuuid") or "").lower(),
         "logical_sector_size": logical_sector_size,
+        "holders": _block_holders(resolved),
         "mountpoints": mounts,
         "mounted": bool(mounts),
         "signatures": _wipefs_signatures(authority_path),
@@ -2842,6 +3089,103 @@ def _verify_protected_by_id_aliases(contract: dict[str, Any]) -> None:
             raise ProductionInstallError("protected verified by-id alias no longer resolves to the WD")
 
 
+def _firmware_loader_relative_path(raw: str) -> str:
+    if not isinstance(raw, str) or len(raw) > 512 or not raw.startswith("\\"):
+        raise ProductionInstallError("protected firmware loader path is invalid")
+    parts = raw.split("\\")[1:]
+    if (
+        not parts
+        or any(
+            not part or part in {".", ".."} or "/" in part or "\x00" in part
+            for part in parts
+        )
+    ):
+        raise ProductionInstallError("protected firmware loader path is invalid")
+    return PurePosixPath(*parts).as_posix()
+
+
+def protected_firmware_bootability(
+    contract: dict[str, Any], *, efi_root: Path = Path("/boot/efi")
+) -> dict[str, Any]:
+    policy = contract.get("source_preservation")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("protected_source_bootability_required") is not True
+        or policy.get("protected_source_bootability_proof")
+        != "bootcurrent-protected-esp-loader-v1"
+    ):
+        raise ProductionInstallError("protected source firmware bootability policy is incomplete")
+    protected = contract["protected_disks"][0]
+    esp_matches = [
+        item
+        for item in protected["partition_table_fingerprint"]
+        if item.get("role") == "popos-esp"
+    ]
+    if len(esp_matches) != 1:
+        raise ProductionInstallError("protected Pop!_OS ESP identity is ambiguous")
+    esp = esp_matches[0]
+    expected_partuuid = str(esp.get("partuuid") or "").lower()
+    if storage_identity.GPT_GUID_RE.fullmatch(expected_partuuid) is None:
+        raise ProductionInstallError("protected Pop!_OS ESP PARTUUID is invalid")
+
+    result = _run(["efibootmgr", "-v"])
+    raw = result.stdout
+    try:
+        text = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise ProductionInstallError("EFI/NVRAM inventory is not valid UTF-8") from exc
+    current_matches = [
+        match.group(1).upper()
+        for line in text.splitlines()
+        if (match := re.fullmatch(r"BootCurrent:\s*([0-9A-Fa-f]{4})", line.strip()))
+    ]
+    if len(current_matches) != 1:
+        raise ProductionInstallError("EFI BootCurrent is missing or ambiguous")
+    boot_current = current_matches[0]
+    entry_pattern = re.compile(
+        rf"^Boot{boot_current}(?P<active>\*)?\s+.*?"
+        r"HD\((?P<part>[0-9]+),GPT,(?P<partuuid>[0-9A-Fa-f-]{36}),[^)]*\)"
+        r"/File\((?P<loader>[^)]+)\)",
+        re.IGNORECASE,
+    )
+    entries = [
+        match
+        for line in text.splitlines()
+        if (match := entry_pattern.search(line.strip())) is not None
+    ]
+    if len(entries) != 1:
+        raise ProductionInstallError("EFI BootCurrent entry is missing or ambiguous")
+    entry = entries[0]
+    if entry.group("active") != "*":
+        raise ProductionInstallError("EFI BootCurrent entry is not active")
+    partition_number = int(entry.group("part"))
+    if partition_number != esp.get("number"):
+        raise ProductionInstallError("EFI BootCurrent does not target the protected WD ESP partition")
+    observed_partuuid = entry.group("partuuid").lower()
+    if observed_partuuid != expected_partuuid:
+        raise ProductionInstallError("EFI BootCurrent does not target the protected WD ESP")
+    loader_relative = _firmware_loader_relative_path(entry.group("loader"))
+    loader = efi_root.joinpath(*PurePosixPath(loader_relative).parts)
+    try:
+        info = loader.lstat()
+    except OSError as exc:
+        raise ProductionInstallError("protected firmware loader is unavailable on the WD ESP") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+        raise ProductionInstallError("protected firmware loader on the WD ESP is not one regular file")
+    return {
+        "schema_version": 1,
+        "proof": "bootcurrent-protected-esp-loader-v1",
+        "boot_current": boot_current,
+        "entry": f"Boot{boot_current}",
+        "active": True,
+        "partition_number": partition_number,
+        "esp_partuuid": observed_partuuid,
+        "loader_relative_path": loader_relative,
+        "loader_size_bytes": info.st_size,
+        "efi_nvram_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
 def observe_live(contract: dict[str, Any]) -> dict[str, Any]:
     _verify_protected_by_id_aliases(contract)
     root_source = _findmnt("/")
@@ -2849,12 +3193,16 @@ def observe_live(contract: dict[str, Any]) -> dict[str, Any]:
     efi_content_sha256 = _directory_content_sha256(Path("/boot/efi"))
     if _findmnt("/boot/efi") != efi_source:
         raise ProductionInstallError("protected EFI mount changed while hashing content")
+    protected_bootability = protected_firmware_bootability(contract)
+    if _findmnt("/boot/efi") != efi_source:
+        raise ProductionInstallError("protected EFI mount changed while proving firmware bootability")
     return {
         "target": _disk_observation(contract["target_identity"]["exact_by_id"]),
         "protected": _disk_observation(contract["protected_disks"][0]["by_id"]),
         "root_source": root_source,
         "efi_source": efi_source,
         "efi_content_sha256": efi_content_sha256,
+        "protected_bootability": protected_bootability,
     }
 
 
@@ -4520,8 +4868,16 @@ def execute_plan(
             "production apply requires a merged-main install artifact"
         )
     readiness_snapshot = plan.get("pre_cutover_readiness")
-    if plan.get("pre_cutover_readiness_required") is not True or not isinstance(readiness_snapshot, dict):
+    readiness_required = pre_cutover_readiness_required(contract)
+    expected_readiness_required = (
+        artifact["source_authority"] == "merged-main" and readiness_required
+    )
+    if plan.get("pre_cutover_readiness_required") is not expected_readiness_required:
+        raise ProductionInstallError("production plan readiness policy no longer matches storage contract")
+    if expected_readiness_required and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("production apply lacks validated pre-cutover readiness")
+    if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("production readiness evidence is malformed")
     if plan.get("readiness_bundle_authorizes_production") is not False:
         raise ProductionInstallError("readiness bundle must not carry production authority")
     attestation = plan.get("managed_build_attestation_verification")
@@ -4551,7 +4907,6 @@ def execute_plan(
     verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     pre_now = validate_preflight(observer(contract), contract)
-    verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
     verify_partuuid_namespace_clear(contract)
     verify_partlabel_namespace_clear(contract)
     if protected_fingerprint(pre_now["protected"]) != plan["protected_pre_fingerprint"]:
@@ -4651,7 +5006,6 @@ def execute_plan(
         if protected_efi_freeze_handoff is not None:
             protected_efi_freeze_handoff["freeze"] = protected_efi_freeze
         final_pre = validate_preflight(observer(contract), contract)
-        verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         verify_partuuid_namespace_clear(contract)
         verify_partlabel_namespace_clear(contract)
         verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
@@ -4662,6 +5016,9 @@ def execute_plan(
         if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
             raise ProductionInstallError("protected WD changed after interactive authorization")
         nvram_before = efi_nvram_digest()
+        expected_nvram_before = final_pre["protected"]["firmware_bootability"]["efi_nvram_sha256"]
+        if nvram_before != expected_nvram_before:
+            raise ProductionInstallError("EFI/NVRAM changed after the protected bootability proof")
         readiness_jit_complete = False
 
         try:
@@ -4680,19 +5037,20 @@ def execute_plan(
                             raise ProductionInstallError(
                                 "source revision changed before storage mutation"
                             )
-                        pre_cutover_readiness.revalidate_readiness(
-                            readiness_snapshot,
-                            source_revision=jit_source_revision,
-                            recovery_contract_path=Path(
-                                readiness_snapshot["recovery_contract_path"]
-                            ),
-                            lifecycle_contract_path=Path(
-                                readiness_snapshot["nix_lifecycle_contract_path"]
-                            ),
-                            critical_user_data_contract_path=Path(
-                                readiness_snapshot["critical_user_data_contract_path"]
-                            ),
-                        )
+                        if readiness_snapshot is not None:
+                            pre_cutover_readiness.revalidate_readiness(
+                                readiness_snapshot,
+                                source_revision=jit_source_revision,
+                                recovery_contract_path=Path(
+                                    readiness_snapshot["recovery_contract_path"]
+                                ),
+                                lifecycle_contract_path=Path(
+                                    readiness_snapshot["nix_lifecycle_contract_path"]
+                                ),
+                                critical_user_data_contract_path=Path(
+                                    readiness_snapshot["critical_user_data_contract_path"]
+                                ),
+                            )
                     except (
                         ProductionInstallError,
                         pre_cutover_readiness.ReadinessError,
@@ -4903,8 +5261,6 @@ def main(argv: list[str] | None = None) -> int:
             args.identity_contract, expected_revision=artifact["source_revision"]
         )
         observation = json.loads(args.observation_json.read_text()) if args.observation_json else observe_live(contract)
-        if args.observation_json is None:
-            verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         plan = compile_plan(
             observation,
             install_artifact=artifact,

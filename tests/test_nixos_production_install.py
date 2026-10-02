@@ -148,6 +148,11 @@ PARTUUIDS = [
     "22222222-2222-4222-8222-222222222222",
     "33333333-3333-4333-8333-333333333333",
 ]
+PREIMAGE_PARTUUIDS = [
+    "aaaaaaaa-1111-4111-8111-111111111111",
+    "bbbbbbbb-2222-4222-8222-222222222222",
+    "cccccccc-3333-4333-8333-333333333333",
+]
 PUBLIC_CONTRACT = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
 PRIVATE_IDENTITY = {
     "schema_version": 1,
@@ -158,6 +163,17 @@ PRIVATE_IDENTITY = {
         "exact_by_id": SEAGATE,
         "exact_serial": "SYNTH-TARGET-SERIAL",
         "exact_wwn": "eui.synthetic-target",
+        "preimage": {
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
+            "logical_sector_size": 512,
+            "signatures": [{"type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "size_bytes": 1073741824, "start_sector": 2048, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "size_bytes": 4294967296, "start_sector": 2099200, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "size_bytes": 3995417255424, "start_sector": 10487808, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "fstype": "", "uuid": "", "signatures": []},
+            ],
+        },
     },
     "protected_disks": [{
         "role": "popos-fallback",
@@ -195,13 +211,18 @@ def observation():
             "size_bytes": 4000787030016,
             "transport": "nvme",
             "filesystem": None,
-            "partition_table": None,
-            "gpt_disk_guid": "",
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
             "logical_sector_size": 512,
+            "holders": [],
             "mountpoints": [],
             "mounted": False,
-            "signatures": [],
-            "partitions": [],
+            "signatures": [{"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}], "holders": [], "descendants": []},
+                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}], "holders": [], "descendants": []},
+                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": [], "holders": [], "descendants": []},
+            ],
         },
         "protected": {
             "requested_path": WD,
@@ -228,6 +249,18 @@ def observation():
         "root_source": "/dev/nvme1n1p3",
         "efi_source": "/dev/nvme1n1p1",
         "efi_content_sha256": "e" * 64,
+        "protected_bootability": {
+            "schema_version": 1,
+            "proof": "bootcurrent-protected-esp-loader-v1",
+            "boot_current": "0000",
+            "entry": "Boot0000",
+            "active": True,
+            "partition_number": 1,
+            "esp_partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "loader_relative_path": "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI",
+            "loader_size_bytes": 98504,
+            "efi_nvram_sha256": "a" * 64,
+        },
     }
 
 
@@ -604,6 +637,47 @@ def test_valid_preflight_binds_root_and_efi_to_protected_wd():
     assert result["protected"]["efi_source"] == "/dev/nvme1n1p1"
 
 
+
+def test_target_disk_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device holders"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_partition_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_nested_block_descendant_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["descendants"] = [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_nested_block_descendant_inventory_recurses():
+    observed = prod._nested_block_descendants([
+        {
+            "path": "/dev/dm-0",
+            "type": "crypt",
+            "mountpoints": [None],
+            "children": [
+                {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+            ],
+        },
+    ])
+    assert observed == [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+        {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "wrong"),
     [
@@ -633,16 +707,108 @@ def test_kernel_name_cannot_be_target_authority():
     [
         lambda target: target.update(mounted=True, mountpoints=["/mnt/wrong"]),
         lambda target: target.update(partitions=[{"number": 1}]),
-        lambda target: target.update(partition_table="gpt"),
+        lambda target: target.update(partition_table="dos"),
         lambda target: target.update(filesystem="ext4"),
         lambda target: target.update(signatures=[{"type": "gpt"}]),
     ],
 )
-def test_nonblank_or_mounted_target_is_rejected(mutation):
+def test_target_mount_or_private_preimage_drift_is_rejected(mutation):
     obs = observation()
     mutation(obs["target"])
     with pytest.raises(prod.ProductionInstallError):
         prod.validate_preflight(obs, CONTRACT)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("start_sector", 4096),
+        ("partuuid", "99999999-9999-4999-8999-999999999999"),
+        ("type_guid", "0fc63daf-8483-4772-8e79-3d69d8477de4"),
+        ("partlabel", "UNEXPECTED"),
+        ("fstype", "xfs"),
+        ("uuid", "UNEXPECTED-UUID"),
+    ],
+)
+def test_target_partition_private_preimage_drift_is_rejected(field, wrong):
+    obs = observation()
+    obs["target"]["partitions"][0][field] = wrong
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_signature_private_preimage_drift_is_rejected():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"][0]["uuid"] = "DIFFERENT"
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_null_uuid_gpt_signatures_are_bound_and_accepted():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": None},
+        {"type": "PMBR", "uuid": None},
+    ]
+    contract = prod.storage_identity.bind_contract(
+        PUBLIC_CONTRACT, identity, expected_revision=REVISION
+    )
+    obs = observation()
+    obs["target"]["signatures"] = [
+        {"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": None},
+        {"device": SEAGATE, "offset": "0x1fe", "type": "PMBR", "uuid": None},
+    ]
+    result = prod.validate_preflight(obs, contract)
+    assert result["target"]["requested_path"] == SEAGATE
+
+
+def test_null_uuid_is_rejected_for_filesystem_signature():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["partitions"][0]["signatures"] = [
+        {"type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_live_null_uuid_is_rejected_for_filesystem_signature():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"] = [
+        {"device": f"{SEAGATE}-part1", "type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="signature identity is invalid"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_missing_signature_uuid_field_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [{"type": "gpt"}]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_non_string_non_null_signature_uuid_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": 123},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
 
 
 def test_target_protected_alias_collision_is_rejected():
@@ -661,6 +827,66 @@ def test_root_and_efi_must_be_on_protected_wd(key, wrong):
     obs[key] = wrong
     with pytest.raises(prod.ProductionInstallError):
         prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_proof_is_required():
+    obs = observation()
+    del obs["protected_bootability"]
+    with pytest.raises(prod.ProductionInstallError, match="bootability proof"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_must_target_wd_esp():
+    obs = observation()
+    obs["protected_bootability"]["esp_partuuid"] = PREIMAGE_PARTUUIDS[0]
+    with pytest.raises(prod.ProductionInstallError, match="does not bind the WD ESP"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_parser_binds_current_loader(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "SYSTEMD" / "SYSTEMD-BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0000\n"
+        "Timeout: 1 seconds\n"
+        "BootOrder: 0000,0001\n"
+        "Boot0000* Pop!_OS 22.04 LTS\t"
+        "HD(1,GPT,aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1,0x1000,0x1fefff)"
+        "/File(\\EFI\\SYSTEMD\\SYSTEMD-BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    proof = prod.protected_firmware_bootability(CONTRACT, efi_root=root)
+    assert proof["boot_current"] == "0000"
+    assert proof["esp_partuuid"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    assert proof["loader_relative_path"] == "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI"
+    assert proof["loader_size_bytes"] == len(b"efi-loader")
+    assert proof["efi_nvram_sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_protected_firmware_bootability_parser_rejects_seagate_entry(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "BOOT" / "BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0002\n"
+        "Boot0002* UEFI OS\t"
+        "HD(1,GPT," + PREIMAGE_PARTUUIDS[0] + ",0x800,0x200000)"
+        "/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    with pytest.raises(prod.ProductionInstallError, match="protected WD ESP"):
+        prod.protected_firmware_bootability(CONTRACT, efi_root=root)
 
 
 def test_protected_partition_fingerprint_mismatch_is_rejected():
@@ -685,9 +911,12 @@ def test_protected_signature_and_efi_content_are_bound_into_fingerprint():
     changed_disk["protected"]["signatures"][0]["offset"] = "0x201"
     changed_efi = observation()
     changed_efi["efi_content_sha256"] = "f" * 64
+    changed_boot = observation()
+    changed_boot["protected_bootability"]["loader_size_bytes"] += 1
     assert prod.protected_fingerprint(prod.validate_preflight(changed_partition, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_disk, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_efi, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_boot, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
 
 
 def test_protected_efi_content_digest_changes_with_bytes_and_rejects_symlinks(tmp_path):
@@ -5173,18 +5402,8 @@ def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_
     assert result["historical_reproducibility_verification"] == evidence
 
 
-def test_merged_main_plan_requires_readiness_and_independent_attestation():
+def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_attestation():
     receipt = managed_receipt(MERGED_ARTIFACT)
-    with pytest.raises(prod.ProductionInstallError, match="requires validated pre-cutover readiness"):
-        prod.compile_plan(
-            observation(), install_artifact=MERGED_ARTIFACT,
-            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
-            managed_build_receipt=receipt,
-            managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
-        )
-    readiness_path = synthetic_readiness_path()
     with pytest.raises(prod.ProductionInstallError, match="requires independent managed-build attestation"):
         prod.compile_plan(
             observation(), install_artifact=MERGED_ARTIFACT,
@@ -5192,11 +5411,41 @@ def test_merged_main_plan_requires_readiness_and_independent_attestation():
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
             flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            pre_cutover_readiness_path=readiness_path,
         )
-    compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
+    compiled = prod.compile_plan(
+        observation(), install_artifact=MERGED_ARTIFACT,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt,
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
+        flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
+        managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
+    )
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["pre_cutover_readiness"] is None
     assert compiled["managed_build_attestation_required"] is True
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("boot", "shared_esp_forbidden", False),
+        ("boot", "touch_efi_variables", True),
+        ("protected", "esp_must_remain_unchanged", False),
+        ("protected", "filesystem_signatures_must_remain_unchanged", False),
+    ],
+)
+def test_dual_os_readiness_skip_requires_hard_source_isolation(section, key, value):
+    contract = json.loads(json.dumps(CONTRACT))
+    if section == "boot":
+        contract["boot"][key] = value
+    else:
+        contract["protected_disks"][0][key] = value
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
+    ):
+        prod.pre_cutover_readiness_required(contract)
 
 
 def test_proof_only_plan_does_not_claim_production_attestation():
@@ -5390,6 +5639,44 @@ def test_private_target_partuuid_must_be_a_canonical_gpt_guid():
     identity["topology"]["partitions"][0]["partuuid"] = "not-a-guid"
     with pytest.raises(prod.storage_identity.IdentityContractError, match="private target PARTUUID"):
         prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partuuids_must_be_disjoint_from_replacement_preimage():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partuuids_must_be_disjoint_from_protected_disk():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["protected_disks"][0]["partition_table_fingerprint"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint from the protected disk",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partlabels_must_be_disjoint_from_replacement_preimage():
+    public = json.loads(json.dumps(PUBLIC_CONTRACT))
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    public["topology"]["partitions"][0]["label"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partlabel"]
+    )
+    identity["public_contract_sha256"] = prod.storage_identity.sha256_json(public)
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTLABELs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(public, identity, expected_revision=REVISION)
 
 
 def test_proof_only_artifact_can_plan_but_cannot_apply(monkeypatch, tmp_path):

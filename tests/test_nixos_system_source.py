@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2df557b771354c59e853a776a0e685f7606e5e30a9fb2520048f1e5959ec4b64"
+SOURCE_SNAPSHOT_SHA256 = "217bf6684de327db859f800bc2a070d600a4bbcf430a9046cf2f5050a7540c58"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -689,7 +689,11 @@ class T(unittest.TestCase):
         self.assertIn('i18n.defaultLocale = "de_DE.UTF-8";', host)
         self.assertIn('time.timeZone = "Europe/Berlin";', host)
         self.assertEqual(production["kind"], "heim_pc.nixos_production_storage_contract")
-        self.assertEqual(production["migration_mode"], "isolated-parallel-disk")
+        self.assertEqual(production["migration_mode"], "isolated-parallel-disk-dual-os")
+        self.assertEqual(production["source_preservation"]["mode"], "retained-protected-source")
+        self.assertFalse(production["source_preservation"]["destructive_source_cutover"])
+        self.assertFalse(production["source_preservation"]["pre_cutover_readiness_required"])
+        self.assertTrue(production["source_preservation"]["protected_source_bootability_required"])
         self.assertTrue(production["target_identity"]["capture_required_before_mutation"])
         self.assertFalse(production["target_identity"]["kernel_name_authoritative"])
         self.assertNotIn("exact_by_id", production["target_identity"])

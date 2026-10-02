@@ -16,6 +16,7 @@ PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
 FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
 EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
 GPT_GUID_RE = re.compile(r"^[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$")
+NULL_UUID_SIGNATURE_TYPES = frozenset({"gpt", "PMBR"})
 FORBIDDEN_PUBLIC_IDENTITY_KEYS = frozenset({
     "exact_by_id", "exact_serial", "exact_wwn", "by_id", "serial", "wwn",
     "verified_by_id_aliases", "partuuid", "uuid",
@@ -99,6 +100,19 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         raise IdentityContractError("public production contract must be a JSON object")
     if value.get("schema_version") != 1 or value.get("kind") != "heim_pc.nixos_production_storage_contract":
         raise IdentityContractError("public production contract identity mismatch")
+    if value.get("migration_mode") != "isolated-parallel-disk-dual-os":
+        raise IdentityContractError("public production migration mode must be isolated dual-OS")
+    source_preservation = value.get("source_preservation")
+    if (
+        not isinstance(source_preservation, dict)
+        or source_preservation.get("mode") != "retained-protected-source"
+        or source_preservation.get("destructive_source_cutover") is not False
+        or source_preservation.get("pre_cutover_readiness_required") is not False
+        or source_preservation.get("protected_source_bootability_required") is not True
+        or source_preservation.get("protected_source_bootability_proof")
+        != "bootcurrent-protected-esp-loader-v1"
+    ):
+        raise IdentityContractError("public retained-source dual-OS policy is incomplete")
     _reject_public_unique_identifiers(value)
     policy = value.get("identity_policy")
     if (
@@ -119,8 +133,10 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or target.get("exact_size_bytes") in (None, "")
         or target.get("transport") != "nvme"
         or target.get("kernel_name_authoritative") is not False
-        or target.get("requires_blank") is not True
+        or target.get("requires_blank") is not False
         or target.get("requires_unmounted") is not True
+        or target.get("requires_no_active_descendants") is not True
+        or target.get("existing_state_policy") != "replace-exact-private-preimage"
     ):
         raise IdentityContractError("public target structure/policy is incomplete")
     if (
@@ -131,6 +147,24 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or len(protected[0]["partition_table_fingerprint"]) != 4
     ):
         raise IdentityContractError("public protected-disk structure is incomplete")
+    if not all(
+        protected[0].get(key) is True
+        for key in (
+            "partition_table_must_remain_unchanged",
+            "esp_must_remain_unchanged",
+            "filesystem_signatures_must_remain_unchanged",
+        )
+    ):
+        raise IdentityContractError("public protected-source invariants are incomplete")
+    boot = value.get("boot")
+    if (
+        not isinstance(boot, dict)
+        or boot.get("own_esp_required") is not True
+        or boot.get("shared_esp_forbidden") is not True
+        or boot.get("touch_efi_variables") is not False
+        or boot.get("fallback_os_role") != protected[0].get("role")
+    ):
+        raise IdentityContractError("public isolated dual-OS boot policy is incomplete")
     if (
         not isinstance(topology, dict)
         or topology.get("partition_table") != "gpt"
@@ -178,6 +212,85 @@ def _canonical_gpt_guid(value: Any, label: str) -> str:
     return value.lower()
 
 
+def _signature_preimage(value: Any, label: str) -> list[dict[str, str | None]]:
+    if not isinstance(value, list):
+        raise IdentityContractError(f"{label} signatures are invalid")
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise IdentityContractError(f"{label} signature is invalid")
+        sig_type = item.get("type")
+        sig_uuid = item.get("uuid")
+        if (
+            not isinstance(sig_type, str)
+            or not sig_type
+            or "uuid" not in item
+            or (sig_uuid is not None and not isinstance(sig_uuid, str))
+            or (sig_uuid is None and sig_type not in NULL_UUID_SIGNATURE_TYPES)
+        ):
+            raise IdentityContractError(f"{label} signature identity is invalid")
+        result.append({"type": sig_type, "uuid": sig_uuid})
+    result.sort(key=lambda item: (item["type"], item["uuid"] or ""))
+    return result
+
+
+def _target_preimage(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise IdentityContractError("private target preimage is missing")
+    if value.get("partition_table") != "gpt":
+        raise IdentityContractError("private target preimage must bind GPT")
+    gpt_disk_guid = _canonical_gpt_guid(value.get("gpt_disk_guid"), "private target preimage GPT GUID")
+    logical_sector_size = value.get("logical_sector_size")
+    if isinstance(logical_sector_size, bool) or not isinstance(logical_sector_size, int) or logical_sector_size <= 0:
+        raise IdentityContractError("private target preimage logical sector size is invalid")
+    partitions = value.get("partitions")
+    if not isinstance(partitions, list) or len(partitions) != 3:
+        raise IdentityContractError("private target preimage partition set is incomplete")
+    normalized = []
+    numbers = set()
+    for item in partitions:
+        if not isinstance(item, dict):
+            raise IdentityContractError("private target preimage partition is invalid")
+        number = item.get("number")
+        size_bytes = item.get("size_bytes")
+        start_sector = item.get("start_sector")
+        if isinstance(number, bool) or not isinstance(number, int) or number not in {1, 2, 3} or number in numbers:
+            raise IdentityContractError("private target preimage partition numbers are invalid")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise IdentityContractError("private target preimage partition size is invalid")
+        if isinstance(start_sector, bool) or not isinstance(start_sector, int) or start_sector < 0:
+            raise IdentityContractError("private target preimage partition start is invalid")
+        partlabel = item.get("partlabel")
+        fstype = item.get("fstype")
+        uuid = item.get("uuid")
+        if not isinstance(partlabel, str) or not partlabel:
+            raise IdentityContractError("private target preimage PARTLABEL is invalid")
+        if not isinstance(fstype, str) or not isinstance(uuid, str):
+            raise IdentityContractError("private target preimage filesystem identity is invalid")
+        numbers.add(number)
+        normalized.append({
+            "number": number,
+            "size_bytes": size_bytes,
+            "start_sector": start_sector,
+            "partuuid": _canonical_gpt_guid(item.get("partuuid"), "private target preimage PARTUUID"),
+            "type_guid": _canonical_gpt_guid(item.get("type_guid"), "private target preimage type GUID"),
+            "partlabel": partlabel,
+            "fstype": fstype,
+            "uuid": uuid,
+            "signatures": _signature_preimage(item.get("signatures"), "private target partition"),
+        })
+    if numbers != {1, 2, 3}:
+        raise IdentityContractError("private target preimage partition numbers are incomplete")
+    normalized.sort(key=lambda item: item["number"])
+    return {
+        "partition_table": "gpt",
+        "gpt_disk_guid": gpt_disk_guid,
+        "logical_sector_size": logical_sector_size,
+        "signatures": _signature_preimage(value.get("signatures"), "private target disk"),
+        "partitions": normalized,
+    }
+
+
 def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_revision: str) -> dict[str, Any]:
     public = validate_public_contract(public)
     if SOURCE_REVISION_RE.fullmatch(expected_revision) is None:
@@ -207,6 +320,7 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
         if target_private.get(key) in (None, ""):
             raise IdentityContractError(f"private target identity is incomplete: {key}")
     _require_private_by_id(target_private["exact_by_id"], "private target authority")
+    target_preimage = _target_preimage(target_private.get("preimage"))
 
     protected_identity = protected_private[0]
     if protected_identity.get("role") != public["protected_disks"][0].get("role"):
@@ -236,6 +350,7 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
     merged["target_identity"].update(
         {key: target_private[key] for key in ("exact_by_id", "exact_serial", "exact_wwn")}
     )
+    merged["target_identity"]["private_preimage"] = target_preimage
     merged_protected = merged["protected_disks"][0]
     merged_protected.update({key: protected_identity[key] for key in ("by_id", "serial", "wwn")})
     merged_protected["verified_by_id_aliases"] = list(aliases)
@@ -261,6 +376,18 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
     partuuids = [item["partuuid"] for item in merged["topology"]["partitions"]]
     if len(set(partuuids)) != len(partuuids):
         raise IdentityContractError("private target PARTUUIDs must be unique")
+    preimage_partuuids = {item["partuuid"] for item in target_preimage["partitions"]}
+    if set(partuuids) & preimage_partuuids:
+        raise IdentityContractError("planned target PARTUUIDs must be disjoint from the replacement preimage")
+    protected_partuuids = {
+        item["partuuid"] for item in merged_protected["partition_table_fingerprint"]
+    }
+    if set(partuuids) & protected_partuuids:
+        raise IdentityContractError("planned target PARTUUIDs must be disjoint from the protected disk")
+    planned_labels = {item["label"] for item in merged["topology"]["partitions"]}
+    preimage_labels = {item["partlabel"] for item in target_preimage["partitions"]}
+    if planned_labels & preimage_labels:
+        raise IdentityContractError("planned target PARTLABELs must be disjoint from the replacement preimage")
     merged["identity_binding"] = {
         "schema_version": 1,
         "source_revision": expected_revision,
