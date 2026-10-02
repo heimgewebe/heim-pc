@@ -430,11 +430,73 @@ def managed_build_receipt_path(artifact_path: Path) -> Path:
     return Path(str(artifact_path) + MANAGED_BUILD_RECEIPT_SUFFIX)
 
 
+def _root_git_checkout_for_source(source: Path) -> Path:
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError as exc:
+        raise ProductionInstallError("flake source is unavailable") from exc
+    if not resolved.is_dir():
+        raise ProductionInstallError("flake source must be a directory")
+    for candidate in (resolved, *resolved.parents):
+        marker = candidate / ".git"
+        try:
+            info = marker.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ProductionInstallError("cannot inspect flake source Git root") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise ProductionInstallError("flake source Git marker must not be a symlink")
+        if stat.S_ISDIR(info.st_mode) or (
+            stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+        ):
+            return candidate
+        raise ProductionInstallError("flake source Git marker has an unsafe type")
+    raise ProductionInstallError("flake source is not inside a Git checkout")
+
+
+def _source_git_argv(
+    flake_source: str | Path,
+    arguments: list[str],
+) -> list[str]:
+    source = Path(flake_source)
+    if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
+        raise ProductionInstallError("flake source must be a canonical absolute path")
+    if not arguments or any(not isinstance(item, str) or not item for item in arguments):
+        raise ProductionInstallError("source Git arguments are invalid")
+    if os.geteuid() != 0:
+        return ["git", "-C", str(source), *arguments]
+
+    checkout_root = _root_git_checkout_for_source(source)
+    resolved_source = source.resolve(strict=True)
+    return [
+        "git",
+        "--no-optional-locks",
+        "-c",
+        f"safe.directory={checkout_root}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "status.submoduleSummary=false",
+        "-C",
+        str(resolved_source),
+        *arguments,
+    ]
+
+
 def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, Path]:
     source = Path(flake_source)
     if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
         raise ProductionInstallError("flake source must be a canonical absolute path")
-    result = _run(["git", "-C", str(source), "rev-parse", "--show-toplevel"])
+    result = _run(_source_git_argv(source, ["rev-parse", "--show-toplevel"]))
     try:
         root_text = result.stdout.decode("utf-8", "strict").strip()
     except UnicodeDecodeError as exc:
@@ -455,7 +517,7 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, 
 
 
 def managed_policy_sha256_for_source(flake_source: str) -> str:
-    result = _run(["git", "-C", flake_source, "rev-parse", "--show-toplevel"])
+    result = _run(_source_git_argv(flake_source, ["rev-parse", "--show-toplevel"]))
     try:
         root_text = result.stdout.decode("utf-8", "strict").strip()
     except UnicodeDecodeError as exc:
@@ -3296,20 +3358,10 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     path = Path(flake_source)
     if not path.is_absolute():
         raise ProductionInstallError("flake source must be absolute")
-    git = ["git"]
-    if os.geteuid() == 0:
-        try:
-            resolved_path = path.resolve(strict=True)
-        except OSError as exc:
-            raise ProductionInstallError("flake source is unavailable") from exc
-        # Production runs as root against a deliberately user-owned checkout.
-        # Trust only this exact resolved repository for these Git invocations;
-        # never mutate global, system, or repository Git configuration.
-        git.extend(["-c", f"safe.directory={resolved_path}"])
-    head = _run([*git, "-C", str(path), "rev-parse", "HEAD"]).stdout.decode().strip()
+    head = _run(_source_git_argv(path, ["rev-parse", "HEAD"])).stdout.decode().strip()
     if SOURCE_REVISION_RE.fullmatch(head) is None:
         raise ProductionInstallError("flake source is not bound to an exact Git revision")
-    dirty = _run([*git, "-C", str(path), "status", "--porcelain"]).stdout
+    dirty = _run(_source_git_argv(path, ["status", "--porcelain"])).stdout
     if dirty:
         raise ProductionInstallError("flake source must be clean before a production install")
     if expected_revision is not None and head != expected_revision:

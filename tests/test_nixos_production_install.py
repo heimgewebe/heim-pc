@@ -4755,7 +4755,35 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
-def test_verify_source_root_trusts_only_exact_resolved_repository(monkeypatch, tmp_path):
+def _expected_root_source_git_argv(checkout_root, source, arguments):
+    return [
+        "git",
+        "--no-optional-locks",
+        "-c",
+        f"safe.directory={checkout_root}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "status.submoduleSummary=false",
+        "-C",
+        str(source),
+        *arguments,
+    ]
+
+
+def test_verify_source_root_trusts_checkout_root_and_disables_repo_execution(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
     calls = []
 
     class Result:
@@ -4766,21 +4794,77 @@ def test_verify_source_root_trusts_only_exact_resolved_repository(monkeypatch, t
 
     def fake_run(argv):
         calls.append(argv)
-        if "rev-parse" in argv:
+        if argv[-2:] == ["rev-parse", "HEAD"]:
             return Result((REVISION + "\n").encode())
         return Result(b"")
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
 
-    assert prod.verify_source(str(tmp_path), REVISION) == REVISION
-    resolved = tmp_path.resolve()
+    assert prod.verify_source(str(flake_source), REVISION) == REVISION
     assert calls == [
-        ["git", "-c", f"safe.directory={resolved}", "-C", str(tmp_path), "rev-parse", "HEAD"],
-        ["git", "-c", f"safe.directory={resolved}", "-C", str(tmp_path), "status", "--porcelain"],
+        _expected_root_source_git_argv(
+            checkout_root.resolve(), flake_source.resolve(), ["rev-parse", "HEAD"]
+        ),
+        _expected_root_source_git_argv(
+            checkout_root.resolve(), flake_source.resolve(), ["status", "--porcelain"]
+        ),
     ]
     assert all("safe.directory=*" not in arg for call in calls for arg in call)
     assert all("--global" not in call for call in calls)
+    assert all("core.fsmonitor=false" in call for call in calls)
+    assert all("core.hooksPath=/dev/null" in call for call in calls)
+
+
+def test_root_source_git_hardening_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    production_root = checkout_root / "nixos" / "production"
+    policy_path = checkout_root / prod.MANAGED_BUILD_POLICY_RELATIVE
+    flake_source.mkdir(parents=True)
+    production_root.mkdir(parents=True)
+    policy_path.parent.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    policy = {"schema_version": 1, "kind": "synthetic-managed-policy"}
+    policy_path.write_text(json.dumps(policy) + "\n", encoding="utf-8")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = (str(checkout_root.resolve()) + "\n").encode()
+        stderr = b""
+
+    def fake_run(argv):
+        calls.append(argv)
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    expected_paths = (
+        production_root / "recovery-contract-v1.json",
+        production_root / "nix-lifecycle-contract-v1.json",
+        production_root / "critical-user-data-contract-v1.json",
+    )
+    assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
+    assert prod.managed_policy_sha256_for_source(str(flake_source)) == prod.sha256_json(policy)
+    expected = _expected_root_source_git_argv(
+        checkout_root.resolve(), flake_source.resolve(), ["rev-parse", "--show-toplevel"]
+    )
+    assert calls == [expected, expected]
+
+
+def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    real_marker = tmp_path / "real-git-marker"
+    real_marker.mkdir()
+    (checkout_root / ".git").symlink_to(real_marker, target_is_directory=True)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+
+    with pytest.raises(prod.ProductionInstallError, match="must not be a symlink"):
+        prod.verify_source(str(flake_source), REVISION)
 
 
 def test_verify_source_non_root_does_not_add_safe_directory_override(monkeypatch, tmp_path):
