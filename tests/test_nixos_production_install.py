@@ -4755,12 +4755,10 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
-def _expected_root_source_git_argv(checkout_root, source, arguments):
+def _expected_root_source_git_argv(source, arguments):
     return [
         "git",
         "--no-optional-locks",
-        "-c",
-        f"safe.directory={checkout_root}",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -4779,11 +4777,12 @@ def _expected_root_source_git_argv(checkout_root, source, arguments):
     ]
 
 
-def test_verify_source_root_trusts_checkout_root_and_disables_repo_execution(monkeypatch, tmp_path):
+def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
     checkout_root = tmp_path / "checkout"
     flake_source = checkout_root / "nixos" / "system"
     flake_source.mkdir(parents=True)
     (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
     calls = []
 
     class Result:
@@ -4792,8 +4791,8 @@ def test_verify_source_root_trusts_checkout_root_and_disables_repo_execution(mon
             self.stdout = stdout
             self.stderr = b""
 
-    def fake_run(argv):
-        calls.append(argv)
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
         if argv[-2:] == ["rev-parse", "HEAD"]:
             return Result((REVISION + "\n").encode())
         return Result(b"")
@@ -4803,20 +4802,28 @@ def test_verify_source_root_trusts_checkout_root_and_disables_repo_execution(mon
 
     assert prod.verify_source(str(flake_source), REVISION) == REVISION
     assert calls == [
-        _expected_root_source_git_argv(
-            checkout_root.resolve(), flake_source.resolve(), ["rev-parse", "HEAD"]
+        (
+            _expected_root_source_git_argv(
+                flake_source.resolve(), ["rev-parse", "HEAD"]
+            ),
+            {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid},
         ),
-        _expected_root_source_git_argv(
-            checkout_root.resolve(), flake_source.resolve(), ["status", "--porcelain"]
+        (
+            _expected_root_source_git_argv(
+                flake_source.resolve(), ["status", "--porcelain"]
+            ),
+            {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid},
         ),
     ]
-    assert all("safe.directory=*" not in arg for call in calls for arg in call)
-    assert all("--global" not in call for call in calls)
-    assert all("core.fsmonitor=false" in call for call in calls)
-    assert all("core.hooksPath=/dev/null" in call for call in calls)
+    assert all(
+        not any(arg.startswith("safe.directory=") for arg in argv)
+        for argv, _kwargs in calls
+    )
+    assert all("core.fsmonitor=false" in argv for argv, _kwargs in calls)
+    assert all("core.hooksPath=/dev/null" in argv for argv, _kwargs in calls)
 
 
-def test_root_source_git_hardening_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
+def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
     checkout_root = tmp_path / "checkout"
     flake_source = checkout_root / "nixos" / "system"
     production_root = checkout_root / "nixos" / "production"
@@ -4825,6 +4832,7 @@ def test_root_source_git_hardening_is_reused_by_policy_and_readiness(monkeypatch
     production_root.mkdir(parents=True)
     policy_path.parent.mkdir(parents=True)
     (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
     policy = {"schema_version": 1, "kind": "synthetic-managed-policy"}
     policy_path.write_text(json.dumps(policy) + "\n", encoding="utf-8")
     calls = []
@@ -4834,8 +4842,8 @@ def test_root_source_git_hardening_is_reused_by_policy_and_readiness(monkeypatch
         stdout = (str(checkout_root.resolve()) + "\n").encode()
         stderr = b""
 
-    def fake_run(argv):
-        calls.append(argv)
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
         return Result()
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
@@ -4849,9 +4857,10 @@ def test_root_source_git_hardening_is_reused_by_policy_and_readiness(monkeypatch
     assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
     assert prod.managed_policy_sha256_for_source(str(flake_source)) == prod.sha256_json(policy)
     expected = _expected_root_source_git_argv(
-        checkout_root.resolve(), flake_source.resolve(), ["rev-parse", "--show-toplevel"]
+        flake_source.resolve(), ["rev-parse", "--show-toplevel"]
     )
-    assert calls == [expected, expected]
+    owner_kwargs = {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid}
+    assert calls == [(expected, owner_kwargs), (expected, owner_kwargs)]
 
 
 def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
@@ -4867,7 +4876,7 @@ def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
         prod.verify_source(str(flake_source), REVISION)
 
 
-def test_verify_source_non_root_does_not_add_safe_directory_override(monkeypatch, tmp_path):
+def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_path):
     calls = []
 
     class Result:
@@ -4876,8 +4885,8 @@ def test_verify_source_non_root_does_not_add_safe_directory_override(monkeypatch
             self.stdout = stdout
             self.stderr = b""
 
-    def fake_run(argv):
-        calls.append(argv)
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
         if "rev-parse" in argv:
             return Result((REVISION + "\n").encode())
         return Result(b"")
@@ -4887,8 +4896,8 @@ def test_verify_source_non_root_does_not_add_safe_directory_override(monkeypatch
 
     assert prod.verify_source(str(tmp_path), REVISION) == REVISION
     assert calls == [
-        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-        ["git", "-C", str(tmp_path), "status", "--porcelain"],
+        (["git", "-C", str(tmp_path), "rev-parse", "HEAD"], {"run_as_uid": None, "run_as_gid": None}),
+        (["git", "-C", str(tmp_path), "status", "--porcelain"], {"run_as_uid": None, "run_as_gid": None}),
     ]
 
 
@@ -4909,6 +4918,29 @@ def test_run_uses_fixed_trusted_environment(monkeypatch):
     assert captured["env"]["PATH"] == prod.TRUSTED_PATH
     assert captured["env"]["HOME"] == "/"
     assert set(captured["env"]) == {"PATH", "LC_ALL", "LANG", "HOME", "SYSTEMD_COLORS"}
+    assert "user" not in captured
+    assert "group" not in captured
+    assert "extra_groups" not in captured
+
+
+def test_run_drops_source_git_credentials_and_supplementary_groups(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod.subprocess, "run", fake_run)
+    prod._run(["git", "--version"], run_as_uid=1234, run_as_gid=5678)
+    assert captured["user"] == 1234
+    assert captured["group"] == 5678
+    assert captured["extra_groups"] == []
 
 
 def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):

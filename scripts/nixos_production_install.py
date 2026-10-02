@@ -455,25 +455,31 @@ def _root_git_checkout_for_source(source: Path) -> Path:
     raise ProductionInstallError("flake source is not inside a Git checkout")
 
 
-def _source_git_argv(
+def _source_git_invocation(
     flake_source: str | Path,
     arguments: list[str],
-) -> list[str]:
+) -> tuple[list[str], int | None, int | None]:
     source = Path(flake_source)
     if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
         raise ProductionInstallError("flake source must be a canonical absolute path")
     if not arguments or any(not isinstance(item, str) or not item for item in arguments):
         raise ProductionInstallError("source Git arguments are invalid")
     if os.geteuid() != 0:
-        return ["git", "-C", str(source), *arguments]
+        return ["git", "-C", str(source), *arguments], None, None
 
     checkout_root = _root_git_checkout_for_source(source)
+    try:
+        checkout_info = checkout_root.stat()
+        marker_info = (checkout_root / ".git").lstat()
+    except OSError as exc:
+        raise ProductionInstallError("cannot inspect flake source Git ownership") from exc
+    if checkout_info.st_uid != marker_info.st_uid:
+        raise ProductionInstallError("flake source Git ownership is inconsistent")
+
     resolved_source = source.resolve(strict=True)
-    return [
+    argv = [
         "git",
         "--no-optional-locks",
-        "-c",
-        f"safe.directory={checkout_root}",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -490,13 +496,25 @@ def _source_git_argv(
         str(resolved_source),
         *arguments,
     ]
+    # The production checkout is deliberately user-owned. Never let Git parse
+    # its repository config/attributes as root: repository-defined filters are
+    # allowed to execute only with the checkout owner's credentials.
+    return argv, checkout_info.st_uid, checkout_info.st_gid
+
+
+def _run_source_git(
+    flake_source: str | Path,
+    arguments: list[str],
+) -> subprocess.CompletedProcess[str]:
+    argv, run_as_uid, run_as_gid = _source_git_invocation(flake_source, arguments)
+    return _run(argv, run_as_uid=run_as_uid, run_as_gid=run_as_gid)
 
 
 def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, Path]:
     source = Path(flake_source)
     if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
         raise ProductionInstallError("flake source must be a canonical absolute path")
-    result = _run(_source_git_argv(source, ["rev-parse", "--show-toplevel"]))
+    result = _run_source_git(source, ["rev-parse", "--show-toplevel"])
     try:
         root_text = result.stdout.decode("utf-8", "strict").strip()
     except UnicodeDecodeError as exc:
@@ -517,7 +535,7 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, 
 
 
 def managed_policy_sha256_for_source(flake_source: str) -> str:
-    result = _run(_source_git_argv(flake_source, ["rev-parse", "--show-toplevel"]))
+    result = _run_source_git(flake_source, ["rev-parse", "--show-toplevel"])
     try:
         root_text = result.stdout.decode("utf-8", "strict").strip()
     except UnicodeDecodeError as exc:
@@ -2802,7 +2820,29 @@ def verify_private_boot_binding(*, mount_root: str, contract: dict[str, Any]) ->
             raise ProductionInstallError("systemd-boot loader entry is not bound to private LUKS identity")
 
 
-def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str],
+    *,
+    input_bytes: bytes | None = None,
+    check: bool = True,
+    run_as_uid: int | None = None,
+    run_as_gid: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if (run_as_uid is None) != (run_as_gid is None):
+        raise ProductionInstallError("command credential drop requires both UID and GID")
+    if run_as_uid is not None:
+        if (
+            isinstance(run_as_uid, bool)
+            or isinstance(run_as_gid, bool)
+            or not isinstance(run_as_uid, int)
+            or not isinstance(run_as_gid, int)
+            or run_as_uid < 0
+            or run_as_gid < 0
+        ):
+            raise ProductionInstallError("command credential drop identity is invalid")
+        if os.geteuid() != 0:
+            raise ProductionInstallError("command credential drop requires root")
+
     command_env = {
         "PATH": TRUSTED_PATH,
         "LC_ALL": "C",
@@ -2810,9 +2850,16 @@ def _run(argv: list[str], *, input_bytes: bytes | None = None, check: bool = Tru
         "HOME": "/",
         "SYSTEMD_COLORS": "0",
     }
+    credential_args: dict[str, Any] = {}
+    if run_as_uid is not None:
+        credential_args = {
+            "user": run_as_uid,
+            "group": run_as_gid,
+            "extra_groups": [],
+        }
     result = subprocess.run(
         argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        check=False, env=command_env,
+        check=False, env=command_env, **credential_args,
     )
     if check and result.returncode != 0:
         if input_bytes is not None:
@@ -3358,10 +3405,10 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     path = Path(flake_source)
     if not path.is_absolute():
         raise ProductionInstallError("flake source must be absolute")
-    head = _run(_source_git_argv(path, ["rev-parse", "HEAD"])).stdout.decode().strip()
+    head = _run_source_git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
     if SOURCE_REVISION_RE.fullmatch(head) is None:
         raise ProductionInstallError("flake source is not bound to an exact Git revision")
-    dirty = _run(_source_git_argv(path, ["status", "--porcelain"])).stdout
+    dirty = _run_source_git(path, ["status", "--porcelain"]).stdout
     if dirty:
         raise ProductionInstallError("flake source must be clean before a production install")
     if expected_revision is not None and head != expected_revision:
