@@ -4,6 +4,7 @@ import io
 import tarfile
 import importlib.util
 import json
+import os
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -4803,9 +4804,21 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
         if argv[-2:] == ["rev-parse", "HEAD"]:
             return Result((REVISION + "\n").encode())
-        if argv[-4:] == ["ls-tree", "-r", "-z", "HEAD"]:
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
             return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
         if argv[-3:] == ["ls-files", "--stage", "-z"]:
             return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
@@ -4820,7 +4833,7 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
     assert len(calls) == 4
     expected_suffixes = [
         ["rev-parse", "HEAD"],
-        ["ls-tree", "-r", "-z", "HEAD"],
+        ["ls-tree", "-r", "-z", REVISION],
         ["ls-files", "--stage", "-z"],
         ["ls-files", "--others", "--exclude-standard", "-z"],
     ]
@@ -4859,6 +4872,18 @@ def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatc
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
         return Result()
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
@@ -4939,7 +4964,7 @@ def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_
         calls.append((argv, kwargs))
         if argv[-2:] == ["rev-parse", "HEAD"]:
             return Result((REVISION + "\n").encode())
-        if argv[-4:] == ["ls-tree", "-r", "-z", "HEAD"]:
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
             return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
         if argv[-3:] == ["ls-files", "--stage", "-z"]:
             return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
@@ -4954,6 +4979,46 @@ def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_
         prod.verify_source(str(flake_source), REVISION)
     assert calls
     assert all("status" not in argv for argv, _kwargs in calls)
+
+
+def test_verify_source_root_rejects_untracked_file_outside_flake_source(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(checkout_fd)
+        assert (fd_info.st_dev, fd_info.st_ino) == (owner.st_dev, owner.st_ino)
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(b"")
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(b"")
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"outside-flake.txt\0")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    for argv, kwargs in calls:
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert kwargs["pass_fds"] == (checkout_fd,)
 
 
 def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_path):

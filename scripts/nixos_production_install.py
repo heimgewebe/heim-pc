@@ -552,7 +552,7 @@ def _run_source_git(
 
     source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
     try:
-        return _run_root_source_git(source_fd, owner_uid, owner_gid, arguments)
+        return _run_root_source_git(checkout_fd, owner_uid, owner_gid, arguments)
     finally:
         os.close(checkout_fd)
         os.close(source_fd)
@@ -694,23 +694,23 @@ def _verify_root_source_git_state(flake_source: str | Path) -> str:
     source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
     try:
         head = _run_root_source_git(
-            source_fd, owner_uid, owner_gid, ["rev-parse", "HEAD"]
+            checkout_fd, owner_uid, owner_gid, ["rev-parse", "HEAD"]
         ).stdout.decode("utf-8", "strict").strip()
         if SOURCE_REVISION_RE.fullmatch(head) is None:
             raise ProductionInstallError("flake source is not bound to an exact Git revision")
 
         tree = _parse_root_source_tree(
             _run_root_source_git(
-                source_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", "HEAD"]
+                checkout_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", head]
             ).stdout
         )
         index = _parse_root_source_index(
             _run_root_source_git(
-                source_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
+                checkout_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
             ).stdout
         )
         untracked = _run_root_source_git(
-            source_fd,
+            checkout_fd,
             owner_uid,
             owner_gid,
             ["ls-files", "--others", "--exclude-standard", "-z"],
