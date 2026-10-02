@@ -34,7 +34,7 @@ Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt w
 1. Exakte WD-/Seagate-Identität unmittelbar vor jeder destruktiven Phase.
 2. WD-Partitionstabelle, WD-Dateisystemsignaturen und WD-ESP müssen vor/nach Apply identisch sein.
 3. Target/Protected-by-id dürfen nicht kollidieren.
-4. Seagate muss unmittelbar vor dem Produktionsplan unmounted und blank sein.
+4. Seagate muss unmittelbar vor dem Produktionsplan unmounted sein und exakt dem privaten, revisionsgebundenen Replacement-Preimage entsprechen; ein separates Vorab-Blanking ist verboten.
 5. Eigene Seagate-ESP; Shared ESP verboten.
 6. `boot.loader.efi.canTouchEfiVariables = false`; EFI/NVRAM-Digest vor/nach Apply identisch.
 7. Produktionsartefakt muss von `merged-main` stammen und die unabhängige Managed-Build-Attestation bestehen.
@@ -48,13 +48,13 @@ Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt w
 
 1. Diese Vertragsänderung testen, reviewen und über Captain nach `main` mergen.
 2. Frische Live-Identität von WD und Seagate lesen.
-3. Vorhandene alte NixOS-Testpartitionen auf der Seagate read-only inventarisieren; nur bei bestätigter Zielidentität die Seagate einmalig auf blank zurücksetzen.
+3. Vorhandenen Seagate-Testzustand als privaten Replacement-Preimage aus GPT-GUID, Sektorgröße, Partitionsgrenzen, GUIDs, Labels und Signaturidentitäten binden; kein separater Vorab-Wipe.
 4. Für den gemergten Commit einen neuen privaten Storage-Identity-Contract erzeugen; die bisherige revisionsgebundene Datei nicht wiederverwenden.
 5. `nixos_production_prepare.py` für exakt den gemergten `main`-Commit ausführen.
 6. Unabhängige `nixos-production-build-attest`-Attestation für exakt diesen Kandidaten erzeugen/verifizieren.
 7. Produktionsplan effect-frei aus frischer Hardwarewahrheit kompilieren.
-8. Plan-Digest und Zielidentität erneut prüfen.
-9. Produktions-Apply ausschließlich gegen die Seagate durchführen.
+8. Plan-Digest, Zielidentität und Replacement-Preimage erneut prüfen.
+9. Produktions-Apply ausschließlich gegen die Seagate durchführen; `sgdisk --zap-all` bleibt die erste Storage-Wirkung des gehärteten Installers.
 10. WD-Fingerprint und EFI/NVRAM unverändert verifizieren.
 11. NixOS über Firmware booten und Basissystem/Storage/Firstboot prüfen.
 12. Pop!_OS separat booten; erst danach gilt der Dual-OS-Installationspfad als abgeschlossen.

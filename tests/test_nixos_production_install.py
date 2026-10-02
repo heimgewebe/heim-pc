@@ -158,6 +158,17 @@ PRIVATE_IDENTITY = {
         "exact_by_id": SEAGATE,
         "exact_serial": "SYNTH-TARGET-SERIAL",
         "exact_wwn": "eui.synthetic-target",
+        "preimage": {
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
+            "logical_sector_size": 512,
+            "signatures": [{"type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "size_bytes": 1073741824, "start_sector": 2048, "partuuid": PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "size_bytes": 4294967296, "start_sector": 2099200, "partuuid": PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "size_bytes": 3995417255424, "start_sector": 10487808, "partuuid": PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "fstype": "", "uuid": "", "signatures": []},
+            ],
+        },
     },
     "protected_disks": [{
         "role": "popos-fallback",
@@ -195,13 +206,17 @@ def observation():
             "size_bytes": 4000787030016,
             "transport": "nvme",
             "filesystem": None,
-            "partition_table": None,
-            "gpt_disk_guid": "",
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
             "logical_sector_size": 512,
             "mountpoints": [],
             "mounted": False,
-            "signatures": [],
-            "partitions": [],
+            "signatures": [{"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": []},
+            ],
         },
         "protected": {
             "requested_path": WD,
@@ -633,15 +648,40 @@ def test_kernel_name_cannot_be_target_authority():
     [
         lambda target: target.update(mounted=True, mountpoints=["/mnt/wrong"]),
         lambda target: target.update(partitions=[{"number": 1}]),
-        lambda target: target.update(partition_table="gpt"),
+        lambda target: target.update(partition_table="dos"),
         lambda target: target.update(filesystem="ext4"),
         lambda target: target.update(signatures=[{"type": "gpt"}]),
     ],
 )
-def test_nonblank_or_mounted_target_is_rejected(mutation):
+def test_target_mount_or_private_preimage_drift_is_rejected(mutation):
     obs = observation()
     mutation(obs["target"])
     with pytest.raises(prod.ProductionInstallError):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("start_sector", 4096),
+        ("partuuid", "99999999-9999-4999-8999-999999999999"),
+        ("type_guid", "0fc63daf-8483-4772-8e79-3d69d8477de4"),
+        ("partlabel", "UNEXPECTED"),
+        ("fstype", "xfs"),
+        ("uuid", "UNEXPECTED-UUID"),
+    ],
+)
+def test_target_partition_private_preimage_drift_is_rejected(field, wrong):
+    obs = observation()
+    obs["target"]["partitions"][0][field] = wrong
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_signature_private_preimage_drift_is_rejected():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"][0]["uuid"] = "DIFFERENT"
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
         prod.validate_preflight(obs, CONTRACT)
 
 

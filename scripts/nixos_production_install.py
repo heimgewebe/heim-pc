@@ -254,8 +254,13 @@ def load_contract(
     _require_by_id(target["exact_by_id"], "target exact_by_id")
     if target.get("transport") != "nvme" or target.get("kernel_name_authoritative") is not False:
         raise ProductionInstallError("target transport/kernel-name policy mismatch")
-    if not target.get("requires_blank") or not target.get("requires_unmounted"):
-        raise ProductionInstallError("production target must require blank and unmounted state")
+    if (
+        target.get("requires_blank") is not False
+        or target.get("requires_unmounted") is not True
+        or target.get("existing_state_policy") != "replace-exact-private-preimage"
+        or not isinstance(target.get("private_preimage"), dict)
+    ):
+        raise ProductionInstallError("production target must require exact private preimage replacement and unmounted state")
     protected = value.get("protected_disks")
     if not isinstance(protected, list) or len(protected) != 1:
         raise ProductionInstallError("exactly one protected fallback disk is required")
@@ -1589,18 +1594,83 @@ def validate_preflight(observation: dict[str, Any], contract: dict[str, Any]) ->
         raise ProductionInstallError("Seagate target identity mismatch")
     if target.get("mounted") is not False or _normalize_mounts(target.get("mountpoints")):
         raise ProductionInstallError("Seagate target must be unmounted")
-    if target.get("partitions") not in ([], None):
-        raise ProductionInstallError("Seagate target is not blank: partitions exist")
-    if target.get("partition_table") not in (None, ""):
-        raise ProductionInstallError("Seagate target is not blank: partition table exists")
-    if target.get("filesystem") not in (None, "") or target.get("signatures") not in ([], None):
-        raise ProductionInstallError("Seagate target is not blank: filesystem/signatures exist")
+    expected_preimage = target_contract.get("private_preimage")
+    actual_preimage = target_preimage_fingerprint(target)
+    if actual_preimage != expected_preimage:
+        raise ProductionInstallError("Seagate target preimage no longer matches the private replacement authority")
     protected = validate_protected_state(observation, contract)
     if target.get("resolved_path") == protected.get("resolved_path"):
         raise ProductionInstallError("target/protected disk alias collision")
     if requested == protected["requested_path"]:
         raise ProductionInstallError("target/protected authority path collision")
     return {"target": dict(target), "protected": protected}
+
+
+def _target_signature_preimage(value: Any, label: str) -> list[dict[str, str]]:
+    records = _normalize_signature_records(value, label)
+    result = []
+    for record in records:
+        sig_type = record.get("type")
+        sig_uuid = record.get("uuid")
+        if not isinstance(sig_type, str) or not sig_type or not isinstance(sig_uuid, str):
+            raise ProductionInstallError(f"{label} signature identity is invalid")
+        result.append({"type": sig_type, "uuid": sig_uuid})
+    result.sort(key=lambda item: (item["type"], item["uuid"]))
+    return result
+
+
+def target_preimage_fingerprint(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("partition_table") != "gpt":
+        raise ProductionInstallError("Seagate replacement target must retain the expected GPT preimage before apply")
+    gpt_disk_guid = str(value.get("gpt_disk_guid") or "").lower()
+    if storage_identity.GPT_GUID_RE.fullmatch(gpt_disk_guid) is None:
+        raise ProductionInstallError("Seagate target GPT GUID is unavailable")
+    logical_sector_size = value.get("logical_sector_size")
+    if isinstance(logical_sector_size, bool) or not isinstance(logical_sector_size, int) or logical_sector_size <= 0:
+        raise ProductionInstallError("Seagate target logical sector size is unavailable")
+    partitions = value.get("partitions")
+    if not isinstance(partitions, list) or len(partitions) != 3:
+        raise ProductionInstallError("Seagate replacement target must contain the exact three-partition private preimage")
+    normalized = []
+    numbers = set()
+    for item in partitions:
+        if not isinstance(item, dict):
+            raise ProductionInstallError("Seagate target preimage partition is invalid")
+        number = item.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or number not in {1, 2, 3} or number in numbers:
+            raise ProductionInstallError("Seagate target preimage partition numbers are invalid")
+        size_bytes = item.get("size_bytes")
+        start_sector = item.get("start_sector")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise ProductionInstallError("Seagate target preimage partition size is invalid")
+        if isinstance(start_sector, bool) or not isinstance(start_sector, int) or start_sector < 0:
+            raise ProductionInstallError("Seagate target preimage partition start is invalid")
+        partuuid = str(item.get("partuuid") or "").lower()
+        type_guid = str(item.get("type_guid") or "").lower()
+        if storage_identity.GPT_GUID_RE.fullmatch(partuuid) is None or storage_identity.GPT_GUID_RE.fullmatch(type_guid) is None:
+            raise ProductionInstallError("Seagate target preimage partition GUID is invalid")
+        numbers.add(number)
+        normalized.append({
+            "number": number,
+            "size_bytes": size_bytes,
+            "start_sector": start_sector,
+            "partuuid": partuuid,
+            "type_guid": type_guid,
+            "partlabel": str(item.get("partlabel") or ""),
+            "fstype": str(item.get("fstype") or ""),
+            "uuid": str(item.get("uuid") or ""),
+            "signatures": _target_signature_preimage(item.get("signatures"), "Seagate target partition"),
+        })
+    normalized.sort(key=lambda item: item["number"])
+    if value.get("filesystem") not in (None, ""):
+        raise ProductionInstallError("Seagate target disk carries an unexpected direct filesystem")
+    return {
+        "partition_table": "gpt",
+        "gpt_disk_guid": gpt_disk_guid,
+        "logical_sector_size": logical_sector_size,
+        "signatures": _target_signature_preimage(value.get("signatures"), "Seagate target disk"),
+        "partitions": normalized,
+    }
 
 
 def protected_fingerprint(value: dict[str, Any]) -> str:
