@@ -4773,10 +4773,17 @@ def _expected_root_source_git_argv(source_fd, arguments):
         "submodule.recurse=false",
         "-c",
         "status.submoduleSummary=false",
+        f"--work-tree=/proc/self/fd/{source_fd}",
         "-C",
         f"/proc/self/fd/{source_fd}",
         *arguments,
     ]
+
+
+def test_root_source_git_argv_pins_work_tree_to_checkout_fd():
+    argv = prod._root_source_git_argv(17, ["rev-parse", "HEAD"])
+    assert "--work-tree=/proc/self/fd/17" in argv
+    assert argv[argv.index("-C") + 1] == "/proc/self/fd/17"
 
 
 def _fixture_blob_oid(payload: bytes) -> str:

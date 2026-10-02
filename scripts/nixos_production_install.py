@@ -520,6 +520,7 @@ def _root_source_git_argv(source_fd: int, arguments: list[str]) -> list[str]:
         "submodule.recurse=false",
         "-c",
         "status.submoduleSummary=false",
+        f"--work-tree=/proc/self/fd/{source_fd}",
         "-C",
         f"/proc/self/fd/{source_fd}",
         *arguments,
