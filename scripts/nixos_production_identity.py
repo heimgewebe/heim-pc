@@ -16,6 +16,7 @@ PARTLABEL_RE = re.compile(r"^[A-Z0-9_]{1,36}$")
 FAT_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,11}$")
 EXT4_LABEL_RE = re.compile(r"^[A-Z0-9_]{1,16}$")
 GPT_GUID_RE = re.compile(r"^[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$")
+NULL_UUID_SIGNATURE_TYPES = frozenset({"gpt", "PMBR"})
 FORBIDDEN_PUBLIC_IDENTITY_KEYS = frozenset({
     "exact_by_id", "exact_serial", "exact_wwn", "by_id", "serial", "wwn",
     "verified_by_id_aliases", "partuuid", "uuid",
@@ -222,6 +223,7 @@ def _signature_preimage(value: Any, label: str) -> list[dict[str, str | None]]:
             or not sig_type
             or "uuid" not in item
             or (sig_uuid is not None and not isinstance(sig_uuid, str))
+            or (sig_uuid is None and sig_type not in NULL_UUID_SIGNATURE_TYPES)
         ):
             raise IdentityContractError(f"{label} signature identity is invalid")
         result.append({"type": sig_type, "uuid": sig_uuid})
@@ -374,6 +376,11 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
     preimage_partuuids = {item["partuuid"] for item in target_preimage["partitions"]}
     if set(partuuids) & preimage_partuuids:
         raise IdentityContractError("planned target PARTUUIDs must be disjoint from the replacement preimage")
+    protected_partuuids = {
+        item["partuuid"] for item in merged_protected["partition_table_fingerprint"]
+    }
+    if set(partuuids) & protected_partuuids:
+        raise IdentityContractError("planned target PARTUUIDs must be disjoint from the protected disk")
     planned_labels = {item["label"] for item in merged["topology"]["partitions"]}
     preimage_labels = {item["partlabel"] for item in target_preimage["partitions"]}
     if planned_labels & preimage_labels:

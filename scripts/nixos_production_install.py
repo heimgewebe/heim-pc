@@ -1617,6 +1617,10 @@ def _target_signature_preimage(value: Any, label: str) -> list[dict[str, str | N
             or not sig_type
             or "uuid" not in record
             or (sig_uuid is not None and not isinstance(sig_uuid, str))
+            or (
+                sig_uuid is None
+                and sig_type not in storage_identity.NULL_UUID_SIGNATURE_TYPES
+            )
         ):
             raise ProductionInstallError(f"{label} signature identity is invalid")
         result.append({"type": sig_type, "uuid": sig_uuid})

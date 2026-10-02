@@ -708,6 +708,29 @@ def test_null_uuid_gpt_signatures_are_bound_and_accepted():
     assert result["target"]["requested_path"] == SEAGATE
 
 
+def test_null_uuid_is_rejected_for_filesystem_signature():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["partitions"][0]["signatures"] = [
+        {"type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_live_null_uuid_is_rejected_for_filesystem_signature():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"] = [
+        {"device": f"{SEAGATE}-part1", "type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="signature identity is invalid"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
 def test_missing_signature_uuid_field_is_rejected():
     identity = json.loads(json.dumps(PRIVATE_IDENTITY))
     identity["target_identity"]["preimage"]["signatures"] = [{"type": "gpt"}]
@@ -5509,6 +5532,18 @@ def test_planned_target_partuuids_must_be_disjoint_from_replacement_preimage():
     with pytest.raises(
         prod.storage_identity.IdentityContractError,
         match="planned target PARTUUIDs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partuuids_must_be_disjoint_from_protected_disk():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["protected_disks"][0]["partition_table_fingerprint"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint from the protected disk",
     ):
         prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
 
