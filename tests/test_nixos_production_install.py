@@ -5173,18 +5173,8 @@ def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_
     assert result["historical_reproducibility_verification"] == evidence
 
 
-def test_merged_main_plan_requires_readiness_and_independent_attestation():
+def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_attestation():
     receipt = managed_receipt(MERGED_ARTIFACT)
-    with pytest.raises(prod.ProductionInstallError, match="requires validated pre-cutover readiness"):
-        prod.compile_plan(
-            observation(), install_artifact=MERGED_ARTIFACT,
-            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
-            managed_build_receipt=receipt,
-            managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
-        )
-    readiness_path = synthetic_readiness_path()
     with pytest.raises(prod.ProductionInstallError, match="requires independent managed-build attestation"):
         prod.compile_plan(
             observation(), install_artifact=MERGED_ARTIFACT,
@@ -5192,11 +5182,41 @@ def test_merged_main_plan_requires_readiness_and_independent_attestation():
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
             flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            pre_cutover_readiness_path=readiness_path,
         )
-    compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
+    compiled = prod.compile_plan(
+        observation(), install_artifact=MERGED_ARTIFACT,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt,
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
+        flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
+        managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
+    )
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["pre_cutover_readiness"] is None
     assert compiled["managed_build_attestation_required"] is True
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("boot", "shared_esp_forbidden", False),
+        ("boot", "touch_efi_variables", True),
+        ("protected", "esp_must_remain_unchanged", False),
+        ("protected", "filesystem_signatures_must_remain_unchanged", False),
+    ],
+)
+def test_dual_os_readiness_skip_requires_hard_source_isolation(section, key, value):
+    contract = json.loads(json.dumps(CONTRACT))
+    if section == "boot":
+        contract["boot"][key] = value
+    else:
+        contract["protected_disks"][0][key] = value
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
+    ):
+        prod.pre_cutover_readiness_required(contract)
 
 
 def test_proof_only_plan_does_not_claim_production_attestation():

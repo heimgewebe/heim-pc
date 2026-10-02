@@ -234,6 +234,17 @@ def load_contract(
         )
     except storage_identity.IdentityContractError as exc:
         raise ProductionInstallError("production storage identity contract rejected") from exc
+    if value.get("migration_mode") != "isolated-parallel-disk-dual-os":
+        raise ProductionInstallError("production migration mode must be isolated dual-OS")
+    source_preservation = value.get("source_preservation")
+    if (
+        not isinstance(source_preservation, dict)
+        or source_preservation.get("mode") != "retained-protected-source"
+        or source_preservation.get("destructive_source_cutover") is not False
+        or not isinstance(source_preservation.get("pre_cutover_readiness_required"), bool)
+        or source_preservation.get("protected_source_bootability_required") is not True
+    ):
+        raise ProductionInstallError("retained-source dual-OS policy is incomplete")
     target = value.get("target_identity")
     if not isinstance(target, dict):
         raise ProductionInstallError("target_identity is missing")
@@ -312,6 +323,44 @@ def load_contract(
     ):
         raise ProductionInstallError("production identity binding is incomplete")
     return value
+
+
+def pre_cutover_readiness_required(contract: dict[str, Any]) -> bool:
+    policy = contract.get("source_preservation")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("mode") != "retained-protected-source"
+        or policy.get("destructive_source_cutover") is not False
+        or not isinstance(policy.get("pre_cutover_readiness_required"), bool)
+        or policy.get("protected_source_bootability_required") is not True
+    ):
+        raise ProductionInstallError("retained-source dual-OS policy is incomplete")
+    required = policy["pre_cutover_readiness_required"]
+    if required is False:
+        protected = contract.get("protected_disks")
+        boot = contract.get("boot")
+        if (
+            contract.get("migration_mode") != "isolated-parallel-disk-dual-os"
+            or not isinstance(protected, list)
+            or len(protected) != 1
+            or not isinstance(protected[0], dict)
+            or not all(
+                protected[0].get(key) is True
+                for key in (
+                    "partition_table_must_remain_unchanged",
+                    "esp_must_remain_unchanged",
+                    "filesystem_signatures_must_remain_unchanged",
+                )
+            )
+            or not isinstance(boot, dict)
+            or boot.get("own_esp_required") is not True
+            or boot.get("shared_esp_forbidden") is not True
+            or boot.get("touch_efi_variables") is not False
+        ):
+            raise ProductionInstallError(
+                "pre-cutover readiness may be skipped only for isolated retained-source dual-OS"
+            )
+    return required
 
 
 def validate_install_artifact(value: Any) -> dict[str, Any]:
@@ -1618,6 +1667,7 @@ def compile_plan(
         managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
     )
     source_revision = artifact["source_revision"]
+    readiness_required = pre_cutover_readiness_required(contract)
     readiness_verification = None
     if pre_cutover_readiness_path is not None:
         (
@@ -1637,7 +1687,7 @@ def compile_plan(
             raise ProductionInstallError("pre-cutover readiness rejected") from exc
     attestation_verification = None
     if artifact["source_authority"] == "merged-main":
-        if readiness_verification is None:
+        if readiness_required and readiness_verification is None:
             raise ProductionInstallError("merged-main artifact requires validated pre-cutover readiness")
         if managed_build_attestation_verification is None:
             raise ProductionInstallError("merged-main artifact requires independent managed-build attestation")
@@ -1734,7 +1784,9 @@ def compile_plan(
         "managed_build_attestation_verification": attestation_verification,
         "source_revision": source_revision,
         "source_authority": artifact["source_authority"],
-        "pre_cutover_readiness_required": artifact["source_authority"] == "merged-main",
+        "pre_cutover_readiness_required": (
+            artifact["source_authority"] == "merged-main" and readiness_required
+        ),
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
         "flake_source": flake,
@@ -4520,8 +4572,16 @@ def execute_plan(
             "production apply requires a merged-main install artifact"
         )
     readiness_snapshot = plan.get("pre_cutover_readiness")
-    if plan.get("pre_cutover_readiness_required") is not True or not isinstance(readiness_snapshot, dict):
+    readiness_required = pre_cutover_readiness_required(contract)
+    expected_readiness_required = (
+        artifact["source_authority"] == "merged-main" and readiness_required
+    )
+    if plan.get("pre_cutover_readiness_required") is not expected_readiness_required:
+        raise ProductionInstallError("production plan readiness policy no longer matches storage contract")
+    if expected_readiness_required and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("production apply lacks validated pre-cutover readiness")
+    if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("production readiness evidence is malformed")
     if plan.get("readiness_bundle_authorizes_production") is not False:
         raise ProductionInstallError("readiness bundle must not carry production authority")
     attestation = plan.get("managed_build_attestation_verification")
@@ -4680,19 +4740,20 @@ def execute_plan(
                             raise ProductionInstallError(
                                 "source revision changed before storage mutation"
                             )
-                        pre_cutover_readiness.revalidate_readiness(
-                            readiness_snapshot,
-                            source_revision=jit_source_revision,
-                            recovery_contract_path=Path(
-                                readiness_snapshot["recovery_contract_path"]
-                            ),
-                            lifecycle_contract_path=Path(
-                                readiness_snapshot["nix_lifecycle_contract_path"]
-                            ),
-                            critical_user_data_contract_path=Path(
-                                readiness_snapshot["critical_user_data_contract_path"]
-                            ),
-                        )
+                        if readiness_snapshot is not None:
+                            pre_cutover_readiness.revalidate_readiness(
+                                readiness_snapshot,
+                                source_revision=jit_source_revision,
+                                recovery_contract_path=Path(
+                                    readiness_snapshot["recovery_contract_path"]
+                                ),
+                                lifecycle_contract_path=Path(
+                                    readiness_snapshot["nix_lifecycle_contract_path"]
+                                ),
+                                critical_user_data_contract_path=Path(
+                                    readiness_snapshot["critical_user_data_contract_path"]
+                                ),
+                            )
                     except (
                         ProductionInstallError,
                         pre_cutover_readiness.ReadinessError,

@@ -99,6 +99,17 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         raise IdentityContractError("public production contract must be a JSON object")
     if value.get("schema_version") != 1 or value.get("kind") != "heim_pc.nixos_production_storage_contract":
         raise IdentityContractError("public production contract identity mismatch")
+    if value.get("migration_mode") != "isolated-parallel-disk-dual-os":
+        raise IdentityContractError("public production migration mode must be isolated dual-OS")
+    source_preservation = value.get("source_preservation")
+    if (
+        not isinstance(source_preservation, dict)
+        or source_preservation.get("mode") != "retained-protected-source"
+        or source_preservation.get("destructive_source_cutover") is not False
+        or source_preservation.get("pre_cutover_readiness_required") is not False
+        or source_preservation.get("protected_source_bootability_required") is not True
+    ):
+        raise IdentityContractError("public retained-source dual-OS policy is incomplete")
     _reject_public_unique_identifiers(value)
     policy = value.get("identity_policy")
     if (
@@ -131,6 +142,24 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or len(protected[0]["partition_table_fingerprint"]) != 4
     ):
         raise IdentityContractError("public protected-disk structure is incomplete")
+    if not all(
+        protected[0].get(key) is True
+        for key in (
+            "partition_table_must_remain_unchanged",
+            "esp_must_remain_unchanged",
+            "filesystem_signatures_must_remain_unchanged",
+        )
+    ):
+        raise IdentityContractError("public protected-source invariants are incomplete")
+    boot = value.get("boot")
+    if (
+        not isinstance(boot, dict)
+        or boot.get("own_esp_required") is not True
+        or boot.get("shared_esp_forbidden") is not True
+        or boot.get("touch_efi_variables") is not False
+        or boot.get("fallback_os_role") != protected[0].get("role")
+    ):
+        raise IdentityContractError("public isolated dual-OS boot policy is incomplete")
     if (
         not isinstance(topology, dict)
         or topology.get("partition_table") != "gpt"

@@ -2,7 +2,13 @@
   "schema_version": 1,
   "kind": "heim_pc.nixos_production_storage_contract",
   "profile": "nixos-executor-2026",
-  "migration_mode": "isolated-parallel-disk",
+  "migration_mode": "isolated-parallel-disk-dual-os",
+  "source_preservation": {
+    "mode": "retained-protected-source",
+    "destructive_source_cutover": false,
+    "pre_cutover_readiness_required": false,
+    "protected_source_bootability_required": true
+  },
   "target_identity": {
     "role": "nixos-primary",
     "transport": "nvme",
