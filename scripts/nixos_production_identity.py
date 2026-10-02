@@ -208,7 +208,7 @@ def _canonical_gpt_guid(value: Any, label: str) -> str:
     return value.lower()
 
 
-def _signature_preimage(value: Any, label: str) -> list[dict[str, str]]:
+def _signature_preimage(value: Any, label: str) -> list[dict[str, str | None]]:
     if not isinstance(value, list):
         raise IdentityContractError(f"{label} signatures are invalid")
     result = []
@@ -217,10 +217,15 @@ def _signature_preimage(value: Any, label: str) -> list[dict[str, str]]:
             raise IdentityContractError(f"{label} signature is invalid")
         sig_type = item.get("type")
         sig_uuid = item.get("uuid")
-        if not isinstance(sig_type, str) or not sig_type or not isinstance(sig_uuid, str):
+        if (
+            not isinstance(sig_type, str)
+            or not sig_type
+            or "uuid" not in item
+            or (sig_uuid is not None and not isinstance(sig_uuid, str))
+        ):
             raise IdentityContractError(f"{label} signature identity is invalid")
         result.append({"type": sig_type, "uuid": sig_uuid})
-    result.sort(key=lambda item: (item["type"], item["uuid"]))
+    result.sort(key=lambda item: (item["type"], item["uuid"] or ""))
     return result
 
 

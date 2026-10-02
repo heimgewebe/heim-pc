@@ -690,6 +690,50 @@ def test_target_signature_private_preimage_drift_is_rejected():
         prod.validate_preflight(obs, CONTRACT)
 
 
+def test_null_uuid_gpt_signatures_are_bound_and_accepted():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": None},
+        {"type": "PMBR", "uuid": None},
+    ]
+    contract = prod.storage_identity.bind_contract(
+        PUBLIC_CONTRACT, identity, expected_revision=REVISION
+    )
+    obs = observation()
+    obs["target"]["signatures"] = [
+        {"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": None},
+        {"device": SEAGATE, "offset": "0x1fe", "type": "PMBR", "uuid": None},
+    ]
+    result = prod.validate_preflight(obs, contract)
+    assert result["target"]["requested_path"] == SEAGATE
+
+
+def test_missing_signature_uuid_field_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [{"type": "gpt"}]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_non_string_non_null_signature_uuid_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": 123},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
 def test_target_protected_alias_collision_is_rejected():
     obs = observation()
     obs["target"]["resolved_path"] = "/dev/nvme1n1"

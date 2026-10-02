@@ -1606,16 +1606,21 @@ def validate_preflight(observation: dict[str, Any], contract: dict[str, Any]) ->
     return {"target": dict(target), "protected": protected}
 
 
-def _target_signature_preimage(value: Any, label: str) -> list[dict[str, str]]:
+def _target_signature_preimage(value: Any, label: str) -> list[dict[str, str | None]]:
     records = _normalize_signature_records(value, label)
     result = []
     for record in records:
         sig_type = record.get("type")
         sig_uuid = record.get("uuid")
-        if not isinstance(sig_type, str) or not sig_type or not isinstance(sig_uuid, str):
+        if (
+            not isinstance(sig_type, str)
+            or not sig_type
+            or "uuid" not in record
+            or (sig_uuid is not None and not isinstance(sig_uuid, str))
+        ):
             raise ProductionInstallError(f"{label} signature identity is invalid")
         result.append({"type": sig_type, "uuid": sig_uuid})
-    result.sort(key=lambda item: (item["type"], item["uuid"]))
+    result.sort(key=lambda item: (item["type"], item["uuid"] or ""))
     return result
 
 
