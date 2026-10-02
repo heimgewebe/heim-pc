@@ -430,55 +430,83 @@ def managed_build_receipt_path(artifact_path: Path) -> Path:
     return Path(str(artifact_path) + MANAGED_BUILD_RECEIPT_SUFFIX)
 
 
-def _root_git_checkout_for_source(source: Path) -> Path:
-    try:
-        resolved = source.resolve(strict=True)
-    except OSError as exc:
-        raise ProductionInstallError("flake source is unavailable") from exc
-    if not resolved.is_dir():
-        raise ProductionInstallError("flake source must be a directory")
-    for candidate in (resolved, *resolved.parents):
-        marker = candidate / ".git"
-        try:
-            info = marker.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise ProductionInstallError("cannot inspect flake source Git root") from exc
-        if stat.S_ISLNK(info.st_mode):
-            raise ProductionInstallError("flake source Git marker must not be a symlink")
-        if stat.S_ISDIR(info.st_mode) or (
-            stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-        ):
-            return candidate
-        raise ProductionInstallError("flake source Git marker has an unsafe type")
-    raise ProductionInstallError("flake source is not inside a Git checkout")
+_ROOT_SOURCE_GIT_TRACKED_MODES = frozenset({b"100644", b"100755"})
 
 
-def _source_git_invocation(
-    flake_source: str | Path,
-    arguments: list[str],
-) -> tuple[list[str], int | None, int | None]:
+def _source_git_path(flake_source: str | Path) -> Path:
     source = Path(flake_source)
     if not source.is_absolute() or os.path.normpath(str(source)) != str(source):
         raise ProductionInstallError("flake source must be a canonical absolute path")
-    if not arguments or any(not isinstance(item, str) or not item for item in arguments):
-        raise ProductionInstallError("source Git arguments are invalid")
-    if os.geteuid() != 0:
-        return ["git", "-C", str(source), *arguments], None, None
+    return source
 
-    checkout_root = _root_git_checkout_for_source(source)
+
+def _open_root_source_git_context(source: Path) -> tuple[int, int, int, int]:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        checkout_info = checkout_root.stat()
-        marker_info = (checkout_root / ".git").lstat()
+        source_fd = os.open(source, flags)
     except OSError as exc:
-        raise ProductionInstallError("cannot inspect flake source Git ownership") from exc
-    if checkout_info.st_uid != marker_info.st_uid:
-        raise ProductionInstallError("flake source Git ownership is inconsistent")
+        raise ProductionInstallError("flake source is unavailable") from exc
 
-    resolved_source = source.resolve(strict=True)
-    argv = [
+    candidate_fd = os.dup(source_fd)
+    try:
+        while True:
+            candidate_info = os.fstat(candidate_fd)
+            try:
+                marker_info = os.stat(".git", dir_fd=candidate_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                marker_info = None
+            except OSError as exc:
+                raise ProductionInstallError("cannot inspect flake source Git root") from exc
+
+            if marker_info is not None:
+                if stat.S_ISLNK(marker_info.st_mode):
+                    raise ProductionInstallError("flake source Git marker must not be a symlink")
+                if not (
+                    stat.S_ISDIR(marker_info.st_mode)
+                    or (stat.S_ISREG(marker_info.st_mode) and marker_info.st_nlink == 1)
+                ):
+                    raise ProductionInstallError("flake source Git marker has an unsafe type")
+                if (
+                    candidate_info.st_uid != marker_info.st_uid
+                    or candidate_info.st_gid != marker_info.st_gid
+                ):
+                    raise ProductionInstallError("flake source Git ownership is inconsistent")
+                if candidate_info.st_uid == 0 or candidate_info.st_gid == 0:
+                    raise ProductionInstallError("flake source Git checkout must be non-root owned")
+                return (
+                    source_fd,
+                    candidate_fd,
+                    candidate_info.st_uid,
+                    candidate_info.st_gid,
+                )
+
+            try:
+                parent_fd = os.open("..", flags, dir_fd=candidate_fd)
+            except OSError as exc:
+                raise ProductionInstallError("cannot inspect flake source Git root") from exc
+            parent_info = os.fstat(parent_fd)
+            if (
+                parent_info.st_dev == candidate_info.st_dev
+                and parent_info.st_ino == candidate_info.st_ino
+            ):
+                os.close(parent_fd)
+                break
+            os.close(candidate_fd)
+            candidate_fd = parent_fd
+    except BaseException:
+        os.close(candidate_fd)
+        os.close(source_fd)
+        raise
+
+    os.close(candidate_fd)
+    os.close(source_fd)
+    raise ProductionInstallError("flake source is not inside a Git checkout")
+
+
+def _root_source_git_argv(source_fd: int, arguments: list[str]) -> list[str]:
+    return [
         "git",
+        "--no-replace-objects",
         "--no-optional-locks",
         "-c",
         "core.fsmonitor=false",
@@ -493,22 +521,212 @@ def _source_git_invocation(
         "-c",
         "status.submoduleSummary=false",
         "-C",
-        str(resolved_source),
+        f"/proc/self/fd/{source_fd}",
         *arguments,
     ]
-    # The production checkout is deliberately user-owned. Never let Git parse
-    # its repository config/attributes as root: repository-defined filters are
-    # allowed to execute only with the checkout owner's credentials.
-    return argv, checkout_info.st_uid, checkout_info.st_gid
+
+
+def _run_root_source_git(
+    source_fd: int,
+    owner_uid: int,
+    owner_gid: int,
+    arguments: list[str],
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        _root_source_git_argv(source_fd, arguments),
+        run_as_uid=owner_uid,
+        run_as_gid=owner_gid,
+        pass_fds=(source_fd,),
+    )
 
 
 def _run_source_git(
     flake_source: str | Path,
     arguments: list[str],
 ) -> subprocess.CompletedProcess[str]:
-    argv, run_as_uid, run_as_gid = _source_git_invocation(flake_source, arguments)
-    return _run(argv, run_as_uid=run_as_uid, run_as_gid=run_as_gid)
+    source = _source_git_path(flake_source)
+    if not arguments or any(not isinstance(item, str) or not item for item in arguments):
+        raise ProductionInstallError("source Git arguments are invalid")
+    if os.geteuid() != 0:
+        return _run(["git", "-C", str(source), *arguments])
 
+    source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
+    try:
+        return _run_root_source_git(source_fd, owner_uid, owner_gid, arguments)
+    finally:
+        os.close(checkout_fd)
+        os.close(source_fd)
+
+
+def _parse_root_source_index(payload: bytes) -> dict[bytes, tuple[bytes, bytes]]:
+    entries: dict[bytes, tuple[bytes, bytes]] = {}
+    for record in payload.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, oid, stage = metadata.split(b" ")
+        except ValueError as exc:
+            raise ProductionInstallError("flake source Git index is malformed") from exc
+        if (
+            stage != b"0"
+            or mode not in _ROOT_SOURCE_GIT_TRACKED_MODES
+            or re.fullmatch(rb"[0-9a-f]{40}", oid) is None
+            or not path
+            or path in entries
+        ):
+            raise ProductionInstallError("flake source Git index contains unsupported entries")
+        entries[path] = (mode, oid)
+    return entries
+
+
+def _parse_root_source_tree(payload: bytes) -> dict[bytes, tuple[bytes, bytes]]:
+    entries: dict[bytes, tuple[bytes, bytes]] = {}
+    for record in payload.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, object_type, oid = metadata.split(b" ")
+        except ValueError as exc:
+            raise ProductionInstallError("flake source Git tree is malformed") from exc
+        if (
+            object_type != b"blob"
+            or mode not in _ROOT_SOURCE_GIT_TRACKED_MODES
+            or re.fullmatch(rb"[0-9a-f]{40}", oid) is None
+            or not path
+            or path in entries
+        ):
+            raise ProductionInstallError("flake source Git tree contains unsupported entries")
+        entries[path] = (mode, oid)
+    return entries
+
+
+def _open_root_source_regular_file(checkout_fd: int, relative_path: bytes) -> int:
+    parts = relative_path.split(b"/")
+    if any(part in {b"", b".", b".."} for part in parts):
+        raise ProductionInstallError("flake source Git path is unsafe")
+    directory_flags = (
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if not hasattr(os, "O_PATH"):
+        raise ProductionInstallError("root source verification requires O_PATH support")
+
+    directory_fd = os.dup(checkout_fd)
+    path_fd = -1
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        path_fd = os.open(
+            parts[-1],
+            os.O_PATH | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        path_info = os.fstat(path_fd)
+        if not stat.S_ISREG(path_info.st_mode):
+            raise ProductionInstallError("flake source tracked path is not a regular file")
+        read_fd = os.open(f"/proc/self/fd/{path_fd}", os.O_RDONLY | os.O_CLOEXEC)
+        read_info = os.fstat(read_fd)
+        if (
+            read_info.st_dev != path_info.st_dev
+            or read_info.st_ino != path_info.st_ino
+        ):
+            os.close(read_fd)
+            raise ProductionInstallError("flake source tracked path identity changed")
+        return read_fd
+    except OSError as exc:
+        raise ProductionInstallError("cannot read tracked flake source path") from exc
+    finally:
+        if path_fd >= 0:
+            os.close(path_fd)
+        os.close(directory_fd)
+
+
+def _root_source_raw_blob_oid(
+    checkout_fd: int,
+    relative_path: bytes,
+    expected_mode: bytes,
+) -> bytes:
+    fd = _open_root_source_regular_file(checkout_fd, relative_path)
+    try:
+        before = os.fstat(fd)
+        observed_mode = b"100755" if before.st_mode & 0o111 else b"100644"
+        if observed_mode != expected_mode:
+            raise ProductionInstallError("flake source must be clean before a production install")
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"blob {before.st_size}\0".encode("ascii"))
+        total = 0
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mode,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mode,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if total != before.st_size or after_identity != before_identity:
+        raise ProductionInstallError("flake source changed during root verification")
+    return digest.hexdigest().encode("ascii")
+
+
+def _verify_root_source_git_state(flake_source: str | Path) -> str:
+    source = _source_git_path(flake_source)
+    source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
+    try:
+        head = _run_root_source_git(
+            source_fd, owner_uid, owner_gid, ["rev-parse", "HEAD"]
+        ).stdout.decode("utf-8", "strict").strip()
+        if SOURCE_REVISION_RE.fullmatch(head) is None:
+            raise ProductionInstallError("flake source is not bound to an exact Git revision")
+
+        tree = _parse_root_source_tree(
+            _run_root_source_git(
+                source_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", "HEAD"]
+            ).stdout
+        )
+        index = _parse_root_source_index(
+            _run_root_source_git(
+                source_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
+            ).stdout
+        )
+        untracked = _run_root_source_git(
+            source_fd,
+            owner_uid,
+            owner_gid,
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+        ).stdout
+        if tree != index or untracked:
+            raise ProductionInstallError("flake source must be clean before a production install")
+
+        for relative_path, (mode, oid) in index.items():
+            if _root_source_raw_blob_oid(checkout_fd, relative_path, mode) != oid:
+                raise ProductionInstallError(
+                    "flake source must be clean before a production install"
+                )
+        return head
+    finally:
+        os.close(checkout_fd)
+        os.close(source_fd)
 
 def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, Path]:
     source = Path(flake_source)
@@ -2827,6 +3045,7 @@ def _run(
     check: bool = True,
     run_as_uid: int | None = None,
     run_as_gid: int | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     if (run_as_uid is None) != (run_as_gid is None):
         raise ProductionInstallError("command credential drop requires both UID and GID")
@@ -2842,6 +3061,11 @@ def _run(
             raise ProductionInstallError("command credential drop identity is invalid")
         if os.geteuid() != 0:
             raise ProductionInstallError("command credential drop requires root")
+    if (
+        not isinstance(pass_fds, tuple)
+        or any(isinstance(fd, bool) or not isinstance(fd, int) or fd < 0 for fd in pass_fds)
+    ):
+        raise ProductionInstallError("command inherited file descriptors are invalid")
 
     command_env = {
         "PATH": TRUSTED_PATH,
@@ -2857,9 +3081,19 @@ def _run(
             "group": run_as_gid,
             "extra_groups": [],
         }
+    fd_args: dict[str, Any] = {}
+    if pass_fds:
+        fd_args["pass_fds"] = pass_fds
     result = subprocess.run(
-        argv, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        check=False, env=command_env, **credential_args,
+        argv,
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        env=command_env,
+        close_fds=True,
+        **credential_args,
+        **fd_args,
     )
     if check and result.returncode != 0:
         if input_bytes is not None:
@@ -3405,12 +3639,15 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     path = Path(flake_source)
     if not path.is_absolute():
         raise ProductionInstallError("flake source must be absolute")
-    head = _run_source_git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
-    if SOURCE_REVISION_RE.fullmatch(head) is None:
-        raise ProductionInstallError("flake source is not bound to an exact Git revision")
-    dirty = _run_source_git(path, ["status", "--porcelain"]).stdout
-    if dirty:
-        raise ProductionInstallError("flake source must be clean before a production install")
+    if os.geteuid() == 0:
+        head = _verify_root_source_git_state(path)
+    else:
+        head = _run_source_git(path, ["rev-parse", "HEAD"]).stdout.decode().strip()
+        if SOURCE_REVISION_RE.fullmatch(head) is None:
+            raise ProductionInstallError("flake source is not bound to an exact Git revision")
+        dirty = _run_source_git(path, ["status", "--porcelain"]).stdout
+        if dirty:
+            raise ProductionInstallError("flake source must be clean before a production install")
     if expected_revision is not None and head != expected_revision:
         raise ProductionInstallError("flake source revision mismatch")
     return head

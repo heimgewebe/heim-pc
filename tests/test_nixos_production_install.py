@@ -4755,9 +4755,10 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
-def _expected_root_source_git_argv(source, arguments):
+def _expected_root_source_git_argv(source_fd, arguments):
     return [
         "git",
+        "--no-replace-objects",
         "--no-optional-locks",
         "-c",
         "core.fsmonitor=false",
@@ -4772,9 +4773,16 @@ def _expected_root_source_git_argv(source, arguments):
         "-c",
         "status.submoduleSummary=false",
         "-C",
-        str(source),
+        f"/proc/self/fd/{source_fd}",
         *arguments,
     ]
+
+
+def _fixture_blob_oid(payload: bytes) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
 
 
 def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
@@ -4782,7 +4790,9 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
     flake_source = checkout_root / "nixos" / "system"
     flake_source.mkdir(parents=True)
     (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"base\n")
     owner = checkout_root.stat()
+    blob_oid = _fixture_blob_oid(b"base\n")
     calls = []
 
     class Result:
@@ -4795,32 +4805,37 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
         calls.append((argv, kwargs))
         if argv[-2:] == ["rev-parse", "HEAD"]:
             return Result((REVISION + "\n").encode())
-        return Result(b"")
+        if argv[-4:] == ["ls-tree", "-r", "-z", "HEAD"]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
 
     assert prod.verify_source(str(flake_source), REVISION) == REVISION
-    assert calls == [
-        (
-            _expected_root_source_git_argv(
-                flake_source.resolve(), ["rev-parse", "HEAD"]
-            ),
-            {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid},
-        ),
-        (
-            _expected_root_source_git_argv(
-                flake_source.resolve(), ["status", "--porcelain"]
-            ),
-            {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid},
-        ),
+    assert len(calls) == 4
+    expected_suffixes = [
+        ["rev-parse", "HEAD"],
+        ["ls-tree", "-r", "-z", "HEAD"],
+        ["ls-files", "--stage", "-z"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
     ]
+    for (argv, kwargs), suffix in zip(calls, expected_suffixes):
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(source_fd, suffix)
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
     assert all(
         not any(arg.startswith("safe.directory=") for arg in argv)
         for argv, _kwargs in calls
     )
-    assert all("core.fsmonitor=false" in argv for argv, _kwargs in calls)
-    assert all("core.hooksPath=/dev/null" in argv for argv, _kwargs in calls)
 
 
 def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
@@ -4856,11 +4871,17 @@ def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatc
     )
     assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
     assert prod.managed_policy_sha256_for_source(str(flake_source)) == prod.sha256_json(policy)
-    expected = _expected_root_source_git_argv(
-        flake_source.resolve(), ["rev-parse", "--show-toplevel"]
-    )
-    owner_kwargs = {"run_as_uid": owner.st_uid, "run_as_gid": owner.st_gid}
-    assert calls == [(expected, owner_kwargs), (expected, owner_kwargs)]
+    assert len(calls) == 2
+    for argv, kwargs in calls:
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(
+            source_fd, ["rev-parse", "--show-toplevel"]
+        )
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
 
 
 def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
@@ -4874,6 +4895,65 @@ def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
 
     with pytest.raises(prod.ProductionInstallError, match="must not be a symlink"):
         prod.verify_source(str(flake_source), REVISION)
+
+
+def test_root_source_git_context_pins_open_source_across_path_swap(tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    other_source = tmp_path / "other-source"
+    other_source.mkdir()
+
+    source_fd, checkout_fd, _uid, _gid = prod._open_root_source_git_context(flake_source)
+    try:
+        before = prod.os.fstat(source_fd)
+        moved = checkout_root / "nixos" / "system-original"
+        flake_source.rename(moved)
+        flake_source.symlink_to(other_source, target_is_directory=True)
+        after = prod.os.fstat(source_fd)
+        replacement = flake_source.stat()
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        assert (replacement.st_dev, replacement.st_ino) != (before.st_dev, before.st_ino)
+    finally:
+        prod.os.close(checkout_fd)
+        prod.os.close(source_fd)
+
+
+def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"EVIL\n")
+    blob_oid = _fixture_blob_oid(b"base\n")
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", "HEAD"]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    assert all("status" not in argv for argv, _kwargs in calls)
 
 
 def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_path):
@@ -4896,8 +4976,8 @@ def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_pa
 
     assert prod.verify_source(str(tmp_path), REVISION) == REVISION
     assert calls == [
-        (["git", "-C", str(tmp_path), "rev-parse", "HEAD"], {"run_as_uid": None, "run_as_gid": None}),
-        (["git", "-C", str(tmp_path), "status", "--porcelain"], {"run_as_uid": None, "run_as_gid": None}),
+        (["git", "-C", str(tmp_path), "rev-parse", "HEAD"], {}),
+        (["git", "-C", str(tmp_path), "status", "--porcelain"], {}),
     ]
 
 
