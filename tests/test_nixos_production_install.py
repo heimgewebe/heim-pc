@@ -214,13 +214,14 @@ def observation():
             "partition_table": "gpt",
             "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
             "logical_sector_size": 512,
+            "holders": [],
             "mountpoints": [],
             "mounted": False,
             "signatures": [{"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
             "partitions": [
-                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
-                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
-                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": []},
+                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}], "holders": [], "descendants": []},
+                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}], "holders": [], "descendants": []},
+                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": [], "holders": [], "descendants": []},
             ],
         },
         "protected": {
@@ -248,6 +249,18 @@ def observation():
         "root_source": "/dev/nvme1n1p3",
         "efi_source": "/dev/nvme1n1p1",
         "efi_content_sha256": "e" * 64,
+        "protected_bootability": {
+            "schema_version": 1,
+            "proof": "bootcurrent-protected-esp-loader-v1",
+            "boot_current": "0000",
+            "entry": "Boot0000",
+            "active": True,
+            "partition_number": 1,
+            "esp_partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "loader_relative_path": "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI",
+            "loader_size_bytes": 98504,
+            "efi_nvram_sha256": "a" * 64,
+        },
     }
 
 
@@ -624,6 +637,47 @@ def test_valid_preflight_binds_root_and_efi_to_protected_wd():
     assert result["protected"]["efi_source"] == "/dev/nvme1n1p1"
 
 
+
+def test_target_disk_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device holders"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_partition_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_nested_block_descendant_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["descendants"] = [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_nested_block_descendant_inventory_recurses():
+    observed = prod._nested_block_descendants([
+        {
+            "path": "/dev/dm-0",
+            "type": "crypt",
+            "mountpoints": [None],
+            "children": [
+                {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+            ],
+        },
+    ])
+    assert observed == [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+        {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "wrong"),
     [
@@ -775,6 +829,66 @@ def test_root_and_efi_must_be_on_protected_wd(key, wrong):
         prod.validate_preflight(obs, CONTRACT)
 
 
+def test_protected_firmware_bootability_proof_is_required():
+    obs = observation()
+    del obs["protected_bootability"]
+    with pytest.raises(prod.ProductionInstallError, match="bootability proof"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_must_target_wd_esp():
+    obs = observation()
+    obs["protected_bootability"]["esp_partuuid"] = PREIMAGE_PARTUUIDS[0]
+    with pytest.raises(prod.ProductionInstallError, match="does not bind the WD ESP"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_parser_binds_current_loader(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "SYSTEMD" / "SYSTEMD-BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0000\n"
+        "Timeout: 1 seconds\n"
+        "BootOrder: 0000,0001\n"
+        "Boot0000* Pop!_OS 22.04 LTS\t"
+        "HD(1,GPT,aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1,0x1000,0x1fefff)"
+        "/File(\\EFI\\SYSTEMD\\SYSTEMD-BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    proof = prod.protected_firmware_bootability(CONTRACT, efi_root=root)
+    assert proof["boot_current"] == "0000"
+    assert proof["esp_partuuid"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    assert proof["loader_relative_path"] == "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI"
+    assert proof["loader_size_bytes"] == len(b"efi-loader")
+    assert proof["efi_nvram_sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_protected_firmware_bootability_parser_rejects_seagate_entry(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "BOOT" / "BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0002\n"
+        "Boot0002* UEFI OS\t"
+        "HD(1,GPT," + PREIMAGE_PARTUUIDS[0] + ",0x800,0x200000)"
+        "/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    with pytest.raises(prod.ProductionInstallError, match="protected WD ESP"):
+        prod.protected_firmware_bootability(CONTRACT, efi_root=root)
+
+
 def test_protected_partition_fingerprint_mismatch_is_rejected():
     obs = observation()
     obs["protected"]["partitions"][2]["partuuid"] = "00000000-0000-0000-0000-000000000000"
@@ -797,9 +911,12 @@ def test_protected_signature_and_efi_content_are_bound_into_fingerprint():
     changed_disk["protected"]["signatures"][0]["offset"] = "0x201"
     changed_efi = observation()
     changed_efi["efi_content_sha256"] = "f" * 64
+    changed_boot = observation()
+    changed_boot["protected_bootability"]["loader_size_bytes"] += 1
     assert prod.protected_fingerprint(prod.validate_preflight(changed_partition, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_disk, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_efi, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_boot, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
 
 
 def test_protected_efi_content_digest_changes_with_bytes_and_rejects_symlinks(tmp_path):

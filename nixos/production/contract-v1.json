@@ -7,7 +7,8 @@
     "mode": "retained-protected-source",
     "destructive_source_cutover": false,
     "pre_cutover_readiness_required": false,
-    "protected_source_bootability_required": true
+    "protected_source_bootability_required": true,
+    "protected_source_bootability_proof": "bootcurrent-protected-esp-loader-v1"
   },
   "target_identity": {
     "role": "nixos-primary",
@@ -20,7 +21,8 @@
     "requires_blank": false,
     "requires_unmounted": true,
     "exact_size_bytes": 4000787030016,
-    "existing_state_policy": "replace-exact-private-preimage"
+    "existing_state_policy": "replace-exact-private-preimage",
+    "requires_no_active_descendants": true
   },
   "protected_disks": [
     {

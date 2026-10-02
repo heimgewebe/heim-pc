@@ -34,9 +34,9 @@ Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt w
 1. Exakte WD-/Seagate-Identität unmittelbar vor jeder destruktiven Phase.
 2. WD-Partitionstabelle, WD-Dateisystemsignaturen und WD-ESP müssen vor/nach Apply identisch sein.
 3. Target/Protected-by-id dürfen nicht kollidieren.
-4. Seagate muss unmittelbar vor dem Produktionsplan unmounted sein und exakt dem privaten, revisionsgebundenen Replacement-Preimage entsprechen; ein separates Vorab-Blanking ist verboten.
+4. Seagate muss unmittelbar vor dem Produktionsplan unmounted sein, darf weder Kernel-Holder noch verschachtelte aktive Block-Device-Descendants haben und muss exakt dem privaten, revisionsgebundenen Replacement-Preimage entsprechen; ein separates Vorab-Blanking ist verboten.
 5. Eigene Seagate-ESP; Shared ESP verboten.
-6. `boot.loader.efi.canTouchEfiVariables = false`; EFI/NVRAM-Digest vor/nach Apply identisch.
+6. `boot.loader.efi.canTouchEfiVariables = false`; vor Apply muss `BootCurrent` als aktiver Firmware-Eintrag auf die geschützte WD-ESP-PARTUUID und einen dort vorhandenen regulären EFI-Loader zeigen; EFI/NVRAM-Digest vor/nach Apply identisch.
 7. Produktionsartefakt muss von `merged-main` stammen und die unabhängige Managed-Build-Attestation bestehen.
 8. Versiegelter lokaler Nix-Store und Root-only-Verifikation bleiben Voraussetzung.
 9. Private Storage Identity bleibt revisions- und Public-Contract-Digest-gebunden.
@@ -53,7 +53,7 @@ Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt w
 5. `nixos_production_prepare.py` für exakt den gemergten `main`-Commit ausführen.
 6. Unabhängige `nixos-production-build-attest`-Attestation für exakt diesen Kandidaten erzeugen/verifizieren.
 7. Produktionsplan effect-frei aus frischer Hardwarewahrheit kompilieren.
-8. Plan-Digest, Zielidentität und Replacement-Preimage erneut prüfen.
+8. Plan-Digest, Zielidentität, Target-Quieszenz, Replacement-Preimage und geschützten WD-Firmware-Bootpfad erneut prüfen.
 9. Produktions-Apply ausschließlich gegen die Seagate durchführen; `sgdisk --zap-all` bleibt die erste Storage-Wirkung des gehärteten Installers.
 10. WD-Fingerprint und EFI/NVRAM unverändert verifizieren.
 11. NixOS über Firmware booten und Basissystem/Storage/Firstboot prüfen.
@@ -61,4 +61,4 @@ Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt w
 
 ## Stop-Bedingungen
 
-Sofort stoppen ohne Storage-Mutation, wenn Zielidentität, Protected-Identität, Mountzustand, Attestation, private Identity, WD-Fingerprint, EFI-Policy oder Plan-Digest nicht exakt stimmen. Nach einer bereits begonnenen Seagate-Mutation wird kein automatischer Source-Rollback behauptet; Pop!_OS bleibt die getrennte, unveränderte Rückfallplattform.
+Sofort stoppen ohne Storage-Mutation, wenn Zielidentität, Protected-Identität, Mount-/Holder-/Descendant-Zustand, Attestation, private Identity, WD-Fingerprint, geschützter Firmware-Bootpfad, EFI-Policy oder Plan-Digest nicht exakt stimmen. Nach einer bereits begonnenen Seagate-Mutation wird kein automatischer Source-Rollback behauptet; Pop!_OS bleibt die getrennte, unveränderte Rückfallplattform.

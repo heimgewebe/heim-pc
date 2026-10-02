@@ -109,6 +109,8 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or source_preservation.get("destructive_source_cutover") is not False
         or source_preservation.get("pre_cutover_readiness_required") is not False
         or source_preservation.get("protected_source_bootability_required") is not True
+        or source_preservation.get("protected_source_bootability_proof")
+        != "bootcurrent-protected-esp-loader-v1"
     ):
         raise IdentityContractError("public retained-source dual-OS policy is incomplete")
     _reject_public_unique_identifiers(value)
@@ -133,6 +135,7 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or target.get("kernel_name_authoritative") is not False
         or target.get("requires_blank") is not False
         or target.get("requires_unmounted") is not True
+        or target.get("requires_no_active_descendants") is not True
         or target.get("existing_state_policy") != "replace-exact-private-preimage"
     ):
         raise IdentityContractError("public target structure/policy is incomplete")
