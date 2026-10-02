@@ -4681,7 +4681,6 @@ def execute_plan(
     verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     pre_now = validate_preflight(observer(contract), contract)
-    verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
     verify_partuuid_namespace_clear(contract)
     verify_partlabel_namespace_clear(contract)
     if protected_fingerprint(pre_now["protected"]) != plan["protected_pre_fingerprint"]:
@@ -4781,7 +4780,6 @@ def execute_plan(
         if protected_efi_freeze_handoff is not None:
             protected_efi_freeze_handoff["freeze"] = protected_efi_freeze
         final_pre = validate_preflight(observer(contract), contract)
-        verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         verify_partuuid_namespace_clear(contract)
         verify_partlabel_namespace_clear(contract)
         verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
@@ -5034,8 +5032,6 @@ def main(argv: list[str] | None = None) -> int:
             args.identity_contract, expected_revision=artifact["source_revision"]
         )
         observation = json.loads(args.observation_json.read_text()) if args.observation_json else observe_live(contract)
-        if args.observation_json is None:
-            verify_no_hidden_target_signatures(contract["target_identity"]["exact_by_id"])
         plan = compile_plan(
             observation,
             install_artifact=artifact,

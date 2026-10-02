@@ -366,6 +366,13 @@ def bind_contract(public: dict[str, Any], identity: dict[str, Any], *, expected_
     partuuids = [item["partuuid"] for item in merged["topology"]["partitions"]]
     if len(set(partuuids)) != len(partuuids):
         raise IdentityContractError("private target PARTUUIDs must be unique")
+    preimage_partuuids = {item["partuuid"] for item in target_preimage["partitions"]}
+    if set(partuuids) & preimage_partuuids:
+        raise IdentityContractError("planned target PARTUUIDs must be disjoint from the replacement preimage")
+    planned_labels = {item["label"] for item in merged["topology"]["partitions"]}
+    preimage_labels = {item["partlabel"] for item in target_preimage["partitions"]}
+    if planned_labels & preimage_labels:
+        raise IdentityContractError("planned target PARTLABELs must be disjoint from the replacement preimage")
     merged["identity_binding"] = {
         "schema_version": 1,
         "source_revision": expected_revision,

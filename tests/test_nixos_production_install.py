@@ -148,6 +148,11 @@ PARTUUIDS = [
     "22222222-2222-4222-8222-222222222222",
     "33333333-3333-4333-8333-333333333333",
 ]
+PREIMAGE_PARTUUIDS = [
+    "aaaaaaaa-1111-4111-8111-111111111111",
+    "bbbbbbbb-2222-4222-8222-222222222222",
+    "cccccccc-3333-4333-8333-333333333333",
+]
 PUBLIC_CONTRACT = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
 PRIVATE_IDENTITY = {
     "schema_version": 1,
@@ -164,9 +169,9 @@ PRIVATE_IDENTITY = {
             "logical_sector_size": 512,
             "signatures": [{"type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
             "partitions": [
-                {"number": 1, "size_bytes": 1073741824, "start_sector": 2048, "partuuid": PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
-                {"number": 2, "size_bytes": 4294967296, "start_sector": 2099200, "partuuid": PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
-                {"number": 3, "size_bytes": 3995417255424, "start_sector": 10487808, "partuuid": PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "fstype": "", "uuid": "", "signatures": []},
+                {"number": 1, "size_bytes": 1073741824, "start_sector": 2048, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "size_bytes": 4294967296, "start_sector": 2099200, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "size_bytes": 3995417255424, "start_sector": 10487808, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "fstype": "", "uuid": "", "signatures": []},
             ],
         },
     },
@@ -213,9 +218,9 @@ def observation():
             "mounted": False,
             "signatures": [{"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
             "partitions": [
-                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
-                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
-                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": []},
+                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": []},
             ],
         },
         "protected": {
@@ -5450,6 +5455,32 @@ def test_private_target_partuuid_must_be_a_canonical_gpt_guid():
     identity["topology"]["partitions"][0]["partuuid"] = "not-a-guid"
     with pytest.raises(prod.storage_identity.IdentityContractError, match="private target PARTUUID"):
         prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partuuids_must_be_disjoint_from_replacement_preimage():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partlabels_must_be_disjoint_from_replacement_preimage():
+    public = json.loads(json.dumps(PUBLIC_CONTRACT))
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    public["topology"]["partitions"][0]["label"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partlabel"]
+    )
+    identity["public_contract_sha256"] = prod.storage_identity.sha256_json(public)
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTLABELs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(public, identity, expected_revision=REVISION)
 
 
 def test_proof_only_artifact_can_plan_but_cannot_apply(monkeypatch, tmp_path):
