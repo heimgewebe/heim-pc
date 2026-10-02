@@ -4,6 +4,7 @@ import io
 import tarfile
 import importlib.util
 import json
+import os
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -4755,6 +4756,303 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
+def _expected_root_source_git_argv(source_fd, arguments):
+    return [
+        "git",
+        "--no-replace-objects",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "status.submoduleSummary=false",
+        f"--work-tree=/proc/self/fd/{source_fd}",
+        "-C",
+        f"/proc/self/fd/{source_fd}",
+        *arguments,
+    ]
+
+
+def test_root_source_git_argv_pins_work_tree_to_checkout_fd():
+    argv = prod._root_source_git_argv(17, ["rev-parse", "HEAD"])
+    assert "--work-tree=/proc/self/fd/17" in argv
+    assert argv[argv.index("-C") + 1] == "/proc/self/fd/17"
+
+
+def _fixture_blob_oid(payload: bytes) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"base\n")
+    owner = checkout_root.stat()
+    blob_oid = _fixture_blob_oid(b"base\n")
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(flake_source), REVISION) == REVISION
+    assert len(calls) == 4
+    expected_suffixes = [
+        ["rev-parse", "HEAD"],
+        ["ls-tree", "-r", "-z", REVISION],
+        ["ls-files", "--stage", "-z"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    ]
+    for (argv, kwargs), suffix in zip(calls, expected_suffixes):
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(source_fd, suffix)
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
+    assert all(
+        not any(arg.startswith("safe.directory=") for arg in argv)
+        for argv, _kwargs in calls
+    )
+
+
+def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    production_root = checkout_root / "nixos" / "production"
+    policy_path = checkout_root / prod.MANAGED_BUILD_POLICY_RELATIVE
+    flake_source.mkdir(parents=True)
+    production_root.mkdir(parents=True)
+    policy_path.parent.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
+    policy = {"schema_version": 1, "kind": "synthetic-managed-policy"}
+    policy_path.write_text(json.dumps(policy) + "\n", encoding="utf-8")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = (str(checkout_root.resolve()) + "\n").encode()
+        stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    expected_paths = (
+        production_root / "recovery-contract-v1.json",
+        production_root / "nix-lifecycle-contract-v1.json",
+        production_root / "critical-user-data-contract-v1.json",
+    )
+    assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
+    assert prod.managed_policy_sha256_for_source(str(flake_source)) == prod.sha256_json(policy)
+    assert len(calls) == 2
+    for argv, kwargs in calls:
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(
+            source_fd, ["rev-parse", "--show-toplevel"]
+        )
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
+
+
+def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    real_marker = tmp_path / "real-git-marker"
+    real_marker.mkdir()
+    (checkout_root / ".git").symlink_to(real_marker, target_is_directory=True)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+
+    with pytest.raises(prod.ProductionInstallError, match="must not be a symlink"):
+        prod.verify_source(str(flake_source), REVISION)
+
+
+def test_root_source_git_context_pins_open_source_across_path_swap(tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    other_source = tmp_path / "other-source"
+    other_source.mkdir()
+
+    source_fd, checkout_fd, _uid, _gid = prod._open_root_source_git_context(flake_source)
+    try:
+        before = prod.os.fstat(source_fd)
+        moved = checkout_root / "nixos" / "system-original"
+        flake_source.rename(moved)
+        flake_source.symlink_to(other_source, target_is_directory=True)
+        after = prod.os.fstat(source_fd)
+        replacement = flake_source.stat()
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        assert (replacement.st_dev, replacement.st_ino) != (before.st_dev, before.st_ino)
+    finally:
+        prod.os.close(checkout_fd)
+        prod.os.close(source_fd)
+
+
+def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"EVIL\n")
+    blob_oid = _fixture_blob_oid(b"base\n")
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    assert all("status" not in argv for argv, _kwargs in calls)
+
+
+def test_verify_source_root_rejects_untracked_file_outside_flake_source(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(checkout_fd)
+        assert (fd_info.st_dev, fd_info.st_ino) == (owner.st_dev, owner.st_ino)
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(b"")
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(b"")
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"outside-flake.txt\0")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    for argv, kwargs in calls:
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert kwargs["pass_fds"] == (checkout_fd,)
+
+
+def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_path):
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "rev-parse" in argv:
+            return Result((REVISION + "\n").encode())
+        return Result(b"")
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(tmp_path), REVISION) == REVISION
+    assert calls == [
+        (["git", "-C", str(tmp_path), "rev-parse", "HEAD"], {}),
+        (["git", "-C", str(tmp_path), "status", "--porcelain"], {}),
+    ]
+
+
 def test_run_uses_fixed_trusted_environment(monkeypatch):
     captured = {}
 
@@ -4772,6 +5070,29 @@ def test_run_uses_fixed_trusted_environment(monkeypatch):
     assert captured["env"]["PATH"] == prod.TRUSTED_PATH
     assert captured["env"]["HOME"] == "/"
     assert set(captured["env"]) == {"PATH", "LC_ALL", "LANG", "HOME", "SYSTEMD_COLORS"}
+    assert "user" not in captured
+    assert "group" not in captured
+    assert "extra_groups" not in captured
+
+
+def test_run_drops_source_git_credentials_and_supplementary_groups(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod.subprocess, "run", fake_run)
+    prod._run(["git", "--version"], run_as_uid=1234, run_as_gid=5678)
+    assert captured["user"] == 1234
+    assert captured["group"] == 5678
+    assert captured["extra_groups"] == []
 
 
 def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):
