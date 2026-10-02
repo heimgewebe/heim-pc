@@ -3296,10 +3296,20 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     path = Path(flake_source)
     if not path.is_absolute():
         raise ProductionInstallError("flake source must be absolute")
-    head = _run(["git", "-C", str(path), "rev-parse", "HEAD"]).stdout.decode().strip()
+    git = ["git"]
+    if os.geteuid() == 0:
+        try:
+            resolved_path = path.resolve(strict=True)
+        except OSError as exc:
+            raise ProductionInstallError("flake source is unavailable") from exc
+        # Production runs as root against a deliberately user-owned checkout.
+        # Trust only this exact resolved repository for these Git invocations;
+        # never mutate global, system, or repository Git configuration.
+        git.extend(["-c", f"safe.directory={resolved_path}"])
+    head = _run([*git, "-C", str(path), "rev-parse", "HEAD"]).stdout.decode().strip()
     if SOURCE_REVISION_RE.fullmatch(head) is None:
         raise ProductionInstallError("flake source is not bound to an exact Git revision")
-    dirty = _run(["git", "-C", str(path), "status", "--porcelain"]).stdout
+    dirty = _run([*git, "-C", str(path), "status", "--porcelain"]).stdout
     if dirty:
         raise ProductionInstallError("flake source must be clean before a production install")
     if expected_revision is not None and head != expected_revision:

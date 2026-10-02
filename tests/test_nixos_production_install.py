@@ -4755,6 +4755,59 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
+def test_verify_source_root_trusts_only_exact_resolved_repository(monkeypatch, tmp_path):
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv):
+        calls.append(argv)
+        if "rev-parse" in argv:
+            return Result((REVISION + "\n").encode())
+        return Result(b"")
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(tmp_path), REVISION) == REVISION
+    resolved = tmp_path.resolve()
+    assert calls == [
+        ["git", "-c", f"safe.directory={resolved}", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        ["git", "-c", f"safe.directory={resolved}", "-C", str(tmp_path), "status", "--porcelain"],
+    ]
+    assert all("safe.directory=*" not in arg for call in calls for arg in call)
+    assert all("--global" not in call for call in calls)
+
+
+def test_verify_source_non_root_does_not_add_safe_directory_override(monkeypatch, tmp_path):
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv):
+        calls.append(argv)
+        if "rev-parse" in argv:
+            return Result((REVISION + "\n").encode())
+        return Result(b"")
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(tmp_path), REVISION) == REVISION
+    assert calls == [
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        ["git", "-C", str(tmp_path), "status", "--porcelain"],
+    ]
+
+
 def test_run_uses_fixed_trusted_environment(monkeypatch):
     captured = {}
 
