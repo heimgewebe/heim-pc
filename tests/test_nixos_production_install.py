@@ -1269,6 +1269,21 @@ def test_tpm2_luks_enrollment_requires_pcr7_recovery_and_bootstrap_retirement(mo
     with pytest.raises(prod.ProductionInstallError, match="PCR policy mismatch"):
         prod.verify_tpm2_luks_enrollment(CONTRACT)
 
+    for field, value in (
+        ("tpm2-pcrlock", True),
+        ("tpm2-pcrlock-nv", "synthetic-nv-handle"),
+        ("tpm2_pcrlock_nv", "synthetic-nv-handle"),
+    ):
+        unexpected_pcrlock = json.loads(json.dumps(final))
+        unexpected_pcrlock["tokens"]["0"][field] = value
+        monkeypatch.setattr(
+            prod, "_json_command", lambda _argv, state=unexpected_pcrlock: state
+        )
+        with pytest.raises(
+            prod.ProductionInstallError, match="pcrlock material"
+        ):
+            prod.verify_tpm2_luks_enrollment(CONTRACT)
+
     no_recovery = json.loads(json.dumps(final))
     del no_recovery["tokens"]["1"]
     del no_recovery["keyslots"]["2"]

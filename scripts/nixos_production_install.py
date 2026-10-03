@@ -1630,6 +1630,14 @@ def verify_tpm2_luks_enrollment(
         raise ProductionInstallError("LUKS2 TPM2 token PCR policy mismatch")
     if tpm_tokens[0].get("tpm2-pin") not in (None, False):
         raise ProductionInstallError("LUKS2 TPM2 token unexpectedly requires a PIN")
+    if any(
+        "pcrlock" in key.casefold()
+        and value not in (None, False, "", [], {})
+        for key, value in tpm_tokens[0].items()
+    ):
+        raise ProductionInstallError(
+            "LUKS2 TPM2 token unexpectedly contains pcrlock material"
+        )
     bootstrap = str(unlock["bootstrap_keyslot"])
     expected_slots = tpm_slots | recovery_slots
     if bootstrap_slot_present:
