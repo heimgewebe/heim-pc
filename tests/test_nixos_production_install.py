@@ -1283,6 +1283,183 @@ def test_tpm2_luks_enrollment_requires_pcr7_recovery_and_bootstrap_retirement(mo
         prod.verify_tpm2_luks_enrollment(CONTRACT)
 
 
+def _recovery_key_test_path(monkeypatch, tmp_path):
+    parent = tmp_path / "heim-pc"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    base = parent / "nixos-production-recovery"
+    monkeypatch.setattr(prod, "PRODUCTION_RECOVERY_KEY_BASE", base)
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", os.getegid())
+    path = base / (("a" * 40) + "-" + ("b" * 16)) / "luks-recovery-key.txt"
+    prod.prepare_recovery_key_destination(path)
+    return path
+
+
+def _recovery_key_payload():
+    return (b"ABCDEFGH-" * 7) + b"ABCDEFGH\n"
+
+
+def test_write_recovery_key_is_private_single_link_create_only(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    payload = _recovery_key_payload()
+    digest = prod.write_recovery_key(path, payload)
+    info = path.lstat()
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert path.read_bytes() == payload
+    assert stat.S_ISREG(info.st_mode)
+    assert info.st_nlink == 1
+    assert info.st_uid == os.geteuid()
+    assert info.st_gid == os.getegid()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    with pytest.raises(prod.ProductionInstallError, match="already exists"):
+        prod.write_recovery_key(path, payload)
+
+
+def test_write_recovery_key_unlinks_created_file_when_fchmod_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_fchmod(_fd, _mode):
+        raise OSError("synthetic recovery fchmod failure")
+
+    monkeypatch.setattr(prod.os, "fchmod", fail_fchmod)
+    with pytest.raises(OSError, match="synthetic recovery fchmod failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_unlinks_created_file_when_write_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_unlinks_created_file_when_file_fsync_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_fsync(_fd):
+        raise OSError("synthetic recovery fsync failure")
+
+    monkeypatch.setattr(prod.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="synthetic recovery fsync failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+
+def test_write_recovery_key_binds_created_identity_before_mutating_file(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    events = []
+    real_fstat = prod.os.fstat
+    real_fchmod = prod.os.fchmod
+    real_write = prod._write_all_fd
+    real_fsync = prod.os.fsync
+
+    def record_fstat(fd):
+        events.append("fstat")
+        return real_fstat(fd)
+
+    def record_fchmod(fd, mode):
+        events.append("fchmod")
+        return real_fchmod(fd, mode)
+
+    def record_write(fd, value):
+        events.append("write")
+        return real_write(fd, value)
+
+    def record_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fstat", record_fstat)
+    monkeypatch.setattr(prod.os, "fchmod", record_fchmod)
+    monkeypatch.setattr(prod, "_write_all_fd", record_write)
+    monkeypatch.setattr(prod.os, "fsync", record_fsync)
+
+    prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert events[:4] == ["fstat", "fchmod", "write", "fsync"]
+
+
+def test_write_recovery_key_cleanup_unlinks_same_created_identity(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    created_identity = []
+    unlinked_identity = []
+    real_fstat = prod.os.fstat
+    real_unlink = prod.os.unlink
+
+    def capture_fstat(fd):
+        info = real_fstat(fd)
+        if not created_identity:
+            created_identity.append((info.st_dev, info.st_ino))
+        return info
+
+    def capture_unlink(name, *, dir_fd=None):
+        linked = prod.os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        unlinked_identity.append((linked.st_dev, linked.st_ino))
+        return real_unlink(name, dir_fd=dir_fd)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod.os, "fstat", capture_fstat)
+    monkeypatch.setattr(prod.os, "unlink", capture_unlink)
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert unlinked_identity == created_identity
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_cleanup_preserves_foreign_replacement(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    displaced = path.with_name("displaced-created-recovery-key")
+    foreign = b"foreign-replacement\n"
+
+    def replace_then_fail(_fd, _payload):
+        os.rename(path, displaced)
+        path.write_bytes(foreign)
+        os.chmod(path, 0o600)
+        raise prod.ProductionInstallError("synthetic replacement write failure")
+
+    monkeypatch.setattr(prod, "_write_all_fd", replace_then_fail)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic replacement write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert path.read_bytes() == foreign
+    assert displaced.exists()
+
+
+def test_write_recovery_key_cleanup_fsyncs_parent_directory(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    fsync_modes = []
+    real_fsync = prod.os.fsync
+
+    def record_fsync(fd):
+        fsync_modes.append(stat.S_IFMT(prod.os.fstat(fd).st_mode))
+        return real_fsync(fd)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod.os, "fsync", record_fsync)
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert stat.S_IFDIR in fsync_modes
+    assert not os.path.lexists(path)
+
 def test_luks_bootstrap_key_is_sealed_unlinked_memfd(monkeypatch):
     binding = prod.create_luks_bootstrap_key()
     fd = binding["fd"]

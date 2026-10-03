@@ -1398,6 +1398,7 @@ def write_recovery_key(path: Path, payload: bytes) -> str:
     created: os.stat_result | None = None
     try:
         fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+        created = os.fstat(fd)
         os.fchmod(fd, 0o600)
         _write_all_fd(fd, payload)
         os.fsync(fd)
