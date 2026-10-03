@@ -635,6 +635,16 @@ def test_contract_is_bound_to_physical_seagate_and_protected_wd():
     assert len(contract["protected_disks"][0]["partition_table_fingerprint"]) == 4
 
 
+def test_public_contract_rejects_tpm2_pcrlock_discovery():
+    value = json.loads(json.dumps(PUBLIC_CONTRACT))
+    value["topology"]["luks"]["unlock"]["pcrlock"] = True
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="public LUKS TPM2 unlock policy",
+    ):
+        prod.storage_identity.validate_public_contract(value)
+
+
 def test_public_contract_contains_no_private_hardware_identifiers():
     prod.storage_identity.validate_public_contract(PUBLIC_CONTRACT)
     forbidden = prod.storage_identity.FORBIDDEN_PUBLIC_IDENTITY_KEYS
@@ -1114,7 +1124,9 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert f"--unlock-key-file={sentinel}" in enroll["argv"]
     assert "--tpm2-device=auto" in enroll["argv"]
     assert "--tpm2-pcrs=7" in enroll["argv"]
+    assert "--tpm2-pcrlock=" in enroll["argv"]
     assert "--tpm2-with-pin=no" in enroll["argv"]
+    assert compiled["luks_unlock_policy"]["pcrlock"] is False
 
     recovery = by_effect["luks-recovery-enroll"]
     assert recovery["sensitive_stdout"] == "luks-recovery-key-v1"

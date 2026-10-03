@@ -183,12 +183,13 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or not luks["mapper_name"]
         or not isinstance(unlock, dict)
         or set(unlock) != {
-            "mode", "device", "pcrs", "with_pin", "bootstrap_key",
+            "mode", "device", "pcrs", "pcrlock", "with_pin", "bootstrap_key",
             "bootstrap_keyslot", "persistent_passphrase", "recovery_key", "headless",
         }
         or unlock.get("mode") != "tpm2-auto"
         or unlock.get("device") != "auto"
         or unlock.get("pcrs") != [7]
+        or unlock.get("pcrlock") is not False
         or unlock.get("with_pin") is not False
         or unlock.get("bootstrap_key") != "ephemeral-random-memfd"
         or unlock.get("bootstrap_keyslot") != 0

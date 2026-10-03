@@ -193,6 +193,7 @@ in
         && unlock.mode == "tpm2-auto"
         && unlock.device == "auto"
         && unlock.pcrs == [ 7 ]
+        && unlock.pcrlock == false
         && unlock.with_pin == false
         && unlock.bootstrap_key == "ephemeral-random-memfd"
         && unlock.bootstrap_keyslot == 0

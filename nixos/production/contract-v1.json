@@ -108,6 +108,7 @@
         "mode": "tpm2-auto",
         "device": "auto",
         "pcrs": [7],
+        "pcrlock": false,
         "with_pin": false,
         "bootstrap_key": "ephemeral-random-memfd",
         "bootstrap_keyslot": 0,

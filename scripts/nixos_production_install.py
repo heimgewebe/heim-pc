@@ -2594,6 +2594,7 @@ def compile_plan(
                     f"--unlock-key-file={LUKS_BOOTSTRAP_FD_SENTINEL}",
                     f"--tpm2-device={unlock['device']}",
                     f"--tpm2-pcrs={tpm2_pcrs}",
+                    "--tpm2-pcrlock=",
                     "--tpm2-with-pin=no",
                     encrypted_path,
                 ],
