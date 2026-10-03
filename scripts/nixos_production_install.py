@@ -18,6 +18,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -3654,16 +3655,226 @@ def verify_source(flake_source: str, expected_revision: str | None = None) -> st
     return head
 
 
-def _nix_volume_argv(artifact: dict[str, Any], args: list[str]) -> list[str]:
-    return [
+def _managed_nix_volume_backing_root(
+    artifact: dict[str, Any], managed_store_root: str
+) -> Path:
+    artifact = validate_install_artifact(artifact)
+    if (
+        not isinstance(managed_store_root, str)
+        or MANAGED_NIX_STORE_ROOT_RE.fullmatch(managed_store_root) is None
+    ):
+        raise ProductionInstallError("managed Nix store root is invalid")
+    payload = _json_command(["docker", "volume", "inspect", artifact["nix_volume"]])
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        raise ProductionInstallError("managed Nix Docker volume metadata is ambiguous")
+    volume = payload[0]
+    expected_options = {
+        "device": managed_store_root,
+        "o": "bind",
+        "type": "none",
+    }
+    if (
+        volume.get("Name") != artifact["nix_volume"]
+        or volume.get("Driver") != "local"
+        or volume.get("Scope") != "local"
+        or volume.get("Options") != expected_options
+    ):
+        raise ProductionInstallError(
+            "managed Nix Docker volume no longer matches the success receipt"
+        )
+    return Path(managed_store_root)
+
+
+def _managed_nix_verification_snapshot_parent(
+    managed_nix_store_root: Path,
+) -> Path:
+    if os.geteuid() != 0:
+        return managed_nix_store_root.parent
+    _require_root_owned_directory(PRODUCTION_APPLY_LOCK_DIR, mode=0o700)
+    return PRODUCTION_APPLY_LOCK_DIR
+
+
+def _managed_nix_verification_db_snapshot(
+    *, managed_nix_store_root: Path, destination: Path, system_path: str
+) -> Path:
+    """Materialize WAL-aware Nix DB state for immutable read-only verification."""
+    root_text = str(managed_nix_store_root)
+    if (
+        not managed_nix_store_root.is_absolute()
+        or managed_nix_store_root.is_symlink()
+        or not managed_nix_store_root.is_dir()
+        or os.path.normpath(root_text) != root_text
+    ):
+        raise ProductionInstallError(
+            "managed Nix store root is unsafe for verification snapshot"
+        )
+    if SYSTEM_PATH_RE.fullmatch(system_path) is None:
+        raise ProductionInstallError(
+            "managed Nix verification snapshot system path is invalid"
+        )
+    if (
+        not destination.is_absolute()
+        or destination.exists()
+        or destination.is_symlink()
+        or os.path.normpath(str(destination)) != str(destination)
+    ):
+        raise ProductionInstallError(
+            "managed Nix verification snapshot destination is unsafe"
+        )
+
+    source = managed_nix_store_root / "var" / "nix" / "db" / "db.sqlite"
+    wal = source.with_name("db.sqlite-wal")
+
+    def persistence_identity(
+        path: Path, *, required: bool, allow_empty: bool = False
+    ) -> tuple[int, ...] | None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if required:
+                raise ProductionInstallError(
+                    "managed Nix database is unavailable for verification snapshot"
+                )
+            return None
+        except OSError as exc:
+            raise ProductionInstallError(
+                "managed Nix database is unavailable for verification snapshot"
+            ) from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1
+            or (info.st_size <= 0 and not allow_empty)
+        ):
+            raise ProductionInstallError(
+                "managed Nix database identity is unsafe for verification snapshot"
+            )
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_gid,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    before_source = persistence_identity(source, required=True)
+    before_wal = persistence_identity(wal, required=False, allow_empty=True)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o600)
+    os.close(descriptor)
+    try:
+        source_db = None
+        snapshot_db = None
+        try:
+            source_db = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)
+            snapshot_db = sqlite3.connect(str(destination))
+            source_db.backup(snapshot_db)
+        finally:
+            if snapshot_db is not None:
+                snapshot_db.close()
+            if source_db is not None:
+                source_db.close()
+
+        after_source = persistence_identity(source, required=True)
+        after_wal = persistence_identity(wal, required=False, allow_empty=True)
+        if after_source != before_source or after_wal != before_wal:
+            raise ProductionInstallError(
+                "managed Nix database changed during verification snapshot"
+            )
+
+        os.chmod(destination, 0o400)
+        read_flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            read_flags |= os.O_NOFOLLOW
+        descriptor = os.open(destination, read_flags)
+        try:
+            snapshot_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(snapshot_stat.st_mode)
+                or snapshot_stat.st_uid != os.geteuid()
+                or snapshot_stat.st_nlink != 1
+                or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
+            ):
+                raise ProductionInstallError(
+                    "managed Nix verification snapshot identity is unsafe"
+                )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        immutable = sqlite3.connect(
+            destination.as_uri() + "?immutable=1", uri=True
+        )
+        try:
+            row = immutable.execute(
+                "select 1 from ValidPaths where path = ? limit 1",
+                (system_path,),
+            ).fetchone()
+        finally:
+            immutable.close()
+        if row is None:
+            raise ProductionInstallError(
+                "managed Nix verification snapshot lacks the built system path"
+            )
+    except ProductionInstallError:
+        destination.unlink(missing_ok=True)
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        destination.unlink(missing_ok=True)
+        raise ProductionInstallError(
+            "managed Nix verification snapshot failed"
+        ) from exc
+    return destination
+
+
+def _nix_volume_argv(
+    artifact: dict[str, Any],
+    args: list[str],
+    *,
+    db_snapshot: Path | None = None,
+) -> list[str]:
+    argv = [
         "docker", "run", "--rm", "--network", "none",
         "-v", f"{artifact['nix_volume']}:/subject/nix:ro",
+    ]
+    if db_snapshot is not None:
+        try:
+            snapshot_stat = db_snapshot.lstat()
+        except OSError as exc:
+            raise ProductionInstallError(
+                "managed Nix verification snapshot is unavailable"
+            ) from exc
+        if (
+            not db_snapshot.is_absolute()
+            or os.path.normpath(str(db_snapshot)) != str(db_snapshot)
+            or not stat.S_ISREG(snapshot_stat.st_mode)
+            or stat.S_ISLNK(snapshot_stat.st_mode)
+            or snapshot_stat.st_uid != os.geteuid()
+            or snapshot_stat.st_nlink != 1
+            or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
+        ):
+            raise ProductionInstallError(
+                "managed Nix verification snapshot is unsafe"
+            )
+        argv += [
+            "-v",
+            f"{db_snapshot}:/subject/nix/var/nix/db/db.sqlite:ro",
+        ]
+    argv += [
         "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
         artifact["nix_image"],
         "--extra-experimental-features", READONLY_NIX_FEATURES,
         "--store", READONLY_NIX_STORE,
         *args,
     ]
+    return argv
 
 
 def verify_pinned_nix_image_identity(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -3693,20 +3904,48 @@ def verify_pinned_nix_image_identity(artifact: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def verify_install_artifact_environment(artifact: dict[str, Any]) -> None:
+def verify_install_artifact_environment(
+    artifact: dict[str, Any], managed_store_root: str
+) -> None:
     artifact = validate_install_artifact(artifact)
     verify_pinned_nix_image_identity(artifact)
-    _run(["docker", "volume", "inspect", artifact["nix_volume"]])
-    path_info = _json_command(_nix_volume_argv(artifact, ["path-info", "--json", "--recursive", artifact["system_path"]]))
-    closure = closure_manifest_metadata(path_info)
-    if closure["closure_manifest_sha256"] != artifact["closure_manifest_sha256"] or closure["closure_path_count"] != artifact["closure_path_count"]:
-        raise ProductionInstallError("prepared Nix closure metadata no longer matches the install artifact")
-    _run(_nix_volume_argv(artifact, ["store", "verify", "--no-trust", "--recursive", artifact["system_path"]]))
+    backing_root = _managed_nix_volume_backing_root(artifact, managed_store_root)
+    snapshot_parent = _managed_nix_verification_snapshot_parent(backing_root)
+    with tempfile.TemporaryDirectory(
+        prefix=".heim-pc-nix-verify-", dir=snapshot_parent
+    ) as temporary:
+        db_snapshot = _managed_nix_verification_db_snapshot(
+            managed_nix_store_root=backing_root,
+            destination=Path(temporary) / "db.sqlite",
+            system_path=artifact["system_path"],
+        )
+        path_info = _json_command(_nix_volume_argv(
+            artifact,
+            ["path-info", "--json", "--recursive", artifact["system_path"]],
+            db_snapshot=db_snapshot,
+        ))
+        closure = closure_manifest_metadata(path_info)
+        if (
+            closure["closure_manifest_sha256"] != artifact["closure_manifest_sha256"]
+            or closure["closure_path_count"] != artifact["closure_path_count"]
+        ):
+            raise ProductionInstallError(
+                "prepared Nix closure metadata no longer matches the install artifact"
+            )
+        _run(_nix_volume_argv(
+            artifact,
+            ["store", "verify", "--no-trust", "--recursive", artifact["system_path"]],
+            db_snapshot=db_snapshot,
+        ))
     checks = [
         ("-x", f"{artifact['system_path']}/sw/bin/nixos-install"),
         ("-x", f"{artifact['system_path']}/sw/bin/mkfs.btrfs"),
         ("-x", f"{artifact['system_path']}/sw/bin/btrfs"),
-        ("-e", f"{artifact['system_path']}/etc/systemd/system/heim-pc-firstboot-credentials.service"),
+        (
+            "-e",
+            f"{artifact['system_path']}/etc/systemd/system/"
+            "heim-pc-firstboot-credentials.service",
+        ),
     ]
     for mode, path in checks:
         _run([
@@ -3715,7 +3954,6 @@ def verify_install_artifact_environment(artifact: dict[str, Any]) -> None:
             "--entrypoint", f"{artifact['system_path']}/sw/bin/test",
             artifact["nix_image"], mode, path,
         ])
-
 
 
 def verify_host_nix_root_absent() -> None:
@@ -5209,7 +5447,7 @@ def execute_plan(
     if contract.get("identity_binding", {}).get("identity_contract_sha256") != plan.get("identity_contract_sha256"):
         raise ProductionInstallError("private storage identity no longer matches the reviewed plan")
     artifact = validate_install_artifact(plan.get("install_artifact"))
-    verify_managed_build_binding(plan, artifact)
+    managed_build_receipt = verify_managed_build_binding(plan, artifact)
     if artifact["source_authority"] != "merged-main":
         raise ProductionInstallError(
             "production apply requires a merged-main install artifact"
@@ -5250,7 +5488,7 @@ def execute_plan(
     if artifact["source_revision"] != plan.get("source_revision"):
         raise ProductionInstallError("install artifact revision no longer matches the reviewed plan")
     source_revision = verify_source(plan["flake_source"], artifact["source_revision"])
-    verify_install_artifact_environment(artifact)
+    verify_install_artifact_environment(artifact, managed_build_receipt["store_root"])
     verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
     pre_now = validate_preflight(observer(contract), contract)
