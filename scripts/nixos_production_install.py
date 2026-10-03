@@ -5374,11 +5374,6 @@ def verify_scratch_state(mapper_name: str) -> None:
     mapper = Path("/dev/mapper") / mapper_name
     if mapper.exists() or mapper.is_symlink():
         raise ProductionInstallError(f"LUKS mapper already exists: {mapper}")
-    bootstrap = _luks_bootstrap_key_path()
-    if os.path.lexists(bootstrap):
-        raise ProductionInstallError(
-            "stale LUKS bootstrap key blocks production apply"
-        )
 
 
 def _mountpoint_is_mounted(path: str) -> bool:

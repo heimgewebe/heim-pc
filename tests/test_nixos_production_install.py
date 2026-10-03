@@ -1304,6 +1304,25 @@ def test_luks_bootstrap_key_is_sealed_unlinked_memfd(monkeypatch):
         os.fstat(fd)
 
 
+def test_verify_scratch_state_has_no_filesystem_bootstrap_key_dependency(
+    monkeypatch, tmp_path
+):
+    mount_root = tmp_path / "mount-root"
+    btrfs_root = tmp_path / "btrfs-stage"
+    mount_root.mkdir()
+    btrfs_root.mkdir()
+    monkeypatch.setattr(prod, "MOUNT_ROOT", str(mount_root))
+    monkeypatch.setattr(prod, "BTRFS_STAGE_ROOT", str(btrfs_root))
+
+    class Result:
+        returncode = 1
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    prod.verify_scratch_state("heimpc-nixos-crypt")
+
+
 def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
     compiled = plan()
     install = next(item for item in compiled["commands"] if item["effect"] == "nixos-install")
