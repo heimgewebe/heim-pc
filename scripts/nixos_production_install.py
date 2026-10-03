@@ -3694,10 +3694,66 @@ def _managed_nix_verification_snapshot_parent(
     return PRODUCTION_APPLY_LOCK_DIR
 
 
+def _managed_nix_verification_db_directory(db_snapshot: Path) -> Path:
+    snapshot_dir = db_snapshot.parent
+    snapshot_dir_text = str(snapshot_dir)
+    try:
+        directory_stat = snapshot_dir.lstat()
+    except OSError as exc:
+        raise ProductionInstallError(
+            "managed Nix verification snapshot directory is unavailable"
+        ) from exc
+    if (
+        db_snapshot.name != "db.sqlite"
+        or not snapshot_dir.is_absolute()
+        or os.path.normpath(snapshot_dir_text) != snapshot_dir_text
+        or stat.S_ISLNK(directory_stat.st_mode)
+        or not stat.S_ISDIR(directory_stat.st_mode)
+        or directory_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(directory_stat.st_mode) != 0o700
+    ):
+        raise ProductionInstallError(
+            "managed Nix verification snapshot directory is unsafe"
+        )
+    try:
+        entries = {entry.name for entry in snapshot_dir.iterdir()}
+    except OSError as exc:
+        raise ProductionInstallError(
+            "managed Nix verification snapshot directory is unavailable"
+        ) from exc
+    if entries != {"db.sqlite", "schema"}:
+        raise ProductionInstallError(
+            "managed Nix verification snapshot directory contains unexpected files"
+        )
+    for path, is_schema in (
+        (db_snapshot, False),
+        (snapshot_dir / "schema", True),
+    ):
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise ProductionInstallError(
+                "managed Nix verification snapshot is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o400
+            or info.st_size <= 0
+            or (is_schema and info.st_size > 64)
+        ):
+            raise ProductionInstallError(
+                "managed Nix verification snapshot identity is unsafe"
+            )
+    return snapshot_dir
+
+
 def _managed_nix_verification_db_snapshot(
     *, managed_nix_store_root: Path, destination: Path, system_path: str
 ) -> Path:
-    """Materialize WAL-aware Nix DB state for immutable read-only verification."""
+    """Materialize WAL-aware Nix DB state in one sidecar-free private directory."""
     root_text = str(managed_nix_store_root)
     if (
         not managed_nix_store_root.is_absolute()
@@ -3712,11 +3768,28 @@ def _managed_nix_verification_db_snapshot(
         raise ProductionInstallError(
             "managed Nix verification snapshot system path is invalid"
         )
+    snapshot_dir = destination.parent
+    snapshot_dir_text = str(snapshot_dir)
+    try:
+        snapshot_dir_stat = snapshot_dir.lstat()
+        existing_entries = list(snapshot_dir.iterdir())
+    except OSError as exc:
+        raise ProductionInstallError(
+            "managed Nix verification snapshot destination is unsafe"
+        ) from exc
     if (
-        not destination.is_absolute()
+        destination.name != "db.sqlite"
+        or not destination.is_absolute()
         or destination.exists()
         or destination.is_symlink()
         or os.path.normpath(str(destination)) != str(destination)
+        or not snapshot_dir.is_absolute()
+        or os.path.normpath(snapshot_dir_text) != snapshot_dir_text
+        or stat.S_ISLNK(snapshot_dir_stat.st_mode)
+        or not stat.S_ISDIR(snapshot_dir_stat.st_mode)
+        or snapshot_dir_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(snapshot_dir_stat.st_mode) != 0o700
+        or existing_entries
     ):
         raise ProductionInstallError(
             "managed Nix verification snapshot destination is unsafe"
@@ -3724,12 +3797,27 @@ def _managed_nix_verification_db_snapshot(
 
     source = managed_nix_store_root / "var" / "nix" / "db" / "db.sqlite"
     wal = source.with_name("db.sqlite-wal")
+    schema = source.with_name("schema")
+    schema_destination = destination.with_name("schema")
+
+    def stat_identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_gid,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
 
     def persistence_identity(
-        path: Path, *, required: bool, allow_empty: bool = False
+        source_path: Path, *, required: bool, allow_empty: bool = False
     ) -> tuple[int, ...] | None:
         try:
-            info = path.lstat()
+            info = source_path.lstat()
         except FileNotFoundError:
             if required:
                 raise ProductionInstallError(
@@ -3749,20 +3837,11 @@ def _managed_nix_verification_db_snapshot(
             raise ProductionInstallError(
                 "managed Nix database identity is unsafe for verification snapshot"
             )
-        return (
-            info.st_dev,
-            info.st_ino,
-            info.st_mode,
-            info.st_uid,
-            info.st_gid,
-            info.st_nlink,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-        )
+        return stat_identity(info)
 
     before_source = persistence_identity(source, required=True)
     before_wal = persistence_identity(wal, required=False, allow_empty=True)
+    before_schema = persistence_identity(schema, required=True)
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -3782,38 +3861,75 @@ def _managed_nix_verification_db_snapshot(
             if source_db is not None:
                 source_db.close()
 
+        schema_read_flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            schema_read_flags |= os.O_NOFOLLOW
+        schema_descriptor = os.open(schema, schema_read_flags)
+        try:
+            if stat_identity(os.fstat(schema_descriptor)) != before_schema:
+                raise ProductionInstallError(
+                    "managed Nix database changed during verification snapshot"
+                )
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(schema_descriptor, 65 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > 64:
+                    break
+            schema_bytes = b"".join(chunks)
+            if not schema_bytes or len(schema_bytes) > 64:
+                raise ProductionInstallError(
+                    "managed Nix database schema marker is invalid"
+                )
+        finally:
+            os.close(schema_descriptor)
+
+        schema_descriptor = os.open(schema_destination, flags, 0o600)
+        try:
+            written = 0
+            while written < len(schema_bytes):
+                count = os.write(schema_descriptor, schema_bytes[written:])
+                if count <= 0:
+                    raise OSError("short write while copying Nix schema marker")
+                written += count
+            os.fsync(schema_descriptor)
+        finally:
+            os.close(schema_descriptor)
+
         after_source = persistence_identity(source, required=True)
         after_wal = persistence_identity(wal, required=False, allow_empty=True)
+        after_schema = persistence_identity(schema, required=True)
         # SQLite's Unix VFS may issue fchown() while opening an existing WAL
         # as root. Even a same-owner fchown changes only ctime, so do not
         # mistake that read-side effect for source drift. Every other WAL
-        # identity field remains strict, and db.sqlite ctime remains strict.
+        # identity field remains strict, and db.sqlite/schema ctime remain strict.
         wal_changed = (
             after_wal != before_wal
             if before_wal is None or after_wal is None
             else after_wal[:-1] != before_wal[:-1]
         )
-        if after_source != before_source or wal_changed:
+        if (
+            after_source != before_source
+            or wal_changed
+            or after_schema != before_schema
+        ):
             raise ProductionInstallError(
                 "managed Nix database changed during verification snapshot"
             )
 
         os.chmod(destination, 0o400)
+        os.chmod(schema_destination, 0o400)
+        _managed_nix_verification_db_directory(destination)
+
         read_flags = os.O_RDONLY | os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
             read_flags |= os.O_NOFOLLOW
         descriptor = os.open(destination, read_flags)
         try:
-            snapshot_stat = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(snapshot_stat.st_mode)
-                or snapshot_stat.st_uid != os.geteuid()
-                or snapshot_stat.st_nlink != 1
-                or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
-            ):
-                raise ProductionInstallError(
-                    "managed Nix verification snapshot identity is unsafe"
-                )
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -3833,9 +3949,11 @@ def _managed_nix_verification_db_snapshot(
                 "managed Nix verification snapshot lacks the built system path"
             )
     except ProductionInstallError:
+        schema_destination.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise
     except (OSError, sqlite3.Error) as exc:
+        schema_destination.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise ProductionInstallError(
             "managed Nix verification snapshot failed"
@@ -3854,27 +3972,10 @@ def _nix_volume_argv(
         "-v", f"{artifact['nix_volume']}:/subject/nix:ro",
     ]
     if db_snapshot is not None:
-        try:
-            snapshot_stat = db_snapshot.lstat()
-        except OSError as exc:
-            raise ProductionInstallError(
-                "managed Nix verification snapshot is unavailable"
-            ) from exc
-        if (
-            not db_snapshot.is_absolute()
-            or os.path.normpath(str(db_snapshot)) != str(db_snapshot)
-            or not stat.S_ISREG(snapshot_stat.st_mode)
-            or stat.S_ISLNK(snapshot_stat.st_mode)
-            or snapshot_stat.st_uid != os.geteuid()
-            or snapshot_stat.st_nlink != 1
-            or stat.S_IMODE(snapshot_stat.st_mode) != 0o400
-        ):
-            raise ProductionInstallError(
-                "managed Nix verification snapshot is unsafe"
-            )
+        snapshot_dir = _managed_nix_verification_db_directory(db_snapshot)
         argv += [
             "-v",
-            f"{db_snapshot}:/subject/nix/var/nix/db/db.sqlite:ro",
+            f"{snapshot_dir}:/subject/nix/var/nix/db:ro",
         ]
     argv += [
         "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
