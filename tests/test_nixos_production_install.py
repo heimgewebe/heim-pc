@@ -5,6 +5,7 @@ import tarfile
 import importlib.util
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -5229,6 +5230,367 @@ def test_target_partition_bindings_reject_partlabel_alias_outside_seagate(monkey
         prod.verify_target_partition_bindings(CONTRACT)
 
 
+def test_managed_nix_verification_snapshot_parent_uses_root_apply_lock(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    lock_dir = tmp_path / "production-apply-locks"
+    calls = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", lock_dir)
+    monkeypatch.setattr(
+        prod,
+        "_require_root_owned_directory",
+        lambda path, *, mode: calls.append((path, mode)),
+    )
+
+    assert prod._managed_nix_verification_snapshot_parent(store_root) == lock_dir
+    assert calls == [(lock_dir, 0o700)]
+
+
+def test_managed_nix_verification_snapshot_parent_keeps_nonroot_cache_parent(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 1000)
+
+    def unexpected_root_check(*args, **kwargs):
+        raise AssertionError("non-root verification must not require the root apply lock")
+
+    monkeypatch.setattr(prod, "_require_root_owned_directory", unexpected_root_check)
+    assert prod._managed_nix_verification_snapshot_parent(store_root) == store_root.parent
+
+
+def test_managed_nix_verification_snapshot_parent_fails_closed_without_safe_root(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+
+    def reject_root(*args, **kwargs):
+        raise prod.ProductionInstallError("root-owned directory is unavailable")
+
+    monkeypatch.setattr(prod, "_require_root_owned_directory", reject_root)
+    with pytest.raises(
+        prod.ProductionInstallError, match="root-owned directory is unavailable"
+    ):
+        prod._managed_nix_verification_snapshot_parent(store_root)
+
+
+def _write_nix_db_schema(db_dir: Path) -> Path:
+    schema = db_dir / "schema"
+    schema.write_text("10", encoding="ascii")
+    return schema
+
+
+def _verification_snapshot_destination(tmp_path: Path) -> Path:
+    snapshot_dir = tmp_path / "verification-db"
+    snapshot_dir.mkdir(mode=0o700)
+    snapshot_dir.chmod(0o700)
+    return snapshot_dir / "db.sqlite"
+
+
+def test_managed_nix_verification_db_snapshot_materializes_wal_without_mutating_source(
+    tmp_path,
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    schema = _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = (source.read_bytes(), wal.read_bytes(), schema.read_bytes())
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        assert (source.read_bytes(), wal.read_bytes(), schema.read_bytes()) == before
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+        assert destination.stat().st_mode & 0o777 == 0o400
+        assert (destination.parent / "schema").read_text(encoding="ascii") == "10"
+        assert (destination.parent / "schema").stat().st_mode & 0o777 == 0o400
+        snapshot = sqlite3.connect(
+            f"file:{destination}?immutable=1", uri=True
+        )
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_db_snapshot_accepts_empty_wal(tmp_path):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    schema = _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        assert writer.execute("pragma wal_checkpoint(truncate)").fetchone()[0] == 0
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size == 0
+        before = (source.read_bytes(), wal.read_bytes(), schema.read_bytes())
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        assert (source.read_bytes(), wal.read_bytes(), schema.read_bytes()) == before
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+        snapshot = sqlite3.connect(
+            f"file:{destination}?immutable=1", uri=True
+        )
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_db_snapshot_allows_wal_ctime_only_drift(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    real_connect = sqlite3.connect
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = wal.lstat()
+        source_uri = source.as_uri() + "?mode=ro"
+
+        def connect(database, *args, **kwargs):
+            if database == source_uri:
+                mode = stat.S_IMODE(wal.lstat().st_mode)
+                os.chmod(wal, mode | stat.S_IXUSR)
+                os.chmod(wal, mode)
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(prod.sqlite3, "connect", connect)
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        after = wal.lstat()
+        assert after.st_ctime_ns != before.st_ctime_ns
+        assert (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ) == (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        snapshot = real_connect(f"file:{destination}?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_snapshot_stays_frozen_after_source_wal_restart(
+    tmp_path,
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+
+        assert writer.execute("pragma wal_checkpoint(truncate)").fetchone()[0] == 0
+        writer.execute("delete from ValidPaths where path = ?", (SYSTEM_PATH,))
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/live-new",))
+        writer.commit()
+
+        live = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)
+        try:
+            assert live.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() is None
+            assert live.execute(
+                "select 1 from ValidPaths where path = ?",
+                ("/nix/store/live-new",),
+            ).fetchone() == (1,)
+        finally:
+            live.close()
+
+        snapshot = sqlite3.connect(destination.as_uri() + "?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                ("/nix/store/live-new",),
+            ).fetchone() is None
+        finally:
+            snapshot.close()
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+    finally:
+        writer.close()
+
+
+def test_managed_nix_volume_backing_root_is_bound_to_success_receipt(monkeypatch):
+    store_root = managed_receipt(ARTIFACT)["store_root"]
+    volume = {
+        "Name": NIX_VOLUME,
+        "Driver": "local",
+        "Scope": "local",
+        "Options": {
+            "device": store_root,
+            "o": "bind",
+            "type": "none",
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda argv: [volume])
+    assert prod._managed_nix_volume_backing_root(
+        ARTIFACT, store_root
+    ) == Path(store_root)
+
+    volume["Options"] = dict(volume["Options"], device=store_root + "-other")
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="Docker volume no longer matches",
+    ):
+        prod._managed_nix_volume_backing_root(ARTIFACT, store_root)
+
+
+def test_readonly_nix_verifier_overlays_private_db_directory(tmp_path):
+    snapshot = _verification_snapshot_destination(tmp_path)
+    snapshot.write_bytes(b"snapshot")
+    schema = snapshot.parent / "schema"
+    schema.write_text("10", encoding="ascii")
+    snapshot.chmod(0o400)
+    schema.chmod(0o400)
+
+    argv = prod._nix_volume_argv(
+        ARTIFACT,
+        ["path-info", SYSTEM_PATH],
+        db_snapshot=snapshot,
+    )
+    private_mount = f"{snapshot.parent}:/subject/nix/var/nix/db:ro"
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
+    assert private_mount in argv
+    assert argv.index(f"{NIX_VOLUME}:/subject/nix:ro") < argv.index(private_mount)
+    assert not any(
+        item.endswith("/subject/nix/var/nix/db/db.sqlite:ro")
+        for item in argv
+    )
+
+
+def test_readonly_nix_verifier_rejects_snapshot_sidecars(tmp_path):
+    snapshot = _verification_snapshot_destination(tmp_path)
+    snapshot.write_bytes(b"snapshot")
+    schema = snapshot.parent / "schema"
+    schema.write_text("10", encoding="ascii")
+    snapshot.chmod(0o400)
+    schema.chmod(0o400)
+    (snapshot.parent / "db.sqlite-wal").write_bytes(b"live-wal")
+
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="snapshot directory contains unexpected files",
+    ):
+        prod._nix_volume_argv(
+            ARTIFACT,
+            ["path-info", SYSTEM_PATH],
+            db_snapshot=snapshot,
+        )
+
+
 def test_readonly_nix_verifier_uses_pinned_image_binary_and_separate_subject_store():
     argv = prod._nix_volume_argv(ARTIFACT, ["store", "verify", "--no-trust", SYSTEM_PATH])
     assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
@@ -5239,8 +5601,13 @@ def test_readonly_nix_verifier_uses_pinned_image_binary_and_separate_subject_sto
     assert prod.READONLY_NIX_FEATURES in argv
 
 
-def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatch):
+def test_install_artifact_environment_recomputes_and_verifies_closure(
+    monkeypatch, tmp_path
+):
     calls = []
+    managed_root = tmp_path / "nix-store"
+    managed_root.mkdir()
+    receipt_store_root = managed_receipt(ARTIFACT)["store_root"]
 
     class Result:
         def __init__(self, stdout=b""):
@@ -5260,13 +5627,42 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
             return Result(json.dumps(CLOSURE_PATH_INFO).encode())
         return Result()
 
+    def snapshot_db(*, managed_nix_store_root, destination, system_path):
+        assert managed_nix_store_root == managed_root
+        assert system_path == SYSTEM_PATH
+        destination.write_bytes(b"snapshot")
+        schema = destination.parent / "schema"
+        schema.write_text("10", encoding="ascii")
+        destination.chmod(0o400)
+        schema.chmod(0o400)
+        return destination
+
     monkeypatch.setattr(prod, "_run", fake_run)
-    prod.verify_install_artifact_environment(ARTIFACT)
-    verifier = next(argv for argv in calls if "store" in argv and "verify" in argv and "--no-trust" in argv)
+    monkeypatch.setattr(
+        prod,
+        "_managed_nix_volume_backing_root",
+        lambda artifact, store_root: managed_root,
+    )
+    monkeypatch.setattr(
+        prod, "_managed_nix_verification_db_snapshot", snapshot_db
+    )
+    prod.verify_install_artifact_environment(ARTIFACT, receipt_store_root)
+    verifier = next(
+        argv
+        for argv in calls
+        if "store" in argv and "verify" in argv and "--no-trust" in argv
+    )
     assert f"{NIX_VOLUME}:/subject/nix:ro" in verifier
     assert verifier[verifier.index("--store") + 1] == prod.READONLY_NIX_STORE
+    assert any(
+        item.endswith(":/subject/nix/var/nix/db:ro")
+        for item in verifier
+    )
     with pytest.raises(prod.ProductionInstallError, match="closure metadata"):
-        prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
+        prod.verify_install_artifact_environment(
+            dict(ARTIFACT, closure_manifest_sha256="0" * 64),
+            receipt_store_root,
+        )
 
 
 def test_attestation_verifier_runner_uses_isolated_writable_home(monkeypatch, tmp_path):
