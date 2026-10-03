@@ -5360,6 +5360,77 @@ def test_managed_nix_verification_db_snapshot_accepts_empty_wal(tmp_path):
         writer.close()
 
 
+def test_managed_nix_verification_db_snapshot_allows_wal_ctime_only_drift(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    real_connect = sqlite3.connect
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = wal.lstat()
+        source_uri = source.as_uri() + "?mode=ro"
+
+        def connect(database, *args, **kwargs):
+            if database == source_uri:
+                mode = stat.S_IMODE(wal.lstat().st_mode)
+                os.chmod(wal, mode | stat.S_IXUSR)
+                os.chmod(wal, mode)
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(prod.sqlite3, "connect", connect)
+        destination = tmp_path / "snapshot-ctime.sqlite"
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        after = wal.lstat()
+        assert after.st_ctime_ns != before.st_ctime_ns
+        assert (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ) == (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        snapshot = real_connect(f"file:{destination}?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
 def test_managed_nix_volume_backing_root_is_bound_to_success_receipt(monkeypatch):
     store_root = managed_receipt(ARTIFACT)["store_root"]
     volume = {

@@ -3784,7 +3784,16 @@ def _managed_nix_verification_db_snapshot(
 
         after_source = persistence_identity(source, required=True)
         after_wal = persistence_identity(wal, required=False, allow_empty=True)
-        if after_source != before_source or after_wal != before_wal:
+        # SQLite's Unix VFS may issue fchown() while opening an existing WAL
+        # as root. Even a same-owner fchown changes only ctime, so do not
+        # mistake that read-side effect for source drift. Every other WAL
+        # identity field remains strict, and db.sqlite ctime remains strict.
+        wal_changed = (
+            after_wal != before_wal
+            if before_wal is None or after_wal is None
+            else after_wal[:-1] != before_wal[:-1]
+        )
+        if after_source != before_source or wal_changed:
             raise ProductionInstallError(
                 "managed Nix database changed during verification snapshot"
             )
