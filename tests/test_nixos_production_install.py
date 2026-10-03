@@ -5121,7 +5121,10 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
         stdout = b""
         stderr = b""
 
-    def fake_run(argv, *, input_bytes=None, check=True):
+    calls = []
+
+    def fake_run(argv, *, input_bytes=None, check=True, pass_fds=()):
+        calls.append((argv, pass_fds))
         if argv == first_argv:
             raise prod.ProductionInstallError("private command detail")
         return Result()
@@ -5136,6 +5139,7 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
             observer=lambda _contract: observation(),
         )
     assert exc.value.code == "apply-failed-after-mutation-attempt"
+    assert calls[0] == (first_argv, ())
     assert "private command detail" not in prod.POST_MUTATION_PUBLIC_MESSAGES[exc.value.code]
     assert gate_events[:10] == [
         "nix-root-absent",
