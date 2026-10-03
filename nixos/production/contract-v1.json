@@ -103,7 +103,18 @@
     ],
     "luks": {
       "version": 2,
-      "mapper_name": "heimpc-nixos-crypt"
+      "mapper_name": "heimpc-nixos-crypt",
+      "unlock": {
+        "mode": "tpm2-auto",
+        "device": "auto",
+        "pcrs": [7],
+        "with_pin": false,
+        "bootstrap_key": "ephemeral-random-memfd",
+        "bootstrap_keyslot": 0,
+        "persistent_passphrase": false,
+        "recovery_key": true,
+        "headless": true
+      }
     },
     "btrfs": {
       "label": "HEIMPC_NIXOS",

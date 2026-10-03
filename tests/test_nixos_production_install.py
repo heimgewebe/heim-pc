@@ -552,6 +552,50 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
         "closure_path_count": compiled["install_artifact"]["closure_path_count"],
     }
     monkeypatch.setattr(prod, "verify_host_tools_available", lambda _plan: [])
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_device_available",
+        lambda _artifact: log.append("tpm2-ready") or {"device_count": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "prepare_recovery_key_destination",
+        lambda _path: log.append("recovery-destination-ready"),
+    )
+    monkeypatch.setattr(
+        prod,
+        "write_recovery_key",
+        lambda _path, _payload: log.append("recovery-key-stage") or ("e" * 64),
+    )
+    monkeypatch.setattr(
+        prod,
+        "create_luks_bootstrap_key",
+        lambda: log.append("bootstrap-key-create")
+        or {"fd": 123, "device": 1, "inode": 2, "size": prod.LUKS_BOOTSTRAP_KEY_BYTES},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_command_bootstrap_argv",
+        lambda command, _binding: (
+            [
+                item.replace(
+                    prod.LUKS_BOOTSTRAP_FD_SENTINEL, "/proc/self/fd/123"
+                )
+                for item in command["argv"]
+            ],
+            (),
+        ),
+    )
+    def close_bootstrap(binding):
+        log.append("bootstrap-key-close")
+        binding["fd"] = None
+    monkeypatch.setattr(prod, "close_luks_bootstrap_key", close_bootstrap)
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_luks_enrollment",
+        lambda _contract, **_kwargs:
+            log.append("tpm2-enroll-verify") or {"tpm2_token_count": 1},
+    )
     monkeypatch.setattr(prod, "verify_host_nix_root_absent", lambda: log.append("nix-root-absent"))
     monkeypatch.setattr(prod, "prepare_verifier_image_archive", lambda _plan, _artifact: log.append("archive-create") or archive)
     monkeypatch.setattr(prod, "validate_verifier_image_archive", lambda *args, **kwargs: log.append("archive-verify") or archive)
@@ -1042,12 +1086,55 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert f"{SEAGATE}-part1" in by_effect["efi-filesystem"]["argv"]
     assert f"{SEAGATE}-part2" in by_effect["recovery-filesystem"]["argv"]
     crypt = f"{SEAGATE}-part3"
-    assert crypt in by_effect["luks-format"]["argv"]
-    assert crypt in by_effect["luks-open"]["argv"]
+    sentinel = prod.LUKS_BOOTSTRAP_FD_SENTINEL
+
+    for effect in (
+        "luks-format",
+        "luks-tpm2-enroll",
+        "luks-recovery-enroll",
+        "luks-bootstrap-wipe",
+        "luks-open",
+    ):
+        assert crypt in by_effect[effect]["argv"]
+
     assert f"/dev/disk/by-partuuid/{PARTUUIDS[0]}" not in by_effect["efi-filesystem"]["argv"]
-    assert by_effect["luks-format"]["secret_binding"] == "luks-passphrase-v1"
-    assert by_effect["luks-format"]["argv"][by_effect["luks-format"]["argv"].index("--uuid") + 1] == PARTUUIDS[2]
-    assert by_effect["luks-open"]["secret_binding"] == "luks-passphrase-v1"
+    luks_format = by_effect["luks-format"]
+    assert luks_format["bootstrap_key_fd"] is True
+    assert luks_format["argv"][luks_format["argv"].index("--uuid") + 1] == PARTUUIDS[2]
+    assert luks_format["argv"][luks_format["argv"].index("--key-slot") + 1] == "0"
+    assert luks_format["argv"][luks_format["argv"].index("--key-file") + 1] == sentinel
+
+    enroll = by_effect["luks-tpm2-enroll"]
+    assert enroll["bootstrap_key_fd"] is True
+    assert enroll["argv"][:3] == [
+        prod.SEALED_TOOL_LAUNCHER,
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/systemd-cryptenroll",
+    ]
+    assert f"--unlock-key-file={sentinel}" in enroll["argv"]
+    assert "--tpm2-device=auto" in enroll["argv"]
+    assert "--tpm2-pcrs=7" in enroll["argv"]
+    assert "--tpm2-with-pin=no" in enroll["argv"]
+
+    recovery = by_effect["luks-recovery-enroll"]
+    assert recovery["sensitive_stdout"] == "luks-recovery-key-v1"
+    assert "--unlock-tpm2-device=auto" in recovery["argv"]
+    assert "--recovery-key" in recovery["argv"]
+
+    wipe = by_effect["luks-bootstrap-wipe"]
+    assert "--wipe-slot=0" in wipe["argv"]
+
+    opened = by_effect["luks-open"]["argv"]
+    assert opened[:3] == [
+        prod.SEALED_TOOL_LAUNCHER,
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/systemd-cryptsetup",
+    ]
+    assert opened[-5:] == [
+        "attach", "heimpc-nixos-crypt", crypt, "-", prod.TPM2_BOOT_OPTIONS
+    ]
+    assert compiled["luks_unlock_policy"] == PUBLIC_CONTRACT["topology"]["luks"]["unlock"]
+    assert compiled["recovery_key_output_path"].endswith("/luks-recovery-key.txt")
     assert compiled["partition_binding_verification_required"] is True
 
 
@@ -1071,13 +1158,22 @@ def test_private_storage_identity_and_loader_entry_are_bound_create_only(monkeyp
     entry = entries / "nixos-generation-1.conf"
     entry.write_text("title NixOS\nsort-key nixos\nlinux /EFI/nixos/kernel.efi\noptions quiet root=/dev/mapper/heimpc-nixos-crypt\n")
     prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
-    expected = f"rd.luks.name={PARTUUIDS[2]}=heimpc-nixos-crypt"
-    assert entry.read_text().count(expected) == 1
+    expected_name = f"rd.luks.name={PARTUUIDS[2]}=heimpc-nixos-crypt"
+    expected_options = (
+        f"rd.luks.options={PARTUUIDS[2]}=tpm2-device=auto,headless=yes"
+    )
+    assert entry.read_text().count(expected_name) == 1
+    assert entry.read_text().count(expected_options) == 1
     class Result:
         stdout = (PARTUUIDS[2] + "\n").encode()
         returncode = 0
         stderr = b""
     monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_luks_enrollment",
+        lambda _contract, **_kwargs: {"tpm2_token_count": 1, "recovery_token_count": 1},
+    )
     prod.verify_private_boot_binding(mount_root=str(tmp_path), contract=CONTRACT)
 
 
@@ -1091,8 +1187,121 @@ def test_loader_entry_rejects_conflicting_private_luks_token(tmp_path):
         "title NixOS\nsort-key nixos\noptions "
         "rd.luks.name=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa=heimpc-nixos-crypt\n"
     )
-    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS"):
+    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS name"):
         prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
+
+
+def test_loader_entry_rejects_conflicting_private_luks_options_token(tmp_path):
+    (tmp_path / "persist").mkdir()
+    prod.stage_private_storage_identity(mount_root=str(tmp_path), contract=CONTRACT)
+    entries = tmp_path / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    entry = entries / "nixos-generation-1.conf"
+    entry.write_text(
+        "title NixOS\nsort-key nixos\noptions "
+        f"rd.luks.options={PARTUUIDS[2]}=password-echo=yes\n"
+    )
+    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS options"):
+        prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
+
+
+def test_tpm2_luks_enrollment_requires_pcr7_recovery_and_bootstrap_retirement(monkeypatch):
+    bootstrap_state = {
+        "keyslots": {"0": {"type": "luks2"}, "1": {"type": "luks2"}},
+        "tokens": {
+            "0": {
+                "type": prod.TPM2_TOKEN_TYPE,
+                "keyslots": ["1"],
+                "tpm2-pcrs": [7],
+                "tpm2-pin": False,
+            }
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: bootstrap_state)
+    interim = prod.verify_tpm2_luks_enrollment(
+        CONTRACT, require_recovery=False, bootstrap_slot_present=True
+    )
+    assert interim["tpm2_token_count"] == 1
+    assert interim["recovery_token_count"] == 0
+    assert interim["pcrs"] == [7]
+    assert interim["bootstrap_slot_present"] is True
+
+    final = {
+        "keyslots": {"1": {"type": "luks2"}, "2": {"type": "luks2"}},
+        "tokens": {
+            "0": {
+                "type": prod.TPM2_TOKEN_TYPE,
+                "keyslots": ["1"],
+                "tpm2-pcrs": [7],
+                "tpm2-pin": False,
+            },
+            "1": {
+                "type": prod.RECOVERY_TOKEN_TYPE,
+                "keyslots": ["2"],
+            },
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: final)
+    result = prod.verify_tpm2_luks_enrollment(CONTRACT)
+    assert result["tpm2_token_count"] == 1
+    assert result["recovery_token_count"] == 1
+    assert result["keyslot_count"] == 2
+    assert result["pcrs"] == [7]
+    assert result["bootstrap_slot_present"] is False
+    assert result["persistent_passphrase"] is False
+    assert result["recovery_key"] is True
+
+    wrong_pcr = json.loads(json.dumps(final))
+    wrong_pcr["tokens"]["0"]["tpm2-pcrs"] = []
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: wrong_pcr)
+    with pytest.raises(prod.ProductionInstallError, match="PCR policy mismatch"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    no_recovery = json.loads(json.dumps(final))
+    del no_recovery["tokens"]["1"]
+    del no_recovery["keyslots"]["2"]
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: no_recovery)
+    with pytest.raises(prod.ProductionInstallError, match="token set is invalid"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    lingering_bootstrap = json.loads(json.dumps(final))
+    lingering_bootstrap["keyslots"]["0"] = {"type": "luks2"}
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: lingering_bootstrap)
+    with pytest.raises(prod.ProductionInstallError, match="keyslot set violates"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+
+def test_luks_bootstrap_key_is_sealed_unlinked_memfd(monkeypatch):
+    binding = prod.create_luks_bootstrap_key()
+    fd = binding["fd"]
+    info = os.fstat(fd)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_nlink == 0
+    assert info.st_size == prod.LUKS_BOOTSTRAP_KEY_BYTES
+    expected_seals = (
+        prod.fcntl.F_SEAL_GROW
+        | prod.fcntl.F_SEAL_SHRINK
+        | prod.fcntl.F_SEAL_WRITE
+        | prod.fcntl.F_SEAL_SEAL
+    )
+    assert prod.fcntl.fcntl(fd, prod.fcntl.F_GET_SEALS) == expected_seals
+
+    command = {
+        "argv": [
+            "cryptsetup",
+            "--key-file",
+            prod.LUKS_BOOTSTRAP_FD_SENTINEL,
+        ],
+        "bootstrap_key_fd": True,
+    }
+    argv, pass_fds = prod._command_bootstrap_argv(command, binding)
+    assert argv[-1] == f"/proc/self/fd/{fd}"
+    assert pass_fds == (fd,)
+
+    prod.close_luks_bootstrap_key(binding)
+    assert binding["fd"] is None
+    with pytest.raises(OSError):
+        os.fstat(fd)
 
 
 def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
@@ -1214,7 +1423,6 @@ def _mock_historical_apply_until_final_gate(monkeypatch, compiled):
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     return mock_trusted_build_gate(monkeypatch, compiled)
 
 
@@ -1400,8 +1608,11 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
 
 def test_plan_contains_no_secret_material():
     serialized = json.dumps(plan())
-    assert "passphrase" not in serialized.lower() or "luks-passphrase-v1" in serialized
+    assert "luks-passphrase-v1" not in serialized
+    assert "getpass" not in serialized.lower()
     assert "$y$j9T$" not in serialized
+    assert prod.LUKS_BOOTSTRAP_FD_SENTINEL in serialized
+    assert "luks-bootstrap.key" not in serialized
 
 
 def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
@@ -4525,7 +4736,6 @@ def test_execute_plan_starts_signal_deferral_before_owned_setup(
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     handoff = {}
     gate_events = mock_trusted_build_gate(monkeypatch, compiled)
 
@@ -4573,6 +4783,7 @@ def test_execute_plan_starts_signal_deferral_before_owned_setup(
     assert gate_events == [
         "nix-root-absent",
         "signal-deferral",
+        "recovery-destination-ready",
         "archive-create",
         "docker-stop",
         "docker-quiesced",
@@ -4601,7 +4812,6 @@ def test_execute_plan_interrupt_before_freeze_handoff_thaws_local_owner(
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     gate_events = mock_trusted_build_gate(monkeypatch, compiled)
     handoff = {}
 
@@ -4660,7 +4870,6 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
     monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
@@ -4689,8 +4898,9 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
         )
     assert exc.value.code == "apply-failed-after-mutation-attempt"
     assert "private command detail" not in prod.POST_MUTATION_PUBLIC_MESSAGES[exc.value.code]
-    assert gate_events[:9] == [
+    assert gate_events[:10] == [
         "nix-root-absent",
+        "recovery-destination-ready",
         "archive-create",
         "docker-stop",
         "docker-quiesced",
@@ -4721,7 +4931,6 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
@@ -6513,7 +6722,6 @@ def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypat
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
@@ -6846,7 +7054,6 @@ def test_guard_failure_before_first_effect_is_not_a_post_mutation_alarm(monkeypa
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
     mock_trusted_build_gate(monkeypatch, compiled)
 

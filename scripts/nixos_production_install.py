@@ -11,12 +11,12 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
-import getpass
 import hashlib
 import importlib.util
 import json
 import os
 import re
+import secrets
 import signal
 import sqlite3
 import stat
@@ -110,6 +110,13 @@ PRODUCTION_APPLY_LOCK_DIR = Path("/run/heim-pc-nixos-production-locks")
 PRODUCTION_APPLY_LOCK_OWNER_UID = 0
 PRODUCTION_APPLY_LOCK_OWNER_GID = 0
 PRODUCTION_APPLY_GLOBAL_LOCK_NAME = "global.lock"
+PRODUCTION_RECOVERY_KEY_BASE = Path("/var/lib/heim-pc/nixos-production-recovery")
+LUKS_BOOTSTRAP_KEY_BYTES = 64
+LUKS_BOOTSTRAP_FD_SENTINEL = "/proc/self/fd/__HEIM_PC_LUKS_BOOTSTRAP_FD__"
+TPM2_TOKEN_TYPE = "systemd-tpm2"
+RECOVERY_TOKEN_TYPE = "systemd-recovery"
+TPM2_BOOT_OPTIONS = "tpm2-device=auto,headless=yes"
+RECOVERY_KEY_RE = re.compile(r"^[A-Za-z0-9]{8}(?:-[A-Za-z0-9]{8}){7}\n$")
 PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
@@ -194,6 +201,7 @@ PROTECTED_EFI_RECOVERY_MESSAGE = (
 POST_MUTATION_PUBLIC_MESSAGES = {
     "apply-failed-after-mutation-attempt": "nixos production install POST-MUTATION ALARM: destructive execution was attempted and the apply did not complete; inspect target and fallback before any retry",
     "credential-staging-incomplete": "nixos production install POST-MUTATION ALARM: credential staging did not complete; inspect installed target before any retry",
+    "recovery-key-staging-incomplete": "nixos production install POST-MUTATION ALARM: TPM2 recovery-key staging did not complete; preserve current LUKS state and inspect recovery authority before any retry",
     "efi-nvram-changed": "nixos production install POST-MUTATION ALARM: EFI/NVRAM state changed; inspect firmware state before any retry",
     "efi-nvram-unverifiable": "nixos production install POST-MUTATION ALARM: EFI/NVRAM state could not be verified; inspect firmware state before any retry",
     "mapper-open-after-teardown": "nixos production install POST-MUTATION ALARM: encrypted mapper remains open after teardown; inspect mounts and mapper before any retry",
@@ -1288,11 +1296,359 @@ def _verifier_namespace(artifact_file_sha256: str) -> str:
 
 def _sealed_tool_argv(artifact: dict[str, Any], tool: str, args: list[str]) -> list[str]:
     artifact = validate_install_artifact(artifact)
-    if tool not in {"mkfs.btrfs", "btrfs", "nixos-install"}:
+    if tool not in {
+        "mkfs.btrfs", "btrfs", "nixos-install",
+        "systemd-cryptenroll", "systemd-cryptsetup",
+    }:
         raise ProductionInstallError("sealed Nix tool is not allowlisted")
     executable = f"{artifact['system_path']}/sw/bin/{tool}"
     path_value = f"{artifact['system_path']}/sw/bin:{TRUSTED_PATH}"
     return [SEALED_TOOL_LAUNCHER, f"PATH={path_value}", executable, *args]
+
+
+def _recovery_key_output_path(
+    artifact: dict[str, Any], contract: dict[str, Any]
+) -> Path:
+    artifact = validate_install_artifact(artifact)
+    identity_sha256 = contract.get("identity_binding", {}).get("identity_contract_sha256")
+    if (
+        not isinstance(identity_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", identity_sha256) is None
+    ):
+        raise ProductionInstallError("private storage identity digest is invalid")
+    return (
+        PRODUCTION_RECOVERY_KEY_BASE
+        / f"{artifact['source_revision']}-{identity_sha256[:16]}"
+        / "luks-recovery-key.txt"
+    )
+
+
+def _require_root_private_directory(path: Path, *, create: bool) -> None:
+    path = Path(path)
+    if create and not path.exists() and not path.is_symlink():
+        try:
+            os.mkdir(path, 0o700)
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ProductionInstallError(
+                "cannot create private recovery-key directory"
+            ) from exc
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProductionInstallError(
+            "private recovery-key directory is unavailable"
+        ) from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+        or info.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ProductionInstallError("private recovery-key directory is unsafe")
+
+
+def prepare_recovery_key_destination(path: Path) -> None:
+    path = Path(path)
+    if (
+        not path.is_absolute()
+        or os.path.normpath(str(path)) != str(path)
+        or path.name != "luks-recovery-key.txt"
+        or path.parent.parent != PRODUCTION_RECOVERY_KEY_BASE
+    ):
+        raise ProductionInstallError("recovery-key destination is not canonical")
+    if (
+        os.geteuid() != PRODUCTION_APPLY_LOCK_OWNER_UID
+        or os.getegid() != PRODUCTION_APPLY_LOCK_OWNER_GID
+    ):
+        raise ProductionInstallError("recovery-key staging requires root authority")
+    _require_root_private_directory(PRODUCTION_RECOVERY_KEY_BASE.parent, create=False)
+    _require_root_private_directory(PRODUCTION_RECOVERY_KEY_BASE, create=True)
+    _require_root_private_directory(path.parent, create=True)
+    if os.path.lexists(path):
+        raise ProductionInstallError(
+            "recovery-key destination already exists; refusing overwrite"
+        )
+
+
+def write_recovery_key(path: Path, payload: bytes) -> str:
+    path = Path(path)
+    prepare_recovery_key_destination(path)
+    try:
+        text = payload.decode("ascii", "strict")
+    except UnicodeDecodeError as exc:
+        raise ProductionInstallError("generated recovery key is not ASCII") from exc
+    if RECOVERY_KEY_RE.fullmatch(text) is None:
+        raise ProductionInstallError("generated recovery key has invalid format")
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+    parent_fd = os.open(path.parent, parent_flags)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    created: os.stat_result | None = None
+    try:
+        fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+        os.fchmod(fd, 0o600)
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+        created = os.fstat(fd)
+        linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(created.st_mode)
+            or created.st_nlink != 1
+            or created.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+            or created.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+            or stat.S_IMODE(created.st_mode) != 0o600
+            or created.st_size != len(payload)
+            or linked.st_dev != created.st_dev
+            or linked.st_ino != created.st_ino
+            or linked.st_mode != created.st_mode
+            or linked.st_uid != created.st_uid
+            or linked.st_gid != created.st_gid
+            or linked.st_nlink != 1
+        ):
+            raise ProductionInstallError("staged recovery-key identity is unsafe")
+        os.fsync(parent_fd)
+        return hashlib.sha256(payload).hexdigest()
+    except BaseException:
+        if created is not None:
+            try:
+                linked = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if linked.st_dev == created.st_dev and linked.st_ino == created.st_ino:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def create_luks_bootstrap_key() -> dict[str, Any]:
+    if (
+        os.geteuid() != PRODUCTION_APPLY_LOCK_OWNER_UID
+        or os.getegid() != PRODUCTION_APPLY_LOCK_OWNER_GID
+    ):
+        raise ProductionInstallError("LUKS bootstrap key requires root authority")
+    required_os = ("memfd_create", "MFD_CLOEXEC", "MFD_ALLOW_SEALING")
+    required_fcntl = (
+        "F_ADD_SEALS", "F_GET_SEALS", "F_SEAL_SEAL",
+        "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_WRITE",
+    )
+    if not all(hasattr(os, item) for item in required_os) or not all(
+        hasattr(fcntl, item) for item in required_fcntl
+    ):
+        raise ProductionInstallError("sealed memfd bootstrap keys are unsupported")
+    flags = os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+    try:
+        fd = os.memfd_create("heim-pc-luks-bootstrap", flags=flags)
+    except OSError as exc:
+        raise ProductionInstallError("cannot create LUKS bootstrap memfd") from exc
+    try:
+        os.fchmod(fd, 0o600)
+        payload = secrets.token_bytes(LUKS_BOOTSTRAP_KEY_BYTES)
+        _write_all_fd(fd, payload)
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        seals = (
+            fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(fd, fcntl.F_GET_SEALS) != seals:
+            raise ProductionInstallError("LUKS bootstrap memfd seals are incomplete")
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != PRODUCTION_APPLY_LOCK_OWNER_UID
+            or info.st_gid != PRODUCTION_APPLY_LOCK_OWNER_GID
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size != LUKS_BOOTSTRAP_KEY_BYTES
+            or info.st_nlink != 0
+        ):
+            raise ProductionInstallError("LUKS bootstrap memfd identity is unsafe")
+        return {
+            "fd": fd,
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "size": info.st_size,
+        }
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def close_luks_bootstrap_key(binding: dict[str, Any]) -> None:
+    fd = binding.get("fd")
+    if type(fd) is not int or fd < 0:
+        return
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        raise ProductionInstallError("LUKS bootstrap memfd is unavailable") from exc
+    if (
+        info.st_dev != binding.get("device")
+        or info.st_ino != binding.get("inode")
+        or info.st_size != binding.get("size")
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 0
+    ):
+        raise ProductionInstallError("LUKS bootstrap memfd identity changed")
+    os.close(fd)
+    binding["fd"] = None
+
+
+def _command_bootstrap_argv(
+    command: dict[str, Any], binding: dict[str, Any] | None
+) -> tuple[list[str], tuple[int, ...]]:
+    argv = command.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        raise ProductionInstallError("reviewed command argv is invalid")
+    needs_fd = command.get("bootstrap_key_fd") is True
+    occurrences = sum(item.count(LUKS_BOOTSTRAP_FD_SENTINEL) for item in argv)
+    if needs_fd:
+        if binding is None or type(binding.get("fd")) is not int:
+            raise ProductionInstallError("LUKS bootstrap memfd is unavailable")
+        if occurrences != 1:
+            raise ProductionInstallError("LUKS bootstrap command binding is invalid")
+        fd = binding["fd"]
+        replacement = f"/proc/self/fd/{fd}"
+        return (
+            [item.replace(LUKS_BOOTSTRAP_FD_SENTINEL, replacement) for item in argv],
+            (fd,),
+        )
+    if occurrences:
+        raise ProductionInstallError("unexpected LUKS bootstrap placeholder")
+    return list(argv), ()
+
+
+def verify_tpm2_device_available(artifact: dict[str, Any]) -> dict[str, Any]:
+    for raw in ("/dev/tpmrm0", "/dev/tpm0"):
+        device = Path(raw)
+        try:
+            info = device.lstat()
+        except OSError as exc:
+            raise ProductionInstallError("TPM2 device is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISCHR(info.st_mode):
+            raise ProductionInstallError("TPM2 device is not trusted")
+    if not Path("/sys/class/tpm/tpm0").exists():
+        raise ProductionInstallError("TPM2 sysfs device is unavailable")
+    result = _run(_sealed_tool_argv(
+        artifact, "systemd-cryptenroll", ["--tpm2-device=list"]
+    ))
+    try:
+        lines = [
+            line.split()
+            for line in result.stdout.decode("utf-8", "strict").splitlines()
+            if line.strip()
+        ]
+    except UnicodeDecodeError as exc:
+        raise ProductionInstallError("TPM2 device enumeration is invalid") from exc
+    if (
+        len(lines) != 2
+        or lines[0] != ["PATH", "DEVICE", "DRIVER"]
+        or len(lines[1]) != 3
+        or lines[1][0] != "/dev/tpmrm0"
+    ):
+        raise ProductionInstallError("TPM2 auto-device resolution is not unique")
+    return {
+        "schema_version": 1,
+        "device": "auto",
+        "resolved_path": "/dev/tpmrm0",
+        "device_count": 1,
+    }
+
+
+def verify_tpm2_luks_enrollment(
+    contract: dict[str, Any], *, require_recovery: bool = True,
+    bootstrap_slot_present: bool = False,
+) -> dict[str, Any]:
+    encrypted = _partition_by_role(contract, "encrypted-system")
+    unlock = contract["topology"]["luks"]["unlock"]
+    path = _target_partition_path(contract["target_identity"]["exact_by_id"], encrypted)
+    metadata = _json_command(["cryptsetup", "luksDump", "--dump-json-metadata", path])
+    if not isinstance(metadata, dict):
+        raise ProductionInstallError("LUKS2 metadata is invalid after TPM2 enrollment")
+    keyslots = metadata.get("keyslots")
+    tokens = metadata.get("tokens")
+    if not isinstance(keyslots, dict) or not isinstance(tokens, dict):
+        raise ProductionInstallError("LUKS2 TPM2 metadata is incomplete")
+    tpm_tokens = [
+        value for value in tokens.values()
+        if isinstance(value, dict) and value.get("type") == TPM2_TOKEN_TYPE
+    ]
+    recovery_tokens = [
+        value for value in tokens.values()
+        if isinstance(value, dict) and value.get("type") == RECOVERY_TOKEN_TYPE
+    ]
+    allowed_types = {TPM2_TOKEN_TYPE}
+    if require_recovery:
+        allowed_types.add(RECOVERY_TOKEN_TYPE)
+    if (
+        len(tpm_tokens) != 1
+        or len(recovery_tokens) != (1 if require_recovery else 0)
+        or any(
+            not isinstance(value, dict) or value.get("type") not in allowed_types
+            for value in tokens.values()
+        )
+    ):
+        raise ProductionInstallError("LUKS2 TPM2/recovery token set is invalid")
+
+    def token_slots(token: dict[str, Any], label: str) -> set[str]:
+        values = token.get("keyslots")
+        if (
+            not isinstance(values, list)
+            or len(values) != 1
+            or not isinstance(values[0], str)
+            or not values[0].isdigit()
+        ):
+            raise ProductionInstallError(f"LUKS2 {label} token keyslot is invalid")
+        return {values[0]}
+
+    tpm_slots = token_slots(tpm_tokens[0], "TPM2")
+    recovery_slots = (
+        token_slots(recovery_tokens[0], "recovery") if require_recovery else set()
+    )
+    if tpm_slots & recovery_slots:
+        raise ProductionInstallError("LUKS2 TPM2/recovery keyslots overlap")
+    if tpm_tokens[0].get("tpm2-pcrs") != unlock["pcrs"]:
+        raise ProductionInstallError("LUKS2 TPM2 token PCR policy mismatch")
+    if tpm_tokens[0].get("tpm2-pin") not in (None, False):
+        raise ProductionInstallError("LUKS2 TPM2 token unexpectedly requires a PIN")
+    bootstrap = str(unlock["bootstrap_keyslot"])
+    expected_slots = tpm_slots | recovery_slots
+    if bootstrap_slot_present:
+        expected_slots.add(bootstrap)
+    if set(keyslots) != expected_slots:
+        raise ProductionInstallError("LUKS2 keyslot set violates TPM2 unlock policy")
+    if (bootstrap in keyslots) is not bootstrap_slot_present:
+        raise ProductionInstallError("LUKS2 bootstrap keyslot state is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_tpm2_luks_enrollment",
+        "tpm2_token_count": 1,
+        "recovery_token_count": len(recovery_tokens),
+        "keyslot_count": len(keyslots),
+        "pcrs": list(unlock["pcrs"]),
+        "pin_required": False,
+        "bootstrap_slot_present": bootstrap_slot_present,
+        "persistent_passphrase": False,
+        "recovery_key": require_recovery,
+    }
 
 
 def _require_by_id(value: Any, label: str) -> str:
@@ -2195,9 +2551,14 @@ def compile_plan(
     efi = _partition_by_role(contract, "efi-system-partition")
     recovery = _partition_by_role(contract, "recovery-surface")
     encrypted = _partition_by_role(contract, "encrypted-system")
-    mapper_name = contract["topology"]["luks"]["mapper_name"]
+    luks = contract["topology"]["luks"]
+    unlock = luks["unlock"]
+    mapper_name = luks["mapper_name"]
     mapper = f"/dev/mapper/{mapper_name}"
     btrfs = contract["topology"]["btrfs"]
+    encrypted_path = _target_partition_path(target, encrypted)
+    tpm2_pcrs = "+".join(str(item) for item in unlock["pcrs"])
+    recovery_key_path = _recovery_key_output_path(artifact, contract)
     commands: list[dict[str, Any]] = [{"effect": "partition-table-reset", "argv": ["sgdisk", "--zap-all", target]}]
     for partition in sorted(contract["topology"]["partitions"], key=lambda item: item["number"]):
         n = partition["number"]
@@ -2214,8 +2575,56 @@ def compile_plan(
         {"effect": "mount-root-create", "argv": ["mkdir", "-p", MOUNT_ROOT, BTRFS_STAGE_ROOT]},
         {"effect": "efi-filesystem", "argv": ["mkfs.fat", "-F", "32", "-n", efi["filesystem_label"], _target_partition_path(target, efi)]},
         {"effect": "recovery-filesystem", "argv": ["mkfs.ext4", "-F", "-L", recovery["filesystem_label"], _target_partition_path(target, recovery)]},
-        {"effect": "luks-format", "argv": ["cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode", "--uuid", encrypted["partuuid"], "--key-file", "-", _target_partition_path(target, encrypted)], "secret_binding": "luks-passphrase-v1"},
-        {"effect": "luks-open", "argv": ["cryptsetup", "open", "--type", "luks2", "--key-file", "-", _target_partition_path(target, encrypted), mapper_name], "secret_binding": "luks-passphrase-v1"},
+        {
+            "effect": "luks-format",
+            "argv": [
+                "cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode",
+                "--uuid", encrypted["partuuid"], "--key-slot",
+                str(unlock["bootstrap_keyslot"]), "--key-file",
+                LUKS_BOOTSTRAP_FD_SENTINEL, encrypted_path,
+            ],
+            "bootstrap_key_fd": True,
+        },
+        {
+            "effect": "luks-tpm2-enroll",
+            "argv": _sealed_tool_argv(
+                artifact,
+                "systemd-cryptenroll",
+                [
+                    f"--unlock-key-file={LUKS_BOOTSTRAP_FD_SENTINEL}",
+                    f"--tpm2-device={unlock['device']}",
+                    f"--tpm2-pcrs={tpm2_pcrs}",
+                    "--tpm2-with-pin=no",
+                    encrypted_path,
+                ],
+            ),
+            "bootstrap_key_fd": True,
+        },
+        {
+            "effect": "luks-recovery-enroll",
+            "argv": _sealed_tool_argv(
+                artifact,
+                "systemd-cryptenroll",
+                ["--unlock-tpm2-device=auto", "--recovery-key", encrypted_path],
+            ),
+            "sensitive_stdout": "luks-recovery-key-v1",
+        },
+        {
+            "effect": "luks-bootstrap-wipe",
+            "argv": _sealed_tool_argv(
+                artifact,
+                "systemd-cryptenroll",
+                [f"--wipe-slot={unlock['bootstrap_keyslot']}", encrypted_path],
+            ),
+        },
+        {
+            "effect": "luks-open",
+            "argv": _sealed_tool_argv(
+                artifact,
+                "systemd-cryptsetup",
+                ["attach", mapper_name, encrypted_path, "-", TPM2_BOOT_OPTIONS],
+            ),
+        },
         {
             "effect": "btrfs-filesystem",
             "argv": _sealed_tool_argv(
@@ -2288,6 +2697,8 @@ def compile_plan(
         "preflight": preflight,
         "protected_pre_fingerprint": protected_fingerprint(preflight["protected"]),
         "partition_binding_verification_required": True,
+        "luks_unlock_policy": json.loads(json.dumps(unlock)),
+        "recovery_key_output_path": str(recovery_key_path),
         "commands": commands,
         "teardown_commands": teardown,
         "credential_staging_required": True,
@@ -2945,9 +3356,14 @@ def _read_private_storage_identity(*, mount_root: str, contract: dict[str, Any])
     return _private_storage_identity_values(contract)
 
 
-def _private_luks_token(contract: dict[str, Any]) -> str:
+def _private_luks_tokens(contract: dict[str, Any]) -> tuple[str, str]:
     values = _private_storage_identity_values(contract)
-    return f"rd.luks.name={values['encrypted_partuuid']}={values['mapper_name']}"
+    encrypted_partuuid = values["encrypted_partuuid"]
+    mapper_name = values["mapper_name"]
+    return (
+        f"rd.luks.name={encrypted_partuuid}={mapper_name}",
+        f"rd.luks.options={encrypted_partuuid}={TPM2_BOOT_OPTIONS}",
+    )
 
 
 def _nixos_loader_entries(mount_root: str) -> list[Path]:
@@ -2971,7 +3387,13 @@ def _nixos_loader_entries(mount_root: str) -> list[Path]:
     return result
 
 
-def _loader_options_with_private_luks(text: str, expected_token: str, mapper_name: str) -> str:
+def _loader_options_with_private_luks(
+    text: str,
+    expected_name_token: str,
+    expected_options_token: str,
+    mapper_name: str,
+    encrypted_partuuid: str,
+) -> str:
     lines = text.splitlines()
     indexes = [index for index, line in enumerate(lines) if line.startswith("options ")]
     if len(indexes) != 1:
@@ -2979,26 +3401,47 @@ def _loader_options_with_private_luks(text: str, expected_token: str, mapper_nam
     index = indexes[0]
     tokens = lines[index][len("options "):].split()
     kept: list[str] = []
-    seen = 0
-    suffix = "=" + mapper_name
+    seen_name = 0
+    seen_options = 0
+    name_suffix = "=" + mapper_name
+    options_prefix = f"rd.luks.options={encrypted_partuuid}="
     for token in tokens:
-        if token.startswith("rd.luks.name=") and token.endswith(suffix):
-            if token != expected_token or seen:
-                raise ProductionInstallError("conflicting private LUKS token in loader entry")
-            seen += 1
+        if token.startswith("rd.luks.name=") and token.endswith(name_suffix):
+            if token != expected_name_token or seen_name:
+                raise ProductionInstallError(
+                    "conflicting private LUKS name token in loader entry"
+                )
+            seen_name += 1
+        elif token.startswith(options_prefix):
+            if token != expected_options_token or seen_options:
+                raise ProductionInstallError(
+                    "conflicting private LUKS options token in loader entry"
+                )
+            seen_options += 1
         else:
             kept.append(token)
-    lines[index] = "options " + " ".join([*kept, expected_token])
+    lines[index] = "options " + " ".join(
+        [*kept, expected_name_token, expected_options_token]
+    )
     return "\n".join(lines) + "\n"
 
 
 def bind_private_boot_entries(*, mount_root: str, contract: dict[str, Any]) -> None:
-    _read_private_storage_identity(mount_root=mount_root, contract=contract)
-    token = _private_luks_token(contract)
-    mapper_name = contract["topology"]["luks"]["mapper_name"]
+    values = _read_private_storage_identity(mount_root=mount_root, contract=contract)
+    name_token, options_token = _private_luks_tokens(contract)
+    mapper_name = values["mapper_name"]
+    encrypted_partuuid = values["encrypted_partuuid"]
     for entry in _nixos_loader_entries(mount_root):
-        updated = _loader_options_with_private_luks(entry.read_text(encoding="utf-8"), token, mapper_name)
-        temporary_fd, temporary_name = tempfile.mkstemp(dir=entry.parent, prefix=f".{entry.name}.", suffix=".tmp")
+        updated = _loader_options_with_private_luks(
+            entry.read_text(encoding="utf-8"),
+            name_token,
+            options_token,
+            mapper_name,
+            encrypted_partuuid,
+        )
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            dir=entry.parent, prefix=f".{entry.name}.", suffix=".tmp"
+        )
         temporary = Path(temporary_name)
         try:
             mode = stat.S_IMODE(entry.lstat().st_mode)
@@ -3008,7 +3451,9 @@ def bind_private_boot_entries(*, mount_root: str, contract: dict[str, Any]) -> N
             os.close(temporary_fd)
             temporary_fd = -1
             os.replace(temporary, entry)
-            directory_fd = os.open(entry.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            directory_fd = os.open(
+                entry.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            )
             try:
                 os.fsync(directory_fd)
             finally:
@@ -3029,15 +3474,25 @@ def verify_private_luks_uuid(contract: dict[str, Any]) -> None:
 
 
 def verify_private_boot_binding(*, mount_root: str, contract: dict[str, Any]) -> None:
-    _read_private_storage_identity(mount_root=mount_root, contract=contract)
+    values = _read_private_storage_identity(mount_root=mount_root, contract=contract)
     verify_private_luks_uuid(contract)
-    expected = _private_luks_token(contract)
-    mapper_name = contract["topology"]["luks"]["mapper_name"]
+    verify_tpm2_luks_enrollment(contract)
+    name_token, options_token = _private_luks_tokens(contract)
+    mapper_name = values["mapper_name"]
+    encrypted_partuuid = values["encrypted_partuuid"]
     for entry in _nixos_loader_entries(mount_root):
         text = entry.read_text(encoding="utf-8")
-        rewritten = _loader_options_with_private_luks(text, expected, mapper_name)
+        rewritten = _loader_options_with_private_luks(
+            text,
+            name_token,
+            options_token,
+            mapper_name,
+            encrypted_partuuid,
+        )
         if rewritten != text:
-            raise ProductionInstallError("systemd-boot loader entry is not bound to private LUKS identity")
+            raise ProductionInstallError(
+                "systemd-boot loader entry is not bound to private TPM2 LUKS identity"
+            )
 
 
 def _run(
@@ -4051,6 +4506,8 @@ def verify_install_artifact_environment(
         ("-x", f"{artifact['system_path']}/sw/bin/nixos-install"),
         ("-x", f"{artifact['system_path']}/sw/bin/mkfs.btrfs"),
         ("-x", f"{artifact['system_path']}/sw/bin/btrfs"),
+        ("-x", f"{artifact['system_path']}/sw/bin/systemd-cryptenroll"),
+        ("-x", f"{artifact['system_path']}/sw/bin/systemd-cryptsetup"),
         (
             "-e",
             f"{artifact['system_path']}/etc/systemd/system/"
@@ -4917,6 +5374,11 @@ def verify_scratch_state(mapper_name: str) -> None:
     mapper = Path("/dev/mapper") / mapper_name
     if mapper.exists() or mapper.is_symlink():
         raise ProductionInstallError(f"LUKS mapper already exists: {mapper}")
+    bootstrap = _luks_bootstrap_key_path()
+    if os.path.lexists(bootstrap):
+        raise ProductionInstallError(
+            "stale LUKS bootstrap key blocks production apply"
+        )
 
 
 def _mountpoint_is_mounted(path: str) -> bool:
@@ -4986,6 +5448,7 @@ def verify_installed_target(artifact: dict[str, Any]) -> None:
 def _success_receipt(
     *, plan: dict[str, Any], artifact: dict[str, Any], source_revision: str,
     post: dict[str, Any], completed_effects: list[str], nvram_before: str, nvram_after: str,
+    recovery_key_staged: bool = False, recovery_key_sha256: str | None = None,
 ) -> dict[str, Any]:
     target_authority = str(plan["target_authority"])
     return {
@@ -5000,6 +5463,13 @@ def _success_receipt(
         "protected_post_fingerprint": protected_fingerprint(post),
         "completed_effects": completed_effects,
         "credential_staged": True,
+        "recovery_key_staged": recovery_key_staged,
+        "recovery_key_sha256": (
+            recovery_key_sha256
+            if isinstance(recovery_key_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", recovery_key_sha256)
+            else None
+        ),
         "efi_nvram_sha256_before": nvram_before,
         "efi_nvram_sha256_after": nvram_after,
         "efi_variables_touched": False,
@@ -5014,7 +5484,11 @@ def _post_mutation_failure_receipt(
         str(command.get("effect"))
         for command in plan.get("commands", [])
         if isinstance(command, dict) and isinstance(command.get("effect"), str)
-    } | {"private-storage-identity-staged", "private-boot-entries-bound"}
+    } | {
+        "private-storage-identity-staged",
+        "private-boot-entries-bound",
+        "recovery-key-staged",
+    }
     completed = evidence.get("completed_effects")
     completed_effects = (
         [item for item in completed if isinstance(item, str) and item in allowed_effects]
@@ -5052,6 +5526,11 @@ def _post_mutation_failure_receipt(
         "mutation_attempted": evidence.get("mutation_attempted", True) is True,
         "credential_staging_attempted": evidence.get("credential_staging_attempted") is True,
         "credential_staged": evidence.get("credential_staged") is True,
+        "recovery_key_staging_attempted": (
+            evidence.get("recovery_key_staging_attempted") is True
+        ),
+        "recovery_key_staged": evidence.get("recovery_key_staged") is True,
+        "recovery_key_sha256": safe_digest(evidence.get("recovery_key_sha256")),
         "private_storage_identity_staged": evidence.get("private_storage_identity_staged") is True,
         "teardown_failures": teardown_failures,
         "efi_nvram_sha256_before": safe_digest(evidence.get("efi_nvram_sha256_before")),
@@ -5079,6 +5558,9 @@ def _post_mutation_evidence_from_success_receipt(receipt: dict[str, Any]) -> dic
         "mutation_attempted": True,
         "credential_staging_attempted": True,
         "credential_staged": receipt.get("credential_staged") is True,
+        "recovery_key_staging_attempted": True,
+        "recovery_key_staged": receipt.get("recovery_key_staged") is True,
+        "recovery_key_sha256": receipt.get("recovery_key_sha256"),
         "private_storage_identity_staged": "private-storage-identity-staged" in completed_effects,
         "teardown_failures": [],
         "protected_post_fingerprint": receipt.get("protected_post_fingerprint"),
@@ -5607,12 +6089,16 @@ def execute_plan(
     if protected_fingerprint(pre_now["protected"]) != plan["protected_pre_fingerprint"]:
         raise ProductionInstallError("live protected WD preimage differs from the reviewed plan")
     hash_bytes = read_credential_hash(credential_hash_file)
-    first = getpass.getpass("LUKS passphrase: ", stream=sys.stderr)
-    second = getpass.getpass("Repeat LUKS passphrase: ", stream=sys.stderr)
-    if not first or first != second:
-        raise ProductionInstallError("LUKS passphrase confirmation mismatch")
-    secret = first.encode("utf-8")
-
+    unlock_policy = contract["topology"]["luks"]["unlock"]
+    if plan.get("luks_unlock_policy") != unlock_policy:
+        raise ProductionInstallError(
+            "reviewed plan LUKS unlock policy no longer matches storage contract"
+        )
+    recovery_key_path = _recovery_key_output_path(artifact, contract)
+    if plan.get("recovery_key_output_path") != str(recovery_key_path):
+        raise ProductionInstallError(
+            "reviewed plan recovery-key destination no longer matches contract"
+        )
     # Final race-closing gate immediately before the first destructive command.
     docker_state: dict[str, Any] | None = None
     seal: dict[str, Any] | None = None
@@ -5630,6 +6116,10 @@ def execute_plan(
     nvram_before: str | None = None
     nvram_after: str | None = None
     protected_efi_freeze: dict[str, Any] | None = None
+    luks_bootstrap_key: dict[str, Any] | None = None
+    recovery_key_staging_attempted = False
+    recovery_key_staged = False
+    recovery_key_sha256: str | None = None
 
     def post_mutation_alarm(code: str) -> ProductionInstallError:
         # An in-loop guard can fail before the first destructive command runs. The
@@ -5646,6 +6136,9 @@ def execute_plan(
                 "mutation_attempted": mutation_attempted,
                 "credential_staging_attempted": credential_staging_attempted,
                 "credential_staged": credential_staged,
+                "recovery_key_staging_attempted": recovery_key_staging_attempted,
+                "recovery_key_staged": recovery_key_staged,
+                "recovery_key_sha256": recovery_key_sha256,
                 "private_storage_identity_staged": private_storage_identity_staged,
                 "teardown_failures": list(teardown_failures),
                 "protected_post_fingerprint": (
@@ -5665,6 +6158,7 @@ def execute_plan(
         # exec'd child processes still receive their default SIGTERM semantics.
         if completion_signal_handoff is not None:
             _begin_apply_signal_deferral(completion_signal_handoff)
+        prepare_recovery_key_destination(recovery_key_path)
         verifier_archive = prepare_verifier_image_archive(plan, artifact)
         docker_state = stop_docker_for_apply()
         verify_docker_quiesced()
@@ -5703,18 +6197,20 @@ def execute_plan(
         final_pre = validate_preflight(observer(contract), contract)
         verify_partuuid_namespace_clear(contract)
         verify_partlabel_namespace_clear(contract)
+        verify_tpm2_device_available(artifact)
         verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
         verify_managed_build_binding(plan, artifact)
         verify_promoted_main_revision(signer_revision)
         verify_docker_quiesced()
         verify_sealed_nix_structure(artifact, seal)
         if protected_fingerprint(final_pre["protected"]) != plan["protected_pre_fingerprint"]:
-            raise ProductionInstallError("protected WD changed after interactive authorization")
+            raise ProductionInstallError("protected WD changed after final authorization")
         nvram_before = efi_nvram_digest()
         expected_nvram_before = final_pre["protected"]["firmware_bootability"]["efi_nvram_sha256"]
         if nvram_before != expected_nvram_before:
             raise ProductionInstallError("EFI/NVRAM changed after the protected bootability proof")
         readiness_jit_complete = False
+        luks_bootstrap_key = create_luks_bootstrap_key()
 
         try:
             for command in plan["commands"]:
@@ -5758,16 +6254,71 @@ def execute_plan(
                     stage_private_storage_identity(mount_root=MOUNT_ROOT, contract=contract)
                     private_storage_identity_staged = True
                     completed_effects.append("private-storage-identity-staged")
-                mutation_attempted = True
-                _run(
-                    command["argv"],
-                    input_bytes=secret if command.get("secret_binding") else None,
+                execution_argv, pass_fds = _command_bootstrap_argv(
+                    command, luks_bootstrap_key
                 )
-                completed_effects.append(command["effect"])
+                mutation_attempted = True
+                if command.get("sensitive_stdout") == "luks-recovery-key-v1":
+                    result = _run(
+                        execution_argv, check=False, pass_fds=pass_fds
+                    )
+                    if result.returncode != 0:
+                        raise ProductionInstallError(
+                            "recovery-key enrollment failed; sensitive output withheld"
+                        )
+                    completed_effects.append(command["effect"])
+                    recovery_key_staging_attempted = True
+                    recovery_key_sha256 = write_recovery_key(
+                        recovery_key_path, result.stdout
+                    )
+                    recovery_key_staged = True
+                    completed_effects.append("recovery-key-staged")
+                    del result
+                else:
+                    _run(execution_argv, pass_fds=pass_fds)
+                    completed_effects.append(command["effect"])
                 if command["effect"] == "udev-settle":
                     verify_target_partition_bindings(contract)
-                if command["effect"] == "luks-format":
+                elif command["effect"] == "luks-format":
                     verify_private_luks_uuid(contract)
+                elif command["effect"] == "luks-tpm2-enroll":
+                    verify_tpm2_luks_enrollment(
+                        contract,
+                        require_recovery=False,
+                        bootstrap_slot_present=True,
+                    )
+                elif command["effect"] == "luks-recovery-enroll":
+                    verify_tpm2_luks_enrollment(
+                        contract,
+                        require_recovery=True,
+                        bootstrap_slot_present=True,
+                    )
+                    if not recovery_key_staged:
+                        raise ProductionInstallError(
+                            "recovery key was not durably staged after enrollment"
+                        )
+                elif command["effect"] == "luks-bootstrap-wipe":
+                    verify_tpm2_luks_enrollment(
+                        contract,
+                        require_recovery=True,
+                        bootstrap_slot_present=False,
+                    )
+                    if luks_bootstrap_key is None:
+                        raise ProductionInstallError(
+                            "LUKS bootstrap memfd disappeared before retirement"
+                        )
+                    close_luks_bootstrap_key(luks_bootstrap_key)
+            if (
+                luks_bootstrap_key is None
+                or type(luks_bootstrap_key.get("fd")) is int
+            ):
+                raise ProductionInstallError(
+                    "LUKS bootstrap keyslot/memfd was not retired"
+                )
+            if not recovery_key_staged:
+                raise ProductionInstallError(
+                    "TPM2 recovery key was not staged before installation"
+                )
             if not private_storage_identity_staged:
                 raise ProductionInstallError("private storage identity was not staged before installation")
             verify_installed_target(artifact)
@@ -5789,9 +6340,22 @@ def execute_plan(
         except BaseException as exc:
             failure = exc
         finally:
+            bootstrap_cleanup_exception: BaseException | None = None
+            if (
+                luks_bootstrap_key is not None
+                and type(luks_bootstrap_key.get("fd")) is int
+            ):
+                try:
+                    close_luks_bootstrap_key(luks_bootstrap_key)
+                except BaseException as exc:
+                    bootstrap_cleanup_exception = exc
             teardown_failures, teardown_exception = _attempt_teardown(
                 plan["teardown_commands"], contract["topology"]["luks"]["mapper_name"]
             )
+            if bootstrap_cleanup_exception is not None:
+                teardown_failures.insert(0, "luks-bootstrap-memfd-cleanup")
+                if teardown_exception is None:
+                    teardown_exception = bootstrap_cleanup_exception
 
         try:
             post = validate_protected_state(observer(contract), contract)
@@ -5821,12 +6385,16 @@ def execute_plan(
             raise post_mutation_alarm("teardown-incomplete") from (
                 failure if failure is not None else teardown_exception
             )
+        if recovery_key_staging_attempted and not recovery_key_staged:
+            raise post_mutation_alarm("recovery-key-staging-incomplete") from failure
         if credential_staging_attempted and not credential_staged:
             raise post_mutation_alarm("credential-staging-incomplete") from failure
         if failure is not None:
             if mutation_attempted:
                 raise post_mutation_alarm("apply-failed-after-mutation-attempt") from failure
             raise failure
+        if not recovery_key_staged:
+            raise post_mutation_alarm("recovery-key-staging-incomplete")
         if not credential_staged:
             raise post_mutation_alarm("credential-staging-incomplete")
         return _success_receipt(
@@ -5837,6 +6405,8 @@ def execute_plan(
             completed_effects=completed_effects,
             nvram_before=nvram_before,
             nvram_after=nvram_after,
+            recovery_key_staged=recovery_key_staged,
+            recovery_key_sha256=recovery_key_sha256,
         )
     except PostMutationInstallError:
         raise
@@ -5886,6 +6456,9 @@ def execute_plan(
                         "mutation_attempted": mutation_attempted,
                         "credential_staging_attempted": credential_staging_attempted,
                         "credential_staged": credential_staged,
+                        "recovery_key_staging_attempted": recovery_key_staging_attempted,
+                        "recovery_key_staged": recovery_key_staged,
+                        "recovery_key_sha256": recovery_key_sha256,
                         "private_storage_identity_staged": private_storage_identity_staged,
                         "teardown_failures": list(teardown_failures),
                         "protected_post_fingerprint": (

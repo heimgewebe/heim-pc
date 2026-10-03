@@ -173,6 +173,30 @@ def validate_public_contract(value: Any) -> dict[str, Any]:
         or len(topology["partitions"]) != 3
     ):
         raise IdentityContractError("public production topology is incomplete")
+    luks = topology.get("luks")
+    unlock = luks.get("unlock") if isinstance(luks, dict) else None
+    if (
+        not isinstance(luks, dict)
+        or set(luks) != {"version", "mapper_name", "unlock"}
+        or luks.get("version") != 2
+        or not isinstance(luks.get("mapper_name"), str)
+        or not luks["mapper_name"]
+        or not isinstance(unlock, dict)
+        or set(unlock) != {
+            "mode", "device", "pcrs", "with_pin", "bootstrap_key",
+            "bootstrap_keyslot", "persistent_passphrase", "recovery_key", "headless",
+        }
+        or unlock.get("mode") != "tpm2-auto"
+        or unlock.get("device") != "auto"
+        or unlock.get("pcrs") != [7]
+        or unlock.get("with_pin") is not False
+        or unlock.get("bootstrap_key") != "ephemeral-random-memfd"
+        or unlock.get("bootstrap_keyslot") != 0
+        or unlock.get("persistent_passphrase") is not False
+        or unlock.get("recovery_key") is not True
+        or unlock.get("headless") is not True
+    ):
+        raise IdentityContractError("public LUKS TPM2 unlock policy is incomplete")
     labels = [item.get("label") for item in topology["partitions"] if isinstance(item, dict)]
     if (
         len(labels) != 3
