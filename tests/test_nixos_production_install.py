@@ -1125,6 +1125,7 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert "--tpm2-device=auto" in enroll["argv"]
     assert "--tpm2-pcrs=7" in enroll["argv"]
     assert "--tpm2-pcrlock=" in enroll["argv"]
+    assert "--tpm2-public-key=" in enroll["argv"]
     assert "--tpm2-with-pin=no" in enroll["argv"]
     assert compiled["luks_unlock_policy"]["pcrlock"] is False
 
@@ -1281,6 +1282,21 @@ def test_tpm2_luks_enrollment_requires_pcr7_recovery_and_bootstrap_retirement(mo
         )
         with pytest.raises(
             prod.ProductionInstallError, match="pcrlock material"
+        ):
+            prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    for field, value in (
+        ("tpm2_pubkey", "c3ludGhldGljLXB1YmtleQ=="),
+        ("tpm2_pubkey_pcrs", [11]),
+        ("tpm2-pubkey", "c3ludGhldGljLXB1YmtleQ=="),
+    ):
+        unexpected_pubkey = json.loads(json.dumps(final))
+        unexpected_pubkey["tokens"]["0"][field] = value
+        monkeypatch.setattr(
+            prod, "_json_command", lambda _argv, state=unexpected_pubkey: state
+        )
+        with pytest.raises(
+            prod.ProductionInstallError, match="public-key material"
         ):
             prod.verify_tpm2_luks_enrollment(CONTRACT)
 

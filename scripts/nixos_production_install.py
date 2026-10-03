@@ -1638,6 +1638,14 @@ def verify_tpm2_luks_enrollment(
         raise ProductionInstallError(
             "LUKS2 TPM2 token unexpectedly contains pcrlock material"
         )
+    if any(
+        ("pubkey" in key.casefold() or "public-key" in key.casefold())
+        and value not in (None, False, "", [], {})
+        for key, value in tpm_tokens[0].items()
+    ):
+        raise ProductionInstallError(
+            "LUKS2 TPM2 token unexpectedly contains public-key material"
+        )
     bootstrap = str(unlock["bootstrap_keyslot"])
     expected_slots = tpm_slots | recovery_slots
     if bootstrap_slot_present:
@@ -2604,6 +2612,7 @@ def compile_plan(
                     f"--tpm2-device={unlock['device']}",
                     f"--tpm2-pcrs={tpm2_pcrs}",
                     "--tpm2-pcrlock=",
+                    "--tpm2-public-key=",
                     "--tpm2-with-pin=no",
                     encrypted_path,
                 ],
