@@ -17,6 +17,17 @@ CONTROL_DIGEST = "3" * 64
 SOURCE_ARTIFACT_DIGEST = "4" * 64
 CLOSURE = "/nix/store/11111111111111111111111111111111-nixos-system-heim-pc-26.05"
 PRIOR = "/nix/store/22222222222222222222222222222222-nixos-system-heim-pc-26.05-prev"
+
+
+def _quiescent_killpg(events):
+    def killpg(pid, sig):
+        events.append(("killpg", pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    return killpg
+
+
 TARGET = "production:heim-pc"
 NOW = "2026-10-04T09:00:00Z"
 
@@ -450,7 +461,7 @@ def test_run_exact_timeout_terminates_private_process_group(
     monkeypatch.setattr(
         executor.os,
         "killpg",
-        lambda pid, sig: events.append(("killpg", pid, sig)),
+        _quiescent_killpg(events),
     )
 
     with pytest.raises(executor.RuntimeExecutorError, match="process group terminated"):
@@ -490,7 +501,7 @@ def test_run_exact_keyboard_interrupt_terminates_private_process_group(
     monkeypatch.setattr(
         executor.os,
         "killpg",
-        lambda pid, sig: events.append(("killpg", pid, sig)),
+        _quiescent_killpg(events),
     )
 
     with pytest.raises(executor.RuntimeExecutorError, match="interrupted; process group terminated"):
@@ -530,7 +541,7 @@ def test_run_exact_sigterm_during_spawn_is_deferred_until_child_can_be_reaped(
     monkeypatch.setattr(
         executor.os,
         "killpg",
-        lambda pid, sig: events.append(("killpg", pid, sig)),
+        _quiescent_killpg(events),
     )
 
     with pytest.raises(executor.RuntimeExecutorError, match="interrupted; process group terminated"):
@@ -576,7 +587,7 @@ def test_run_exact_signal_after_wait_is_still_controlled(
     monkeypatch.setattr(
         executor.os,
         "killpg",
-        lambda pid, sig: events.append(("killpg", pid, sig)),
+        _quiescent_killpg(events),
     )
 
     with pytest.raises(
@@ -593,6 +604,109 @@ def test_run_exact_signal_after_wait_is_still_controlled(
 
     assert ("killpg", 4545, executor.signal.SIGKILL) in events
     assert ("wait", None) in events
+
+
+def test_run_exact_waits_for_process_group_quiescence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+    group_probes = 0
+
+    class FakeProcess:
+        pid = 4646
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            events.append(("wait", timeout))
+            if self.wait_calls == 1:
+                raise executor.subprocess.TimeoutExpired(
+                    cmd="helper",
+                    timeout=executor.COMMAND_TIMEOUT_SECONDS,
+                )
+            return -9
+
+    def killpg(pid, sig):
+        nonlocal group_probes
+        events.append(("killpg", pid, sig))
+        if sig == 0:
+            group_probes += 1
+            if group_probes >= 2:
+                raise ProcessLookupError
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(executor.os, "killpg", killpg)
+    monkeypatch.setattr(
+        executor.time,
+        "sleep",
+        lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="timed out; process group terminated",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert events == [
+        ("wait", executor.COMMAND_TIMEOUT_SECONDS),
+        ("killpg", 4646, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 4646, 0),
+        ("sleep", executor.PROCESS_GROUP_QUIESCENCE_POLL_SECONDS),
+        ("killpg", 4646, 0),
+    ]
+
+
+def test_run_exact_preserves_inherited_ignored_termination_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_handlers: list[tuple[object, object]] = []
+    previous_handlers = (
+        executor.signal.getsignal(executor.signal.SIGINT),
+        executor.signal.getsignal(executor.signal.SIGTERM),
+    )
+
+    class FakeProcess:
+        pid = 4747
+
+        def wait(self, timeout=None):
+            assert timeout == executor.COMMAND_TIMEOUT_SECONDS
+            return 0
+
+    def fake_popen(*_args, **_kwargs):
+        observed_handlers.append(
+            (
+                executor.signal.getsignal(executor.signal.SIGINT),
+                executor.signal.getsignal(executor.signal.SIGTERM),
+            )
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr(executor.subprocess, "Popen", fake_popen)
+
+    with executor._ignore_termination_signals():
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert observed_handlers == [(executor.signal.SIG_IGN, executor.signal.SIG_IGN)]
+    assert (
+        executor.signal.getsignal(executor.signal.SIGINT),
+        executor.signal.getsignal(executor.signal.SIGTERM),
+    ) == previous_handlers
 
 
 def test_test_activation_sigterm_after_effect_starts_recovery(
@@ -701,6 +815,35 @@ def test_uncertain_child_termination_does_not_start_promotion_recovery(
 
     assert calls == 1
     assert state["profile"] == CLOSURE
+
+
+def test_recover_stops_after_uncertain_profile_rollback(
+    runtime,
+) -> None:
+    _request_root, _state, _runner = runtime
+    calls: list[list[str]] = []
+
+    def uncertain_recovery_runner(argv, _target_closure):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            raise executor._ProcessTerminationUncertain(
+                "simulated uncertain recovery termination"
+            )
+        pytest.fail("no second recovery process may start after uncertain termination")
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="simulated uncertain recovery termination",
+    ):
+        executor._recover(
+            prior_closure=PRIOR,
+            mode="switch",
+            runner=uncertain_recovery_runner,
+            profile_may_have_changed=True,
+        )
+
+    assert len(calls) == 1
+    assert "--profile" in calls[0]
 
 
 def test_test_activation_post_readback_failure_recovers_bound_prior_state(

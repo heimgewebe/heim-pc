@@ -27,6 +27,7 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ SYSTEM_PROFILE_LINK = Path("/nix/var/nix/profiles/system")
 LOCK_PATH = Path("/run/lock/heim-pc-nixos-activation.lock")
 MAX_FILE_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 1800
+PROCESS_GROUP_QUIESCENCE_POLL_SECONDS = 0.05
 _REQUIRED_REQUEST_FILES = (
     "build-receipt.json",
     "authority.json",
@@ -440,11 +442,16 @@ _TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 def _set_termination_handlers(
     handler: signal.Handlers | Callable[[int, Any], None],
+    *,
+    preserve_ignored: bool = False,
 ) -> dict[int, Any]:
     previous: dict[int, Any] = {}
     try:
         for signum in _TERMINATION_SIGNALS:
-            previous[signum] = signal.getsignal(signum)
+            prior = signal.getsignal(signum)
+            previous[signum] = prior
+            if preserve_ignored and prior == signal.SIG_IGN:
+                continue
             signal.signal(signum, handler)
     except (OSError, ValueError) as exc:
         for signum, prior in previous.items():
@@ -481,6 +488,19 @@ def _ignore_termination_signals() -> Iterator[None]:
         _restore_termination_handlers(previous)
 
 
+def _wait_for_process_group_quiescence(pgid: int) -> None:
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            raise _ProcessTerminationUncertain(
+                "executor process-group quiescence could not be confirmed"
+            ) from exc
+        time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     ignored_handlers = _set_termination_handlers(signal.SIG_IGN)
     kill_error: OSError | None = None
@@ -501,6 +521,8 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
             raise _ProcessTerminationUncertain(
                 "executor process termination could not be confirmed"
             ) from exc
+        if kill_error is None:
+            _wait_for_process_group_quiescence(process.pid)
     finally:
         _restore_termination_handlers(ignored_handlers)
     if kill_error is not None:
@@ -526,7 +548,10 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
         if process is not None:
             raise _ExecutorInterrupted()
 
-    previous_handlers = _set_termination_handlers(_handle_termination)
+    previous_handlers = _set_termination_handlers(
+        _handle_termination,
+        preserve_ignored=True,
+    )
     try:
         try:
             try:
@@ -626,10 +651,14 @@ def _recover(
                     prior_closure,
                     label="recovered persistent system profile",
                 )
+            except _ProcessTerminationUncertain:
+                raise
             except RuntimeExecutorError as exc:
                 errors.append(f"profile rollback failed: {exc}")
         try:
             runner(_switch_argv(prior_closure, mode), prior_closure)
+        except _ProcessTerminationUncertain:
+            raise
         except RuntimeExecutorError as exc:
             errors.append(f"prior closure recovery activation failed: {exc}")
 
