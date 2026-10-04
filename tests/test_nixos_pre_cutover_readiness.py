@@ -296,6 +296,41 @@ def test_critical_user_data_validator_rejects_inventory_implementation_drift(
         )
 
 
+def test_recovery_contract_scope_is_source_cutover_only():
+    scope = ready.validate_recovery_contract_scope(
+        ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+    )
+    assert scope == {
+        "complete_evidence_required_for": "destructive-source-cutover",
+        "excluded_installation": {
+            "migration_mode": "isolated-parallel-disk-dual-os",
+            "source_preservation_mode": "retained-protected-source",
+            "destructive_source_cutover": False,
+            "pre_cutover_readiness_required": False,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing-scope", "global-scope", "legacy-global-admission"],
+)
+def test_recovery_contract_rejects_global_or_missing_admission_scope(mutation):
+    recovery = json.loads(
+        (ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text()
+    )
+    if mutation == "missing-scope":
+        recovery.pop("admission_scope")
+    elif mutation == "global-scope":
+        recovery["admission_scope"]["complete_evidence_required_for"] = (
+            "production-storage-mutation"
+        )
+    else:
+        recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"] = True
+    with pytest.raises(ready.ReadinessError):
+        ready._recovery_policy(recovery)
+
+
 def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
     fx = _fixture(tmp_path, provisioned=False)
     with pytest.raises(

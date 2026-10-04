@@ -342,24 +342,51 @@ def load_contract(
     return value
 
 
-def pre_cutover_readiness_required(contract: dict[str, Any]) -> bool:
+def pre_cutover_readiness_required(
+    contract: dict[str, Any], recovery_admission_scope: dict[str, Any]
+) -> bool:
     policy = contract.get("source_preservation")
     if (
         not isinstance(policy, dict)
-        or policy.get("mode") != "retained-protected-source"
-        or policy.get("destructive_source_cutover") is not False
+        or not isinstance(policy.get("mode"), str)
+        or type(policy.get("destructive_source_cutover")) is not bool
         or not isinstance(policy.get("pre_cutover_readiness_required"), bool)
         or policy.get("protected_source_bootability_required") is not True
         or policy.get("protected_source_bootability_proof")
         != "bootcurrent-protected-esp-loader-v1"
     ):
-        raise ProductionInstallError("retained-source dual-OS policy is incomplete")
+        raise ProductionInstallError("source-preservation policy is incomplete")
+    if (
+        recovery_admission_scope.get("complete_evidence_required_for")
+        != "destructive-source-cutover"
+        or not isinstance(recovery_admission_scope.get("excluded_installation"), dict)
+    ):
+        raise ProductionInstallError("recovery readiness scope is invalid")
     required = policy["pre_cutover_readiness_required"]
+    if policy["destructive_source_cutover"]:
+        if required is not True:
+            raise ProductionInstallError(
+                "destructive source cutover requires pre-cutover readiness"
+            )
+        return True
     if required is False:
+        excluded = recovery_admission_scope["excluded_installation"]
         protected = contract.get("protected_disks")
         boot = contract.get("boot")
         if (
-            contract.get("migration_mode") != "isolated-parallel-disk-dual-os"
+            set(excluded) != {
+                "migration_mode",
+                "source_preservation_mode",
+                "destructive_source_cutover",
+                "pre_cutover_readiness_required",
+            }
+            or contract.get("migration_mode") != excluded.get("migration_mode")
+            or policy.get("mode") != excluded.get("source_preservation_mode")
+            or policy.get("destructive_source_cutover")
+            is not excluded.get("destructive_source_cutover")
+            or required is not excluded.get("pre_cutover_readiness_required")
+            or contract.get("migration_mode") != "isolated-parallel-disk-dual-os"
+            or policy.get("mode") != "retained-protected-source"
             or not isinstance(protected, list)
             or len(protected) != 1
             or not isinstance(protected[0], dict)
@@ -2526,14 +2553,24 @@ def compile_plan(
         managed_build_receipt, artifact, expected_policy_sha256=managed_policy_sha256
     )
     source_revision = artifact["source_revision"]
-    readiness_required = pre_cutover_readiness_required(contract)
+    (
+        recovery_contract_path,
+        lifecycle_contract_path,
+        critical_user_data_contract_path,
+    ) = readiness_contract_paths_for_source(flake_source)
+    try:
+        recovery_admission_scope = (
+            pre_cutover_readiness.validate_recovery_contract_scope(
+                recovery_contract_path
+            )
+        )
+    except pre_cutover_readiness.ReadinessError as exc:
+        raise ProductionInstallError("recovery readiness scope rejected") from exc
+    readiness_required = pre_cutover_readiness_required(
+        contract, recovery_admission_scope
+    )
     readiness_verification = None
     if pre_cutover_readiness_path is not None:
-        (
-            recovery_contract_path,
-            lifecycle_contract_path,
-            critical_user_data_contract_path,
-        ) = readiness_contract_paths_for_source(flake_source)
         try:
             readiness_verification = pre_cutover_readiness.validate_readiness(
                 Path(pre_cutover_readiness_path),
@@ -2701,6 +2738,7 @@ def compile_plan(
         "pre_cutover_readiness_required": (
             artifact["source_authority"] == "merged-main" and readiness_required
         ),
+        "recovery_admission_scope": recovery_admission_scope,
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
         "flake_source": flake,
@@ -6059,7 +6097,12 @@ def execute_plan(
             "production apply requires a merged-main install artifact"
         )
     readiness_snapshot = plan.get("pre_cutover_readiness")
-    readiness_required = pre_cutover_readiness_required(contract)
+    recovery_admission_scope = plan.get("recovery_admission_scope")
+    if not isinstance(recovery_admission_scope, dict):
+        raise ProductionInstallError("production plan recovery readiness scope is malformed")
+    readiness_required = pre_cutover_readiness_required(
+        contract, recovery_admission_scope
+    )
     expected_readiness_required = (
         artifact["source_authority"] == "merged-main" and readiness_required
     )

@@ -21,8 +21,14 @@ in
       assertion =
         recovery.schema_version == 1
         && recovery.kind == "heim_pc.nixos_recovery_readiness_contract"
+        && recovery.admission_scope.complete_evidence_required_for == "destructive-source-cutover"
+        && recovery.admission_scope.excluded_installation.migration_mode == "isolated-parallel-disk-dual-os"
+        && recovery.admission_scope.excluded_installation.source_preservation_mode == "retained-protected-source"
+        && !recovery.admission_scope.excluded_installation.destructive_source_cutover
+        && !recovery.admission_scope.excluded_installation.pre_cutover_readiness_required
         && recovery.admission.point_of_no_return_blocked_without_complete_evidence
-        && recovery.admission.production_storage_mutation_blocked_without_complete_evidence
+        && recovery.admission.destructive_source_cutover_blocked_without_complete_evidence
+        && !(recovery.admission ? production_storage_mutation_blocked_without_complete_evidence)
         && recovery.critical_user_data_scope.contract_kind == "heim_pc.critical_user_data_scope_contract"
         && recovery.critical_user_data_scope.scope == "critical-user-data"
         && recovery.critical_user_data_scope.sha256 == criticalUserDataSha256

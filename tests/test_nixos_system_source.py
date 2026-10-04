@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "6e07629d4e3554d44662af2761f16cdd812a8174622e085711648b3b4f36f150"
+SOURCE_SNAPSHOT_SHA256 = "8abbce987ebb24117335b44ffbca2c4ce6227f461b95de724f3cf688885467ae"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -524,9 +524,25 @@ class T(unittest.TestCase):
             recovery["readiness_bundle"]["critical_user_data_contract_sha256_bound"]
         )
         self.assertEqual(recovery["status"], "external-evidence-required")
+        self.assertEqual(
+            recovery["admission_scope"],
+            {
+                "complete_evidence_required_for": "destructive-source-cutover",
+                "excluded_installation": {
+                    "migration_mode": "isolated-parallel-disk-dual-os",
+                    "source_preservation_mode": "retained-protected-source",
+                    "destructive_source_cutover": False,
+                    "pre_cutover_readiness_required": False,
+                },
+            },
+        )
         self.assertTrue(recovery["admission"]["point_of_no_return_blocked_without_complete_evidence"])
         self.assertTrue(
-            recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"]
+            recovery["admission"]["destructive_source_cutover_blocked_without_complete_evidence"]
+        )
+        self.assertNotIn(
+            "production_storage_mutation_blocked_without_complete_evidence",
+            recovery["admission"],
         )
         self.assertFalse(recovery["same_disk_recovery_partition_is_off_host_backup"])
         self.assertEqual(recovery["evidence_freshness"]["maximum_age_seconds"], 604800)

@@ -3,6 +3,15 @@
   "kind": "heim_pc.nixos_recovery_readiness_contract",
   "profile": "nixos-executor-2026",
   "status": "external-evidence-required",
+  "admission_scope": {
+    "complete_evidence_required_for": "destructive-source-cutover",
+    "excluded_installation": {
+      "migration_mode": "isolated-parallel-disk-dual-os",
+      "source_preservation_mode": "retained-protected-source",
+      "destructive_source_cutover": false,
+      "pre_cutover_readiness_required": false
+    }
+  },
   "same_disk_recovery_partition_is_off_host_backup": false,
   "secrets_in_repository_forbidden": true,
   "critical_user_data_scope": {
@@ -80,13 +89,13 @@
   "admission": {
     "all_required_evidence_must_be_fresh": true,
     "point_of_no_return_blocked_without_complete_evidence": true,
-    "production_storage_mutation_blocked_without_complete_evidence": true
+    "destructive_source_cutover_blocked_without_complete_evidence": true
   },
   "does_not_establish": [
     "existence of any off-host backup",
     "successful restore",
     "fresh recovery media",
-    "permission to mutate production storage",
+    "permission to authorize a destructive source cutover",
     "permission to cross the point of no return"
   ],
   "evidence_receipt": {
