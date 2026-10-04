@@ -546,6 +546,163 @@ def test_run_exact_sigterm_during_spawn_is_deferred_until_child_can_be_reaped(
     assert ("wait", None) in events
 
 
+def test_run_exact_signal_after_wait_is_still_controlled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class SignalOnCompare:
+        def __ne__(self, other):
+            assert other == 0
+            handler = executor.signal.getsignal(executor.signal.SIGTERM)
+            assert callable(handler)
+            handler(executor.signal.SIGTERM, None)
+            return False
+
+    class FakeProcess:
+        pid = 4545
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            events.append(("wait", timeout))
+            if self.wait_calls == 1:
+                return SignalOnCompare()
+            return -9
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor.os,
+        "killpg",
+        lambda pid, sig: events.append(("killpg", pid, sig)),
+    )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="interrupted; process group terminated",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert ("killpg", 4545, executor.signal.SIGKILL) in events
+    assert ("wait", None) in events
+
+
+def test_test_activation_sigterm_after_effect_starts_recovery(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    write_request(request_root, "activation-post-effect-signal", receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
+
+    original_resolve = executor._resolve_link
+    signalled = False
+
+    def signal_before_readback(path: Path, *, label: str) -> str:
+        nonlocal signalled
+        if (
+            not signalled
+            and path == executor.CURRENT_SYSTEM_LINK
+            and state["current"] == CLOSURE
+        ):
+            signalled = True
+            handler = executor.signal.getsignal(executor.signal.SIGTERM)
+            assert callable(handler)
+            handler(executor.signal.SIGTERM, None)
+        return original_resolve(path, label=label)
+
+    monkeypatch.setattr(executor, "_resolve_link", signal_before_readback)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_activation(
+            request_id="activation-post-effect-signal",
+            runner=runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+
+
+def test_uncertain_child_termination_does_not_start_activation_recovery(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    write_request(request_root, "activation-uncertain-child", receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
+    calls = 0
+
+    def uncertain_runner(_argv, _target_closure):
+        nonlocal calls
+        calls += 1
+        state["current"] = CLOSURE
+        raise executor._ProcessTerminationUncertain("simulated uncertain termination")
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="simulated uncertain termination",
+    ):
+        executor.execute_activation(
+            request_id="activation-uncertain-child",
+            runner=uncertain_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert calls == 1
+    assert state["current"] == CLOSURE
+
+
+def test_uncertain_child_termination_does_not_start_promotion_recovery(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    write_request(request_root, "promotion-uncertain-child", receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+    calls = 0
+
+    def uncertain_runner(argv, _target_closure):
+        nonlocal calls
+        calls += 1
+        if "--profile" in list(argv):
+            state["profile"] = CLOSURE
+        raise executor._ProcessTerminationUncertain("simulated uncertain termination")
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="simulated uncertain termination",
+    ):
+        executor.execute_persistent_promotion(
+            request_id="promotion-uncertain-child",
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=uncertain_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert calls == 1
+    assert state["profile"] == CLOSURE
+
+
 def test_test_activation_post_readback_failure_recovers_bound_prior_state(
     runtime,
     monkeypatch: pytest.MonkeyPatch,
