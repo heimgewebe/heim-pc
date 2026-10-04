@@ -6655,6 +6655,30 @@ def test_destructive_source_cutover_cannot_skip_recovery_readiness():
         prod.pre_cutover_readiness_required(contract, RECOVERY_ADMISSION_SCOPE)
 
 
+def test_merged_main_destructive_source_cutover_requires_readiness_bundle():
+    contract = json.loads(json.dumps(CONTRACT))
+    contract["source_preservation"]["destructive_source_cutover"] = True
+    contract["source_preservation"]["pre_cutover_readiness_required"] = True
+    receipt = managed_receipt(MERGED_ARTIFACT)
+
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="requires validated pre-cutover readiness",
+    ):
+        prod.compile_plan(
+            observation(),
+            install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source=str(prod.FLAKE_SOURCE),
+            contract=contract,
+            managed_build_attestation_verification=managed_attestation_verification(
+                MERGED_ARTIFACT, receipt
+            ),
+        )
+
+
 def test_recovery_scope_must_match_isolated_replacement_path():
     contract = json.loads(json.dumps(CONTRACT))
     scope = json.loads(json.dumps(RECOVERY_ADMISSION_SCOPE))
