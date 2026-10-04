@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -440,6 +441,30 @@ Runner = Callable[[Sequence[str], str], None]
 _TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
+class _TerminationState:
+    def __init__(self) -> None:
+        self.signum: int | None = None
+        self.defer_depth = 0
+
+    def record(self, signum: int) -> None:
+        if self.signum is None:
+            self.signum = signum
+
+    @property
+    def requested(self) -> bool:
+        return self.signum is not None
+
+    @property
+    def deferred(self) -> bool:
+        return self.defer_depth > 0
+
+
+_ACTIVE_TERMINATION_STATE: ContextVar[_TerminationState | None] = ContextVar(
+    "heim_pc_day2_termination_state",
+    default=None,
+)
+
+
 def _set_termination_handlers(
     handler: signal.Handlers | Callable[[int, Any], None],
     *,
@@ -468,76 +493,53 @@ def _restore_termination_handlers(previous: Mapping[int, Any]) -> None:
 
 
 @contextmanager
-def _controlled_termination() -> Iterator[None]:
-    def _handle_termination(_signum: int, _frame: Any) -> None:
-        raise _ExecutorInterrupted()
+def _controlled_termination(
+    *,
+    preserve_ignored: bool = False,
+) -> Iterator[_TerminationState]:
+    active = _ACTIVE_TERMINATION_STATE.get()
+    if active is not None:
+        yield active
+        return
 
-    previous = _set_termination_handlers(_handle_termination)
+    state = _TerminationState()
+
+    def _handle_termination(signum: int, _frame: Any) -> None:
+        # Never throw asynchronously from a signal handler.  Mutating paths
+        # observe this flag only at explicit safe boundaries, after a child
+        # process group is proven quiescent when one exists.
+        state.record(signum)
+
+    previous = _set_termination_handlers(
+        _handle_termination,
+        preserve_ignored=preserve_ignored,
+    )
+    token = _ACTIVE_TERMINATION_STATE.set(state)
     try:
-        yield
+        yield state
     finally:
-        _restore_termination_handlers(previous)
+        try:
+            _restore_termination_handlers(previous)
+        finally:
+            _ACTIVE_TERMINATION_STATE.reset(token)
 
 
 @contextmanager
-def _ignore_termination_signals() -> Iterator[None]:
-    # Recovery begins while the controlled handlers are still installed.  A
-    # second termination request may therefore raise _ExecutorInterrupted just
-    # before the mask takes effect; retry that transition until both signals are
-    # blocked, then change both dispositions to SIG_IGN before unblocking.
-    while True:
-        try:
-            previous_mask = signal.pthread_sigmask(
-                signal.SIG_BLOCK,
-                _TERMINATION_SIGNALS,
-            )
-            break
-        except _ExecutorInterrupted:
-            continue
-        except (AttributeError, OSError, ValueError) as exc:
-            raise RuntimeExecutorError(
-                "cannot block termination signals before recovery"
-            ) from exc
-
-    previous: dict[int, Any] = {}
+def _defer_termination() -> Iterator[None]:
+    state = _ACTIVE_TERMINATION_STATE.get()
+    if state is None:
+        yield
+        return
+    state.defer_depth += 1
     try:
-        try:
-            for signum in _TERMINATION_SIGNALS:
-                previous[signum] = signal.getsignal(signum)
-                signal.signal(signum, signal.SIG_IGN)
-        except (OSError, ValueError) as exc:
-            for signum, prior in previous.items():
-                signal.signal(signum, prior)
-            raise RuntimeExecutorError(
-                "cannot install non-interruptible recovery handlers"
-            ) from exc
-        try:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        except (OSError, ValueError) as exc:
-            raise RuntimeExecutorError(
-                "cannot restore termination signal mask for recovery"
-            ) from exc
         yield
     finally:
-        try:
-            restore_mask = signal.pthread_sigmask(
-                signal.SIG_BLOCK,
-                _TERMINATION_SIGNALS,
-            )
-        except (AttributeError, OSError, ValueError) as exc:
-            raise RuntimeExecutorError(
-                "cannot block termination signals while leaving recovery"
-            ) from exc
-        try:
-            for signum, prior in previous.items():
-                signal.signal(signum, prior)
-        finally:
-            try:
-                signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
-            except (OSError, ValueError) as exc:
-                raise RuntimeExecutorError(
-                    "cannot restore termination signal mask after recovery"
-                ) from exc
+        state.defer_depth -= 1
+
+
+def _raise_if_termination_requested(state: _TerminationState) -> None:
+    if state.requested and not state.deferred:
+        raise _ExecutorInterrupted()
 
 
 def _wait_for_process_group_quiescence(pgid: int) -> None:
@@ -562,6 +564,9 @@ def _wait_for_process_exit_without_reaping(
     deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
     flags = os.WEXITED | os.WNOWAIT | os.WNOHANG
     while True:
+        state = _ACTIVE_TERMINATION_STATE.get()
+        if state is not None:
+            _raise_if_termination_requested(state)
         try:
             observed = os.waitid(os.P_PID, process.pid, flags)
         except InterruptedError:
@@ -585,26 +590,32 @@ def _wait_for_process_exit_without_reaping(
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    with _ignore_termination_signals():
+    # A completed Popen has already reaped its leader.  Never send a destructive
+    # signal to that numeric PGID again: it may have been recycled meanwhile.
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        # Do not treat an unsuccessful signal attempt as proof that the
+        # mutation is still running or stopped.  The blocking wait and
+        # process-group disappearance check below remain authoritative.
+        pass
+
+    while True:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            # Do not treat an unsuccessful signal attempt as proof that the
-            # mutation is still running or stopped.  The blocking wait and
-            # process-group disappearance check below remain authoritative.
-            pass
-        try:
-            # No second timeout is allowed here.  Recovery may only begin after
-            # the private process group is positively quiescent; if kernel exit
-            # is delayed or wait status is unavailable, this executor keeps the
-            # activation lock rather than releasing an uncertain mutation into
-            # a competing invocation.
+            # No second timeout is allowed here.  Cleanup must finish before
+            # recovery or another mutation can start.
             process.wait()
+            break
+        except (InterruptedError, KeyboardInterrupt):
+            continue
         except OSError:
-            pass
-        _wait_for_process_group_quiescence(process.pid)
+            break
+    _wait_for_process_group_quiescence(process.pid)
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:
@@ -614,21 +625,9 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
         raise RuntimeExecutorError("executor command must be closure-bound")
 
     process: subprocess.Popen[bytes] | None = None
-    interrupted_signum: int | None = None
+    cleanup_complete = False
 
-    def _handle_termination(signum: int, _frame: Any) -> None:
-        nonlocal interrupted_signum
-        interrupted_signum = signum
-        # If a signal lands during Popen before assignment, remember it and
-        # defer the exception until the child handle is available for cleanup.
-        if process is not None:
-            raise _ExecutorInterrupted()
-
-    previous_handlers = _set_termination_handlers(
-        _handle_termination,
-        preserve_ignored=True,
-    )
-    try:
+    with _controlled_termination(preserve_ignored=True) as termination:
         try:
             try:
                 process = subprocess.Popen(
@@ -647,12 +646,12 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                     f"executor command failed to start: {exc}"
                 ) from exc
 
-            if interrupted_signum is not None:
-                raise _ExecutorInterrupted()
+            _raise_if_termination_requested(termination)
             try:
                 returncode = _wait_for_process_exit_without_reaping(process, argv)
             except subprocess.TimeoutExpired as exc:
                 _terminate_process_group(process)
+                cleanup_complete = True
                 raise RuntimeExecutorError(
                     "executor command timed out; process group terminated"
                 ) from exc
@@ -661,25 +660,28 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                 # signal to a numeric PGID that may already have been reused.
                 # Hold the activation lock until that PGID is observed absent.
                 _wait_for_process_group_quiescence(process.pid)
+                cleanup_complete = True
                 raise
 
-            # The leader is deliberately still unreaped here.  Its zombie keeps
-            # the private PGID allocated while SIGKILL removes any same-group
-            # descendants, eliminating the post-wait PGID-reuse window.
+            # The leader remains unreaped until SIGKILL has been dispatched to
+            # the private process group.  Signals received during cleanup are
+            # merely recorded and are raised only after quiescence is proven.
             _terminate_process_group(process)
+            cleanup_complete = True
+            _raise_if_termination_requested(termination)
 
             if returncode != 0:
                 raise RuntimeExecutorError(
                     f"executor command returned non-zero status {returncode}"
                 )
+            _raise_if_termination_requested(termination)
         except (_ExecutorInterrupted, KeyboardInterrupt) as exc:
-            if process is not None:
+            if process is not None and not cleanup_complete:
                 _terminate_process_group(process)
+                cleanup_complete = True
             raise RuntimeExecutorError(
                 "executor command interrupted; process group terminated"
             ) from exc
-    finally:
-        _restore_termination_handlers(previous_handlers)
 
 
 @contextmanager
@@ -724,21 +726,34 @@ def _recover(
     profile_may_have_changed: bool,
 ) -> None:
     errors: list[str] = []
-    # Once recovery starts, further interactive termination requests must not
-    # interrupt the attempt and release the activation lock mid-rollback.
-    with _ignore_termination_signals():
+    # Recovery must run to a verified postcondition even when more interactive
+    # termination requests arrive.  The shared flag-only handler records them,
+    # while nested _run_exact calls defer acting on them until recovery ends.
+    with _defer_termination():
         if profile_may_have_changed:
             try:
-                runner(_profile_set_argv(prior_closure, prior_closure), prior_closure)
-                _require_link_target(
+                observed_profile = _resolve_link(
                     SYSTEM_PROFILE_LINK,
-                    prior_closure,
-                    label="recovered persistent system profile",
+                    label="persistent system profile before recovery rollback",
                 )
-            except _ProcessTerminationUncertain:
-                raise
             except RuntimeExecutorError as exc:
-                errors.append(f"profile rollback failed: {exc}")
+                errors.append(f"profile rollback precheck failed: {exc}")
+            else:
+                if observed_profile != prior_closure:
+                    try:
+                        runner(
+                            _profile_set_argv(prior_closure, prior_closure),
+                            prior_closure,
+                        )
+                        _require_link_target(
+                            SYSTEM_PROFILE_LINK,
+                            prior_closure,
+                            label="recovered persistent system profile",
+                        )
+                    except _ProcessTerminationUncertain:
+                        raise
+                    except RuntimeExecutorError as exc:
+                        errors.append(f"profile rollback failed: {exc}")
         try:
             runner(_switch_argv(prior_closure, mode), prior_closure)
         except _ProcessTerminationUncertain:
@@ -886,19 +901,22 @@ def execute_activation(
             "executable_modes"
         ]["test"]
         switch_argv = _switch_argv(plan["system_closure"], switch_mode)
-        with _controlled_termination():
+        with _controlled_termination() as termination:
             try:
                 runner(switch_argv, plan["system_closure"])
+                _raise_if_termination_requested(termination)
                 post_current = _require_link_target(
                     CURRENT_SYSTEM_LINK,
                     plan["system_closure"],
                     label="current system after test activation",
                 )
+                _raise_if_termination_requested(termination)
                 post_profile = _require_link_target(
                     SYSTEM_PROFILE_LINK,
                     plan["prior_closure"],
                     label="persistent system profile after test activation",
                 )
+                _raise_if_termination_requested(termination)
             except _ProcessTerminationUncertain:
                 raise
             except (
@@ -1011,7 +1029,7 @@ def execute_persistent_promotion(
         )
         profile_changed = False
         switch_argv = _switch_argv(plan["system_closure"], "switch")
-        with _controlled_termination():
+        with _controlled_termination() as termination:
             try:
                 # The profile command may mutate successfully and still report a
                 # timeout/non-zero status.  Treat the profile as potentially changed
@@ -1021,22 +1039,27 @@ def execute_persistent_promotion(
                     _profile_set_argv(plan["prior_closure"], plan["system_closure"]),
                     plan["prior_closure"],
                 )
+                _raise_if_termination_requested(termination)
                 _require_link_target(
                     SYSTEM_PROFILE_LINK,
                     plan["system_closure"],
                     label="persistent system profile after promotion staging",
                 )
+                _raise_if_termination_requested(termination)
                 runner(switch_argv, plan["system_closure"])
+                _raise_if_termination_requested(termination)
                 post_current = _require_link_target(
                     CURRENT_SYSTEM_LINK,
                     plan["system_closure"],
                     label="current system after persistent promotion",
                 )
+                _raise_if_termination_requested(termination)
                 post_profile = _require_link_target(
                     SYSTEM_PROFILE_LINK,
                     plan["system_closure"],
                     label="persistent system profile after persistent promotion",
                 )
+                _raise_if_termination_requested(termination)
             except _ProcessTerminationUncertain:
                 raise
             except (
@@ -1126,6 +1149,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             parser.error("unsupported command")
+    except (_ExecutorInterrupted, KeyboardInterrupt):
+        print(
+            "nixos day2 activation error: interrupted before controlled completion",
+            file=sys.stderr,
+        )
+        return 1
     except (RuntimeExecutorError, managed_nix.ManagedNixError) as exc:
         print(f"nixos day2 activation error: {exc}", file=sys.stderr)
         return 1

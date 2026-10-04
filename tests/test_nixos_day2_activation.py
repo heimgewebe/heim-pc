@@ -835,12 +835,11 @@ def test_terminate_process_group_uses_quiescence_after_wait_error(
 
 
 
-def test_terminate_process_group_retries_second_controlled_termination(
+def test_run_exact_second_signal_before_cleanup_dispatch_is_deferred(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[object, ...]] = []
-    original_mask = executor.signal.pthread_sigmask
-    block_attempts = 0
+    cleanup_calls = 0
 
     class FakeProcess:
         pid = 5151
@@ -849,27 +848,40 @@ def test_terminate_process_group_retries_second_controlled_termination(
             events.append(("wait", timeout))
             return -9
 
-    def interrupt_first_cleanup_mask(how, signals):
-        nonlocal block_attempts
-        if how == executor.signal.SIG_BLOCK:
-            block_attempts += 1
-            if block_attempts == 1:
-                handler = executor.signal.getsignal(executor.signal.SIGTERM)
-                assert callable(handler)
-                handler(executor.signal.SIGTERM, None)
-        return original_mask(how, signals)
+    def first_interrupt(_process, _argv):
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        raise executor._ExecutorInterrupted()
 
+    original_cleanup = executor._terminate_process_group
+
+    def cleanup_after_second_signal(process):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        return original_cleanup(process)
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(executor, "_wait_for_process_exit_without_reaping", first_interrupt)
+    monkeypatch.setattr(executor, "_terminate_process_group", cleanup_after_second_signal)
     monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
 
-    with executor._controlled_termination():
-        monkeypatch.setattr(
-            executor.signal,
-            "pthread_sigmask",
-            interrupt_first_cleanup_mask,
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="interrupted; process group terminated",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
         )
-        executor._terminate_process_group(FakeProcess())
 
-    assert block_attempts >= 2
+    assert cleanup_calls == 1
     assert events == [
         ("killpg", 5151, executor.signal.SIGKILL),
         ("wait", None),
@@ -877,62 +889,102 @@ def test_terminate_process_group_retries_second_controlled_termination(
     ]
 
 
-def test_ignore_termination_signals_masks_installation_and_restore(
+def test_run_exact_signal_during_success_cleanup_is_not_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[object, ...]] = []
-    prior_mask = {executor.signal.SIGUSR1}
-    prior_handlers = {
-        executor.signal.SIGINT: object(),
-        executor.signal.SIGTERM: object(),
-    }
 
-    def fake_mask(how, signals):
-        events.append(("mask", how, frozenset(signals)))
-        if how == executor.signal.SIG_BLOCK:
-            return prior_mask
-        assert how == executor.signal.SIG_SETMASK
-        return set()
+    class FakeProcess:
+        pid = 5152
 
-    def fake_getsignal(signum):
-        return prior_handlers[signum]
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return -9
 
-    def fake_signal(signum, handler):
-        events.append(("handler", signum, handler))
-        return prior_handlers.get(signum)
+    def killpg(pid, sig):
+        events.append(("killpg", pid, sig))
+        if sig == executor.signal.SIGKILL:
+            handler = executor.signal.getsignal(executor.signal.SIGTERM)
+            assert callable(handler)
+            handler(executor.signal.SIGTERM, None)
+        elif sig == 0:
+            raise ProcessLookupError
 
-    monkeypatch.setattr(executor.signal, "pthread_sigmask", fake_mask)
-    monkeypatch.setattr(executor.signal, "getsignal", fake_getsignal)
-    monkeypatch.setattr(executor.signal, "signal", fake_signal)
-
-    with executor._ignore_termination_signals():
-        events.append(("body",))
-
-    blocked = frozenset((executor.signal.SIGINT, executor.signal.SIGTERM))
-    assert events[0] == ("mask", executor.signal.SIG_BLOCK, blocked)
-    assert events[1:3] == [
-        ("handler", executor.signal.SIGINT, executor.signal.SIG_IGN),
-        ("handler", executor.signal.SIGTERM, executor.signal.SIG_IGN),
-    ]
-    assert events[3] == (
-        "mask",
-        executor.signal.SIG_SETMASK,
-        frozenset(prior_mask),
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        lambda _process, _argv: 0,
     )
-    assert events[4] == ("body",)
-    assert events[5] == ("mask", executor.signal.SIG_BLOCK, blocked)
-    assert events[6:8] == [
-        ("handler", executor.signal.SIGINT, prior_handlers[executor.signal.SIGINT]),
-        ("handler", executor.signal.SIGTERM, prior_handlers[executor.signal.SIGTERM]),
+    monkeypatch.setattr(executor.os, "killpg", killpg)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="interrupted; process group terminated",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert events.count(("killpg", 5152, executor.signal.SIGKILL)) == 1
+
+
+def test_terminate_process_group_is_idempotent_after_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 5153
+        returncode = None
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            self.returncode = -9
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
+
+    executor._terminate_process_group(process)
+    executor._terminate_process_group(process)
+
+    assert events == [
+        ("killpg", 5153, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 5153, 0),
     ]
-    assert events[8] == (
-        "mask",
-        executor.signal.SIG_SETMASK,
-        frozenset(prior_mask),
+
+def test_controlled_termination_handler_is_flag_only_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handlers = (
+        executor.signal.getsignal(executor.signal.SIGINT),
+        executor.signal.getsignal(executor.signal.SIGTERM),
+    )
+    monkeypatch.setattr(
+        executor.signal,
+        "pthread_sigmask",
+        lambda *_args, **_kwargs: pytest.fail("pthread_sigmask must not be used"),
     )
 
+    with executor._controlled_termination() as termination:
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        assert termination.requested is True
+        assert termination.signum == executor.signal.SIGTERM
 
-def test_recovery_entry_retries_second_controlled_termination(
+    assert (
+        executor.signal.getsignal(executor.signal.SIGINT),
+        executor.signal.getsignal(executor.signal.SIGTERM),
+    ) == previous_handlers
+
+def test_second_sigterm_before_recovery_dispatch_does_not_abort_recovery(
     runtime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -944,9 +996,9 @@ def test_recovery_entry_retries_second_controlled_termination(
     _allow_future_activation(monkeypatch)
 
     original_resolve = executor._resolve_link
-    original_mask = executor.signal.pthread_sigmask
+    original_recover = executor._recover
     failed = False
-    block_attempts = 0
+    recovery_calls = 0
 
     def fail_post_readback(path: Path, *, label: str) -> str:
         nonlocal failed
@@ -959,22 +1011,16 @@ def test_recovery_entry_retries_second_controlled_termination(
             raise executor.RuntimeExecutorError("simulated post-effect readback failure")
         return original_resolve(path, label=label)
 
-    def interrupt_first_recovery_mask(how, signals):
-        nonlocal block_attempts
-        if how == executor.signal.SIG_BLOCK:
-            block_attempts += 1
-            if block_attempts == 1:
-                handler = executor.signal.getsignal(executor.signal.SIGTERM)
-                assert callable(handler)
-                handler(executor.signal.SIGTERM, None)
-        return original_mask(how, signals)
+    def recover_after_second_signal(**kwargs):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        return original_recover(**kwargs)
 
     monkeypatch.setattr(executor, "_resolve_link", fail_post_readback)
-    monkeypatch.setattr(
-        executor.signal,
-        "pthread_sigmask",
-        interrupt_first_recovery_mask,
-    )
+    monkeypatch.setattr(executor, "_recover", recover_after_second_signal)
 
     with pytest.raises(
         executor.RuntimeExecutorError,
@@ -986,9 +1032,8 @@ def test_recovery_entry_retries_second_controlled_termination(
             **bindings(receipt, authority, plan),
         )
 
-    assert block_attempts >= 2
+    assert recovery_calls == 1
     assert state == {"current": PRIOR, "profile": PRIOR}
-
 
 def test_run_exact_preserves_inherited_ignored_termination_handlers(
     monkeypatch: pytest.MonkeyPatch,
@@ -1023,7 +1068,9 @@ def test_run_exact_preserves_inherited_ignored_termination_handlers(
     )
     monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg([]))
 
-    with executor._ignore_termination_signals():
+    executor.signal.signal(executor.signal.SIGINT, executor.signal.SIG_IGN)
+    executor.signal.signal(executor.signal.SIGTERM, executor.signal.SIG_IGN)
+    try:
         executor._run_exact(
             [
                 "/nix/store/33333333333333333333333333333333-helper/bin/helper",
@@ -1031,12 +1078,11 @@ def test_run_exact_preserves_inherited_ignored_termination_handlers(
             ],
             CLOSURE,
         )
+    finally:
+        executor.signal.signal(executor.signal.SIGINT, previous_handlers[0])
+        executor.signal.signal(executor.signal.SIGTERM, previous_handlers[1])
 
     assert observed_handlers == [(executor.signal.SIG_IGN, executor.signal.SIG_IGN)]
-    assert (
-        executor.signal.getsignal(executor.signal.SIGINT),
-        executor.signal.getsignal(executor.signal.SIGTERM),
-    ) == previous_handlers
 
 def test_test_activation_sigterm_after_effect_starts_recovery(
     runtime,
@@ -1146,10 +1192,33 @@ def test_uncertain_child_termination_does_not_start_promotion_recovery(
     assert state["profile"] == CLOSURE
 
 
+def test_recover_does_not_write_profile_when_profile_is_already_prior(
+    runtime,
+) -> None:
+    _request_root, state, runner = runtime
+    calls: list[list[str]] = []
+
+    def tracking_runner(argv, target_closure):
+        calls.append(list(argv))
+        runner(argv, target_closure)
+
+    executor._recover(
+        prior_closure=PRIOR,
+        mode="test",
+        runner=tracking_runner,
+        profile_may_have_changed=True,
+    )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert all("--profile" not in call for call in calls)
+    assert calls == [[str(Path(PRIOR) / "bin" / "switch-to-configuration"), "test"]]
+
+
 def test_recover_stops_after_uncertain_profile_rollback(
     runtime,
 ) -> None:
-    _request_root, _state, _runner = runtime
+    _request_root, state, _runner = runtime
+    state["profile"] = CLOSURE
     calls: list[list[str]] = []
 
     def uncertain_recovery_runner(argv, _target_closure):
