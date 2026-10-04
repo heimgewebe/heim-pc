@@ -494,41 +494,39 @@ def _wait_for_process_group_quiescence(pgid: int) -> None:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return
-        except OSError as exc:
-            raise _ProcessTerminationUncertain(
-                "executor process-group quiescence could not be confirmed"
-            ) from exc
+        except OSError:
+            # An uncertain probe must not release the activation lock.  Keep
+            # checking until kernel state positively establishes that the
+            # private process group no longer exists.
+            time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
+            continue
         time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     ignored_handlers = _set_termination_handlers(signal.SIG_IGN)
-    kill_error: OSError | None = None
     try:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except OSError as exc:
-            kill_error = exc
+        except OSError:
+            # Do not treat an unsuccessful signal attempt as proof that the
+            # mutation is still running or stopped.  The blocking wait and
+            # process-group disappearance check below remain authoritative.
+            pass
         try:
             # No second timeout is allowed here.  Recovery may only begin after
-            # the private process leader is definitely reaped; if kernel exit is
-            # delayed, this executor keeps the activation lock rather than
-            # releasing an uncertain mutation into a competing invocation.
+            # the private process group is positively quiescent; if kernel exit
+            # is delayed or wait status is unavailable, this executor keeps the
+            # activation lock rather than releasing an uncertain mutation into
+            # a competing invocation.
             process.wait()
-        except OSError as exc:
-            raise _ProcessTerminationUncertain(
-                "executor process termination could not be confirmed"
-            ) from exc
-        if kill_error is None:
-            _wait_for_process_group_quiescence(process.pid)
+        except OSError:
+            pass
+        _wait_for_process_group_quiescence(process.pid)
     finally:
         _restore_termination_handlers(ignored_handlers)
-    if kill_error is not None:
-        raise _ProcessTerminationUncertain(
-            "executor process exited, but its process group could not be signalled cleanly"
-        ) from kill_error
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:

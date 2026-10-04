@@ -666,6 +666,105 @@ def test_run_exact_waits_for_process_group_quiescence(
     ]
 
 
+def test_process_group_quiescence_retries_uncertain_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+    probes = 0
+
+    def killpg(pid, sig):
+        nonlocal probes
+        events.append(("killpg", pid, sig))
+        assert sig == 0
+        probes += 1
+        if probes == 1:
+            raise PermissionError("simulated uncertain probe")
+        raise ProcessLookupError
+
+    monkeypatch.setattr(executor.os, "killpg", killpg)
+    monkeypatch.setattr(
+        executor.time,
+        "sleep",
+        lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    executor._wait_for_process_group_quiescence(4848)
+
+    assert events == [
+        ("killpg", 4848, 0),
+        ("sleep", executor.PROCESS_GROUP_QUIESCENCE_POLL_SECONDS),
+        ("killpg", 4848, 0),
+    ]
+
+
+def test_terminate_process_group_requires_quiescence_after_kill_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+    probes = 0
+
+    class FakeProcess:
+        pid = 4949
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return -9
+
+    def killpg(pid, sig):
+        nonlocal probes
+        events.append(("killpg", pid, sig))
+        if sig == executor.signal.SIGKILL:
+            raise PermissionError("simulated kill uncertainty")
+        probes += 1
+        if probes >= 2:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(executor.os, "killpg", killpg)
+    monkeypatch.setattr(
+        executor.time,
+        "sleep",
+        lambda seconds: events.append(("sleep", seconds)),
+    )
+
+    executor._terminate_process_group(FakeProcess())
+
+    assert events == [
+        ("killpg", 4949, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 4949, 0),
+        ("sleep", executor.PROCESS_GROUP_QUIESCENCE_POLL_SECONDS),
+        ("killpg", 4949, 0),
+    ]
+
+
+def test_terminate_process_group_uses_quiescence_after_wait_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 5050
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            raise ChildProcessError("simulated wait uncertainty")
+
+    def killpg(pid, sig):
+        events.append(("killpg", pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(executor.os, "killpg", killpg)
+
+    executor._terminate_process_group(FakeProcess())
+
+    assert events == [
+        ("killpg", 5050, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 5050, 0),
+    ]
+
+
 def test_run_exact_preserves_inherited_ignored_termination_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
