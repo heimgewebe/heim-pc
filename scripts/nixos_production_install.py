@@ -5512,7 +5512,7 @@ def _post_mutation_failure_receipt(
         str(command.get("effect"))
         for command in plan.get("teardown_commands", [])
         if isinstance(command, dict) and isinstance(command.get("effect"), str)
-    }
+    } | {"luks-bootstrap-memfd-cleanup"}
     teardown = evidence.get("teardown_failures")
     teardown_failures = (
         sorted({item for item in teardown if isinstance(item, str) and item in allowed_teardown})

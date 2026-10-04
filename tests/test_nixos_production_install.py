@@ -3935,6 +3935,29 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     ]
 
 
+def test_post_mutation_failure_receipt_preserves_bootstrap_memfd_cleanup():
+    compiled = plan()
+    error = prod.PostMutationInstallError(
+        "teardown-incomplete",
+        private_evidence={
+            "mutation_attempted": True,
+            "teardown_failures": [
+                "luks-bootstrap-memfd-cleanup",
+                "not-a-real-teardown-effect",
+            ],
+        },
+    )
+
+    receipt = prod._post_mutation_failure_receipt(
+        plan=compiled,
+        artifact=ARTIFACT,
+        error=error,
+    )
+
+    assert receipt["alarm_code"] == "teardown-incomplete"
+    assert receipt["teardown_failures"] == ["luks-bootstrap-memfd-cleanup"]
+
+
 def test_main_failure_receipt_construction_interrupt_persists_bound_fallback(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
