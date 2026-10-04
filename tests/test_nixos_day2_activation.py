@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import signal
+import sys
+import threading
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -835,6 +839,238 @@ def test_terminate_process_group_uses_quiescence_after_wait_error(
 
 
 
+def test_run_exact_inherits_active_lock_fd_into_real_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    real_popen = executor.subprocess.Popen
+    lock_path = tmp_path / "activation.lock"
+    monkeypatch.setattr(executor, "LOCK_PATH", lock_path)
+    real_fstat = executor.os.fstat
+
+    class RootOwnedStat:
+        def __init__(self, fd: int) -> None:
+            self._stat = real_fstat(fd)
+
+        @property
+        def st_uid(self) -> int:
+            return 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._stat, name)
+
+    monkeypatch.setattr(executor.os, "fstat", lambda fd: RootOwnedStat(fd))
+    captured_fd: int | None = None
+
+    def real_child(_argv, **kwargs):
+        nonlocal captured_fd
+        pass_fds = tuple(kwargs.get("pass_fds", ()))
+        assert len(pass_fds) == 1
+        captured_fd = pass_fds[0]
+        return real_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import os; os.fstat({captured_fd})",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(executor.subprocess, "Popen", real_child)
+
+    with executor._exclusive_lock():
+        active_fd = executor._ACTIVE_LOCK_FD.get()
+        assert active_fd is not None
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+        assert captured_fd == active_fd
+
+
+def test_posix_inherited_flock_survives_parent_sigkill_until_child_exit(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "activation.lock"
+    helper = """
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import time
+
+lock_path = sys.argv[1]
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    pass_fds=(fd,),
+    close_fds=True,
+    start_new_session=True,
+)
+print(child.pid, flush=True)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+    parent = executor.subprocess.Popen(
+        [sys.executable, "-c", helper, str(lock_path)],
+        stdout=executor.subprocess.PIPE,
+        stderr=executor.subprocess.PIPE,
+        text=True,
+    )
+    child_pid: int | None = None
+    contender_fd: int | None = None
+    try:
+        assert parent.stdout is not None
+        child_pid = int(parent.stdout.readline().strip())
+        assert parent.wait(timeout=5) == -signal.SIGKILL
+
+        contender_fd = os.open(lock_path, os.O_RDWR)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(contender_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        os.killpg(child_pid, signal.SIGKILL)
+        deadline = executor.time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(contender_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if executor.time.monotonic() >= deadline:
+                    pytest.fail("inherited activation lock was not released after child exit")
+                executor.time.sleep(0.01)
+    finally:
+        if child_pid is not None:
+            try:
+                os.killpg(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        if contender_fd is not None:
+            try:
+                fcntl.flock(contender_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(contender_fd)
+
+
+def test_run_exact_normalizes_inherited_sigchld_ignore_for_real_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_popen = executor.subprocess.Popen
+    observed: list[object] = []
+
+    def real_child(_argv, **kwargs):
+        observed.append(executor.signal.getsignal(executor.signal.SIGCHLD))
+        return real_popen([sys.executable, "-c", "pass"], **kwargs)
+
+    previous = executor.signal.getsignal(executor.signal.SIGCHLD)
+    executor.signal.signal(executor.signal.SIGCHLD, executor.signal.SIG_IGN)
+    monkeypatch.setattr(executor.subprocess, "Popen", real_child)
+    try:
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+    finally:
+        executor.signal.signal(executor.signal.SIGCHLD, previous)
+
+    assert observed == [executor.signal.SIG_DFL]
+
+
+def test_run_exact_real_sigterm_kills_real_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_popen = executor.subprocess.Popen
+    child_pid: int | None = None
+    timer: threading.Timer | None = None
+
+    def real_child(_argv, **kwargs):
+        nonlocal child_pid, timer
+        process = real_popen(
+            ["/bin/sh", "-c", "/bin/sleep 30 & /bin/sleep 30"],
+            **kwargs,
+        )
+        child_pid = process.pid
+        timer = threading.Timer(
+            0.1,
+            lambda: os.kill(os.getpid(), signal.SIGTERM),
+        )
+        timer.start()
+        return process
+
+    monkeypatch.setattr(executor.subprocess, "Popen", real_child)
+    try:
+        with pytest.raises(
+            executor.RuntimeExecutorError,
+            match="interrupted; process group terminated",
+        ):
+            executor._run_exact(
+                [
+                    "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                    "switch",
+                ],
+                CLOSURE,
+            )
+    finally:
+        if timer is not None:
+            timer.join(timeout=2)
+
+    assert child_pid is not None
+    with pytest.raises(ProcessLookupError):
+        os.killpg(child_pid, 0)
+
+
+def test_run_exact_quiescent_unknown_exit_becomes_recoverable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 5150
+        returncode = None
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        lambda _process, _argv: (_ for _ in ()).throw(
+            executor._ProcessTerminationUncertain("simulated missing wait status")
+        ),
+    )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="process group quiescence; recovery required",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert events == [("killpg", 5150, 0)]
+
+
+def test_controlled_termination_covers_hup_and_quit() -> None:
+    with executor._controlled_termination() as termination:
+        for signum in (executor.signal.SIGHUP, executor.signal.SIGQUIT):
+            handler = executor.signal.getsignal(signum)
+            assert callable(handler)
+            handler(signum, None)
+    assert termination.requested is True
+
+
 def test_run_exact_second_signal_before_cleanup_dispatch_is_deferred(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1377,6 +1613,53 @@ def test_recover_refuses_completed_claim_when_runtime_readback_is_not_restored(
             runner=lambda _argv, _target: None,
             profile_may_have_changed=True,
         )
+
+
+def test_main_keeps_flag_only_handler_through_receipt_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[bytes] = []
+
+    class Buffer:
+        def write(self, data: bytes) -> int:
+            handler = executor.signal.getsignal(executor.signal.SIGTERM)
+            assert callable(handler)
+            handler(executor.signal.SIGTERM, None)
+            writes.append(data)
+            return len(data)
+
+        def flush(self) -> None:
+            return None
+
+    class Stdout:
+        buffer = Buffer()
+
+    monkeypatch.setattr(executor.sys, "stdout", Stdout())
+    monkeypatch.setattr(
+        executor,
+        "execute_activation",
+        lambda **_kwargs: {"schema_version": 1, "result": "executed"},
+    )
+
+    digest = "a" * 64
+    rc = executor.main(
+        [
+            "execute-activation",
+            "--request-id",
+            "receipt-window",
+            "--expected-build-receipt-sha256",
+            digest,
+            "--expected-authority-sha256",
+            digest,
+            "--expected-plan-sha256",
+            digest,
+            "--expected-target",
+            TARGET,
+        ]
+    )
+
+    assert rc == 0
+    assert writes == [b'{"result":"executed","schema_version":1}\n']
 
 
 def test_runtime_contract_loader_rejects_security_boundary_drift(

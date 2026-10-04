@@ -438,7 +438,12 @@ def _minimal_env(target_closure: str) -> dict[str, str]:
 
 
 Runner = Callable[[Sequence[str], str], None]
-_TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+_TERMINATION_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
 
 
 class _TerminationState:
@@ -461,6 +466,10 @@ class _TerminationState:
 
 _ACTIVE_TERMINATION_STATE: ContextVar[_TerminationState | None] = ContextVar(
     "heim_pc_day2_termination_state",
+    default=None,
+)
+_ACTIVE_LOCK_FD: ContextVar[int | None] = ContextVar(
+    "heim_pc_day2_activation_lock_fd",
     default=None,
 )
 
@@ -540,6 +549,26 @@ def _defer_termination() -> Iterator[None]:
 def _raise_if_termination_requested(state: _TerminationState) -> None:
     if state.requested and not state.deferred:
         raise _ExecutorInterrupted()
+
+
+@contextmanager
+def _default_sigchld() -> Iterator[None]:
+    previous = signal.getsignal(signal.SIGCHLD)
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    except (OSError, ValueError) as exc:
+        raise RuntimeExecutorError(
+            "cannot normalize SIGCHLD before executor child start"
+        ) from exc
+    try:
+        yield
+    finally:
+        try:
+            signal.signal(signal.SIGCHLD, previous)
+        except (OSError, ValueError) as exc:
+            raise RuntimeExecutorError(
+                "cannot restore SIGCHLD after executor child cleanup"
+            ) from exc
 
 
 def _wait_for_process_group_quiescence(pgid: int) -> None:
@@ -626,62 +655,72 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
 
     process: subprocess.Popen[bytes] | None = None
     cleanup_complete = False
+    lock_fd = _ACTIVE_LOCK_FD.get()
+    pass_fds = () if lock_fd is None else (lock_fd,)
 
-    with _controlled_termination(preserve_ignored=True) as termination:
-        try:
+    with _default_sigchld():
+        with _controlled_termination(preserve_ignored=True) as termination:
             try:
-                process = subprocess.Popen(
-                    list(argv),
-                    cwd="/",
-                    env=_minimal_env(target_closure),
-                    stdin=subprocess.DEVNULL,
-                    stdout=sys.stderr,
-                    stderr=sys.stderr,
-                    shell=False,
-                    close_fds=True,
-                    start_new_session=True,
-                )
-            except OSError as exc:
-                raise RuntimeExecutorError(
-                    f"executor command failed to start: {exc}"
-                ) from exc
+                try:
+                    process = subprocess.Popen(
+                        list(argv),
+                        cwd="/",
+                        env=_minimal_env(target_closure),
+                        stdin=subprocess.DEVNULL,
+                        stdout=sys.stderr,
+                        stderr=sys.stderr,
+                        shell=False,
+                        close_fds=True,
+                        pass_fds=pass_fds,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    raise RuntimeExecutorError(
+                        f"executor command failed to start: {exc}"
+                    ) from exc
 
-            _raise_if_termination_requested(termination)
-            try:
-                returncode = _wait_for_process_exit_without_reaping(process, argv)
-            except subprocess.TimeoutExpired as exc:
+                _raise_if_termination_requested(termination)
+                try:
+                    returncode = _wait_for_process_exit_without_reaping(process, argv)
+                except subprocess.TimeoutExpired as exc:
+                    _terminate_process_group(process)
+                    cleanup_complete = True
+                    raise RuntimeExecutorError(
+                        "executor command timed out; process group terminated"
+                    ) from exc
+                except _ProcessTerminationUncertain as exc:
+                    # Do not send a destructive signal when exit identity is
+                    # uncertain.  Keep the activation lock until the numeric
+                    # process group is positively absent.  Once quiescence is
+                    # proven, convert the status uncertainty into a normal
+                    # effect failure so the caller can recover prior state.
+                    _wait_for_process_group_quiescence(process.pid)
+                    cleanup_complete = True
+                    raise RuntimeExecutorError(
+                        "executor exit status is uncertain after process group "
+                        "quiescence; recovery required"
+                    ) from exc
+
+                # The leader remains unreaped until SIGKILL has been dispatched
+                # to the private process group.  Its zombie pins the PGID while
+                # same-group descendants are removed.  The inherited activation
+                # lock fd keeps the flock alive even if this executor itself dies.
                 _terminate_process_group(process)
                 cleanup_complete = True
+                _raise_if_termination_requested(termination)
+
+                if returncode != 0:
+                    raise RuntimeExecutorError(
+                        f"executor command returned non-zero status {returncode}"
+                    )
+                _raise_if_termination_requested(termination)
+            except (_ExecutorInterrupted, KeyboardInterrupt) as exc:
+                if process is not None and not cleanup_complete:
+                    _terminate_process_group(process)
+                    cleanup_complete = True
                 raise RuntimeExecutorError(
-                    "executor command timed out; process group terminated"
+                    "executor command interrupted; process group terminated"
                 ) from exc
-            except _ProcessTerminationUncertain:
-                # Exit identity is uncertain, so do not send another destructive
-                # signal to a numeric PGID that may already have been reused.
-                # Hold the activation lock until that PGID is observed absent.
-                _wait_for_process_group_quiescence(process.pid)
-                cleanup_complete = True
-                raise
-
-            # The leader remains unreaped until SIGKILL has been dispatched to
-            # the private process group.  Signals received during cleanup are
-            # merely recorded and are raised only after quiescence is proven.
-            _terminate_process_group(process)
-            cleanup_complete = True
-            _raise_if_termination_requested(termination)
-
-            if returncode != 0:
-                raise RuntimeExecutorError(
-                    f"executor command returned non-zero status {returncode}"
-                )
-            _raise_if_termination_requested(termination)
-        except (_ExecutorInterrupted, KeyboardInterrupt) as exc:
-            if process is not None and not cleanup_complete:
-                _terminate_process_group(process)
-                cleanup_complete = True
-            raise RuntimeExecutorError(
-                "executor command interrupted; process group terminated"
-            ) from exc
 
 
 @contextmanager
@@ -696,6 +735,7 @@ def _exclusive_lock() -> Iterator[None]:
         raise RuntimeExecutorError(f"cannot open activation lock: {exc}") from exc
     finally:
         os.umask(old_umask)
+    token = None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
@@ -704,9 +744,14 @@ def _exclusive_lock() -> Iterator[None]:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeExecutorError("another NixOS activation executor holds the lock") from exc
+            raise RuntimeExecutorError(
+                "another NixOS activation executor holds the lock"
+            ) from exc
+        token = _ACTIVE_LOCK_FD.set(fd)
         yield
     finally:
+        if token is not None:
+            _ACTIVE_LOCK_FD.reset(token)
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
@@ -902,6 +947,7 @@ def execute_activation(
         ]["test"]
         switch_argv = _switch_argv(plan["system_closure"], switch_mode)
         with _controlled_termination() as termination:
+            _raise_if_termination_requested(termination)
             try:
                 runner(switch_argv, plan["system_closure"])
                 _raise_if_termination_requested(termination)
@@ -940,20 +986,20 @@ def execute_activation(
                     f"test activation failed; prior closure recovery completed: "
                     f"{effect_error}"
                 ) from effect_error
-        return _execution_receipt(
-            request_id=request_id,
-            operation="activation",
-            mode="test",
-            plan=plan,
-            build_receipt_sha256=build_digest,
-            plan_sha256=plan_digest,
-            argv=switch_argv,
-            pre_current=pre_current,
-            pre_profile=pre_profile,
-            post_current=post_current,
-            post_profile=post_profile,
-            profile_mutated=False,
-        )
+            return _execution_receipt(
+                request_id=request_id,
+                operation="activation",
+                mode="test",
+                plan=plan,
+                build_receipt_sha256=build_digest,
+                plan_sha256=plan_digest,
+                argv=switch_argv,
+                pre_current=pre_current,
+                pre_profile=pre_profile,
+                post_current=post_current,
+                post_profile=post_profile,
+                profile_mutated=False,
+            )
 
 def execute_persistent_promotion(
     *,
@@ -1030,6 +1076,7 @@ def execute_persistent_promotion(
         profile_changed = False
         switch_argv = _switch_argv(plan["system_closure"], "switch")
         with _controlled_termination() as termination:
+            _raise_if_termination_requested(termination)
             try:
                 # The profile command may mutate successfully and still report a
                 # timeout/non-zero status.  Treat the profile as potentially changed
@@ -1083,20 +1130,20 @@ def execute_persistent_promotion(
                     f"persistent promotion failed; prior closure recovery completed: "
                     f"{effect_error}"
                 ) from effect_error
-        return _execution_receipt(
-            request_id=request_id,
-            operation="persistent-promotion",
-            mode="persistent",
-            plan=plan,
-            build_receipt_sha256=build_digest,
-            plan_sha256=plan_digest,
-            argv=switch_argv,
-            pre_current=pre_current,
-            pre_profile=pre_profile,
-            post_current=post_current,
-            post_profile=post_profile,
-            profile_mutated=True,
-        )
+            return _execution_receipt(
+                request_id=request_id,
+                operation="persistent-promotion",
+                mode="persistent",
+                plan=plan,
+                build_receipt_sha256=build_digest,
+                plan_sha256=plan_digest,
+                argv=switch_argv,
+                pre_current=pre_current,
+                pre_profile=pre_profile,
+                post_current=post_current,
+                post_profile=post_profile,
+                profile_mutated=True,
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1130,25 +1177,34 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "execute-activation":
-            result = execute_activation(
-                request_id=args.request_id,
-                expected_build_receipt_sha256=args.expected_build_receipt_sha256,
-                expected_authority_sha256=args.expected_authority_sha256,
-                expected_plan_sha256=args.expected_plan_sha256,
-                expected_target=args.expected_target,
-            )
-        elif args.command == "execute-persistent-promotion":
-            result = execute_persistent_promotion(
-                request_id=args.request_id,
-                expected_build_receipt_sha256=args.expected_build_receipt_sha256,
-                expected_authority_sha256=args.expected_authority_sha256,
-                expected_plan_sha256=args.expected_plan_sha256,
-                expected_target=args.expected_target,
-                expected_source_artifact_sha256=args.expected_source_artifact_sha256,
-            )
-        else:
-            parser.error("unsupported command")
+        with _controlled_termination() as termination:
+            if args.command == "execute-activation":
+                result = execute_activation(
+                    request_id=args.request_id,
+                    expected_build_receipt_sha256=args.expected_build_receipt_sha256,
+                    expected_authority_sha256=args.expected_authority_sha256,
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_target=args.expected_target,
+                )
+            elif args.command == "execute-persistent-promotion":
+                result = execute_persistent_promotion(
+                    request_id=args.request_id,
+                    expected_build_receipt_sha256=args.expected_build_receipt_sha256,
+                    expected_authority_sha256=args.expected_authority_sha256,
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_target=args.expected_target,
+                    expected_source_artifact_sha256=args.expected_source_artifact_sha256,
+                )
+            else:
+                parser.error("unsupported command")
+            # The mutation and its postconditions are already committed here.
+            # Do not let a late interactive signal erase success evidence:
+            # finish the canonical execution receipt while the flag-only
+            # handlers remain installed, then return success.
+            with _defer_termination():
+                sys.stdout.buffer.write(_canonical_json(result) + b"\n")
+                sys.stdout.buffer.flush()
+            del termination
     except (_ExecutorInterrupted, KeyboardInterrupt):
         print(
             "nixos day2 activation error: interrupted before controlled completion",
@@ -1158,7 +1214,6 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeExecutorError, managed_nix.ManagedNixError) as exc:
         print(f"nixos day2 activation error: {exc}", file=sys.stderr)
         return 1
-    sys.stdout.buffer.write(_canonical_json(result) + b"\n")
     return 0
 
 
