@@ -34,12 +34,17 @@ in
     environment.etc."heim-pc/nixos-day2-runtime-executor-contract.json".source =
       runtimeExecutorContractSource;
 
-    # This directory is intentionally root-only. The future capability broker may
-    # stage exact hash-bound requests here, but this module grants no caller the
-    # ability to do so and exposes no systemd service or broad root command.
+    # These directories are intentionally root-only. The future capability
+    # broker may stage exact hash-bound requests, but this module grants no
+    # caller the ability to do so and exposes no systemd service or broad root
+    # command. Each execution must be launched externally in the exact transient
+    # system scope required by runtime-executor-v1; the executor verifies that
+    # cgroup boundary before taking the activation lock and proves peer
+    # quiescence after each mutating child cleanup before recovery can proceed.
     systemd.tmpfiles.rules = [
       "d /run/heim-pc/nixos-activation 0700 root root -"
       "d /run/heim-pc/nixos-activation/requests 0700 root root -"
+      "d /nix/var/nix/gcroots/heim-pc-day2 0700 root root -"
     ];
   };
 }

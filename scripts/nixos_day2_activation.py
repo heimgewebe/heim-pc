@@ -72,9 +72,17 @@ REQUEST_ROOT = Path("/run/heim-pc/nixos-activation/requests")
 CURRENT_SYSTEM_LINK = Path("/run/current-system")
 SYSTEM_PROFILE_LINK = Path("/nix/var/nix/profiles/system")
 LOCK_PATH = Path("/run/lock/heim-pc-nixos-activation.lock")
+SELF_CGROUP_PATH = Path("/proc/self/cgroup")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+GC_ROOT_DIR = Path("/nix/var/nix/gcroots/heim-pc-day2")
+DEDICATED_SCOPE_TEMPLATE = "/system.slice/heim-pc-nixos-day2-{request_id}.scope"
 MAX_FILE_BYTES = 1024 * 1024
+MAX_CGROUP_BYTES = 4096
+MAX_CGROUP_PROCS_BYTES = 64 * 1024
+MAX_CGROUP_NODES = 128
 COMMAND_TIMEOUT_SECONDS = 1800
 PROCESS_GROUP_QUIESCENCE_POLL_SECONDS = 0.05
+NIX_RUNTIME_CONFIG = "substitute = false\nbuilders =\nmax-jobs = 0\n"
 _REQUIRED_REQUEST_FILES = (
     "build-receipt.json",
     "authority.json",
@@ -176,6 +184,21 @@ def _load_contract() -> dict[str, Any]:
         "current_system_link": str(CURRENT_SYSTEM_LINK),
         "persistent_profile_link": str(SYSTEM_PROFILE_LINK),
         "switch_relative_path": "bin/switch-to-configuration",
+        "prior_closure_nix_env_relative_path": "sw/bin/nix-env",
+        "prior_closure_nix_store_relative_path": "sw/bin/nix-store",
+        "target_closure_systemctl_relative_path": "sw/bin/systemctl",
+        "self_cgroup_path": str(SELF_CGROUP_PATH),
+        "cgroup_root": str(CGROUP_ROOT),
+        "required_systemd_scope_template": DEDICATED_SCOPE_TEMPLATE,
+        "scope_peer_quiescence_required": True,
+        "target_gc_root_directory": str(GC_ROOT_DIR),
+        "target_gc_root_registration": "nix-store-add-root-realise-existing-path",
+        "target_gc_root_lifetime": "effect-and-recovery-transaction",
+        "nix_runtime_config": {
+            "substitute": False,
+            "builders": [],
+            "max_jobs": 0,
+        },
         "command_timeout_seconds": COMMAND_TIMEOUT_SECONDS,
         "source_reevaluation_allowed": False,
         "branch_resolution_allowed": False,
@@ -215,6 +238,8 @@ def _load_contract() -> dict[str, Any]:
         "final_activation_receipt_established": False,
         "independent_runtime_readback_established": False,
         "persistent_state_observation_provenance_established": False,
+        "dedicated_scope_membership_established": True,
+        "transaction_gc_root_release_established": True,
     }:
         raise RuntimeExecutorError("runtime execution receipt boundary drifted")
 
@@ -238,7 +263,7 @@ def _load_contract() -> dict[str, Any]:
         raise RuntimeExecutorError("runtime forbidden-effect contract drifted")
 
     if raw.get("successor_boundaries") != [
-        "root-owned request staging and capability authorization",
+        "root-owned request staging, dedicated transient scope launch, and capability authorization",
         "boot-critical one-shot next-boot activation and post-boot proof",
         "independent live-closure readback",
         "independent persistent-state observation provenance",
@@ -410,6 +435,10 @@ def _switch_argv(closure: str, mode: str) -> list[str]:
         Path(closure) / "bin" / "switch-to-configuration",
         label="switch-to-configuration",
     )
+    _require_executable(
+        Path(closure) / "sw" / "bin" / "systemctl",
+        label="closure-bound systemctl",
+    )
     return [str(path), mode]
 
 
@@ -427,6 +456,36 @@ def _profile_set_argv(executor_closure: str, target_closure: str) -> list[str]:
     ]
 
 
+def _gc_root_path(request_id: str) -> Path:
+    if REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise RuntimeExecutorError("request id is invalid")
+    return GC_ROOT_DIR / request_id
+
+
+def _gc_root_argv(
+    executor_closure: str,
+    root_path: Path,
+    target_closure: str,
+) -> list[str]:
+    nix_store = _require_executable(
+        Path(executor_closure) / "sw" / "bin" / "nix-store",
+        label="closure-bound nix-store",
+    )
+    return [
+        str(nix_store),
+        "--realise",
+        target_closure,
+        "--add-root",
+        str(root_path),
+        "--option",
+        "substitute",
+        "false",
+        "--option",
+        "max-jobs",
+        "0",
+    ]
+
+
 def _minimal_env(target_closure: str) -> dict[str, str]:
     return {
         "HOME": "/root",
@@ -434,7 +493,138 @@ def _minimal_env(target_closure: str) -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         "PATH": f"{target_closure}/sw/bin",
         "NIX_PATH": "",
+        "NIX_CONFIG": NIX_RUNTIME_CONFIG,
     }
+
+
+def _expected_dedicated_scope(request_id: str) -> str:
+    if REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise RuntimeExecutorError("request id is invalid")
+    return DEDICATED_SCOPE_TEMPLATE.format(request_id=request_id)
+
+
+def _scope_cgroup_dir(scope_path: str) -> Path:
+    if (
+        not scope_path.startswith("/system.slice/")
+        or not scope_path.endswith(".scope")
+        or "\x00" in scope_path
+    ):
+        raise RuntimeExecutorError("dedicated transient scope path is invalid")
+    relative = Path(scope_path.lstrip("/"))
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise RuntimeExecutorError("dedicated transient scope path is invalid")
+    try:
+        root = CGROUP_ROOT.resolve(strict=True)
+        system_slice = (root / "system.slice").resolve(strict=True)
+        cgroup_dir = (root / relative).resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeExecutorError(
+            f"dedicated transient scope cgroup is unavailable: {exc}"
+        ) from exc
+    if system_slice.parent != root or cgroup_dir.parent != system_slice:
+        raise RuntimeExecutorError("dedicated transient scope escaped the cgroup boundary")
+    return cgroup_dir
+
+
+def _read_cgroup_procs(path: Path) -> set[int]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeExecutorError(
+            f"cannot read dedicated transient scope members: {exc}"
+        ) from exc
+    if len(raw) > MAX_CGROUP_PROCS_BYTES:
+        raise RuntimeExecutorError(
+            "dedicated transient scope membership exceeds safety boundary"
+        )
+    try:
+        text = raw.decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeExecutorError(
+            "dedicated transient scope membership is invalid"
+        ) from exc
+    pids: set[int] = set()
+    for line in text.splitlines():
+        if not line or not line.isdigit():
+            raise RuntimeExecutorError(
+                "dedicated transient scope membership is invalid"
+            )
+        pid = int(line)
+        if pid <= 0:
+            raise RuntimeExecutorError(
+                "dedicated transient scope membership is invalid"
+            )
+        pids.add(pid)
+    return pids
+
+
+def _read_scope_pids(cgroup_dir: Path) -> set[int]:
+    pending = [cgroup_dir]
+    visited = 0
+    pids: set[int] = set()
+    while pending:
+        current = pending.pop()
+        visited += 1
+        if visited > MAX_CGROUP_NODES:
+            raise RuntimeExecutorError(
+                "dedicated transient scope cgroup tree exceeds safety boundary"
+            )
+        pids.update(_read_cgroup_procs(current / "cgroup.procs"))
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            raise RuntimeExecutorError(
+                f"cannot enumerate dedicated transient scope cgroups: {exc}"
+            ) from exc
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+            except OSError as exc:
+                raise RuntimeExecutorError(
+                    f"cannot inspect dedicated transient scope cgroup: {exc}"
+                ) from exc
+    if not pids:
+        raise RuntimeExecutorError("dedicated transient scope membership is empty")
+    return pids
+
+
+def _require_scope_self_only(scope_path: str) -> Path:
+    cgroup_dir = _scope_cgroup_dir(scope_path)
+    if _read_scope_pids(cgroup_dir) != {os.getpid()}:
+        raise RuntimeExecutorError(
+            "dedicated transient scope must contain only the executor before mutation"
+        )
+    return cgroup_dir
+
+
+def _require_dedicated_scope(request_id: str) -> str:
+    expected = _expected_dedicated_scope(request_id)
+    try:
+        raw = SELF_CGROUP_PATH.read_bytes()
+    except OSError as exc:
+        raise RuntimeExecutorError(f"cannot read executor cgroup membership: {exc}") from exc
+    if len(raw) > MAX_CGROUP_BYTES:
+        raise RuntimeExecutorError("executor cgroup membership exceeds safety boundary")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeExecutorError("executor cgroup membership is not valid UTF-8") from exc
+    unified: list[str] = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+            unified.append(parts[2])
+    if unified != [expected]:
+        observed = unified[0] if len(unified) == 1 else "<ambiguous>"
+        raise RuntimeExecutorError(
+            "runtime activation executor must run in dedicated transient scope "
+            f"{expected}; observed {observed}"
+        )
+    _require_scope_self_only(expected)
+    return expected
 
 
 Runner = Callable[[Sequence[str], str], None]
@@ -470,6 +660,10 @@ _ACTIVE_TERMINATION_STATE: ContextVar[_TerminationState | None] = ContextVar(
 )
 _ACTIVE_LOCK_FD: ContextVar[int | None] = ContextVar(
     "heim_pc_day2_activation_lock_fd",
+    default=None,
+)
+_ACTIVE_SCOPE_CGROUP: ContextVar[Path | None] = ContextVar(
+    "heim_pc_day2_activation_scope_cgroup",
     default=None,
 )
 
@@ -586,6 +780,23 @@ def _wait_for_process_group_quiescence(pgid: int) -> None:
         time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
 
 
+def _wait_for_active_scope_peer_quiescence() -> None:
+    cgroup_dir = _ACTIVE_SCOPE_CGROUP.get()
+    if cgroup_dir is None:
+        return
+    while True:
+        try:
+            pids = _read_scope_pids(cgroup_dir)
+        except RuntimeExecutorError:
+            # Missing or malformed cgroup readback is uncertainty, not proof
+            # of quiescence. Keep the activation lock and retry fail-closed.
+            time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
+            continue
+        if pids == {os.getpid()}:
+            return
+        time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
+
+
 def _wait_for_process_exit_without_reaping(
     process: subprocess.Popen[bytes],
     argv: Sequence[str],
@@ -617,7 +828,6 @@ def _wait_for_process_exit_without_reaping(
             raise subprocess.TimeoutExpired(list(argv), COMMAND_TIMEOUT_SECONDS)
         time.sleep(min(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS, remaining))
 
-
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     # A completed Popen has already reaped its leader.  Never send a destructive
     # signal to that numeric PGID again: it may have been recycled meanwhile.
@@ -645,6 +855,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         except OSError:
             break
     _wait_for_process_group_quiescence(process.pid)
+    _wait_for_active_scope_peer_quiescence()
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:
@@ -695,6 +906,7 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                     # proven, convert the status uncertainty into a normal
                     # effect failure so the caller can recover prior state.
                     _wait_for_process_group_quiescence(process.pid)
+                    _wait_for_active_scope_peer_quiescence()
                     cleanup_complete = True
                     raise RuntimeExecutorError(
                         "executor exit status is uncertain after process group "
@@ -723,8 +935,109 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                 ) from exc
 
 
+def _run_gc_root_command(argv: Sequence[str], executor_closure: str) -> None:
+    _run_exact(argv, executor_closure)
+
+
+def _require_gc_root(path: Path, expected_target: str) -> str:
+    try:
+        st = path.lstat()
+        target = os.readlink(path)
+    except OSError as exc:
+        raise RuntimeExecutorError(f"transaction GC root is unavailable: {exc}") from exc
+    if not stat.S_ISLNK(st.st_mode) or st.st_uid != TRUSTED_UID:
+        raise RuntimeExecutorError("transaction GC root metadata is unsafe")
+    if target != expected_target:
+        raise RuntimeExecutorError(
+            "transaction GC root target mismatch: "
+            f"expected {expected_target}, observed {target}"
+        )
+    try:
+        resolved = str(path.resolve(strict=True))
+    except OSError as exc:
+        raise RuntimeExecutorError(
+            f"transaction GC root target is unavailable: {exc}"
+        ) from exc
+    if resolved != expected_target:
+        raise RuntimeExecutorError(
+            "transaction GC root resolved target mismatch: "
+            f"expected {expected_target}, observed {resolved}"
+        )
+    return target
+
+
+def _remove_gc_root(path: Path, expected_target: str) -> None:
+    _require_gc_root(path, expected_target)
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise RuntimeExecutorError(f"cannot remove transaction GC root: {exc}") from exc
+    if os.path.lexists(path):
+        raise RuntimeExecutorError("transaction GC root remained after unlink")
+
+
 @contextmanager
-def _exclusive_lock() -> Iterator[None]:
+def _pinned_target_closure(
+    *,
+    request_id: str,
+    prior_closure: str,
+    target_closure: str,
+) -> Iterator[tuple[Path, list[str]]]:
+    _require_secure_dir(GC_ROOT_DIR, label="transaction GC root directory")
+    root_path = _gc_root_path(request_id)
+    if os.path.lexists(root_path):
+        raise RuntimeExecutorError(
+            f"transaction GC root already exists: {root_path}"
+        )
+    root_argv = _gc_root_argv(prior_closure, root_path, target_closure)
+    try:
+        _run_gc_root_command(root_argv, prior_closure)
+        _require_gc_root(root_path, target_closure)
+    except _ProcessTerminationUncertain:
+        # Preserve any possibly-created root when the registration child is not
+        # proven quiescent. A safe leak is preferable to unpinning a path that
+        # might still be in use.
+        raise
+    except BaseException as setup_error:
+        if os.path.lexists(root_path):
+            try:
+                _remove_gc_root(root_path, target_closure)
+            except RuntimeExecutorError as cleanup_error:
+                raise RuntimeExecutorError(
+                    "target GC root setup failed and cleanup is incomplete: "
+                    f"{cleanup_error}"
+                ) from setup_error
+        raise
+
+    release_root = True
+    body_error: BaseException | None = None
+    try:
+        yield root_path, root_argv
+        _require_gc_root(root_path, target_closure)
+    except _ProcessTerminationUncertain:
+        release_root = False
+        raise
+    except BaseException as exc:
+        body_error = exc
+        raise
+    finally:
+        if release_root:
+            try:
+                _remove_gc_root(root_path, target_closure)
+            except RuntimeExecutorError as cleanup_error:
+                if body_error is not None:
+                    raise RuntimeExecutorError(
+                        f"{body_error}; target GC root cleanup failed: "
+                        f"{cleanup_error}"
+                    ) from cleanup_error
+                raise
+
+
+@contextmanager
+def _exclusive_lock(scope_path: str | None = None) -> Iterator[None]:
+    # Repeat the self-only cgroup proof immediately before lock acquisition so
+    # request parsing cannot hide a peer that entered the scope in between.
+    scope_cgroup = None if scope_path is None else _require_scope_self_only(scope_path)
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -735,7 +1048,8 @@ def _exclusive_lock() -> Iterator[None]:
         raise RuntimeExecutorError(f"cannot open activation lock: {exc}") from exc
     finally:
         os.umask(old_umask)
-    token = None
+    lock_token = None
+    scope_token = None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
@@ -747,15 +1061,26 @@ def _exclusive_lock() -> Iterator[None]:
             raise RuntimeExecutorError(
                 "another NixOS activation executor holds the lock"
             ) from exc
-        token = _ACTIVE_LOCK_FD.set(fd)
+        if (
+            scope_cgroup is not None
+            and _read_scope_pids(scope_cgroup) != {os.getpid()}
+        ):
+            raise RuntimeExecutorError(
+                "dedicated transient scope gained a peer before mutation"
+            )
+        lock_token = _ACTIVE_LOCK_FD.set(fd)
+        if scope_cgroup is not None:
+            scope_token = _ACTIVE_SCOPE_CGROUP.set(scope_cgroup)
         yield
     finally:
-        if token is not None:
-            _ACTIVE_LOCK_FD.reset(token)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        if scope_token is not None:
+            _ACTIVE_SCOPE_CGROUP.reset(scope_token)
+        if lock_token is not None:
+            _ACTIVE_LOCK_FD.reset(lock_token)
+        # Do not explicitly unlock the shared open-file description. Closing
+        # only this process' descriptor lets any inherited descendant retain
+        # the flock, keeping later executors fail-closed until every holder exits.
+        os.close(fd)
 
 
 def _require_root() -> None:
@@ -836,6 +1161,9 @@ def _execution_receipt(
     plan_sha256: str,
     argv: Sequence[str],
     effect_argvs: Sequence[Sequence[str]],
+    gc_root_argv: Sequence[str],
+    executor_cgroup: str,
+    target_gc_root: str,
     pre_current: str,
     pre_profile: str,
     post_current: str,
@@ -860,6 +1188,12 @@ def _execution_receipt(
         "effect_commands_sha256": _sha256_json(
             [list(effect_argv) for effect_argv in effect_argvs]
         ),
+        "gc_root_command_sha256": _sha256_json(list(gc_root_argv)),
+        "executor_cgroup": executor_cgroup,
+        "target_gc_root": target_gc_root,
+        "target_gc_root_released": True,
+        "dedicated_scope_membership_established": True,
+        "transaction_gc_root_release_established": True,
         "profile_mutated": profile_mutated,
         "pre_current_closure": pre_current,
         "pre_persistent_profile_closure": pre_profile,
@@ -885,7 +1219,6 @@ def _execution_receipt(
     receipt["receipt_sha256"] = _sha256_json(receipt)
     return receipt
 
-
 def execute_activation(
     *,
     request_id: str,
@@ -896,6 +1229,7 @@ def execute_activation(
     runner: Runner = _run_exact,
 ) -> dict[str, Any]:
     _require_root()
+    executor_cgroup = _require_dedicated_scope(request_id)
     build_receipt, authority, candidate_plan = _load_request(request_id)
     build_digest = _require_canonical_digest(
         build_receipt, expected_build_receipt_sha256, "build receipt"
@@ -911,7 +1245,7 @@ def execute_activation(
     ):
         raise RuntimeExecutorError("activation authority digest binding drifted")
 
-    with _exclusive_lock():
+    with _exclusive_lock(executor_cgroup):
         locked_build, locked_authority, locked_plan = _load_request(request_id)
         _require_canonical_digest(
             locked_build, expected_build_receipt_sha256, "locked build receipt"
@@ -946,65 +1280,73 @@ def execute_activation(
             plan["prior_closure"],
             label="persistent system profile before test activation",
         )
-        switch_mode = CONTRACT["supported_operations"]["activation"][
-            "executable_modes"
-        ]["test"]
-        switch_argv = _switch_argv(plan["system_closure"], switch_mode)
-        with _controlled_termination() as termination:
-            _raise_if_termination_requested(termination)
-            try:
-                runner(switch_argv, plan["system_closure"])
+        with _pinned_target_closure(
+            request_id=request_id,
+            prior_closure=plan["prior_closure"],
+            target_closure=plan["system_closure"],
+        ) as (target_gc_root, gc_root_argv):
+            switch_mode = CONTRACT["supported_operations"]["activation"][
+                "executable_modes"
+            ]["test"]
+            switch_argv = _switch_argv(plan["system_closure"], switch_mode)
+            with _controlled_termination() as termination:
                 _raise_if_termination_requested(termination)
-                post_current = _require_link_target(
-                    CURRENT_SYSTEM_LINK,
-                    plan["system_closure"],
-                    label="current system after test activation",
-                )
-                _raise_if_termination_requested(termination)
-                post_profile = _require_link_target(
-                    SYSTEM_PROFILE_LINK,
-                    plan["prior_closure"],
-                    label="persistent system profile after test activation",
-                )
-                _raise_if_termination_requested(termination)
-            except _ProcessTerminationUncertain:
-                raise
-            except (
-                _ExecutorInterrupted,
-                KeyboardInterrupt,
-                RuntimeExecutorError,
-            ) as effect_error:
                 try:
-                    _recover(
-                        prior_closure=plan["prior_closure"],
-                        mode="test",
-                        runner=runner,
-                        profile_may_have_changed=True,
+                    runner(switch_argv, plan["system_closure"])
+                    _raise_if_termination_requested(termination)
+                    post_current = _require_link_target(
+                        CURRENT_SYSTEM_LINK,
+                        plan["system_closure"],
+                        label="current system after test activation",
                     )
-                except RuntimeExecutorError as recovery_error:
+                    _raise_if_termination_requested(termination)
+                    post_profile = _require_link_target(
+                        SYSTEM_PROFILE_LINK,
+                        plan["prior_closure"],
+                        label="persistent system profile after test activation",
+                    )
+                    _raise_if_termination_requested(termination)
+                except _ProcessTerminationUncertain:
+                    raise
+                except (
+                    _ExecutorInterrupted,
+                    KeyboardInterrupt,
+                    RuntimeExecutorError,
+                ) as effect_error:
+                    try:
+                        _recover(
+                            prior_closure=plan["prior_closure"],
+                            mode="test",
+                            runner=runner,
+                            profile_may_have_changed=True,
+                        )
+                    except RuntimeExecutorError as recovery_error:
+                        raise RuntimeExecutorError(
+                            f"test activation failed and recovery is incomplete: "
+                            f"{effect_error}; {recovery_error}"
+                        ) from recovery_error
                     raise RuntimeExecutorError(
-                        f"test activation failed and recovery is incomplete: "
-                        f"{effect_error}; {recovery_error}"
-                    ) from recovery_error
-                raise RuntimeExecutorError(
-                    f"test activation failed; prior closure recovery completed: "
-                    f"{effect_error}"
-                ) from effect_error
-            return _execution_receipt(
-                request_id=request_id,
-                operation="activation",
-                mode="test",
-                plan=plan,
-                build_receipt_sha256=build_digest,
-                plan_sha256=plan_digest,
-                argv=switch_argv,
-                effect_argvs=(switch_argv,),
-                pre_current=pre_current,
-                pre_profile=pre_profile,
-                post_current=post_current,
-                post_profile=post_profile,
-                profile_mutated=False,
-            )
+                        f"test activation failed; prior closure recovery completed: "
+                        f"{effect_error}"
+                    ) from effect_error
+        return _execution_receipt(
+            request_id=request_id,
+            operation="activation",
+            mode="test",
+            plan=plan,
+            build_receipt_sha256=build_digest,
+            plan_sha256=plan_digest,
+            argv=switch_argv,
+            effect_argvs=(switch_argv,),
+            gc_root_argv=gc_root_argv,
+            executor_cgroup=executor_cgroup,
+            target_gc_root=str(target_gc_root),
+            pre_current=pre_current,
+            pre_profile=pre_profile,
+            post_current=post_current,
+            post_profile=post_profile,
+            profile_mutated=False,
+        )
 
 def execute_persistent_promotion(
     *,
@@ -1017,6 +1359,7 @@ def execute_persistent_promotion(
     runner: Runner = _run_exact,
 ) -> dict[str, Any]:
     _require_root()
+    executor_cgroup = _require_dedicated_scope(request_id)
     build_receipt, authority, candidate_plan = _load_request(request_id)
     build_digest = _require_canonical_digest(
         build_receipt, expected_build_receipt_sha256, "build receipt"
@@ -1031,7 +1374,7 @@ def execute_persistent_promotion(
         expected_source_artifact_sha256, "expected source artifact sha256"
     )
 
-    with _exclusive_lock():
+    with _exclusive_lock(executor_cgroup):
         locked_build, locked_authority, locked_plan = _load_request(request_id)
         _require_canonical_digest(
             locked_build, expected_build_receipt_sha256, "locked build receipt"
@@ -1078,79 +1421,86 @@ def execute_persistent_promotion(
             expected_prior_persistent_state_sha256=prior_state_digest,
             now=now,
         )
-        profile_changed = False
-        profile_set_argv = _profile_set_argv(
-            plan["prior_closure"], plan["system_closure"]
-        )
-        switch_argv = _switch_argv(plan["system_closure"], "switch")
-        with _controlled_termination() as termination:
-            _raise_if_termination_requested(termination)
-            try:
-                # The profile command may mutate successfully and still report a
-                # timeout/non-zero status.  Treat the profile as potentially changed
-                # before invoking it so every failure enters rollback.
-                profile_changed = True
-                runner(profile_set_argv, plan["prior_closure"])
-                _raise_if_termination_requested(termination)
-                _require_link_target(
-                    SYSTEM_PROFILE_LINK,
-                    plan["system_closure"],
-                    label="persistent system profile after promotion staging",
-                )
-                _raise_if_termination_requested(termination)
-                runner(switch_argv, plan["system_closure"])
-                _raise_if_termination_requested(termination)
-                post_current = _require_link_target(
-                    CURRENT_SYSTEM_LINK,
-                    plan["system_closure"],
-                    label="current system after persistent promotion",
-                )
-                _raise_if_termination_requested(termination)
-                post_profile = _require_link_target(
-                    SYSTEM_PROFILE_LINK,
-                    plan["system_closure"],
-                    label="persistent system profile after persistent promotion",
-                )
-                _raise_if_termination_requested(termination)
-            except _ProcessTerminationUncertain:
-                raise
-            except (
-                _ExecutorInterrupted,
-                KeyboardInterrupt,
-                RuntimeExecutorError,
-            ) as effect_error:
-                try:
-                    _recover(
-                        prior_closure=plan["prior_closure"],
-                        mode="switch",
-                        runner=runner,
-                        profile_may_have_changed=profile_changed,
-                    )
-                except RuntimeExecutorError as recovery_error:
-                    raise RuntimeExecutorError(
-                        f"persistent promotion failed and recovery is incomplete: "
-                        f"{effect_error}; {recovery_error}"
-                    ) from recovery_error
-                raise RuntimeExecutorError(
-                    f"persistent promotion failed; prior closure recovery completed: "
-                    f"{effect_error}"
-                ) from effect_error
-            return _execution_receipt(
-                request_id=request_id,
-                operation="persistent-promotion",
-                mode="persistent",
-                plan=plan,
-                build_receipt_sha256=build_digest,
-                plan_sha256=plan_digest,
-                argv=switch_argv,
-                effect_argvs=(profile_set_argv, switch_argv),
-                pre_current=pre_current,
-                pre_profile=pre_profile,
-                post_current=post_current,
-                post_profile=post_profile,
-                profile_mutated=True,
+        with _pinned_target_closure(
+            request_id=request_id,
+            prior_closure=plan["prior_closure"],
+            target_closure=plan["system_closure"],
+        ) as (target_gc_root, gc_root_argv):
+            profile_changed = False
+            profile_set_argv = _profile_set_argv(
+                plan["prior_closure"], plan["system_closure"]
             )
-
+            switch_argv = _switch_argv(plan["system_closure"], "switch")
+            with _controlled_termination() as termination:
+                _raise_if_termination_requested(termination)
+                try:
+                    # The profile command may mutate successfully and still report a
+                    # timeout/non-zero status. Treat the profile as potentially changed
+                    # before invoking it so every failure enters rollback.
+                    profile_changed = True
+                    runner(profile_set_argv, plan["prior_closure"])
+                    _raise_if_termination_requested(termination)
+                    _require_link_target(
+                        SYSTEM_PROFILE_LINK,
+                        plan["system_closure"],
+                        label="persistent system profile after promotion staging",
+                    )
+                    _raise_if_termination_requested(termination)
+                    runner(switch_argv, plan["system_closure"])
+                    _raise_if_termination_requested(termination)
+                    post_current = _require_link_target(
+                        CURRENT_SYSTEM_LINK,
+                        plan["system_closure"],
+                        label="current system after persistent promotion",
+                    )
+                    _raise_if_termination_requested(termination)
+                    post_profile = _require_link_target(
+                        SYSTEM_PROFILE_LINK,
+                        plan["system_closure"],
+                        label="persistent system profile after persistent promotion",
+                    )
+                    _raise_if_termination_requested(termination)
+                except _ProcessTerminationUncertain:
+                    raise
+                except (
+                    _ExecutorInterrupted,
+                    KeyboardInterrupt,
+                    RuntimeExecutorError,
+                ) as effect_error:
+                    try:
+                        _recover(
+                            prior_closure=plan["prior_closure"],
+                            mode="switch",
+                            runner=runner,
+                            profile_may_have_changed=profile_changed,
+                        )
+                    except RuntimeExecutorError as recovery_error:
+                        raise RuntimeExecutorError(
+                            f"persistent promotion failed and recovery is incomplete: "
+                            f"{effect_error}; {recovery_error}"
+                        ) from recovery_error
+                    raise RuntimeExecutorError(
+                        f"persistent promotion failed; prior closure recovery completed: "
+                        f"{effect_error}"
+                    ) from effect_error
+        return _execution_receipt(
+            request_id=request_id,
+            operation="persistent-promotion",
+            mode="persistent",
+            plan=plan,
+            build_receipt_sha256=build_digest,
+            plan_sha256=plan_digest,
+            argv=switch_argv,
+            effect_argvs=(profile_set_argv, switch_argv),
+            gc_root_argv=gc_root_argv,
+            executor_cgroup=executor_cgroup,
+            target_gc_root=str(target_gc_root),
+            pre_current=pre_current,
+            pre_profile=pre_profile,
+            post_current=post_current,
+            post_profile=post_profile,
+            profile_mutated=True,
+        )
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

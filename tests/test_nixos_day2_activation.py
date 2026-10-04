@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 from contextlib import nullcontext
@@ -154,8 +155,33 @@ def runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(executor, "TRUSTED_UID", trusted_uid)
     monkeypatch.setattr(executor.os, "geteuid", lambda: 0)
     monkeypatch.setattr(executor, "_utc_now", lambda: NOW)
-    monkeypatch.setattr(executor, "_exclusive_lock", lambda: nullcontext())
+    monkeypatch.setattr(
+        executor, "_exclusive_lock", lambda *_args, **_kwargs: nullcontext()
+    )
     monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+    monkeypatch.setattr(
+        executor,
+        "_require_dedicated_scope",
+        lambda request_id: executor._expected_dedicated_scope(request_id),
+    )
+    gc_root_dir = tmp_path / "gcroots"
+    gc_root_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(executor, "GC_ROOT_DIR", gc_root_dir)
+
+    def register_gc_root(argv, _executor_closure):
+        argv = list(argv)
+        root_path = Path(argv[argv.index("--add-root") + 1])
+        target = argv[argv.index("--realise") + 1]
+        root_path.symlink_to(target)
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", register_gc_root)
+
+    def simulated_gc_root(path: Path, expected_target: str) -> str:
+        if not path.is_symlink() or os.readlink(path) != expected_target:
+            raise executor.RuntimeExecutorError("simulated transaction GC root mismatch")
+        return expected_target
+
+    monkeypatch.setattr(executor, "_require_gc_root", simulated_gc_root)
 
     state = {"current": PRIOR, "profile": PRIOR}
 
@@ -375,6 +401,282 @@ def test_next_boot_is_deferred_before_live_state_readback_or_effect(
     assert calls == []
     assert state == {"current": PRIOR, "profile": PRIOR}
 
+def test_dedicated_scope_requires_exact_request_bound_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    membership = tmp_path / "self-cgroup"
+    cgroup_root = tmp_path / "sys-fs-cgroup"
+    request_id = "activation-scope"
+    expected = executor._expected_dedicated_scope(request_id)
+    scope_dir = cgroup_root / "system.slice" / f"heim-pc-nixos-day2-{request_id}.scope"
+    scope_dir.mkdir(parents=True)
+    (scope_dir / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    membership.write_text(f"0::{expected}\n", encoding="utf-8")
+    monkeypatch.setattr(executor, "SELF_CGROUP_PATH", membership)
+    monkeypatch.setattr(executor, "CGROUP_ROOT", cgroup_root)
+
+    assert executor._require_dedicated_scope(request_id) == expected
+
+    membership.write_text(
+        "0::/system.slice/heim-pc-nixos-day2-other.scope\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="must run in dedicated transient scope",
+    ):
+        executor._require_dedicated_scope(request_id)
+
+
+def test_dedicated_scope_rejects_peer_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    membership = tmp_path / "self-cgroup"
+    cgroup_root = tmp_path / "sys-fs-cgroup"
+    request_id = "activation-scope-peer"
+    expected = executor._expected_dedicated_scope(request_id)
+    scope_dir = cgroup_root / "system.slice" / f"heim-pc-nixos-day2-{request_id}.scope"
+    scope_dir.mkdir(parents=True)
+    (scope_dir / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+    escaped = scope_dir / "escaped"
+    escaped.mkdir()
+    (escaped / "cgroup.procs").write_text("424242\n", encoding="ascii")
+    membership.write_text(f"0::{expected}\n", encoding="utf-8")
+    monkeypatch.setattr(executor, "SELF_CGROUP_PATH", membership)
+    monkeypatch.setattr(executor, "CGROUP_ROOT", cgroup_root)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="must contain only the executor before mutation",
+    ):
+        executor._require_dedicated_scope(request_id)
+
+
+def test_active_scope_quiescence_waits_for_escaped_peer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cgroup_dir = tmp_path / "scope"
+    cgroup_dir.mkdir()
+    procs = cgroup_dir / "cgroup.procs"
+    procs.write_text(f"{os.getpid()}\n", encoding="ascii")
+    escaped = cgroup_dir / "escaped"
+    escaped.mkdir()
+    escaped_procs = escaped / "cgroup.procs"
+    escaped_procs.write_text("424242\n", encoding="ascii")
+    sleeps = 0
+
+    def resolve_peer(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        escaped_procs.write_text("", encoding="ascii")
+
+    monkeypatch.setattr(executor.time, "sleep", resolve_peer)
+    token = executor._ACTIVE_SCOPE_CGROUP.set(cgroup_dir)
+    try:
+        executor._wait_for_active_scope_peer_quiescence()
+    finally:
+        executor._ACTIVE_SCOPE_CGROUP.reset(token)
+
+    assert sleeps == 1
+
+
+def test_wrong_scope_is_rejected_before_request_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("0::/system.slice/not-the-bound-request.scope\n", encoding="utf-8")
+    monkeypatch.setattr(executor, "SELF_CGROUP_PATH", cgroup)
+    monkeypatch.setattr(executor.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        executor,
+        "_load_request",
+        lambda _request_id: pytest.fail("request must not be loaded"),
+    )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="must run in dedicated transient scope",
+    ):
+        executor.execute_activation(
+            request_id="activation-scope-guard",
+            expected_build_receipt_sha256="a" * 64,
+            expected_authority_sha256="b" * 64,
+            expected_plan_sha256="c" * 64,
+            expected_target=TARGET,
+        )
+
+
+def test_gc_root_argv_is_closure_bound_and_forbids_runtime_realization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+    root_path = Path("/nix/var/nix/gcroots/heim-pc-day2/request-01")
+    argv = executor._gc_root_argv(PRIOR, root_path, CLOSURE)
+
+    assert argv[0] == f"{PRIOR}/sw/bin/nix-store"
+    assert argv[argv.index("--realise") + 1] == CLOSURE
+    assert argv[argv.index("--add-root") + 1] == str(root_path)
+    assert ["--option", "substitute", "false"] == argv[
+        argv.index("--option") : argv.index("--option") + 3
+    ]
+    assert ["--option", "max-jobs", "0"] in [
+        argv[index : index + 3]
+        for index, value in enumerate(argv)
+        if value == "--option"
+    ]
+    env = executor._minimal_env(PRIOR)
+    assert env["NIX_CONFIG"] == "substitute = false\nbuilders =\nmax-jobs = 0\n"
+
+
+def test_target_gc_root_is_verified_for_context_lifetime_and_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "gcroots"
+    root_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
+    monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
+    monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+    events: list[str] = []
+
+    def register(argv, executor_closure):
+        assert executor_closure == PRIOR
+        argv = list(argv)
+        root_path = Path(argv[argv.index("--add-root") + 1])
+        target_value = argv[argv.index("--realise") + 1]
+        root_path.symlink_to(target_value)
+        events.append("protected")
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", register)
+    target = tmp_path / "target-closure"
+    target.mkdir()
+    target_closure = str(target.resolve())
+
+    with executor._pinned_target_closure(
+        request_id="gc-root-lifetime",
+        prior_closure=PRIOR,
+        target_closure=target_closure,
+    ) as (root_path, _argv):
+        assert root_path.is_symlink()
+        assert os.readlink(root_path) == target_closure
+        events.append("effect")
+
+    events.append("released")
+    assert not os.path.lexists(root_path)
+    assert events == ["protected", "effect", "released"]
+@pytest.mark.parametrize("wrong_target", [None, PRIOR])
+def test_target_gc_root_registration_must_materialize_exact_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    wrong_target: str | None,
+) -> None:
+    root_dir = tmp_path / "gcroots"
+    root_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
+    monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
+    monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+
+    def register(argv, _executor_closure):
+        if wrong_target is None:
+            return
+        argv = list(argv)
+        Path(argv[argv.index("--add-root") + 1]).symlink_to(wrong_target)
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", register)
+
+    with pytest.raises(executor.RuntimeExecutorError):
+        with executor._pinned_target_closure(
+            request_id="gc-root-invalid",
+            prior_closure=PRIOR,
+            target_closure=CLOSURE,
+        ):
+            pytest.fail("effect must not start without an exact GC root")
+
+    root_path = root_dir / "gc-root-invalid"
+    if os.path.lexists(root_path):
+        root_path.unlink()
+
+
+def test_target_gc_root_spans_failed_effect_and_verified_recovery(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    request_id = "activation-gc-recovery"
+    write_request(request_root, request_id, receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
+    root_path = executor.GC_ROOT_DIR / request_id
+    first = True
+
+    def failing_once(argv, target_closure):
+        nonlocal first
+        assert root_path.is_symlink()
+        if first:
+            first = False
+            state["current"] = CLOSURE
+            raise executor.RuntimeExecutorError("simulated effect failure")
+        runner(argv, target_closure)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_activation(
+            request_id=request_id,
+            runner=failing_once,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(root_path)
+
+
+def test_uncertain_effect_keeps_target_gc_root_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root_dir = tmp_path / "gcroots"
+    root_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
+    monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
+    monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+
+    target = tmp_path / "target-closure"
+    target.mkdir()
+    target_closure = str(target.resolve())
+
+    def register(argv, _executor_closure):
+        argv = list(argv)
+        Path(argv[argv.index("--add-root") + 1]).symlink_to(target_closure)
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", register)
+    root_path = root_dir / "gc-root-uncertain"
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="simulated uncertain mutation",
+    ):
+        with executor._pinned_target_closure(
+            request_id="gc-root-uncertain",
+            prior_closure=PRIOR,
+            target_closure=target_closure,
+        ):
+            raise executor._ProcessTerminationUncertain(
+                "simulated uncertain mutation"
+            )
+
+    assert root_path.is_symlink()
+    assert os.readlink(root_path) == target_closure
+    root_path.unlink()
+
+
 def test_persistent_state_digest_changes_with_runtime_state() -> None:
     prior = executor.persistent_state_sha256(
         target=TARGET,
@@ -441,6 +743,24 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert runtime["rootbroker_authorization_implemented_here"] is False
     assert runtime["request_staging_implemented_here"] is False
     assert runtime["reboot_implemented_here"] is False
+    assert runtime["self_cgroup_path"] == "/proc/self/cgroup"
+    assert runtime["cgroup_root"] == "/sys/fs/cgroup"
+    assert runtime["scope_peer_quiescence_required"] is True
+    assert runtime["required_systemd_scope_template"] == (
+        "/system.slice/heim-pc-nixos-day2-{request_id}.scope"
+    )
+    assert runtime["target_gc_root_directory"] == (
+        "/nix/var/nix/gcroots/heim-pc-day2"
+    )
+    assert runtime["target_gc_root_lifetime"] == "effect-and-recovery-transaction"
+    assert runtime["prior_closure_nix_env_relative_path"] == "sw/bin/nix-env"
+    assert runtime["prior_closure_nix_store_relative_path"] == "sw/bin/nix-store"
+    assert runtime["target_closure_systemctl_relative_path"] == "sw/bin/systemctl"
+    assert runtime["nix_runtime_config"] == {
+        "substitute": False,
+        "builders": [],
+        "max_jobs": 0,
+    }
     activation = contract["supported_operations"]["activation"]
     assert activation["executable_modes"] == {"test": "test"}
     assert activation["deferred_modes"] == {
@@ -476,6 +796,11 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert (
         contract["execution_receipt"]["independent_runtime_readback_established"]
         is False
+    )
+    assert contract["execution_receipt"]["dedicated_scope_membership_established"] is True
+    assert (
+        contract["execution_receipt"]["transaction_gc_root_release_established"]
+        is True
     )
 
 
@@ -676,7 +1001,6 @@ def test_wait_for_process_exit_observes_without_reaping(
             executor.os.WEXITED | executor.os.WNOWAIT | executor.os.WNOHANG,
         )
     ]
-
 
 def test_run_exact_kills_group_before_reaping_nonzero_leader(
     monkeypatch: pytest.MonkeyPatch,
@@ -993,6 +1317,136 @@ os.kill(os.getpid(), signal.SIGKILL)
         if parent.poll() is None:
             parent.kill()
             parent.wait(timeout=5)
+        if contender_fd is not None:
+            try:
+                fcntl.flock(contender_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(contender_fd)
+
+
+def test_exclusive_lock_rechecks_scope_after_flock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "activation.lock"
+    cgroup_dir = tmp_path / "scope"
+    cgroup_dir.mkdir()
+    procs = cgroup_dir / "cgroup.procs"
+    procs.write_text(f"{os.getpid()}\n", encoding="ascii")
+    monkeypatch.setattr(executor, "LOCK_PATH", lock_path)
+    monkeypatch.setattr(
+        executor,
+        "_require_scope_self_only",
+        lambda _scope_path: cgroup_dir,
+    )
+    real_fstat = executor.os.fstat
+    real_flock = fcntl.flock
+
+    class RootOwnedStat:
+        def __init__(self, fd: int) -> None:
+            self._stat = real_fstat(fd)
+
+        @property
+        def st_uid(self) -> int:
+            return 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._stat, name)
+
+    monkeypatch.setattr(executor.os, "fstat", lambda fd: RootOwnedStat(fd))
+
+    def inject_peer_after_lock(fd: int, operation: int) -> None:
+        real_flock(fd, operation)
+        if operation & fcntl.LOCK_EX:
+            procs.write_text(f"{os.getpid()}\n424242\n", encoding="ascii")
+
+    monkeypatch.setattr(executor.fcntl, "flock", inject_peer_after_lock)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="scope gained a peer before mutation",
+    ):
+        with executor._exclusive_lock("/system.slice/heim-pc-nixos-day2-test.scope"):
+            pytest.fail("scope drift must block before mutation")
+
+
+def test_exclusive_lock_close_keeps_inherited_detached_holder_locked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "activation.lock"
+    monkeypatch.setattr(executor, "LOCK_PATH", lock_path)
+    real_fstat = executor.os.fstat
+
+    class RootOwnedStat:
+        def __init__(self, fd: int) -> None:
+            self._stat = real_fstat(fd)
+
+        @property
+        def st_uid(self) -> int:
+            return 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._stat, name)
+
+    monkeypatch.setattr(executor.os, "fstat", lambda fd: RootOwnedStat(fd))
+    child: subprocess.Popen[bytes] | None = None
+    contender_fd: int | None = None
+    try:
+        with executor._exclusive_lock():
+            fd = executor._ACTIVE_LOCK_FD.get()
+            assert fd is not None
+            child = executor.subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time; "
+                        "os.setsid(); "
+                        f"os.fstat({fd}); "
+                        "time.sleep(30)"
+                    ),
+                ],
+                pass_fds=(fd,),
+                close_fds=True,
+            )
+            deadline = executor.time.monotonic() + 5
+            while True:
+                if child.poll() is not None:
+                    pytest.fail("detached lock holder exited before readiness")
+                try:
+                    detached = os.getpgid(child.pid) == child.pid
+                except ProcessLookupError:
+                    pytest.fail("detached lock holder disappeared before readiness")
+                if detached:
+                    break
+                if executor.time.monotonic() >= deadline:
+                    pytest.fail("detached lock holder did not enter its own session")
+                executor.time.sleep(0.01)
+
+        contender_fd = os.open(lock_path, os.O_RDWR)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(contender_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        assert child is not None
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        deadline = executor.time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(contender_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if executor.time.monotonic() >= deadline:
+                    pytest.fail("inherited holder did not release flock after exit")
+                executor.time.sleep(0.01)
+    finally:
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=5)
         if contender_fd is not None:
             try:
                 fcntl.flock(contender_fd, fcntl.LOCK_UN)
@@ -1757,6 +2211,16 @@ def test_runtime_contract_loader_rejects_security_boundary_drift(
         ),
         lambda value: value["runtime"].__setitem__(
             "lock_path", "/run/lock/other.lock"
+        ),
+        lambda value: value["runtime"].__setitem__("cgroup_root", "/tmp/cgroup"),
+        lambda value: value["runtime"].__setitem__(
+            "scope_peer_quiescence_required", False
+        ),
+        lambda value: value["runtime"].__setitem__(
+            "required_systemd_scope_template", "/system.slice/unsafe.scope"
+        ),
+        lambda value: value["runtime"].__setitem__(
+            "target_gc_root_directory", "/tmp/gcroots"
         ),
         lambda value: value["supported_operations"]["activation"].__setitem__(
             "executor_authority", "broad-root"

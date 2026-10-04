@@ -45,6 +45,21 @@
     "current_system_link": "/run/current-system",
     "persistent_profile_link": "/nix/var/nix/profiles/system",
     "switch_relative_path": "bin/switch-to-configuration",
+    "prior_closure_nix_env_relative_path": "sw/bin/nix-env",
+    "prior_closure_nix_store_relative_path": "sw/bin/nix-store",
+    "target_closure_systemctl_relative_path": "sw/bin/systemctl",
+    "self_cgroup_path": "/proc/self/cgroup",
+    "cgroup_root": "/sys/fs/cgroup",
+    "required_systemd_scope_template": "/system.slice/heim-pc-nixos-day2-{request_id}.scope",
+    "scope_peer_quiescence_required": true,
+    "target_gc_root_directory": "/nix/var/nix/gcroots/heim-pc-day2",
+    "target_gc_root_registration": "nix-store-add-root-realise-existing-path",
+    "target_gc_root_lifetime": "effect-and-recovery-transaction",
+    "nix_runtime_config": {
+      "substitute": false,
+      "builders": [],
+      "max_jobs": 0
+    },
     "command_timeout_seconds": 1800,
     "source_reevaluation_allowed": false,
     "branch_resolution_allowed": false,
@@ -63,7 +78,9 @@
     "result": "executed",
     "final_activation_receipt_established": false,
     "independent_runtime_readback_established": false,
-    "persistent_state_observation_provenance_established": false
+    "persistent_state_observation_provenance_established": false,
+    "dedicated_scope_membership_established": true,
+    "transaction_gc_root_release_established": true
   },
   "forbidden_effects": [
     "source-reevaluation",
@@ -83,7 +100,7 @@
     "firmware-flash"
   ],
   "successor_boundaries": [
-    "root-owned request staging and capability authorization",
+    "root-owned request staging, dedicated transient scope launch, and capability authorization",
     "boot-critical one-shot next-boot activation and post-boot proof",
     "independent live-closure readback",
     "independent persistent-state observation provenance",
