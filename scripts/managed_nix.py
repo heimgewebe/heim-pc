@@ -1262,6 +1262,10 @@ def validate_activation_authority(
     mode = authority.get("mode")
     if mode not in ALLOWED_ACTIVATION_MODES:
         raise ManagedNixError("activation mode is invalid")
+    if receipt["effect_scope"] == "boot-critical" and mode != "next-boot":
+        raise ManagedNixError(
+            "boot-critical activation requires the next-boot path"
+        )
 
     source_revision = _require_revision(authority.get("source_revision"))
     closure = _require_closure(authority.get("system_closure"))

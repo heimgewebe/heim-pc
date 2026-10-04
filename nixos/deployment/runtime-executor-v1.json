@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_activation_runtime_executor_contract",
+  "component": "heim-pc-nixos-activation-executor",
+  "supported_operations": {
+    "activation": {
+      "plan_kind": "heim_pc.nixos_activation_plan",
+      "executor_authority": "successor-task-typed-activation-only",
+      "executable_modes": {
+        "test": "test"
+      },
+      "deferred_modes": {
+        "next-boot": "requires-reviewed-one-shot-boot-state-contract"
+      }
+    },
+    "persistent-promotion": {
+      "plan_kind": "heim_pc.nixos_persistent_promotion_plan_v2",
+      "executor_authority": "successor-task-typed-persistent-promotion-only",
+      "switch_argument": "switch",
+      "boot_critical_requires_next_boot_successor_proof": true,
+      "boot_critical_execution_implemented_here": false
+    }
+  },
+  "request": {
+    "root": "/run/heim-pc/nixos-activation/requests",
+    "request_id_pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+    "required_files": [
+      "build-receipt.json",
+      "authority.json",
+      "plan.json"
+    ],
+    "directory_mode": "0700",
+    "file_mode": "0600",
+    "owner_uid": 0,
+    "single_link_required": true,
+    "symlinks_allowed": false,
+    "max_file_bytes": 1048576,
+    "external_expected_sha256_required": true,
+    "external_target_binding_required": true,
+    "external_source_artifact_binding_required_for_persistent_promotion": true
+  },
+  "runtime": {
+    "root_required": true,
+    "lock_path": "/run/lock/heim-pc-nixos-activation.lock",
+    "current_system_link": "/run/current-system",
+    "persistent_profile_link": "/nix/var/nix/profiles/system",
+    "switch_relative_path": "bin/switch-to-configuration",
+    "command_timeout_seconds": 1800,
+    "source_reevaluation_allowed": false,
+    "branch_resolution_allowed": false,
+    "lock_resolution_allowed": false,
+    "remote_input_resolution_allowed": false,
+    "shell_execution_allowed": false,
+    "nix_rebuild_allowed": false,
+    "broad_root_shell_allowed": false,
+    "request_staging_implemented_here": false,
+    "rootbroker_authorization_implemented_here": false,
+    "reboot_implemented_here": false
+  },
+  "execution_receipt": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_activation_runtime_execution_v1",
+    "result": "executed",
+    "final_activation_receipt_established": false,
+    "independent_runtime_readback_established": false,
+    "persistent_state_observation_provenance_established": false
+  },
+  "forbidden_effects": [
+    "source-reevaluation",
+    "git-resolution",
+    "branch-resolution",
+    "nix-input-resolution",
+    "nixos-rebuild",
+    "shell-eval",
+    "reboot",
+    "partition-table-mutation",
+    "filesystem-create-destroy",
+    "luks-container-mutation",
+    "luks-metadata-mutation",
+    "luks-keyslot-mutation",
+    "efi-key-material-mutation",
+    "secure-boot-key-material-mutation",
+    "firmware-flash"
+  ],
+  "successor_boundaries": [
+    "root-owned request staging and capability authorization",
+    "boot-critical one-shot next-boot activation and post-boot proof",
+    "independent live-closure readback",
+    "independent persistent-state observation provenance",
+    "controlled reboot and post-boot readback",
+    "final activation or persistent-promotion receipt publication"
+  ],
+  "persistent_state": {
+    "schema_version": 1,
+    "kind": "heim_pc.nixos_persistent_runtime_state_v1",
+    "algorithm": "canonical-json-sha256-v1",
+    "fields": [
+      "schema_version",
+      "kind",
+      "target",
+      "current_closure",
+      "persistent_profile_closure"
+    ],
+    "target_source": "externally-bound-plan-target",
+    "current_closure_source": "/run/current-system",
+    "persistent_profile_closure_source": "/nix/var/nix/profiles/system"
+  }
+}
