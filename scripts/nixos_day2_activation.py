@@ -481,11 +481,63 @@ def _controlled_termination() -> Iterator[None]:
 
 @contextmanager
 def _ignore_termination_signals() -> Iterator[None]:
-    previous = _set_termination_handlers(signal.SIG_IGN)
+    # Recovery begins while the controlled handlers are still installed.  A
+    # second termination request may therefore raise _ExecutorInterrupted just
+    # before the mask takes effect; retry that transition until both signals are
+    # blocked, then change both dispositions to SIG_IGN before unblocking.
+    while True:
+        try:
+            previous_mask = signal.pthread_sigmask(
+                signal.SIG_BLOCK,
+                _TERMINATION_SIGNALS,
+            )
+            break
+        except _ExecutorInterrupted:
+            continue
+        except (AttributeError, OSError, ValueError) as exc:
+            raise RuntimeExecutorError(
+                "cannot block termination signals before recovery"
+            ) from exc
+
+    previous: dict[int, Any] = {}
     try:
+        try:
+            for signum in _TERMINATION_SIGNALS:
+                previous[signum] = signal.getsignal(signum)
+                signal.signal(signum, signal.SIG_IGN)
+        except (OSError, ValueError) as exc:
+            for signum, prior in previous.items():
+                signal.signal(signum, prior)
+            raise RuntimeExecutorError(
+                "cannot install non-interruptible recovery handlers"
+            ) from exc
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except (OSError, ValueError) as exc:
+            raise RuntimeExecutorError(
+                "cannot restore termination signal mask for recovery"
+            ) from exc
         yield
     finally:
-        _restore_termination_handlers(previous)
+        try:
+            restore_mask = signal.pthread_sigmask(
+                signal.SIG_BLOCK,
+                _TERMINATION_SIGNALS,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise RuntimeExecutorError(
+                "cannot block termination signals while leaving recovery"
+            ) from exc
+        try:
+            for signum, prior in previous.items():
+                signal.signal(signum, prior)
+        finally:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
+            except (OSError, ValueError) as exc:
+                raise RuntimeExecutorError(
+                    "cannot restore termination signal mask after recovery"
+                ) from exc
 
 
 def _wait_for_process_group_quiescence(pgid: int) -> None:
@@ -837,8 +889,8 @@ def execute_activation(
             "executable_modes"
         ]["test"]
         switch_argv = _switch_argv(plan["system_closure"], switch_mode)
-        try:
-            with _controlled_termination():
+        with _controlled_termination():
+            try:
                 runner(switch_argv, plan["system_closure"])
                 post_current = _require_link_target(
                     CURRENT_SYSTEM_LINK,
@@ -850,24 +902,29 @@ def execute_activation(
                     plan["prior_closure"],
                     label="persistent system profile after test activation",
                 )
-        except _ProcessTerminationUncertain:
-            raise
-        except (_ExecutorInterrupted, KeyboardInterrupt, RuntimeExecutorError) as effect_error:
-            try:
-                _recover(
-                    prior_closure=plan["prior_closure"],
-                    mode="test",
-                    runner=runner,
-                    profile_may_have_changed=True,
-                )
-            except RuntimeExecutorError as recovery_error:
+            except _ProcessTerminationUncertain:
+                raise
+            except (
+                _ExecutorInterrupted,
+                KeyboardInterrupt,
+                RuntimeExecutorError,
+            ) as effect_error:
+                try:
+                    _recover(
+                        prior_closure=plan["prior_closure"],
+                        mode="test",
+                        runner=runner,
+                        profile_may_have_changed=True,
+                    )
+                except RuntimeExecutorError as recovery_error:
+                    raise RuntimeExecutorError(
+                        f"test activation failed and recovery is incomplete: "
+                        f"{effect_error}; {recovery_error}"
+                    ) from recovery_error
                 raise RuntimeExecutorError(
-                    f"test activation failed and recovery is incomplete: "
-                    f"{effect_error}; {recovery_error}"
-                ) from recovery_error
-            raise RuntimeExecutorError(
-                f"test activation failed; prior closure recovery completed: {effect_error}"
-            ) from effect_error
+                    f"test activation failed; prior closure recovery completed: "
+                    f"{effect_error}"
+                ) from effect_error
         return _execution_receipt(
             request_id=request_id,
             operation="activation",
@@ -957,8 +1014,8 @@ def execute_persistent_promotion(
         )
         profile_changed = False
         switch_argv = _switch_argv(plan["system_closure"], "switch")
-        try:
-            with _controlled_termination():
+        with _controlled_termination():
+            try:
                 # The profile command may mutate successfully and still report a
                 # timeout/non-zero status.  Treat the profile as potentially changed
                 # before invoking it so every failure enters rollback.
@@ -983,24 +1040,29 @@ def execute_persistent_promotion(
                     plan["system_closure"],
                     label="persistent system profile after persistent promotion",
                 )
-        except _ProcessTerminationUncertain:
-            raise
-        except (_ExecutorInterrupted, KeyboardInterrupt, RuntimeExecutorError) as effect_error:
-            try:
-                _recover(
-                    prior_closure=plan["prior_closure"],
-                    mode="switch",
-                    runner=runner,
-                    profile_may_have_changed=profile_changed,
-                )
-            except RuntimeExecutorError as recovery_error:
+            except _ProcessTerminationUncertain:
+                raise
+            except (
+                _ExecutorInterrupted,
+                KeyboardInterrupt,
+                RuntimeExecutorError,
+            ) as effect_error:
+                try:
+                    _recover(
+                        prior_closure=plan["prior_closure"],
+                        mode="switch",
+                        runner=runner,
+                        profile_may_have_changed=profile_changed,
+                    )
+                except RuntimeExecutorError as recovery_error:
+                    raise RuntimeExecutorError(
+                        f"persistent promotion failed and recovery is incomplete: "
+                        f"{effect_error}; {recovery_error}"
+                    ) from recovery_error
                 raise RuntimeExecutorError(
-                    f"persistent promotion failed and recovery is incomplete: "
-                    f"{effect_error}; {recovery_error}"
-                ) from recovery_error
-            raise RuntimeExecutorError(
-                f"persistent promotion failed; prior closure recovery completed: {effect_error}"
-            ) from effect_error
+                    f"persistent promotion failed; prior closure recovery completed: "
+                    f"{effect_error}"
+                ) from effect_error
         return _execution_receipt(
             request_id=request_id,
             operation="persistent-promotion",

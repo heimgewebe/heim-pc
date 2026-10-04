@@ -835,6 +835,119 @@ def test_terminate_process_group_uses_quiescence_after_wait_error(
 
 
 
+def test_ignore_termination_signals_masks_installation_and_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+    prior_mask = {executor.signal.SIGUSR1}
+    prior_handlers = {
+        executor.signal.SIGINT: object(),
+        executor.signal.SIGTERM: object(),
+    }
+
+    def fake_mask(how, signals):
+        events.append(("mask", how, frozenset(signals)))
+        if how == executor.signal.SIG_BLOCK:
+            return prior_mask
+        assert how == executor.signal.SIG_SETMASK
+        return set()
+
+    def fake_getsignal(signum):
+        return prior_handlers[signum]
+
+    def fake_signal(signum, handler):
+        events.append(("handler", signum, handler))
+        return prior_handlers.get(signum)
+
+    monkeypatch.setattr(executor.signal, "pthread_sigmask", fake_mask)
+    monkeypatch.setattr(executor.signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(executor.signal, "signal", fake_signal)
+
+    with executor._ignore_termination_signals():
+        events.append(("body",))
+
+    blocked = frozenset((executor.signal.SIGINT, executor.signal.SIGTERM))
+    assert events[0] == ("mask", executor.signal.SIG_BLOCK, blocked)
+    assert events[1:3] == [
+        ("handler", executor.signal.SIGINT, executor.signal.SIG_IGN),
+        ("handler", executor.signal.SIGTERM, executor.signal.SIG_IGN),
+    ]
+    assert events[3] == (
+        "mask",
+        executor.signal.SIG_SETMASK,
+        frozenset(prior_mask),
+    )
+    assert events[4] == ("body",)
+    assert events[5] == ("mask", executor.signal.SIG_BLOCK, blocked)
+    assert events[6:8] == [
+        ("handler", executor.signal.SIGINT, prior_handlers[executor.signal.SIGINT]),
+        ("handler", executor.signal.SIGTERM, prior_handlers[executor.signal.SIGTERM]),
+    ]
+    assert events[8] == (
+        "mask",
+        executor.signal.SIG_SETMASK,
+        frozenset(prior_mask),
+    )
+
+
+def test_recovery_entry_retries_second_controlled_termination(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    write_request(request_root, "activation-recovery-entry-signal", receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
+
+    original_resolve = executor._resolve_link
+    original_mask = executor.signal.pthread_sigmask
+    failed = False
+    block_attempts = 0
+
+    def fail_post_readback(path: Path, *, label: str) -> str:
+        nonlocal failed
+        if (
+            not failed
+            and path == executor.CURRENT_SYSTEM_LINK
+            and state["current"] == CLOSURE
+        ):
+            failed = True
+            raise executor.RuntimeExecutorError("simulated post-effect readback failure")
+        return original_resolve(path, label=label)
+
+    def interrupt_first_recovery_mask(how, signals):
+        nonlocal block_attempts
+        if how == executor.signal.SIG_BLOCK:
+            block_attempts += 1
+            if block_attempts == 1:
+                handler = executor.signal.getsignal(executor.signal.SIGTERM)
+                assert callable(handler)
+                handler(executor.signal.SIGTERM, None)
+        return original_mask(how, signals)
+
+    monkeypatch.setattr(executor, "_resolve_link", fail_post_readback)
+    monkeypatch.setattr(
+        executor.signal,
+        "pthread_sigmask",
+        interrupt_first_recovery_mask,
+    )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_activation(
+            request_id="activation-recovery-entry-signal",
+            runner=runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert block_attempts >= 2
+    assert state == {"current": PRIOR, "profile": PRIOR}
+
+
 def test_run_exact_preserves_inherited_ignored_termination_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
