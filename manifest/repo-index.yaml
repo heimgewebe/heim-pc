@@ -12,6 +12,7 @@ zones:
       - model.md
       - system-constitution.md
       - nixos-executor-2026.md
+      - nixos-dual-os-restplan-2026.md
       - security.md
       - zones.md
       - drift-policy.md

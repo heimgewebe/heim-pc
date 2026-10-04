@@ -1,3 +1,14 @@
+---
+id: nixos-dual-os-restplan-2026
+role: action
+status: canonical
+last_reviewed: 2026-10-04
+depends_on:
+  - nixos-executor-2026
+verifies_with:
+  - scripts/ci/check_repo_index_consistency.py
+---
+
 # Heim-PC NixOS Dual-OS Restplan 2026
 
 ## Ziel

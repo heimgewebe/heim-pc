@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2753cd668739c6c7972a42bc843d40a9e0af0736ae9ed71b54ce52a43e78fbc8"
+SOURCE_SNAPSHOT_SHA256 = "6e07629d4e3554d44662af2761f16cdd812a8174622e085711648b3b4f36f150"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -119,7 +119,8 @@ class T(unittest.TestCase):
     def test_firstboot_vm_proof_is_exact_source_headless_and_input_free(self):
         flake = (SOURCE / "flake.nix").read_text()
         proof = (SOURCE / "tests/firstboot-credentials.nix").read_text()
-        self.assertIn("eb260b0b82199e380d881b2436e403dcda64ca32", flake)
+        self.assertIn("inherit pkgs sourceRevision;", flake)
+        self.assertNotIn("eb260b0b82199e380d881b2436e403dcda64ca32", flake)
         self.assertIn("expectedHostSha256", proof)
         self.assertIn("expectedHelperSha256", proof)
         self.assertIn('${pkgs.shadow}/bin/chpasswd "$@"', proof)
