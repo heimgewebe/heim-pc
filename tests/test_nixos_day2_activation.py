@@ -276,6 +276,48 @@ def test_boot_critical_persistent_promotion_fails_before_runtime_effect(runtime)
     assert calls == []
     assert state == {"current": PRIOR, "profile": PRIOR}
 
+def test_persistent_promotion_receipt_binds_all_effect_commands(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    write_request(
+        request_root,
+        "promotion-command-digest",
+        receipt,
+        authority,
+        plan,
+    )
+    _allow_future_promotion(monkeypatch)
+    calls: list[list[str]] = []
+
+    def recording_runner(argv, target_closure):
+        calls.append(list(argv))
+        runner(argv, target_closure)
+
+    result = executor.execute_persistent_promotion(
+        request_id="promotion-command-digest",
+        expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+        runner=recording_runner,
+        **bindings(receipt, authority, plan),
+    )
+
+    profile_set_argv = executor._profile_set_argv(PRIOR, CLOSURE)
+    switch_argv = executor._switch_argv(CLOSURE, "switch")
+    assert calls == [profile_set_argv, switch_argv]
+    assert result["command_sha256"] == executor._sha256_json(switch_argv)
+    assert result["effect_commands_sha256"] == executor._sha256_json(
+        [profile_set_argv, switch_argv]
+    )
+    assert result["effect_commands_sha256"] != executor._sha256_json(
+        [switch_argv, profile_set_argv]
+    )
+    assert state == {"current": CLOSURE, "profile": CLOSURE}
+
+
 def test_next_boot_digest_drift_fails_before_deferred_runtime_path(runtime) -> None:
     request_root, state, runner = runtime
     receipt = build_receipt()

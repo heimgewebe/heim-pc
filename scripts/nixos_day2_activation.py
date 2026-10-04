@@ -835,6 +835,7 @@ def _execution_receipt(
     build_receipt_sha256: str,
     plan_sha256: str,
     argv: Sequence[str],
+    effect_argvs: Sequence[Sequence[str]],
     pre_current: str,
     pre_profile: str,
     post_current: str,
@@ -856,6 +857,9 @@ def _execution_receipt(
         "authority_sha256": plan["authority_sha256"],
         "plan_sha256": plan_sha256,
         "command_sha256": _sha256_json(list(argv)),
+        "effect_commands_sha256": _sha256_json(
+            [list(effect_argv) for effect_argv in effect_argvs]
+        ),
         "profile_mutated": profile_mutated,
         "pre_current_closure": pre_current,
         "pre_persistent_profile_closure": pre_profile,
@@ -994,6 +998,7 @@ def execute_activation(
                 build_receipt_sha256=build_digest,
                 plan_sha256=plan_digest,
                 argv=switch_argv,
+                effect_argvs=(switch_argv,),
                 pre_current=pre_current,
                 pre_profile=pre_profile,
                 post_current=post_current,
@@ -1074,6 +1079,9 @@ def execute_persistent_promotion(
             now=now,
         )
         profile_changed = False
+        profile_set_argv = _profile_set_argv(
+            plan["prior_closure"], plan["system_closure"]
+        )
         switch_argv = _switch_argv(plan["system_closure"], "switch")
         with _controlled_termination() as termination:
             _raise_if_termination_requested(termination)
@@ -1082,10 +1090,7 @@ def execute_persistent_promotion(
                 # timeout/non-zero status.  Treat the profile as potentially changed
                 # before invoking it so every failure enters rollback.
                 profile_changed = True
-                runner(
-                    _profile_set_argv(plan["prior_closure"], plan["system_closure"]),
-                    plan["prior_closure"],
-                )
+                runner(profile_set_argv, plan["prior_closure"])
                 _raise_if_termination_requested(termination)
                 _require_link_target(
                     SYSTEM_PROFILE_LINK,
@@ -1138,6 +1143,7 @@ def execute_persistent_promotion(
                 build_receipt_sha256=build_digest,
                 plan_sha256=plan_digest,
                 argv=switch_argv,
+                effect_argvs=(profile_set_argv, switch_argv),
                 pre_current=pre_current,
                 pre_profile=pre_profile,
                 post_current=post_current,
