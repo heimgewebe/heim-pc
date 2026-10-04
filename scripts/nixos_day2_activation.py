@@ -37,6 +37,10 @@ class RuntimeExecutorError(RuntimeError):
     """Fail-closed runtime-executor error."""
 
 
+class _ExecutorInterrupted(Exception):
+    """Internal controlled termination signal."""
+
+
 def _load_managed_nix() -> Any:
     path = Path(__file__).resolve().with_name("managed_nix.py")
     spec = importlib.util.spec_from_file_location("heim_pc_managed_nix", path)
@@ -427,19 +431,57 @@ def _minimal_env(target_closure: str) -> dict[str, str]:
 
 
 Runner = Callable[[Sequence[str], str], None]
+_TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def _set_termination_handlers(
+    handler: signal.Handlers | Callable[[int, Any], None],
+) -> dict[int, Any]:
+    previous: dict[int, Any] = {}
+    try:
+        for signum in _TERMINATION_SIGNALS:
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+    except (OSError, ValueError) as exc:
+        for signum, prior in previous.items():
+            signal.signal(signum, prior)
+        raise RuntimeExecutorError(
+            "cannot install controlled termination handlers"
+        ) from exc
+    return previous
+
+
+def _restore_termination_handlers(previous: Mapping[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    ignored_handlers = _set_termination_handlers(signal.SIG_IGN)
+    kill_error: OSError | None = None
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            kill_error = exc
+        try:
+            # No second timeout is allowed here.  Recovery may only begin after
+            # the private process leader is definitely reaped; if kernel exit is
+            # delayed, this executor keeps the activation lock rather than
+            # releasing an uncertain mutation into a competing invocation.
+            process.wait()
+        except OSError as exc:
+            raise RuntimeExecutorError(
+                "executor process termination could not be confirmed"
+            ) from exc
+    finally:
+        _restore_termination_handlers(ignored_handlers)
+    if kill_error is not None:
         raise RuntimeExecutorError(
-            "executor process group did not terminate after SIGKILL"
-        ) from exc
+            "executor process exited, but its process group could not be signalled cleanly"
+        ) from kill_error
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:
@@ -447,34 +489,62 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
         raise RuntimeExecutorError("executor argv is invalid")
     if not argv[0].startswith("/nix/store/"):
         raise RuntimeExecutorError("executor command must be closure-bound")
+
+    process: subprocess.Popen[bytes] | None = None
+    interrupted_signum: int | None = None
+
+    def _handle_termination(signum: int, _frame: Any) -> None:
+        nonlocal interrupted_signum
+        interrupted_signum = signum
+        # If a signal lands during Popen before assignment, remember it and
+        # defer the exception until the child handle is available for cleanup.
+        if process is not None:
+            raise _ExecutorInterrupted()
+
+    previous_handlers = _set_termination_handlers(_handle_termination)
     try:
-        process = subprocess.Popen(
-            list(argv),
-            cwd="/",
-            env=_minimal_env(target_closure),
-            stdin=subprocess.DEVNULL,
-            stdout=sys.stderr,
-            stderr=sys.stderr,
-            shell=False,
-            close_fds=True,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        raise RuntimeExecutorError(f"executor command failed to start: {exc}") from exc
-    try:
-        returncode = process.wait(timeout=COMMAND_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_group(process)
-        raise RuntimeExecutorError(
-            "executor command timed out; process group terminated"
-        ) from exc
-    if returncode != 0:
-        # A failing switch helper must not leave a still-running child in its
-        # private process group racing the explicit recovery activation.
-        _terminate_process_group(process)
-        raise RuntimeExecutorError(
-            f"executor command returned non-zero status {returncode}"
-        )
+        try:
+            process = subprocess.Popen(
+                list(argv),
+                cwd="/",
+                env=_minimal_env(target_closure),
+                stdin=subprocess.DEVNULL,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                shell=False,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise RuntimeExecutorError(
+                f"executor command failed to start: {exc}"
+            ) from exc
+
+        try:
+            if interrupted_signum is not None:
+                raise _ExecutorInterrupted()
+            returncode = process.wait(timeout=COMMAND_TIMEOUT_SECONDS)
+        except (_ExecutorInterrupted, KeyboardInterrupt) as exc:
+            _terminate_process_group(process)
+            raise RuntimeExecutorError(
+                "executor command interrupted; process group terminated"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(process)
+            raise RuntimeExecutorError(
+                "executor command timed out; process group terminated"
+            ) from exc
+
+        if returncode != 0:
+            # A failing switch helper must not leave a still-running child in its
+            # private process group racing the explicit recovery activation.
+            _terminate_process_group(process)
+            raise RuntimeExecutorError(
+                f"executor command returned non-zero status {returncode}"
+            )
+    finally:
+        _restore_termination_handlers(previous_handlers)
+
 
 @contextmanager
 def _exclusive_lock() -> Iterator[None]:
@@ -515,10 +585,10 @@ def _recover(
     prior_closure: str,
     mode: str,
     runner: Runner,
-    profile_was_changed: bool,
+    profile_may_have_changed: bool,
 ) -> None:
     errors: list[str] = []
-    if profile_was_changed:
+    if profile_may_have_changed:
         try:
             runner(_profile_set_argv(prior_closure, prior_closure), prior_closure)
             _require_link_target(
@@ -532,6 +602,23 @@ def _recover(
         runner(_switch_argv(prior_closure, mode), prior_closure)
     except RuntimeExecutorError as exc:
         errors.append(f"prior closure recovery activation failed: {exc}")
+
+    try:
+        _require_link_target(
+            CURRENT_SYSTEM_LINK,
+            prior_closure,
+            label="recovered current system",
+        )
+    except RuntimeExecutorError as exc:
+        errors.append(f"current-system recovery verification failed: {exc}")
+    try:
+        _require_link_target(
+            SYSTEM_PROFILE_LINK,
+            prior_closure,
+            label="recovered persistent system profile",
+        )
+    except RuntimeExecutorError as exc:
+        errors.append(f"profile recovery verification failed: {exc}")
     if errors:
         raise RuntimeExecutorError("; ".join(errors))
 
@@ -658,13 +745,23 @@ def execute_activation(
         switch_argv = _switch_argv(plan["system_closure"], switch_mode)
         try:
             runner(switch_argv, plan["system_closure"])
+            post_current = _require_link_target(
+                CURRENT_SYSTEM_LINK,
+                plan["system_closure"],
+                label="current system after test activation",
+            )
+            post_profile = _require_link_target(
+                SYSTEM_PROFILE_LINK,
+                plan["prior_closure"],
+                label="persistent system profile after test activation",
+            )
         except RuntimeExecutorError as effect_error:
             try:
                 _recover(
                     prior_closure=plan["prior_closure"],
                     mode="test",
                     runner=runner,
-                    profile_was_changed=False,
+                    profile_may_have_changed=True,
                 )
             except RuntimeExecutorError as recovery_error:
                 raise RuntimeExecutorError(
@@ -674,17 +771,6 @@ def execute_activation(
             raise RuntimeExecutorError(
                 f"test activation failed; prior closure recovery completed: {effect_error}"
             ) from effect_error
-
-        post_current = _require_link_target(
-            CURRENT_SYSTEM_LINK,
-            plan["system_closure"],
-            label="current system after test activation",
-        )
-        post_profile = _require_link_target(
-            SYSTEM_PROFILE_LINK,
-            plan["prior_closure"],
-            label="persistent system profile after test activation",
-        )
         return _execution_receipt(
             request_id=request_id,
             operation="activation",
@@ -775,24 +861,37 @@ def execute_persistent_promotion(
         profile_changed = False
         switch_argv = _switch_argv(plan["system_closure"], "switch")
         try:
+            # The profile command may mutate successfully and still report a
+            # timeout/non-zero status.  Treat the profile as potentially changed
+            # before invoking it so every failure enters rollback.
+            profile_changed = True
             runner(
                 _profile_set_argv(plan["prior_closure"], plan["system_closure"]),
                 plan["prior_closure"],
             )
-            profile_changed = True
             _require_link_target(
                 SYSTEM_PROFILE_LINK,
                 plan["system_closure"],
                 label="persistent system profile after promotion staging",
             )
             runner(switch_argv, plan["system_closure"])
+            post_current = _require_link_target(
+                CURRENT_SYSTEM_LINK,
+                plan["system_closure"],
+                label="current system after persistent promotion",
+            )
+            post_profile = _require_link_target(
+                SYSTEM_PROFILE_LINK,
+                plan["system_closure"],
+                label="persistent system profile after persistent promotion",
+            )
         except RuntimeExecutorError as effect_error:
             try:
                 _recover(
                     prior_closure=plan["prior_closure"],
                     mode="switch",
                     runner=runner,
-                    profile_was_changed=profile_changed,
+                    profile_may_have_changed=profile_changed,
                 )
             except RuntimeExecutorError as recovery_error:
                 raise RuntimeExecutorError(
@@ -802,17 +901,6 @@ def execute_persistent_promotion(
             raise RuntimeExecutorError(
                 f"persistent promotion failed; prior closure recovery completed: {effect_error}"
             ) from effect_error
-
-        post_current = _require_link_target(
-            CURRENT_SYSTEM_LINK,
-            plan["system_closure"],
-            label="current system after persistent promotion",
-        )
-        post_profile = _require_link_target(
-            SYSTEM_PROFILE_LINK,
-            plan["system_closure"],
-            label="persistent system profile after persistent promotion",
-        )
         return _execution_receipt(
             request_id=request_id,
             operation="persistent-promotion",

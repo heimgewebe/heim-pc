@@ -181,6 +181,44 @@ def bindings(receipt: dict, authority: dict, plan: dict) -> dict[str, str]:
     }
 
 
+def _future_test_plan(receipt: dict, authority: dict) -> dict:
+    plan = dict(activation_plan(receipt, authority))
+    plan["mode"] = "test"
+    return plan
+
+
+def _allow_future_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        executor.managed_nix,
+        "authorize_activation_plan_execution",
+        lambda _build, _authority, plan, **_kwargs: dict(plan),
+    )
+
+
+def _allow_future_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_validate = executor.managed_nix.validate_build_receipt
+
+    def non_boot_critical(receipt):
+        value = dict(original_validate(receipt))
+        value["effect_scope"] = "normal"
+        return value
+
+    monkeypatch.setattr(
+        executor.managed_nix,
+        "validate_build_receipt",
+        non_boot_critical,
+    )
+    monkeypatch.setattr(
+        executor.managed_nix,
+        "authorize_persistent_promotion_execution",
+        lambda _build, _authority, plan, **_kwargs: dict(plan),
+    )
+
+
 def test_current_managed_floor_rejects_test_authority_before_runtime_request(runtime) -> None:
     request_root, state, _runner = runtime
     receipt = build_receipt(possible_effects=["package-set"])
@@ -395,7 +433,7 @@ def test_run_exact_timeout_terminates_private_process_group(
         def __init__(self) -> None:
             self.wait_calls = 0
 
-        def wait(self, timeout):
+        def wait(self, timeout=None):
             self.wait_calls += 1
             events.append(("wait", timeout))
             if self.wait_calls == 1:
@@ -427,7 +465,220 @@ def test_run_exact_timeout_terminates_private_process_group(
     assert events[0][0] == "popen"
     assert events[0][2] is True
     assert ("killpg", 4242, executor.signal.SIGKILL) in events
-    assert ("wait", 10) in events
+    assert ("wait", None) in events
+
+
+def test_run_exact_keyboard_interrupt_terminates_private_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 4343
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            events.append(("wait", timeout))
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt()
+            return -9
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor.os,
+        "killpg",
+        lambda pid, sig: events.append(("killpg", pid, sig)),
+    )
+
+    with pytest.raises(executor.RuntimeExecutorError, match="interrupted; process group terminated"):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert ("killpg", 4343, executor.signal.SIGKILL) in events
+    assert ("wait", None) in events
+
+
+def test_run_exact_sigterm_during_spawn_is_deferred_until_child_can_be_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 4444
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return -9
+
+    process = FakeProcess()
+
+    def fake_popen(*_args, **_kwargs):
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        return process
+
+    monkeypatch.setattr(executor.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        executor.os,
+        "killpg",
+        lambda pid, sig: events.append(("killpg", pid, sig)),
+    )
+
+    with pytest.raises(executor.RuntimeExecutorError, match="interrupted; process group terminated"):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert ("killpg", 4444, executor.signal.SIGKILL) in events
+    assert ("wait", None) in events
+
+
+def test_test_activation_post_readback_failure_recovers_bound_prior_state(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    write_request(request_root, "activation-post-readback", receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
+
+    original_resolve = executor._resolve_link
+    failed = False
+
+    def flaky_resolve(path: Path, *, label: str) -> str:
+        nonlocal failed
+        if (
+            not failed
+            and path == executor.CURRENT_SYSTEM_LINK
+            and state["current"] == CLOSURE
+        ):
+            failed = True
+            raise executor.RuntimeExecutorError("simulated post-effect readback failure")
+        return original_resolve(path, label=label)
+
+    monkeypatch.setattr(executor, "_resolve_link", flaky_resolve)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_activation(
+            request_id="activation-post-readback",
+            runner=runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+
+
+def test_persistent_post_readback_failure_recovers_bound_prior_state(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    write_request(request_root, "promotion-post-readback", receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+
+    original_resolve = executor._resolve_link
+    failed = False
+
+    def flaky_resolve(path: Path, *, label: str) -> str:
+        nonlocal failed
+        if (
+            not failed
+            and path == executor.CURRENT_SYSTEM_LINK
+            and state["current"] == CLOSURE
+        ):
+            failed = True
+            raise executor.RuntimeExecutorError("simulated post-effect readback failure")
+        return original_resolve(path, label=label)
+
+    monkeypatch.setattr(executor, "_resolve_link", flaky_resolve)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_persistent_promotion(
+            request_id="promotion-post-readback",
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+
+
+def test_partial_profile_mutation_on_runner_error_is_rolled_back(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    write_request(request_root, "promotion-partial-profile", receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+    first_profile_call = True
+
+    def partial_runner(argv, target_closure):
+        nonlocal first_profile_call
+        argv = list(argv)
+        if first_profile_call and "--profile" in argv and "--set" in argv:
+            first_profile_call = False
+            state["profile"] = argv[-1]
+            raise executor.RuntimeExecutorError("simulated profile helper failure")
+        runner(argv, target_closure)
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_persistent_promotion(
+            request_id="promotion-partial-profile",
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=partial_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    assert state == {"current": PRIOR, "profile": PRIOR}
+
+
+def test_recover_refuses_completed_claim_when_runtime_readback_is_not_restored(
+    runtime,
+) -> None:
+    _request_root, state, _runner = runtime
+    state["current"] = CLOSURE
+    state["profile"] = CLOSURE
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="recovery verification failed",
+    ):
+        executor._recover(
+            prior_closure=PRIOR,
+            mode="switch",
+            runner=lambda _argv, _target: None,
+            profile_may_have_changed=True,
+        )
 
 
 def test_runtime_contract_loader_rejects_security_boundary_drift(
