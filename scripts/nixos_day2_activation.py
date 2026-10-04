@@ -503,6 +503,35 @@ def _wait_for_process_group_quiescence(pgid: int) -> None:
         time.sleep(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS)
 
 
+def _wait_for_process_exit_without_reaping(
+    process: subprocess.Popen[bytes],
+    argv: Sequence[str],
+) -> int:
+    deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+    flags = os.WEXITED | os.WNOWAIT | os.WNOHANG
+    while True:
+        try:
+            observed = os.waitid(os.P_PID, process.pid, flags)
+        except InterruptedError:
+            continue
+        except (ChildProcessError, OSError) as exc:
+            raise _ProcessTerminationUncertain(
+                "executor process exit could not be observed before reap"
+            ) from exc
+        if observed is not None:
+            if observed.si_code == os.CLD_EXITED:
+                return int(observed.si_status)
+            if observed.si_code in {os.CLD_KILLED, os.CLD_DUMPED}:
+                return -int(observed.si_status)
+            raise _ProcessTerminationUncertain(
+                "executor process exit status was unexpected"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(list(argv), COMMAND_TIMEOUT_SECONDS)
+        time.sleep(min(PROCESS_GROUP_QUIESCENCE_POLL_SECONDS, remaining))
+
+
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     ignored_handlers = _set_termination_handlers(signal.SIG_IGN)
     try:
@@ -572,17 +601,25 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
             if interrupted_signum is not None:
                 raise _ExecutorInterrupted()
             try:
-                returncode = process.wait(timeout=COMMAND_TIMEOUT_SECONDS)
+                returncode = _wait_for_process_exit_without_reaping(process, argv)
             except subprocess.TimeoutExpired as exc:
                 _terminate_process_group(process)
                 raise RuntimeExecutorError(
                     "executor command timed out; process group terminated"
                 ) from exc
+            except _ProcessTerminationUncertain:
+                # Exit identity is uncertain, so do not send another destructive
+                # signal to a numeric PGID that may already have been reused.
+                # Hold the activation lock until that PGID is observed absent.
+                _wait_for_process_group_quiescence(process.pid)
+                raise
+
+            # The leader is deliberately still unreaped here.  Its zombie keeps
+            # the private PGID allocated while SIGKILL removes any same-group
+            # descendants, eliminating the post-wait PGID-reuse window.
+            _terminate_process_group(process)
 
             if returncode != 0:
-                # A failing switch helper must not leave a still-running child in its
-                # private process group racing the explicit recovery activation.
-                _terminate_process_group(process)
                 raise RuntimeExecutorError(
                     f"executor command returned non-zero status {returncode}"
                 )

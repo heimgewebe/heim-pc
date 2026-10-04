@@ -433,6 +433,7 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     )
 
 
+
 def test_run_exact_timeout_terminates_private_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,14 +442,8 @@ def test_run_exact_timeout_terminates_private_process_group(
     class FakeProcess:
         pid = 4242
 
-        def __init__(self) -> None:
-            self.wait_calls = 0
-
         def wait(self, timeout=None):
-            self.wait_calls += 1
             events.append(("wait", timeout))
-            if self.wait_calls == 1:
-                raise executor.subprocess.TimeoutExpired(["executor"], timeout)
             return -9
 
     process = FakeProcess()
@@ -457,12 +452,18 @@ def test_run_exact_timeout_terminates_private_process_group(
         events.append(("popen", list(argv), kwargs["start_new_session"]))
         return process
 
+    def timeout_before_reap(_process, argv):
+        raise executor.subprocess.TimeoutExpired(
+            list(argv), executor.COMMAND_TIMEOUT_SECONDS
+        )
+
     monkeypatch.setattr(executor.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(
-        executor.os,
-        "killpg",
-        _quiescent_killpg(events),
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        timeout_before_reap,
     )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
 
     with pytest.raises(executor.RuntimeExecutorError, match="process group terminated"):
         executor._run_exact(
@@ -487,22 +488,20 @@ def test_run_exact_keyboard_interrupt_terminates_private_process_group(
     class FakeProcess:
         pid = 4343
 
-        def __init__(self) -> None:
-            self.wait_calls = 0
-
         def wait(self, timeout=None):
-            self.wait_calls += 1
             events.append(("wait", timeout))
-            if self.wait_calls == 1:
-                raise KeyboardInterrupt()
             return -9
+
+    def interrupt_before_reap(_process, _argv):
+        raise KeyboardInterrupt()
 
     monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
     monkeypatch.setattr(
-        executor.os,
-        "killpg",
-        _quiescent_killpg(events),
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        interrupt_before_reap,
     )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
 
     with pytest.raises(executor.RuntimeExecutorError, match="interrupted; process group terminated"):
         executor._run_exact(
@@ -515,7 +514,6 @@ def test_run_exact_keyboard_interrupt_terminates_private_process_group(
 
     assert ("killpg", 4343, executor.signal.SIGKILL) in events
     assert ("wait", None) in events
-
 
 def test_run_exact_sigterm_during_spawn_is_deferred_until_child_can_be_reaped(
     monkeypatch: pytest.MonkeyPatch,
@@ -557,38 +555,32 @@ def test_run_exact_sigterm_during_spawn_is_deferred_until_child_can_be_reaped(
     assert ("wait", None) in events
 
 
+
 def test_run_exact_signal_after_wait_is_still_controlled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[object, ...]] = []
 
-    class SignalOnCompare:
-        def __ne__(self, other):
-            assert other == 0
-            handler = executor.signal.getsignal(executor.signal.SIGTERM)
-            assert callable(handler)
-            handler(executor.signal.SIGTERM, None)
-            return False
-
     class FakeProcess:
         pid = 4545
 
-        def __init__(self) -> None:
-            self.wait_calls = 0
-
         def wait(self, timeout=None):
-            self.wait_calls += 1
             events.append(("wait", timeout))
-            if self.wait_calls == 1:
-                return SignalOnCompare()
             return -9
+
+    def signal_after_exit_observation(_process, _argv):
+        handler = executor.signal.getsignal(executor.signal.SIGTERM)
+        assert callable(handler)
+        handler(executor.signal.SIGTERM, None)
+        return 0
 
     monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
     monkeypatch.setattr(
-        executor.os,
-        "killpg",
-        _quiescent_killpg(events),
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        signal_after_exit_observation,
     )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
 
     with pytest.raises(
         executor.RuntimeExecutorError,
@@ -606,6 +598,84 @@ def test_run_exact_signal_after_wait_is_still_controlled(
     assert ("wait", None) in events
 
 
+def test_wait_for_process_exit_observes_without_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 4590
+
+    class Observed:
+        si_code = executor.os.CLD_EXITED
+        si_status = 7
+
+    def waitid(idtype, pid, flags):
+        events.append(("waitid", idtype, pid, flags))
+        return Observed()
+
+    monkeypatch.setattr(executor.os, "waitid", waitid)
+
+    result = executor._wait_for_process_exit_without_reaping(
+        FakeProcess(),
+        ["/nix/store/helper", "switch"],
+    )
+
+    assert result == 7
+    assert events == [
+        (
+            "waitid",
+            executor.os.P_PID,
+            4590,
+            executor.os.WEXITED | executor.os.WNOWAIT | executor.os.WNOHANG,
+        )
+    ]
+
+
+def test_run_exact_kills_group_before_reaping_nonzero_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class FakeProcess:
+        pid = 4591
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return 9
+
+    monkeypatch.setattr(
+        executor.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        lambda _process, _argv: events.append(("observed", 9)) or 9,
+    )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="non-zero status 9",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
+
+    assert events[:4] == [
+        ("observed", 9),
+        ("killpg", 4591, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 4591, 0),
+    ]
+
+
 def test_run_exact_waits_for_process_group_quiescence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -615,18 +685,14 @@ def test_run_exact_waits_for_process_group_quiescence(
     class FakeProcess:
         pid = 4646
 
-        def __init__(self) -> None:
-            self.wait_calls = 0
-
         def wait(self, timeout=None):
-            self.wait_calls += 1
             events.append(("wait", timeout))
-            if self.wait_calls == 1:
-                raise executor.subprocess.TimeoutExpired(
-                    cmd="helper",
-                    timeout=executor.COMMAND_TIMEOUT_SECONDS,
-                )
             return -9
+
+    def timeout_before_reap(_process, argv):
+        raise executor.subprocess.TimeoutExpired(
+            list(argv), executor.COMMAND_TIMEOUT_SECONDS
+        )
 
     def killpg(pid, sig):
         nonlocal group_probes
@@ -637,6 +703,11 @@ def test_run_exact_waits_for_process_group_quiescence(
                 raise ProcessLookupError
 
     monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        timeout_before_reap,
+    )
     monkeypatch.setattr(executor.os, "killpg", killpg)
     monkeypatch.setattr(
         executor.time,
@@ -657,14 +728,12 @@ def test_run_exact_waits_for_process_group_quiescence(
         )
 
     assert events == [
-        ("wait", executor.COMMAND_TIMEOUT_SECONDS),
         ("killpg", 4646, executor.signal.SIGKILL),
         ("wait", None),
         ("killpg", 4646, 0),
         ("sleep", executor.PROCESS_GROUP_QUIESCENCE_POLL_SECONDS),
         ("killpg", 4646, 0),
     ]
-
 
 def test_process_group_quiescence_retries_uncertain_probe(
     monkeypatch: pytest.MonkeyPatch,
@@ -765,6 +834,7 @@ def test_terminate_process_group_uses_quiescence_after_wait_error(
     ]
 
 
+
 def test_run_exact_preserves_inherited_ignored_termination_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -778,7 +848,7 @@ def test_run_exact_preserves_inherited_ignored_termination_handlers(
         pid = 4747
 
         def wait(self, timeout=None):
-            assert timeout == executor.COMMAND_TIMEOUT_SECONDS
+            assert timeout is None
             return 0
 
     def fake_popen(*_args, **_kwargs):
@@ -791,6 +861,12 @@ def test_run_exact_preserves_inherited_ignored_termination_handlers(
         return FakeProcess()
 
     monkeypatch.setattr(executor.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        lambda _process, _argv: 0,
+    )
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg([]))
 
     with executor._ignore_termination_signals():
         executor._run_exact(
@@ -806,7 +882,6 @@ def test_run_exact_preserves_inherited_ignored_termination_handlers(
         executor.signal.getsignal(executor.signal.SIGINT),
         executor.signal.getsignal(executor.signal.SIGTERM),
     ) == previous_handlers
-
 
 def test_test_activation_sigterm_after_effect_starts_recovery(
     runtime,
