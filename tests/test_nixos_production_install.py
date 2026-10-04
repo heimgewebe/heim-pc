@@ -45,6 +45,9 @@ ARTIFACT = {
 }
 MERGED_ARTIFACT = dict(ARTIFACT, source_authority="merged-main")
 MANAGED_POLICY_SHA256 = "c" * 64
+RECOVERY_ADMISSION_SCOPE = json.loads(
+    prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8")
+)["admission_scope"]
 SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
 _READINESS_TEST_ROOT = tempfile.TemporaryDirectory(prefix="heim-pc-precutover-readiness-tests-")
 
@@ -6613,6 +6616,7 @@ def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_att
         managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
     )
     assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["recovery_admission_scope"] == RECOVERY_ADMISSION_SCOPE
     assert compiled["pre_cutover_readiness"] is None
     assert compiled["managed_build_attestation_required"] is True
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
@@ -6637,7 +6641,53 @@ def test_dual_os_readiness_skip_requires_hard_source_isolation(section, key, val
         prod.ProductionInstallError,
         match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
     ):
-        prod.pre_cutover_readiness_required(contract)
+        prod.pre_cutover_readiness_required(contract, RECOVERY_ADMISSION_SCOPE)
+
+
+def test_destructive_source_cutover_cannot_skip_recovery_readiness():
+    contract = json.loads(json.dumps(CONTRACT))
+    contract["source_preservation"]["destructive_source_cutover"] = True
+    contract["source_preservation"]["pre_cutover_readiness_required"] = False
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="destructive source cutover requires pre-cutover readiness",
+    ):
+        prod.pre_cutover_readiness_required(contract, RECOVERY_ADMISSION_SCOPE)
+
+
+def test_merged_main_destructive_source_cutover_requires_readiness_bundle():
+    contract = json.loads(json.dumps(CONTRACT))
+    contract["source_preservation"]["destructive_source_cutover"] = True
+    contract["source_preservation"]["pre_cutover_readiness_required"] = True
+    receipt = managed_receipt(MERGED_ARTIFACT)
+
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="requires validated pre-cutover readiness",
+    ):
+        prod.compile_plan(
+            observation(),
+            install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source=str(prod.FLAKE_SOURCE),
+            contract=contract,
+            managed_build_attestation_verification=managed_attestation_verification(
+                MERGED_ARTIFACT, receipt
+            ),
+        )
+
+
+def test_recovery_scope_must_match_isolated_replacement_path():
+    contract = json.loads(json.dumps(CONTRACT))
+    scope = json.loads(json.dumps(RECOVERY_ADMISSION_SCOPE))
+    scope["excluded_installation"]["migration_mode"] = "all-production-storage-mutations"
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
+    ):
+        prod.pre_cutover_readiness_required(contract, scope)
 
 
 def test_proof_only_plan_does_not_claim_production_attestation():

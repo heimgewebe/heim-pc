@@ -38,7 +38,7 @@ Für diesen Dual-OS-Pfad sind keine Installationsvoraussetzungen mehr:
 8. Source/Restore-Digest-Gleichheit;
 9. das daraus abgeleitete Pre-Cutover-Recovery-Readiness-Gate.
 
-Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt werden, erteilen aber keine Installationsautorität.
+Diese Nachweise können unabhängig als Backup-/Recovery-Arbeit weitergeführt werden, erteilen aber keine Installationsautorität. `recovery-contract-v1.json` bleibt dafür fail-closed, ist jedoch ausdrücklich auf einen **destruktiven Source-Cutover** begrenzt. Die isolierte Replacement-Installation auf der separaten Seagate liegt außerhalb dieses Recovery-Admission-Gates; ihre Autorität entsteht ausschließlich aus den unten genannten Target-, Protected-Disk-, Build-/Attestation-, Boot- und Apply-Gates.
 
 ## Nicht verhandelbare Gates
 

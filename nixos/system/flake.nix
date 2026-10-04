@@ -552,8 +552,14 @@
             target = self.nixosConfigurations.heim-pc-storage-target.config;
           in
           assert contract.status == "external-evidence-required";
+          assert contract.admission_scope.complete_evidence_required_for == "destructive-source-cutover";
+          assert contract.admission_scope.excluded_installation.migration_mode == "isolated-parallel-disk-dual-os";
+          assert contract.admission_scope.excluded_installation.source_preservation_mode == "retained-protected-source";
+          assert !contract.admission_scope.excluded_installation.destructive_source_cutover;
+          assert !contract.admission_scope.excluded_installation.pre_cutover_readiness_required;
           assert contract.admission.point_of_no_return_blocked_without_complete_evidence;
-          assert contract.admission.production_storage_mutation_blocked_without_complete_evidence;
+          assert contract.admission.destructive_source_cutover_blocked_without_complete_evidence;
+          assert !(contract.admission ? production_storage_mutation_blocked_without_complete_evidence);
           assert contract.critical_user_data_scope.contract_kind == "heim_pc.critical_user_data_scope_contract";
           assert contract.critical_user_data_scope.scope == "critical-user-data";
           assert contract.critical_user_data_scope.sha256 == criticalUserDataSha256;

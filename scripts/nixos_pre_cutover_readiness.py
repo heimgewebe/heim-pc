@@ -251,6 +251,41 @@ def _load_contract(path: Path, *, label: str) -> tuple[dict[str, Any], dict[str,
     return _json(payload, label), meta
 
 
+def _recovery_admission_scope(contract: dict[str, Any]) -> dict[str, Any]:
+    scope = contract.get("admission_scope")
+    if (
+        not isinstance(scope, dict)
+        or set(scope) != {
+            "complete_evidence_required_for",
+            "excluded_installation",
+        }
+        or scope.get("complete_evidence_required_for") != "destructive-source-cutover"
+    ):
+        raise ReadinessError("recovery contract admission scope is invalid")
+    excluded = scope.get("excluded_installation")
+    if (
+        not isinstance(excluded, dict)
+        or set(excluded) != {
+            "migration_mode",
+            "source_preservation_mode",
+            "destructive_source_cutover",
+            "pre_cutover_readiness_required",
+        }
+        or excluded.get("migration_mode") != "isolated-parallel-disk-dual-os"
+        or excluded.get("source_preservation_mode") != "retained-protected-source"
+        or excluded.get("destructive_source_cutover") is not False
+        or excluded.get("pre_cutover_readiness_required") is not False
+    ):
+        raise ReadinessError("recovery contract excluded installation scope is invalid")
+    return _copy_json(scope)
+
+
+def validate_recovery_contract_scope(path: Path) -> dict[str, Any]:
+    contract, _meta = _load_contract(path, label="recovery contract")
+    _recovery_policy(contract)
+    return _recovery_admission_scope(contract)
+
+
 def _run_attestation_verifier(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
     if argv[:3] != [GH_BIN, "attestation", "verify"]:
         raise ReadinessError("recovery attestation runner only permits gh attestation verify")
@@ -496,12 +531,18 @@ def _recovery_policy(
         or skew > 300
     ):
         raise ReadinessError("recovery contract evidence freshness is invalid")
+    _recovery_admission_scope(contract)
     admission = contract.get("admission")
     if (
         not isinstance(admission, dict)
+        or set(admission) != {
+            "all_required_evidence_must_be_fresh",
+            "point_of_no_return_blocked_without_complete_evidence",
+            "destructive_source_cutover_blocked_without_complete_evidence",
+        }
         or admission.get("all_required_evidence_must_be_fresh") is not True
         or admission.get("point_of_no_return_blocked_without_complete_evidence") is not True
-        or admission.get("production_storage_mutation_blocked_without_complete_evidence") is not True
+        or admission.get("destructive_source_cutover_blocked_without_complete_evidence") is not True
     ):
         raise ReadinessError("recovery contract admission is not fail-closed")
     return requirements, max_age, skew, _copy_json(attestation_policy)
