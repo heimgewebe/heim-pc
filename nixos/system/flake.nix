@@ -625,13 +625,28 @@
 
         intentional-break-rejected =
           let
+            proofBase = {
+              networking.hostName = "intentional-break-proof";
+              fileSystems."/" = {
+                device = "none";
+                fsType = "tmpfs";
+              };
+              boot.loader.grub.enable = false;
+              system.stateVersion = "26.05";
+            };
+            healthy = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [ proofBase ];
+            };
             broken = nixpkgs.lib.nixosSystem {
               inherit system;
-              modules = [ self.nixosModules.intentionalBreak ];
+              modules = [ proofBase self.nixosModules.intentionalBreak ];
             };
-            evaluated = builtins.tryEval broken.config.system.build.toplevel.drvPath;
+            healthyEval = builtins.tryEval healthy.config.system.build.toplevel.drvPath;
+            brokenEval = builtins.tryEval broken.config.system.build.toplevel.drvPath;
           in
-          assert !evaluated.success;
+          assert healthyEval.success;
+          assert !brokenEval.success;
           pkgs.runCommand "heim-pc-intentional-break-rejected" { } ''
             mkdir -p "$out"
             touch "$out/pass"
@@ -653,8 +668,7 @@
 
         integration = import ./tests/integration.nix { inherit pkgs; };
         firstboot-credentials = import ./tests/firstboot-credentials.nix {
-          inherit pkgs;
-          sourceRevision = "eb260b0b82199e380d881b2436e403dcda64ca32";
+          inherit pkgs sourceRevision;
         };
         trust-zones = import ./tests/trust-zones.nix { inherit pkgs; };
       };

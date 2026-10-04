@@ -57,6 +57,8 @@ in
     fsType = "ext4";
   };
   boot.loader.systemd-boot.enable = true;
+  # Bound retained boot entries so the dedicated 1 GiB ESP cannot grow without limit.
+  boot.loader.systemd-boot.configurationLimit = 10;
   boot.loader.efi.canTouchEfiVariables = false;
   system.stateVersion = "26.05";
 
