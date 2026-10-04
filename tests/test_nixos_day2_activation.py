@@ -1615,6 +1615,49 @@ def test_recover_refuses_completed_claim_when_runtime_readback_is_not_restored(
         )
 
 
+def test_main_preserves_inherited_ignored_termination_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[object, ...]] = []
+
+    def fake_execute_activation(**_kwargs):
+        observed.append(
+            tuple(executor.signal.getsignal(signum) for signum in executor._TERMINATION_SIGNALS)
+        )
+        return {"schema_version": 1, "result": "executed"}
+
+    monkeypatch.setattr(executor, "execute_activation", fake_execute_activation)
+    previous = {
+        signum: executor.signal.getsignal(signum)
+        for signum in executor._TERMINATION_SIGNALS
+    }
+    for signum in executor._TERMINATION_SIGNALS:
+        executor.signal.signal(signum, executor.signal.SIG_IGN)
+    try:
+        digest = "a" * 64
+        rc = executor.main(
+            [
+                "execute-activation",
+                "--request-id",
+                "preserve-ignored-cli",
+                "--expected-build-receipt-sha256",
+                digest,
+                "--expected-authority-sha256",
+                digest,
+                "--expected-plan-sha256",
+                digest,
+                "--expected-target",
+                TARGET,
+            ]
+        )
+    finally:
+        for signum, handler in previous.items():
+            executor.signal.signal(signum, handler)
+
+    assert rc == 0
+    assert observed == [tuple(executor.signal.SIG_IGN for _ in executor._TERMINATION_SIGNALS)]
+
+
 def test_main_keeps_flag_only_handler_through_receipt_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

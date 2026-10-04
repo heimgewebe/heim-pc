@@ -1177,7 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        with _controlled_termination() as termination:
+        with _controlled_termination(preserve_ignored=True) as termination:
             if args.command == "execute-activation":
                 result = execute_activation(
                     request_id=args.request_id,
