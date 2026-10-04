@@ -835,6 +835,48 @@ def test_terminate_process_group_uses_quiescence_after_wait_error(
 
 
 
+def test_terminate_process_group_retries_second_controlled_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[object, ...]] = []
+    original_mask = executor.signal.pthread_sigmask
+    block_attempts = 0
+
+    class FakeProcess:
+        pid = 5151
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return -9
+
+    def interrupt_first_cleanup_mask(how, signals):
+        nonlocal block_attempts
+        if how == executor.signal.SIG_BLOCK:
+            block_attempts += 1
+            if block_attempts == 1:
+                handler = executor.signal.getsignal(executor.signal.SIGTERM)
+                assert callable(handler)
+                handler(executor.signal.SIGTERM, None)
+        return original_mask(how, signals)
+
+    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
+
+    with executor._controlled_termination():
+        monkeypatch.setattr(
+            executor.signal,
+            "pthread_sigmask",
+            interrupt_first_cleanup_mask,
+        )
+        executor._terminate_process_group(FakeProcess())
+
+    assert block_attempts >= 2
+    assert events == [
+        ("killpg", 5151, executor.signal.SIGKILL),
+        ("wait", None),
+        ("killpg", 5151, 0),
+    ]
+
+
 def test_ignore_termination_signals_masks_installation_and_restore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

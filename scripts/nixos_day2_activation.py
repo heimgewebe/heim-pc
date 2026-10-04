@@ -585,8 +585,7 @@ def _wait_for_process_exit_without_reaping(
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    ignored_handlers = _set_termination_handlers(signal.SIG_IGN)
-    try:
+    with _ignore_termination_signals():
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -606,8 +605,6 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         except OSError:
             pass
         _wait_for_process_group_quiescence(process.pid)
-    finally:
-        _restore_termination_handlers(ignored_handlers)
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:
