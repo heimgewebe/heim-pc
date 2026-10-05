@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "8abbce987ebb24117335b44ffbca2c4ce6227f461b95de724f3cf688885467ae"
+SOURCE_SNAPSHOT_SHA256 = "5ad1ad42d4db7242fd88fa3e13c2a451aadd8fa4d5d12b844a26ae078baf276c"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -229,7 +229,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 28)
+        self.assertEqual(len(files), 29)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -237,7 +237,7 @@ class T(unittest.TestCase):
             "flake.nix", "README.md", "hosts/heim-pc/default.nix",
             "hosts/heim-pc/firstboot-credentials.py",
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
-            "modules/containers.nix", "modules/desktop.nix", "modules/development.nix",
+            "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
