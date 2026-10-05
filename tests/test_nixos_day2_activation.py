@@ -794,6 +794,71 @@ def test_incomplete_recovery_retains_transaction_gc_roots(
     target_root.unlink()
 
 
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+def test_uncertain_recovery_preserves_exception_and_transaction_gc_roots(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-gc-recovery-uncertain"
+
+    def failing_effect(_argv, _target_closure):
+        state["current"] = CLOSURE
+        if operation == "persistent-promotion":
+            state["profile"] = CLOSURE
+        raise executor.RuntimeExecutorError("simulated effect failure")
+
+    def uncertain_recovery(**_kwargs):
+        prior_root = executor._gc_root_path(request_id, "prior")
+        target_root = executor._gc_root_path(request_id, "target")
+        assert prior_root.is_symlink()
+        assert target_root.is_symlink()
+        assert os.readlink(prior_root) == PRIOR
+        assert os.readlink(target_root) == CLOSURE
+        raise executor._ProcessTerminationUncertain("simulated uncertain recovery")
+
+    monkeypatch.setattr(executor, "_recover", uncertain_recovery)
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=failing_effect,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=failing_effect,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="simulated uncertain recovery",
+    ):
+        invoke()
+
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    assert prior_root.is_symlink()
+    assert target_root.is_symlink()
+    assert os.readlink(prior_root) == PRIOR
+    assert os.readlink(target_root) == CLOSURE
+    prior_root.unlink()
+    target_root.unlink()
+
+
 def test_uncertain_effect_keeps_transaction_gc_roots_fail_closed(
     runtime,
     monkeypatch: pytest.MonkeyPatch,

@@ -1389,6 +1389,8 @@ def execute_activation(
                             runner=runner,
                             profile_may_have_changed=True,
                         )
+                    except _ProcessTerminationUncertain:
+                        raise
                     except RuntimeExecutorError as recovery_error:
                         retain_gc_roots()
                         raise RuntimeExecutorError(
@@ -1546,6 +1548,8 @@ def execute_persistent_promotion(
                             runner=runner,
                             profile_may_have_changed=profile_changed,
                         )
+                    except _ProcessTerminationUncertain:
+                        raise
                     except RuntimeExecutorError as recovery_error:
                         retain_gc_roots()
                         raise RuntimeExecutorError(
