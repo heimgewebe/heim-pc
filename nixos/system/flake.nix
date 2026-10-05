@@ -384,6 +384,27 @@
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;
+          assert target.heimPc.hostProtection.enable;
+          assert proprietary.heimPc.hostProtection.enable && open.heimPc.hostProtection.enable;
+          assert !vm.heimPc.hostProtection.enable;
+          assert target.zramSwap.enable;
+          assert target.zramSwap.algorithm == "zstd";
+          assert target.zramSwap.memoryPercent == 25;
+          assert target.zramSwap.priority == 1000;
+          assert target.systemd.oomd.enable;
+          assert !target.systemd.oomd.enableRootSlice;
+          assert !target.systemd.oomd.enableSystemSlice;
+          assert !target.systemd.oomd.enableUserSlices;
+          assert !target.heimPc.hostProtection.grabowskiGuard.enable;
+          assert !builtins.hasAttr "heim-pc-grabowski-memory-guard" target.systemd.services;
+          assert !target.heimPc.hostProtection.storagePressure.requestMaintenance;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.timers;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.timers;
+          assert nixpkgs.lib.hasInfix "--observe-only"
+            target.systemd.user.services.heim-pc-storage-pressure-watch.serviceConfig.ExecStart;
           assert builtins.all (c:
             c.networking.networkmanager.enable
             && c.security.polkit.enable
@@ -531,6 +552,35 @@
           pkgs.runCommand "heim-pc-nix-lifecycle-contract" { } ''
             mkdir -p "$out"
             cp ${../production/nix-lifecycle-contract-v1.json} "$out/nix-lifecycle-contract-v1.json"
+          '';
+
+        host-protection-contract =
+          let
+            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            vm = self.nixosConfigurations.heim-pc-vm.config;
+          in
+          assert target.heimPc.hostProtection.enable;
+          assert target.zramSwap.enable;
+          assert target.zramSwap.memoryPercent == 25;
+          assert target.zramSwap.algorithm == "zstd";
+          assert target.zramSwap.priority == 1000;
+          assert target.systemd.oomd.enable;
+          assert !target.systemd.oomd.enableRootSlice;
+          assert !target.systemd.oomd.enableSystemSlice;
+          assert !target.systemd.oomd.enableUserSlices;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.services;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.timers;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.services;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.timers;
+          assert !(builtins.hasAttr "heim-pc-grabowski-memory-guard" target.systemd.services);
+          assert !vm.heimPc.hostProtection.enable;
+          pkgs.runCommand "heim-pc-host-protection-contract" { } ''
+            mkdir -p "$out"
+            touch "$out/pass"
           '';
 
         recovery-readiness-contract =
