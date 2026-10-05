@@ -341,6 +341,25 @@ def test_persistent_promotion_receipt_binds_all_effect_commands(
     assert result["effect_commands_sha256"] != executor._sha256_json(
         [switch_argv, profile_set_argv]
     )
+    prior_root = executor._gc_root_path("promotion-command-digest", "prior")
+    target_root = executor._gc_root_path("promotion-command-digest", "target")
+    gc_root_argvs = [
+        executor._gc_root_argv(PRIOR, prior_root, PRIOR),
+        executor._gc_root_argv(PRIOR, target_root, CLOSURE),
+    ]
+    assert result["gc_root_command_sha256"] == executor._sha256_json(
+        gc_root_argvs[1]
+    )
+    assert result["gc_root_commands_sha256"] == executor._sha256_json(
+        gc_root_argvs
+    )
+    assert result["prior_gc_root"] == str(prior_root)
+    assert result["target_gc_root"] == str(target_root)
+    assert result["prior_gc_root_released"] is True
+    assert result["target_gc_root_released"] is True
+    assert result["transaction_gc_roots_released"] is True
+    assert not os.path.lexists(prior_root)
+    assert not os.path.lexists(target_root)
     assert state == {"current": CLOSURE, "profile": CLOSURE}
 
 
@@ -514,7 +533,7 @@ def test_gc_root_argv_is_closure_bound_and_forbids_runtime_realization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
-    root_path = Path("/nix/var/nix/gcroots/heim-pc-day2/request-01")
+    root_path = Path("/nix/var/nix/gcroots/heim-pc-day2/request-01-target")
     argv = executor._gc_root_argv(PRIOR, root_path, CLOSURE)
 
     assert argv[0] == f"{PRIOR}/sw/bin/nix-store"
@@ -532,76 +551,102 @@ def test_gc_root_argv_is_closure_bound_and_forbids_runtime_realization(
     assert env["NIX_CONFIG"] == "substitute = false\nbuilders =\nmax-jobs = 0\n"
 
 
-def test_target_gc_root_is_verified_for_context_lifetime_and_removed(
+def test_transaction_gc_roots_are_verified_and_removed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     root_dir = tmp_path / "gcroots"
     root_dir.mkdir(mode=0o700)
+    prior = tmp_path / "prior-closure"
+    target = tmp_path / "target-closure"
+    prior.mkdir()
+    target.mkdir()
+    prior_closure = str(prior.resolve())
+    target_closure = str(target.resolve())
     monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
     monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
     monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
-    events: list[str] = []
+    events: list[tuple[str, str]] = []
 
     def register(argv, executor_closure):
-        assert executor_closure == PRIOR
+        assert executor_closure == prior_closure
         argv = list(argv)
         root_path = Path(argv[argv.index("--add-root") + 1])
         target_value = argv[argv.index("--realise") + 1]
         root_path.symlink_to(target_value)
-        events.append("protected")
+        events.append(("protected", root_path.name))
 
     monkeypatch.setattr(executor, "_run_gc_root_command", register)
-    target = tmp_path / "target-closure"
-    target.mkdir()
-    target_closure = str(target.resolve())
 
-    with executor._pinned_target_closure(
+    with executor._pinned_transaction_closures(
         request_id="gc-root-lifetime",
-        prior_closure=PRIOR,
+        prior_closure=prior_closure,
         target_closure=target_closure,
-    ) as (root_path, _argv):
-        assert root_path.is_symlink()
-        assert os.readlink(root_path) == target_closure
-        events.append("effect")
+    ) as (roots, argvs, release_roots):
+        assert os.readlink(roots["prior"]) == prior_closure
+        assert os.readlink(roots["target"]) == target_closure
+        assert [argv[argv.index("--realise") + 1] for argv in argvs] == [
+            prior_closure,
+            target_closure,
+        ]
+        release_roots()
 
-    events.append("released")
-    assert not os.path.lexists(root_path)
-    assert events == ["protected", "effect", "released"]
-@pytest.mark.parametrize("wrong_target", [None, PRIOR])
-def test_target_gc_root_registration_must_materialize_exact_target(
+    assert not os.path.lexists(roots["prior"])
+    assert not os.path.lexists(roots["target"])
+    assert events == [
+        ("protected", "gc-root-lifetime-prior"),
+        ("protected", "gc-root-lifetime-target"),
+    ]
+
+
+@pytest.mark.parametrize("target_root_state", ["missing", "wrong"])
+def test_transaction_gc_root_registration_must_materialize_exact_roots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    wrong_target: str | None,
+    target_root_state: str,
 ) -> None:
     root_dir = tmp_path / "gcroots"
     root_dir.mkdir(mode=0o700)
+    prior = tmp_path / "prior-closure"
+    target = tmp_path / "target-closure"
+    prior.mkdir()
+    target.mkdir()
+    prior_closure = str(prior.resolve())
+    target_closure = str(target.resolve())
     monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
     monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
     monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+    calls = 0
 
     def register(argv, _executor_closure):
-        if wrong_target is None:
-            return
+        nonlocal calls
+        calls += 1
         argv = list(argv)
-        Path(argv[argv.index("--add-root") + 1]).symlink_to(wrong_target)
+        root_path = Path(argv[argv.index("--add-root") + 1])
+        expected = argv[argv.index("--realise") + 1]
+        if calls == 1:
+            root_path.symlink_to(expected)
+        elif target_root_state == "wrong":
+            root_path.symlink_to(prior_closure)
 
     monkeypatch.setattr(executor, "_run_gc_root_command", register)
 
     with pytest.raises(executor.RuntimeExecutorError):
-        with executor._pinned_target_closure(
+        with executor._pinned_transaction_closures(
             request_id="gc-root-invalid",
-            prior_closure=PRIOR,
-            target_closure=CLOSURE,
+            prior_closure=prior_closure,
+            target_closure=target_closure,
         ):
-            pytest.fail("effect must not start without an exact GC root")
+            pytest.fail("effect must not start without both exact GC roots")
 
-    root_path = root_dir / "gc-root-invalid"
-    if os.path.lexists(root_path):
-        root_path.unlink()
+    prior_root = root_dir / "gc-root-invalid-prior"
+    target_root = root_dir / "gc-root-invalid-target"
+    assert not os.path.lexists(prior_root)
+    if os.path.lexists(target_root):
+        target_root.unlink()
 
 
-def test_target_gc_root_spans_failed_effect_and_verified_recovery(
+def test_transaction_gc_roots_span_activation_recovery(
     runtime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -612,14 +657,16 @@ def test_target_gc_root_spans_failed_effect_and_verified_recovery(
     request_id = "activation-gc-recovery"
     write_request(request_root, request_id, receipt, authority, plan)
     _allow_future_activation(monkeypatch)
-    root_path = executor.GC_ROOT_DIR / request_id
-    first = True
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    calls = 0
 
     def failing_once(argv, target_closure):
-        nonlocal first
-        assert root_path.is_symlink()
-        if first:
-            first = False
+        nonlocal calls
+        calls += 1
+        assert prior_root.is_symlink()
+        assert target_root.is_symlink()
+        if calls == 1:
             state["current"] = CLOSURE
             raise executor.RuntimeExecutorError("simulated effect failure")
         runner(argv, target_closure)
@@ -635,46 +682,162 @@ def test_target_gc_root_spans_failed_effect_and_verified_recovery(
         )
 
     assert state == {"current": PRIOR, "profile": PRIOR}
-    assert not os.path.lexists(root_path)
+    assert not os.path.lexists(prior_root)
+    assert not os.path.lexists(target_root)
 
 
-def test_uncertain_effect_keeps_target_gc_root_fail_closed(
+def test_persistent_promotion_keeps_both_gc_roots_through_recovery(
+    runtime,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    root_dir = tmp_path / "gcroots"
-    root_dir.mkdir(mode=0o700)
-    monkeypatch.setattr(executor, "GC_ROOT_DIR", root_dir)
-    monkeypatch.setattr(executor, "TRUSTED_UID", os.geteuid())
-    monkeypatch.setattr(executor, "_require_executable", lambda path, **_: path)
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    request_id = "promotion-gc-recovery"
+    write_request(request_root, request_id, receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    calls = 0
 
-    target = tmp_path / "target-closure"
-    target.mkdir()
-    target_closure = str(target.resolve())
+    def failing_switch(argv, target_closure):
+        nonlocal calls
+        calls += 1
+        assert prior_root.is_symlink()
+        assert target_root.is_symlink()
+        if calls == 2:
+            state["current"] = CLOSURE
+            raise executor.RuntimeExecutorError("simulated promotion switch failure")
+        runner(argv, target_closure)
 
-    def register(argv, _executor_closure):
-        argv = list(argv)
-        Path(argv[argv.index("--add-root") + 1]).symlink_to(target_closure)
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=failing_switch,
+            **bindings(receipt, authority, plan),
+        )
 
-    monkeypatch.setattr(executor, "_run_gc_root_command", register)
-    root_path = root_dir / "gc-root-uncertain"
+    assert calls == 4
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(prior_root)
+    assert not os.path.lexists(target_root)
+
+
+def test_uncertain_effect_keeps_transaction_gc_roots_fail_closed(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_root, _state, _runner = runtime
+    receipt = build_receipt()
+    authority = activation_authority(receipt, mode="next-boot")
+    plan = _future_test_plan(receipt, authority)
+    request_id = "activation-gc-uncertain"
+    write_request(request_root, request_id, receipt, authority, plan)
+    _allow_future_activation(monkeypatch)
 
     with pytest.raises(
         executor._ProcessTerminationUncertain,
         match="simulated uncertain mutation",
     ):
-        with executor._pinned_target_closure(
-            request_id="gc-root-uncertain",
-            prior_closure=PRIOR,
-            target_closure=target_closure,
-        ):
-            raise executor._ProcessTerminationUncertain(
-                "simulated uncertain mutation"
-            )
+        executor.execute_activation(
+            request_id=request_id,
+            runner=lambda _argv, _target: (_ for _ in ()).throw(
+                executor._ProcessTerminationUncertain(
+                    "simulated uncertain mutation"
+                )
+            ),
+            **bindings(receipt, authority, plan),
+        )
 
-    assert root_path.is_symlink()
-    assert os.readlink(root_path) == target_closure
-    root_path.unlink()
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    assert prior_root.is_symlink()
+    assert target_root.is_symlink()
+    prior_root.unlink()
+    target_root.unlink()
+
+
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+@pytest.mark.parametrize("cleanup_failure", ["unlink", "missing"])
+def test_post_effect_gc_root_cleanup_failure_recovers_before_returning_error(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    cleanup_failure: str,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-gc-{cleanup_failure}-recovery"
+    original_remove = executor._remove_gc_root
+    unlink_failed = False
+    missing_injected = False
+    effect_calls = 0
+
+    def fail_target_cleanup_once(path: Path, expected_target: str) -> None:
+        nonlocal unlink_failed
+        if (
+            cleanup_failure == "unlink"
+            and path.name.endswith("-target")
+            and not unlink_failed
+        ):
+            unlink_failed = True
+            raise executor.RuntimeExecutorError(
+                "simulated target GC root unlink failure"
+            )
+        original_remove(path, expected_target)
+
+    monkeypatch.setattr(executor, "_remove_gc_root", fail_target_cleanup_once)
+
+    def effect_runner(argv, target_closure):
+        nonlocal effect_calls, missing_injected
+        runner(argv, target_closure)
+        effect_calls += 1
+        last_effect = (
+            operation == "activation"
+            or (operation == "persistent-promotion" and effect_calls == 2)
+        )
+        if cleanup_failure == "missing" and last_effect and not missing_injected:
+            missing_injected = True
+            executor._gc_root_path(request_id, "target").unlink()
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=effect_runner,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=effect_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="prior closure recovery completed",
+    ):
+        invoke()
+
+    if cleanup_failure == "unlink":
+        assert unlink_failed is True
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(executor._gc_root_path(request_id, "prior"))
+    assert not os.path.lexists(executor._gc_root_path(request_id, "target"))
 
 
 def test_persistent_state_digest_changes_with_runtime_state() -> None:
@@ -749,10 +912,12 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert runtime["required_systemd_scope_template"] == (
         "/system.slice/heim-pc-nixos-day2-{request_id}.scope"
     )
-    assert runtime["target_gc_root_directory"] == (
+    assert runtime["transaction_gc_root_directory"] == (
         "/nix/var/nix/gcroots/heim-pc-day2"
     )
-    assert runtime["target_gc_root_lifetime"] == "effect-and-recovery-transaction"
+    assert runtime["transaction_gc_root_lifetime"] == "effect-and-recovery-transaction"
+    assert runtime["transaction_gc_root_roles"] == ["prior", "target"]
+    assert runtime["prior_closure_gc_root_required"] is True
     assert runtime["prior_closure_nix_env_relative_path"] == "sw/bin/nix-env"
     assert runtime["prior_closure_nix_store_relative_path"] == "sw/bin/nix-store"
     assert runtime["target_closure_systemctl_relative_path"] == "sw/bin/systemctl"
@@ -798,6 +963,7 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
         is False
     )
     assert contract["execution_receipt"]["dedicated_scope_membership_established"] is True
+    assert contract["execution_receipt"]["transaction_gc_roots_released"] is True
     assert (
         contract["execution_receipt"]["transaction_gc_root_release_established"]
         is True

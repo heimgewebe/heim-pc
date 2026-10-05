@@ -191,9 +191,11 @@ def _load_contract() -> dict[str, Any]:
         "cgroup_root": str(CGROUP_ROOT),
         "required_systemd_scope_template": DEDICATED_SCOPE_TEMPLATE,
         "scope_peer_quiescence_required": True,
-        "target_gc_root_directory": str(GC_ROOT_DIR),
-        "target_gc_root_registration": "nix-store-add-root-realise-existing-path",
-        "target_gc_root_lifetime": "effect-and-recovery-transaction",
+        "transaction_gc_root_directory": str(GC_ROOT_DIR),
+        "transaction_gc_root_roles": ["prior", "target"],
+        "transaction_gc_root_registration": "nix-store-add-root-realise-existing-path",
+        "transaction_gc_root_lifetime": "effect-and-recovery-transaction",
+        "prior_closure_gc_root_required": True,
         "nix_runtime_config": {
             "substitute": False,
             "builders": [],
@@ -239,6 +241,7 @@ def _load_contract() -> dict[str, Any]:
         "independent_runtime_readback_established": False,
         "persistent_state_observation_provenance_established": False,
         "dedicated_scope_membership_established": True,
+        "transaction_gc_roots_released": True,
         "transaction_gc_root_release_established": True,
     }:
         raise RuntimeExecutorError("runtime execution receipt boundary drifted")
@@ -456,10 +459,12 @@ def _profile_set_argv(executor_closure: str, target_closure: str) -> list[str]:
     ]
 
 
-def _gc_root_path(request_id: str) -> Path:
+def _gc_root_path(request_id: str, role: str) -> Path:
     if REQUEST_ID_RE.fullmatch(request_id) is None:
         raise RuntimeExecutorError("request id is invalid")
-    return GC_ROOT_DIR / request_id
+    if role not in {"prior", "target"}:
+        raise RuntimeExecutorError("transaction GC root role is invalid")
+    return GC_ROOT_DIR / f"{request_id}-{role}"
 
 
 def _gc_root_argv(
@@ -977,60 +982,106 @@ def _remove_gc_root(path: Path, expected_target: str) -> None:
 
 
 @contextmanager
-def _pinned_target_closure(
+def _pinned_transaction_closures(
     *,
     request_id: str,
     prior_closure: str,
     target_closure: str,
-) -> Iterator[tuple[Path, list[str]]]:
+) -> Iterator[
+    tuple[
+        dict[str, Path],
+        tuple[list[str], list[str]],
+        Callable[[], None],
+    ]
+]:
     _require_secure_dir(GC_ROOT_DIR, label="transaction GC root directory")
-    root_path = _gc_root_path(request_id)
-    if os.path.lexists(root_path):
-        raise RuntimeExecutorError(
-            f"transaction GC root already exists: {root_path}"
-        )
-    root_argv = _gc_root_argv(prior_closure, root_path, target_closure)
+    roots = {
+        "prior": _gc_root_path(request_id, "prior"),
+        "target": _gc_root_path(request_id, "target"),
+    }
+    targets = {"prior": prior_closure, "target": target_closure}
+    for role, root_path in roots.items():
+        if os.path.lexists(root_path):
+            raise RuntimeExecutorError(
+                f"transaction {role} GC root already exists: {root_path}"
+            )
+
+    argvs = (
+        _gc_root_argv(prior_closure, roots["prior"], prior_closure),
+        _gc_root_argv(prior_closure, roots["target"], target_closure),
+    )
     try:
-        _run_gc_root_command(root_argv, prior_closure)
-        _require_gc_root(root_path, target_closure)
+        for role, argv in zip(("prior", "target"), argvs):
+            _run_gc_root_command(argv, prior_closure)
+            _require_gc_root(roots[role], targets[role])
     except _ProcessTerminationUncertain:
-        # Preserve any possibly-created root when the registration child is not
-        # proven quiescent. A safe leak is preferable to unpinning a path that
-        # might still be in use.
+        # Preserve any possibly-created roots when registration is not proven
+        # quiescent. A safe leak is preferable to unpinning a closure that may
+        # still be required by an in-flight child.
         raise
     except BaseException as setup_error:
-        if os.path.lexists(root_path):
+        cleanup_errors: list[str] = []
+        for role in ("target", "prior"):
+            root_path = roots[role]
+            if not os.path.lexists(root_path):
+                continue
             try:
-                _remove_gc_root(root_path, target_closure)
+                _remove_gc_root(root_path, targets[role])
             except RuntimeExecutorError as cleanup_error:
-                raise RuntimeExecutorError(
-                    "target GC root setup failed and cleanup is incomplete: "
-                    f"{cleanup_error}"
-                ) from setup_error
+                cleanup_errors.append(f"{role}: {cleanup_error}")
+        if cleanup_errors:
+            raise RuntimeExecutorError(
+                "transaction GC root setup failed and cleanup is incomplete: "
+                + "; ".join(cleanup_errors)
+            ) from setup_error
         raise
 
-    release_root = True
+    release_roots = True
+    released = False
     body_error: BaseException | None = None
+
+    def release() -> None:
+        nonlocal released
+        # Validate both roots before removing either so a missing/wrong target
+        # enters the caller's guarded recovery path while rollback is pinned.
+        _require_gc_root(roots["prior"], prior_closure)
+        _require_gc_root(roots["target"], target_closure)
+        # Remove target first. If prior cleanup then fails, rollback remains
+        # pinned and the caller can recover before this context retries cleanup.
+        _remove_gc_root(roots["target"], target_closure)
+        _remove_gc_root(roots["prior"], prior_closure)
+        released = True
+
     try:
-        yield root_path, root_argv
-        _require_gc_root(root_path, target_closure)
+        yield roots, argvs, release
     except _ProcessTerminationUncertain:
-        release_root = False
+        release_roots = False
         raise
     except BaseException as exc:
         body_error = exc
         raise
     finally:
-        if release_root:
-            try:
-                _remove_gc_root(root_path, target_closure)
-            except RuntimeExecutorError as cleanup_error:
+        if release_roots and not released:
+            cleanup_errors: list[str] = []
+            last_cleanup_error: RuntimeExecutorError | None = None
+            for role in ("target", "prior"):
+                root_path = roots[role]
+                if not os.path.lexists(root_path):
+                    continue
+                try:
+                    _remove_gc_root(root_path, targets[role])
+                except RuntimeExecutorError as cleanup_error:
+                    last_cleanup_error = cleanup_error
+                    cleanup_errors.append(f"{role}: {cleanup_error}")
+            if cleanup_errors:
+                message = "transaction GC root cleanup is incomplete: " + "; ".join(
+                    cleanup_errors
+                )
                 if body_error is not None:
                     raise RuntimeExecutorError(
-                        f"{body_error}; target GC root cleanup failed: "
-                        f"{cleanup_error}"
-                    ) from cleanup_error
-                raise
+                        f"{body_error}; {message}"
+                    ) from last_cleanup_error
+                raise RuntimeExecutorError(message) from last_cleanup_error
 
 
 @contextmanager
@@ -1161,8 +1212,9 @@ def _execution_receipt(
     plan_sha256: str,
     argv: Sequence[str],
     effect_argvs: Sequence[Sequence[str]],
-    gc_root_argv: Sequence[str],
+    gc_root_argvs: Sequence[Sequence[str]],
     executor_cgroup: str,
+    prior_gc_root: str,
     target_gc_root: str,
     pre_current: str,
     pre_profile: str,
@@ -1188,10 +1240,16 @@ def _execution_receipt(
         "effect_commands_sha256": _sha256_json(
             [list(effect_argv) for effect_argv in effect_argvs]
         ),
-        "gc_root_command_sha256": _sha256_json(list(gc_root_argv)),
+        "gc_root_command_sha256": _sha256_json(list(gc_root_argvs[1])),
+        "gc_root_commands_sha256": _sha256_json(
+            [list(gc_root_argv) for gc_root_argv in gc_root_argvs]
+        ),
         "executor_cgroup": executor_cgroup,
+        "prior_gc_root": prior_gc_root,
         "target_gc_root": target_gc_root,
+        "prior_gc_root_released": True,
         "target_gc_root_released": True,
+        "transaction_gc_roots_released": True,
         "dedicated_scope_membership_established": True,
         "transaction_gc_root_release_established": True,
         "profile_mutated": profile_mutated,
@@ -1218,6 +1276,7 @@ def _execution_receipt(
     }
     receipt["receipt_sha256"] = _sha256_json(receipt)
     return receipt
+
 
 def execute_activation(
     *,
@@ -1280,11 +1339,11 @@ def execute_activation(
             plan["prior_closure"],
             label="persistent system profile before test activation",
         )
-        with _pinned_target_closure(
+        with _pinned_transaction_closures(
             request_id=request_id,
             prior_closure=plan["prior_closure"],
             target_closure=plan["system_closure"],
-        ) as (target_gc_root, gc_root_argv):
+        ) as (gc_roots, gc_root_argvs, release_gc_roots):
             switch_mode = CONTRACT["supported_operations"]["activation"][
                 "executable_modes"
             ]["test"]
@@ -1306,6 +1365,7 @@ def execute_activation(
                         label="persistent system profile after test activation",
                     )
                     _raise_if_termination_requested(termination)
+                    release_gc_roots()
                 except _ProcessTerminationUncertain:
                     raise
                 except (
@@ -1338,9 +1398,10 @@ def execute_activation(
             plan_sha256=plan_digest,
             argv=switch_argv,
             effect_argvs=(switch_argv,),
-            gc_root_argv=gc_root_argv,
+            gc_root_argvs=gc_root_argvs,
             executor_cgroup=executor_cgroup,
-            target_gc_root=str(target_gc_root),
+            prior_gc_root=str(gc_roots["prior"]),
+            target_gc_root=str(gc_roots["target"]),
             pre_current=pre_current,
             pre_profile=pre_profile,
             post_current=post_current,
@@ -1421,11 +1482,11 @@ def execute_persistent_promotion(
             expected_prior_persistent_state_sha256=prior_state_digest,
             now=now,
         )
-        with _pinned_target_closure(
+        with _pinned_transaction_closures(
             request_id=request_id,
             prior_closure=plan["prior_closure"],
             target_closure=plan["system_closure"],
-        ) as (target_gc_root, gc_root_argv):
+        ) as (gc_roots, gc_root_argvs, release_gc_roots):
             profile_changed = False
             profile_set_argv = _profile_set_argv(
                 plan["prior_closure"], plan["system_closure"]
@@ -1460,6 +1521,7 @@ def execute_persistent_promotion(
                         label="persistent system profile after persistent promotion",
                     )
                     _raise_if_termination_requested(termination)
+                    release_gc_roots()
                 except _ProcessTerminationUncertain:
                     raise
                 except (
@@ -1492,9 +1554,10 @@ def execute_persistent_promotion(
             plan_sha256=plan_digest,
             argv=switch_argv,
             effect_argvs=(profile_set_argv, switch_argv),
-            gc_root_argv=gc_root_argv,
+            gc_root_argvs=gc_root_argvs,
             executor_cgroup=executor_cgroup,
-            target_gc_root=str(target_gc_root),
+            prior_gc_root=str(gc_roots["prior"]),
+            target_gc_root=str(gc_roots["target"]),
             pre_current=pre_current,
             pre_profile=pre_profile,
             post_current=post_current,

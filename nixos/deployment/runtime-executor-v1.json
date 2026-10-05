@@ -52,9 +52,14 @@
     "cgroup_root": "/sys/fs/cgroup",
     "required_systemd_scope_template": "/system.slice/heim-pc-nixos-day2-{request_id}.scope",
     "scope_peer_quiescence_required": true,
-    "target_gc_root_directory": "/nix/var/nix/gcroots/heim-pc-day2",
-    "target_gc_root_registration": "nix-store-add-root-realise-existing-path",
-    "target_gc_root_lifetime": "effect-and-recovery-transaction",
+    "transaction_gc_root_directory": "/nix/var/nix/gcroots/heim-pc-day2",
+    "transaction_gc_root_roles": [
+      "prior",
+      "target"
+    ],
+    "transaction_gc_root_registration": "nix-store-add-root-realise-existing-path",
+    "transaction_gc_root_lifetime": "effect-and-recovery-transaction",
+    "prior_closure_gc_root_required": true,
     "nix_runtime_config": {
       "substitute": false,
       "builders": [],
@@ -80,6 +85,7 @@
     "independent_runtime_readback_established": false,
     "persistent_state_observation_provenance_established": false,
     "dedicated_scope_membership_established": true,
+    "transaction_gc_roots_released": true,
     "transaction_gc_root_release_established": true
   },
   "forbidden_effects": [
