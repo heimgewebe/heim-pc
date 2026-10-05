@@ -1370,6 +1370,18 @@ def execute_activation(
             with _controlled_termination() as termination:
                 _raise_if_termination_requested(termination)
                 try:
+                    # GC-root registration can consume a full command timeout.
+                    # Re-run the existing fresh-authority gate after pinning and
+                    # immediately before the first runtime effect.
+                    plan = managed_nix.authorize_activation_plan_execution(
+                        locked_build,
+                        locked_authority,
+                        locked_plan,
+                        expected_authority_sha256=expected_authority_sha256,
+                        expected_target=expected_target,
+                        now=_utc_now(),
+                    )
+                    _raise_if_termination_requested(termination)
                     runner(switch_argv, plan["system_closure"])
                     _raise_if_termination_requested(termination)
                     post_current = _require_link_target(
@@ -1517,6 +1529,21 @@ def execute_persistent_promotion(
             with _controlled_termination() as termination:
                 _raise_if_termination_requested(termination)
                 try:
+                    # Root pinning can be long-running.  Revalidate the exact
+                    # authority window after pinning and immediately before any
+                    # persistent-state mutation.
+                    plan = managed_nix.authorize_persistent_promotion_execution(
+                        locked_build,
+                        locked_authority,
+                        locked_plan,
+                        expected_authority_sha256=expected_authority_sha256,
+                        expected_target=expected_target,
+                        expected_source_artifact_sha256=source_artifact_digest,
+                        expected_prior_closure=pre_current,
+                        expected_prior_persistent_state_sha256=prior_state_digest,
+                        now=_utc_now(),
+                    )
+                    _raise_if_termination_requested(termination)
                     # The profile command may mutate successfully and still report a
                     # timeout/non-zero status. Treat the profile as potentially changed
                     # before invoking it so every failure enters rollback.

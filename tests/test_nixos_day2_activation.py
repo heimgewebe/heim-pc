@@ -302,6 +302,94 @@ def test_boot_critical_persistent_promotion_fails_before_runtime_effect(runtime)
     assert calls == []
     assert state == {"current": PRIOR, "profile": PRIOR}
 
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+def test_authority_is_revalidated_after_gc_root_setup_before_effect(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-fresh-authority-before-effect"
+    late_now = "2026-10-04T10:00:01Z"
+    times = iter((NOW, late_now))
+    authorizations: list[str] = []
+    runner_calls: list[list[str]] = []
+
+    monkeypatch.setattr(executor, "_utc_now", lambda: next(times))
+
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+
+    def authorize(_build, _authority, current_plan, **kwargs):
+        now = kwargs["now"]
+        authorizations.append(now)
+        if now == late_now:
+            assert prior_root.is_symlink()
+            assert target_root.is_symlink()
+            raise managed_nix.ManagedNixError(
+                "authority expired after GC-root setup"
+            )
+        return dict(current_plan)
+
+    def recording_runner(argv, _target_closure):
+        runner_calls.append(list(argv))
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        monkeypatch.setattr(
+            executor.managed_nix,
+            "authorize_activation_plan_execution",
+            authorize,
+        )
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        original_validate = executor.managed_nix.validate_build_receipt
+
+        def non_boot_critical(value):
+            validated = dict(original_validate(value))
+            validated["effect_scope"] = "normal"
+            return validated
+
+        monkeypatch.setattr(
+            executor.managed_nix,
+            "validate_build_receipt",
+            non_boot_critical,
+        )
+        monkeypatch.setattr(
+            executor.managed_nix,
+            "authorize_persistent_promotion_execution",
+            authorize,
+        )
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(
+        managed_nix.ManagedNixError,
+        match="authority expired after GC-root setup",
+    ):
+        invoke()
+
+    assert authorizations == [NOW, late_now]
+    assert runner_calls == []
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(prior_root)
+    assert not os.path.lexists(target_root)
+
+
 def test_persistent_promotion_receipt_binds_all_effect_commands(
     runtime,
     monkeypatch: pytest.MonkeyPatch,
