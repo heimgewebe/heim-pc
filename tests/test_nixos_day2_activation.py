@@ -390,6 +390,156 @@ def test_authority_is_revalidated_after_gc_root_setup_before_effect(
     assert not os.path.lexists(target_root)
 
 
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+@pytest.mark.parametrize("drift_field", ["current", "profile"])
+def test_prior_state_is_revalidated_after_gc_root_setup_before_effect(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    drift_field: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-{drift_field}-drift-before-effect"
+    runner_calls: list[list[str]] = []
+    registrations = 0
+    original_register = executor._run_gc_root_command
+
+    def register_then_drift(argv, executor_closure):
+        nonlocal registrations
+        original_register(argv, executor_closure)
+        registrations += 1
+        if registrations == 2:
+            state[drift_field] = CLOSURE
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", register_then_drift)
+    monkeypatch.setattr(
+        executor,
+        "_recover",
+        lambda **_kwargs: pytest.fail("pre-effect drift must not start recovery"),
+    )
+
+    def recording_runner(argv, _target_closure):
+        runner_calls.append(list(argv))
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+        expected = (
+            "current system immediately before test activation"
+            if drift_field == "current"
+            else "persistent system profile immediately before test activation"
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+        expected = (
+            "current system immediately before persistent promotion"
+            if drift_field == "current"
+            else "persistent system profile immediately before persistent promotion"
+        )
+
+    with pytest.raises(executor.RuntimeExecutorError, match=expected):
+        invoke()
+
+    assert registrations == 2
+    assert runner_calls == []
+    assert state[drift_field] == CLOSURE
+    other = "profile" if drift_field == "current" else "current"
+    assert state[other] == PRIOR
+    assert not os.path.lexists(executor._gc_root_path(request_id, "prior"))
+    assert not os.path.lexists(executor._gc_root_path(request_id, "target"))
+
+
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+def test_pre_effect_termination_after_reauthorization_does_not_recover(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-termination-before-effect"
+    authorization_calls = 0
+    runner_calls: list[list[str]] = []
+    recovery_calls: list[str] = []
+
+    def authorize(_build, _authority, current_plan, **_kwargs):
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls == 2:
+            active = executor._ACTIVE_TERMINATION_STATE.get()
+            assert active is not None
+            active.record(executor.signal.SIGTERM)
+        return dict(current_plan)
+
+    monkeypatch.setattr(
+        executor,
+        "_recover",
+        lambda **_kwargs: recovery_calls.append("recover"),
+    )
+
+    def recording_runner(argv, _target_closure):
+        runner_calls.append(list(argv))
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        monkeypatch.setattr(
+            executor.managed_nix,
+            "authorize_activation_plan_execution",
+            authorize,
+        )
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        monkeypatch.setattr(
+            executor.managed_nix,
+            "authorize_persistent_promotion_execution",
+            authorize,
+        )
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(executor._ExecutorInterrupted):
+        invoke()
+
+    assert authorization_calls == 2
+    assert runner_calls == []
+    assert recovery_calls == []
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(executor._gc_root_path(request_id, "prior"))
+    assert not os.path.lexists(executor._gc_root_path(request_id, "target"))
+
+
 def test_persistent_promotion_receipt_binds_all_effect_commands(
     runtime,
     monkeypatch: pytest.MonkeyPatch,

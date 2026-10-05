@@ -1374,19 +1374,34 @@ def execute_activation(
             switch_argv = _switch_argv(plan["system_closure"], switch_mode)
             with _controlled_termination() as termination:
                 _raise_if_termination_requested(termination)
+                # GC-root registration may take a full command timeout. Re-read
+                # the live prior state after pinning so another activation tool
+                # cannot change the host underneath this exact-bound request.
+                pre_current = _require_link_target(
+                    CURRENT_SYSTEM_LINK,
+                    plan["prior_closure"],
+                    label="current system immediately before test activation",
+                )
+                _raise_if_termination_requested(termination)
+                pre_profile = _require_link_target(
+                    SYSTEM_PROFILE_LINK,
+                    plan["prior_closure"],
+                    label="persistent system profile immediately before test activation",
+                )
+                _raise_if_termination_requested(termination)
+                plan = managed_nix.authorize_activation_plan_execution(
+                    locked_build,
+                    locked_authority,
+                    locked_plan,
+                    expected_authority_sha256=expected_authority_sha256,
+                    expected_target=expected_target,
+                    now=_utc_now(),
+                )
+                # Keep every no-effect check outside the recovery guard. If a
+                # termination was requested before the runner starts, there is
+                # no mutation to roll back.
+                _raise_if_termination_requested(termination)
                 try:
-                    # GC-root registration can consume a full command timeout.
-                    # Re-run the existing fresh-authority gate after pinning and
-                    # immediately before the first runtime effect.
-                    plan = managed_nix.authorize_activation_plan_execution(
-                        locked_build,
-                        locked_authority,
-                        locked_plan,
-                        expected_authority_sha256=expected_authority_sha256,
-                        expected_target=expected_target,
-                        now=_utc_now(),
-                    )
-                    _raise_if_termination_requested(termination)
                     runner(switch_argv, plan["system_closure"])
                     _raise_if_termination_requested(termination)
                     post_current = _require_link_target(
@@ -1533,22 +1548,44 @@ def execute_persistent_promotion(
             switch_argv = _switch_argv(plan["system_closure"], "switch")
             with _controlled_termination() as termination:
                 _raise_if_termination_requested(termination)
+                # GC-root pinning can be long-running. Refresh both live prior
+                # links after pinning, recompute the bound persistent-state
+                # digest, and abort before effects if any external tool drifted
+                # the host while this private activation lock was held.
+                pre_current = _require_link_target(
+                    CURRENT_SYSTEM_LINK,
+                    plan["prior_closure"],
+                    label="current system immediately before persistent promotion",
+                )
+                _raise_if_termination_requested(termination)
+                pre_profile = _require_link_target(
+                    SYSTEM_PROFILE_LINK,
+                    plan["prior_closure"],
+                    label="persistent system profile immediately before persistent promotion",
+                )
+                _raise_if_termination_requested(termination)
+                prior_state_digest = persistent_state_sha256(
+                    target=plan["target"],
+                    current_closure=pre_current,
+                    profile_closure=pre_profile,
+                )
+                plan = managed_nix.authorize_persistent_promotion_execution(
+                    locked_build,
+                    locked_authority,
+                    locked_plan,
+                    expected_authority_sha256=expected_authority_sha256,
+                    expected_target=expected_target,
+                    expected_source_artifact_sha256=source_artifact_digest,
+                    expected_prior_closure=pre_current,
+                    expected_prior_persistent_state_sha256=prior_state_digest,
+                    now=_utc_now(),
+                )
+                # No effect has started yet, so a pending termination here must
+                # exit without dispatching recovery. Once runner() is entered,
+                # _run_exact starts the private child before observing the flag,
+                # making recovery conservative and appropriate from that point.
+                _raise_if_termination_requested(termination)
                 try:
-                    # Root pinning can be long-running.  Revalidate the exact
-                    # authority window after pinning and immediately before any
-                    # persistent-state mutation.
-                    plan = managed_nix.authorize_persistent_promotion_execution(
-                        locked_build,
-                        locked_authority,
-                        locked_plan,
-                        expected_authority_sha256=expected_authority_sha256,
-                        expected_target=expected_target,
-                        expected_source_artifact_sha256=source_artifact_digest,
-                        expected_prior_closure=pre_current,
-                        expected_prior_persistent_state_sha256=prior_state_digest,
-                        now=_utc_now(),
-                    )
-                    _raise_if_termination_requested(termination)
                     # The profile command may mutate successfully and still report a
                     # timeout/non-zero status. Treat the profile as potentially changed
                     # before invoking it so every failure enters rollback.
