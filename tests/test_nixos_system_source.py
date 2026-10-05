@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "880ec0b7846ccfd353e5434088036cc812341ed49ab664e858f24ba30bd44194"
+SOURCE_SNAPSHOT_SHA256 = "1d235c37bb8017783f5d67a76380455acf0e2069a039bb0d2a0fe2cc7bcd69d9"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -229,7 +229,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 31)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
@@ -242,7 +242,7 @@ class T(unittest.TestCase):
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix",
-            "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
+            "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
             "zones/agent.nix",
         ):
             self.assertTrue((SOURCE / relative).is_file(), relative)
@@ -891,6 +891,9 @@ class T(unittest.TestCase):
             'enableUserSlices = false;',
             'default = false;',
             '" --observe-only"',
+            'users.users.alex.linger = false;',
+            'Group = config.users.users.alex.group;',
+            "memoryGuardUsesNixSystemctl",
             "heim-pc-memory-pressure-snapshot",
             "heim-pc-pytest-temp-gc",
             "heim-pc-storage-pressure-watch",
@@ -913,7 +916,16 @@ class T(unittest.TestCase):
             module,
         )
         self.assertIn("target.zramSwap.memoryPercent == 25", flake)
+        self.assertIn("target.users.users.alex.linger == false", flake)
+        self.assertIn(
+            "target.systemd.services.heim-pc-pytest-temp-gc.serviceConfig.Group",
+            flake,
+        )
         self.assertIn("!target.heimPc.hostProtection.grabowskiGuard.enable", flake)
+        self.assertIn(
+            "host-protection = import ./tests/host-protection.nix",
+            flake,
+        )
         self.assertIn(
             'hasInfix "--observe-only"',
             flake,

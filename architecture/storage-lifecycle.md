@@ -144,3 +144,8 @@ Maintenance-Unit anfordern, solange nicht sämtliche im Policy-Vertrag genannten
 Maintenance-Owner ebenfalls deklarativ vorhanden sind. Die Option zur
 Maintenance-Anforderung ist standardmäßig false und durch eine NixOS-Assertion
 an genau diese vollständige Unit-Menge gebunden.
+Die NixOS-User-Timer sind in diesem Schritt bewusst **session-bound**: `alex`
+bekommt kein Linger, weil das den vollständigen User-Manager schon vor Login
+starten würde. Damit wird hier keine unbeaufsichtigte Boot-Abdeckung behauptet;
+eine spätere dauerhafte Scheduling-Autorität braucht einen eigenen, engeren
+Systemdienst- oder Linger-Entscheid.

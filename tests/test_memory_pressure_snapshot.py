@@ -27,14 +27,20 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         swap_free: int = 1000,
         some_avg10: float = 0.0,
         full_avg10: float = 0.0,
+        pressure_present: bool = True,
+        root_events_text: str = "oom 0\noom_kill 0\n",
     ) -> dict:
         state = root / "state"
         history = state / "history.jsonl"
         latest = state / "latest.json"
-        pressure = {
-            "some": {"avg10": some_avg10, "avg60": 0.0, "avg300": 0.0, "total": 0},
-            "full": {"avg10": full_avg10, "avg60": 0.0, "avg300": 0.0, "total": 0},
-        }
+        pressure = (
+            {
+                "some": {"avg10": some_avg10, "avg60": 0.0, "avg300": 0.0, "total": 0},
+                "full": {"avg10": full_avg10, "avg60": 0.0, "avg300": 0.0, "total": 0},
+            }
+            if pressure_present
+            else {}
+        )
         with (
             patch.object(snapshot, "STATE_DIR", state),
             patch.object(snapshot, "HISTORY", history),
@@ -52,7 +58,7 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             patch.object(snapshot, "pressure", return_value=pressure),
             patch.object(snapshot, "process_rows", return_value=[]),
             patch.object(snapshot, "cgroup_rows", return_value=[]),
-            patch.object(snapshot, "parse_key_values", return_value={}),
+            patch.object(snapshot, "read_text", return_value=root_events_text),
         ):
             self.assertEqual(snapshot.main(), 0)
         self.assertEqual(state.stat().st_mode & 0o777, 0o700)
@@ -81,7 +87,10 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["severity"], "warning")
         self.assertEqual(payload["top_processes"], [])
         self.assertEqual(payload["top_cgroups"], [])
+        self.assertTrue(payload["observation_complete"])
+        self.assertEqual(payload["observation_errors"], [])
         self.assertEqual(payload["bounds"]["history_samples"], 240)
+        self.assertEqual(payload["bounds"]["history_bytes"], snapshot.MAX_HISTORY_BYTES)
 
     def test_history_is_bounded_to_240_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -99,6 +108,43 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(len(lines), 240)
         self.assertEqual(json.loads(lines[0]), {"sample": 61})
         self.assertEqual(json.loads(lines[-1])["schema_version"], 1)
+
+    def test_history_is_bounded_by_serialized_bytes(self) -> None:
+        line = json.dumps({"sample": "x" * 22_000}, separators=(",", ":"))
+        result = snapshot.bounded_history([line] * 239, line)
+        self.assertLessEqual(len(result.encode("utf-8")), snapshot.MAX_HISTORY_BYTES)
+        self.assertLess(len(result.splitlines()), 240)
+        self.assertEqual(json.loads(result.splitlines()[-1]), json.loads(line))
+
+    def test_oversized_regular_history_recovers_on_next_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            history = state / "history.jsonl"
+            line = json.dumps({"sample": "x" * 22_000}, separators=(",", ":"))
+            history.write_text((line + "\n") * 240, encoding="utf-8")
+            history.chmod(0o600)
+            self.assertGreater(history.stat().st_size, snapshot.MAX_HISTORY_BYTES)
+            self.assertLess(history.stat().st_size, snapshot.MAX_HISTORY_RECOVERY_BYTES)
+
+            payload = self._run_snapshot(root, mem_available=500)
+            self.assertTrue(payload["observation_complete"])
+            self.assertLessEqual(history.stat().st_size, snapshot.MAX_HISTORY_BYTES)
+            self.assertLess(len(history.read_text(encoding="utf-8").splitlines()), 240)
+
+    def test_incomplete_required_sources_never_report_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary),
+                mem_available=500,
+                pressure_present=False,
+                root_events_text="",
+            )
+        self.assertFalse(payload["observation_complete"])
+        self.assertEqual(payload["severity"], "unknown")
+        self.assertIn("memory_psi_incomplete", payload["observation_errors"])
+        self.assertIn("root_memory_events_unreadable", payload["observation_errors"])
 
     def test_unsafe_history_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

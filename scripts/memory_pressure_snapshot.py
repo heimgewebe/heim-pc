@@ -13,6 +13,10 @@ HISTORY = STATE_DIR / "history.jsonl"
 LATEST = STATE_DIR / "latest.json"
 MAX_HISTORY = 240
 MAX_HISTORY_BYTES = 5 * 1024 * 1024
+# A self-generated history can temporarily exceed the steady-state byte cap
+# when samples are near their bounded path/row maxima. Recovery may read a
+# bounded multiple so the next tick can converge it instead of wedging forever.
+MAX_HISTORY_RECOVERY_BYTES = 4 * MAX_HISTORY_BYTES
 MAX_CGROUPS = 4096
 TOP_PROCESSES = 30
 TOP_CGROUPS = 30
@@ -166,10 +170,23 @@ def validate_history() -> list[str]:
     if not HISTORY.exists():
         return []
     st = HISTORY.lstat()
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_HISTORY_BYTES:
-        raise RuntimeError("unsafe or oversized history file")
-    lines = HISTORY.read_text(encoding="utf-8", errors="replace").splitlines()
-    return lines[-(MAX_HISTORY - 1):]
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise RuntimeError("unsafe history file")
+    if st.st_size > MAX_HISTORY_RECOVERY_BYTES:
+        raise RuntimeError("history file exceeds bounded recovery limit")
+    return HISTORY.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def bounded_history(lines: list[str], current: str) -> str:
+    entries = [*lines[-(MAX_HISTORY - 1):], current]
+    encoded = [(line + "\n").encode("utf-8") for line in entries]
+    total = sum(len(line) for line in encoded)
+    while len(encoded) > 1 and total > MAX_HISTORY_BYTES:
+        total -= len(encoded[0])
+        del encoded[0]
+    if total > MAX_HISTORY_BYTES:
+        raise RuntimeError("current snapshot exceeds history byte cap")
+    return b"".join(encoded).decode("utf-8")
 
 
 def atomic_write(path: Path, data: str) -> None:
@@ -196,6 +213,16 @@ def main() -> int:
 
     mem = meminfo()
     psi = pressure()
+    root_memory_events_text = read_text(Path("/sys/fs/cgroup/memory.events"))
+    observation_errors: list[str] = []
+    for field in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
+        if field not in mem:
+            observation_errors.append(f"meminfo_missing:{field}")
+    if not {"some", "full"}.issubset(psi):
+        observation_errors.append("memory_psi_incomplete")
+    if not root_memory_events_text:
+        observation_errors.append("root_memory_events_unreadable")
+
     swap_total = mem.get("SwapTotal", 0)
     swap_free = mem.get("SwapFree", 0)
     mem_total = mem.get("MemTotal", 0)
@@ -212,11 +239,15 @@ def main() -> int:
         severity = "critical"
     elif available_ratio < 0.10 or swap_ratio >= 0.80 or some_avg10 >= 10.0:
         severity = "warning"
+    elif observation_errors:
+        severity = "unknown"
 
     payload = {
         "schema_version": 1,
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "severity": severity,
+        "observation_complete": not observation_errors,
+        "observation_errors": observation_errors,
         "memory": {
             "total_bytes": mem_total,
             "available_bytes": mem_available,
@@ -226,11 +257,13 @@ def main() -> int:
             "swap_used_ratio": round(swap_ratio, 6),
         },
         "pressure": psi,
-        "root_memory_events": parse_key_values(read_text(Path("/sys/fs/cgroup/memory.events"))),
+        "root_memory_events": parse_key_values(root_memory_events_text),
         "top_processes": process_rows(),
         "top_cgroups": cgroup_rows(),
         "bounds": {
             "history_samples": MAX_HISTORY,
+            "history_bytes": MAX_HISTORY_BYTES,
+            "history_recovery_bytes": MAX_HISTORY_RECOVERY_BYTES,
             "top_processes": TOP_PROCESSES,
             "top_cgroups": TOP_CGROUPS,
             "max_cgroups_scanned": MAX_CGROUPS,
@@ -238,13 +271,12 @@ def main() -> int:
     }
 
     compact = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    lines = validate_history()
-    lines.append(compact)
-    atomic_write(HISTORY, "\n".join(lines) + "\n")
+    atomic_write(HISTORY, bounded_history(validate_history(), compact))
     atomic_write(LATEST, json.dumps(payload, sort_keys=True, indent=2) + "\n")
     print(json.dumps({
         "status": "recorded",
         "severity": severity,
+        "observation_complete": not observation_errors,
         "available_ratio": round(available_ratio, 4),
         "swap_used_ratio": round(swap_ratio, 4),
         "psi_some_avg10": some_avg10,

@@ -309,6 +309,12 @@ die echte `grabowski-operator.service` nicht Teil des NixOS-Systemgraphen ist.
 `systemd-oomd` erhält in diesem Schritt ausdrücklich keine breite Root-, System-
 oder User-Slice-Victim-Selection; eine solche konkurrierende Policy bleibt
 separat kalibrierungs- und reviewpflichtig.
+Erforderliche Kernquellen (`/proc/meminfo`, Memory-PSI und Root-Cgroup-Events)
+werden im NixOS-Snapshot außerdem als Vollständigkeitsstatus ausgewiesen: fehlen
+sie, darf ein ansonsten unauffälliger Tick nicht `severity=ok` melden, sondern
+wird als unvollständig/`unknown` markiert. Die History konvergiert nach Sample-
+und Byte-Limit; eine begrenzt übergroße, reguläre eigene History wird gekürzt
+statt den Timer dauerhaft zu blockieren.
 
 ## Docker-Loggrenze
 

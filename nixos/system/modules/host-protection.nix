@@ -17,12 +17,16 @@ let
   ) maintenanceUnits;
 
   memoryGuardSource = builtins.readFile ../../../scripts/grabowski_memory_guard.py;
-  memoryGuardProgram = pkgs.writeText "heim-pc-grabowski-memory-guard.py" (
-    builtins.replaceStrings
-      [ "SYSTEMCTL = \"/usr/bin/systemctl\"" ]
-      [ "SYSTEMCTL = \"${pkgs.systemd}/bin/systemctl\"" ]
-      memoryGuardSource
-  );
+  memoryGuardSystemctlMarker = "SYSTEMCTL = \"/usr/bin/systemctl\"";
+  memoryGuardPatchedSource = builtins.replaceStrings
+    [ memoryGuardSystemctlMarker ]
+    [ "SYSTEMCTL = \"${pkgs.systemd}/bin/systemctl\"" ]
+    memoryGuardSource;
+  memoryGuardUsesNixSystemctl =
+    lib.hasInfix memoryGuardSystemctlMarker memoryGuardSource
+    && !lib.hasInfix memoryGuardSystemctlMarker memoryGuardPatchedSource;
+  memoryGuardProgram =
+    pkgs.writeText "heim-pc-grabowski-memory-guard.py" memoryGuardPatchedSource;
 
   storagePressureExec =
     "${pkgs.python3}/bin/python3 ${../../../scripts/storage_pressure_watch.py}"
@@ -67,7 +71,22 @@ in
         message =
           "storage-pressure maintenance requests require every declared user maintenance service";
       }
+      {
+        assertion = memoryGuardUsesNixSystemctl;
+        message =
+          "NixOS Grabowski memory guard must use the pinned Nix systemctl path";
+      }
+      {
+        assertion = builtins.hasAttr config.users.users.alex.group config.users.groups;
+        message =
+          "pytest temp GC requires alex's declared primary group to exist";
+      }
     ];
+
+    # These user timers intentionally remain session-bound in this phase.
+    # Starting alex's complete user manager before login via linger would grant
+    # broader ambient startup than the two read-only/observe-only jobs need.
+    users.users.alex.linger = false;
 
     # Independent compressed swap: no swapfile or partition is added to either
     # production disk. 25% of 64 GiB approximates the former host swap capacity.
@@ -175,7 +194,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         User = "alex";
-        Group = "alex";
+        Group = config.users.users.alex.group;
         ExecStart =
           "${pkgs.python3}/bin/python3 ${../../../scripts/pytest_temp_gc.py} --min-age-seconds 600";
         PrivateTmp = false;
@@ -212,7 +231,8 @@ in
     };
 
     # Observe-only by default. Maintenance requests remain disabled until every
-    # policy-declared user maintenance service exists in the NixOS graph.
+    # policy-declared user maintenance service exists in the NixOS graph. Both
+    # user timers below are session-bound because alex.linger is explicitly off.
     systemd.user.services.heim-pc-storage-pressure-watch = {
       description = "Observe lightweight root filesystem pressure";
       after = [ "default.target" ];

@@ -391,6 +391,10 @@
           assert target.zramSwap.algorithm == "zstd";
           assert target.zramSwap.memoryPercent == 25;
           assert target.zramSwap.priority == 1000;
+          assert target.users.users.alex.linger == false;
+          assert target.systemd.services.heim-pc-pytest-temp-gc.serviceConfig.Group
+            == target.users.users.alex.group;
+          assert builtins.hasAttr target.users.users.alex.group target.users.groups;
           assert target.systemd.oomd.enable;
           assert !target.systemd.oomd.enableRootSlice;
           assert !target.systemd.oomd.enableSystemSlice;
@@ -564,6 +568,10 @@
           assert target.zramSwap.memoryPercent == 25;
           assert target.zramSwap.algorithm == "zstd";
           assert target.zramSwap.priority == 1000;
+          assert target.users.users.alex.linger == false;
+          assert target.systemd.services.heim-pc-pytest-temp-gc.serviceConfig.Group
+            == target.users.users.alex.group;
+          assert builtins.hasAttr target.users.users.alex.group target.users.groups;
           assert target.systemd.oomd.enable;
           assert !target.systemd.oomd.enableRootSlice;
           assert !target.systemd.oomd.enableSystemSlice;
@@ -723,6 +731,7 @@
           '';
 
         integration = import ./tests/integration.nix { inherit pkgs; };
+        host-protection = import ./tests/host-protection.nix { inherit pkgs; };
         firstboot-credentials = import ./tests/firstboot-credentials.nix {
           inherit pkgs sourceRevision;
         };
