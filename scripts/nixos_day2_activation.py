@@ -196,6 +196,7 @@ def _load_contract() -> dict[str, Any]:
         "transaction_gc_root_registration": "nix-store-add-root-realise-existing-path",
         "transaction_gc_root_lifetime": "effect-and-recovery-transaction",
         "prior_closure_gc_root_required": True,
+        "incomplete_recovery_gc_roots_retained": True,
         "nix_runtime_config": {
             "substitute": False,
             "builders": [],
@@ -992,6 +993,7 @@ def _pinned_transaction_closures(
         dict[str, Path],
         tuple[list[str], list[str]],
         Callable[[], None],
+        Callable[[], None],
     ]
 ]:
     _require_secure_dir(GC_ROOT_DIR, label="transaction GC root directory")
@@ -1052,8 +1054,15 @@ def _pinned_transaction_closures(
         _remove_gc_root(roots["prior"], prior_closure)
         released = True
 
+    def retain() -> None:
+        nonlocal release_roots
+        # Incomplete recovery is not a transaction endpoint.  Preserve every
+        # remaining exact root so the prior closure stays available for
+        # operator recovery after this executor returns an error.
+        release_roots = False
+
     try:
-        yield roots, argvs, release
+        yield roots, argvs, release, retain
     except _ProcessTerminationUncertain:
         release_roots = False
         raise
@@ -1343,7 +1352,7 @@ def execute_activation(
             request_id=request_id,
             prior_closure=plan["prior_closure"],
             target_closure=plan["system_closure"],
-        ) as (gc_roots, gc_root_argvs, release_gc_roots):
+        ) as (gc_roots, gc_root_argvs, release_gc_roots, retain_gc_roots):
             switch_mode = CONTRACT["supported_operations"]["activation"][
                 "executable_modes"
             ]["test"]
@@ -1381,6 +1390,7 @@ def execute_activation(
                             profile_may_have_changed=True,
                         )
                     except RuntimeExecutorError as recovery_error:
+                        retain_gc_roots()
                         raise RuntimeExecutorError(
                             f"test activation failed and recovery is incomplete: "
                             f"{effect_error}; {recovery_error}"
@@ -1486,7 +1496,7 @@ def execute_persistent_promotion(
             request_id=request_id,
             prior_closure=plan["prior_closure"],
             target_closure=plan["system_closure"],
-        ) as (gc_roots, gc_root_argvs, release_gc_roots):
+        ) as (gc_roots, gc_root_argvs, release_gc_roots, retain_gc_roots):
             profile_changed = False
             profile_set_argv = _profile_set_argv(
                 plan["prior_closure"], plan["system_closure"]
@@ -1537,6 +1547,7 @@ def execute_persistent_promotion(
                             profile_may_have_changed=profile_changed,
                         )
                     except RuntimeExecutorError as recovery_error:
+                        retain_gc_roots()
                         raise RuntimeExecutorError(
                             f"persistent promotion failed and recovery is incomplete: "
                             f"{effect_error}; {recovery_error}"

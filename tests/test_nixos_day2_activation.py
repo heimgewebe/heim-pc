@@ -582,7 +582,7 @@ def test_transaction_gc_roots_are_verified_and_removed(
         request_id="gc-root-lifetime",
         prior_closure=prior_closure,
         target_closure=target_closure,
-    ) as (roots, argvs, release_roots):
+    ) as (roots, argvs, release_roots, _retain_roots):
         assert os.readlink(roots["prior"]) == prior_closure
         assert os.readlink(roots["target"]) == target_closure
         assert [argv[argv.index("--realise") + 1] for argv in argvs] == [
@@ -726,6 +726,72 @@ def test_persistent_promotion_keeps_both_gc_roots_through_recovery(
     assert state == {"current": PRIOR, "profile": PRIOR}
     assert not os.path.lexists(prior_root)
     assert not os.path.lexists(target_root)
+
+
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+def test_incomplete_recovery_retains_transaction_gc_roots(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    request_id = f"{operation}-gc-recovery-incomplete"
+
+    def failing_effect(_argv, _target_closure):
+        state["current"] = CLOSURE
+        if operation == "persistent-promotion":
+            state["profile"] = CLOSURE
+        raise executor.RuntimeExecutorError("simulated effect failure")
+
+    def incomplete_recovery(**_kwargs):
+        prior_root = executor._gc_root_path(request_id, "prior")
+        target_root = executor._gc_root_path(request_id, "target")
+        assert prior_root.is_symlink()
+        assert target_root.is_symlink()
+        assert os.readlink(prior_root) == PRIOR
+        assert os.readlink(target_root) == CLOSURE
+        raise executor.RuntimeExecutorError("simulated recovery failure")
+
+    monkeypatch.setattr(executor, "_recover", incomplete_recovery)
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=failing_effect,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=failing_effect,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="recovery is incomplete",
+    ):
+        invoke()
+
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    assert prior_root.is_symlink()
+    assert target_root.is_symlink()
+    assert os.readlink(prior_root) == PRIOR
+    assert os.readlink(target_root) == CLOSURE
+
+    prior_root.unlink()
+    target_root.unlink()
 
 
 def test_uncertain_effect_keeps_transaction_gc_roots_fail_closed(
@@ -918,6 +984,7 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert runtime["transaction_gc_root_lifetime"] == "effect-and-recovery-transaction"
     assert runtime["transaction_gc_root_roles"] == ["prior", "target"]
     assert runtime["prior_closure_gc_root_required"] is True
+    assert runtime["incomplete_recovery_gc_roots_retained"] is True
     assert runtime["prior_closure_nix_env_relative_path"] == "sw/bin/nix-env"
     assert runtime["prior_closure_nix_store_relative_path"] == "sw/bin/nix-store"
     assert runtime["target_closure_systemctl_relative_path"] == "sw/bin/systemctl"

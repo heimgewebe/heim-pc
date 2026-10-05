@@ -60,6 +60,7 @@
     "transaction_gc_root_registration": "nix-store-add-root-realise-existing-path",
     "transaction_gc_root_lifetime": "effect-and-recovery-transaction",
     "prior_closure_gc_root_required": true,
+    "incomplete_recovery_gc_roots_retained": true,
     "nix_runtime_config": {
       "substitute": false,
       "builders": [],
