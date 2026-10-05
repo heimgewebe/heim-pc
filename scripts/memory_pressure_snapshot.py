@@ -213,15 +213,19 @@ def main() -> int:
 
     mem = meminfo()
     psi = pressure()
+    # cgroup v2 defines memory.events only for non-root cgroups. Its absence at
+    # the real hierarchy root is normal, not a failed host-pressure observation.
+    # Check controller availability through an interface that exists at root.
     root_memory_events_text = read_text(Path("/sys/fs/cgroup/memory.events"))
+    controllers = read_text(Path("/sys/fs/cgroup/cgroup.controllers")).split()
     observation_errors: list[str] = []
     for field in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
         if field not in mem:
             observation_errors.append(f"meminfo_missing:{field}")
     if not {"some", "full"}.issubset(psi):
         observation_errors.append("memory_psi_incomplete")
-    if not root_memory_events_text:
-        observation_errors.append("root_memory_events_unreadable")
+    if "memory" not in controllers:
+        observation_errors.append("cgroup_memory_controller_unavailable")
 
     swap_total = mem.get("SwapTotal", 0)
     swap_free = mem.get("SwapFree", 0)
@@ -258,6 +262,7 @@ def main() -> int:
         },
         "pressure": psi,
         "root_memory_events": parse_key_values(root_memory_events_text),
+        "root_memory_events_available": bool(root_memory_events_text),
         "top_processes": process_rows(),
         "top_cgroups": cgroup_rows(),
         "bounds": {

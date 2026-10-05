@@ -309,10 +309,13 @@ die echte `grabowski-operator.service` nicht Teil des NixOS-Systemgraphen ist.
 `systemd-oomd` erhält in diesem Schritt ausdrücklich keine breite Root-, System-
 oder User-Slice-Victim-Selection; eine solche konkurrierende Policy bleibt
 separat kalibrierungs- und reviewpflichtig.
-Erforderliche Kernquellen (`/proc/meminfo`, Memory-PSI und Root-Cgroup-Events)
-werden im NixOS-Snapshot außerdem als Vollständigkeitsstatus ausgewiesen: fehlen
-sie, darf ein ansonsten unauffälliger Tick nicht `severity=ok` melden, sondern
-wird als unvollständig/`unknown` markiert. Die History konvergiert nach Sample-
+Erforderliche Kernquellen (`/proc/meminfo`, Memory-PSI und die Verfügbarkeit
+des Memory-Controllers über `cgroup.controllers`) werden im NixOS-Snapshot als
+Vollständigkeitsstatus ausgewiesen: fehlen sie, darf ein ansonsten unauffälliger
+Tick nicht `severity=ok` melden, sondern wird als unvollständig/`unknown` markiert.
+`memory.events` existiert laut cgroup-v2-Vertrag nur auf Nicht-Root-cgroups.
+Sein Fehlen an der Hierarchiewurzel ist daher kein Fehler der Kernbeobachtung;
+`root_memory_events_available` weist diese optionale Quelle gesondert aus. Die History konvergiert nach Sample-
 und Byte-Limit; eine begrenzt übergroße, reguläre eigene History wird gekürzt
 statt den Timer dauerhaft zu blockieren.
 

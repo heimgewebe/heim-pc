@@ -13,8 +13,8 @@ pkgs.testers.runNixOSTest {
     };
     heimPc.hostProtection.enable = true;
 
-    # This runtime regression is about user/group resolution and session-bound
-    # scheduling. Keep unrelated zram/oomd kernel behavior out of the VM proof.
+    # Exercise service credentials and the real sandboxed collector, without
+    # coupling this regression to zram sizing or oomd victim-selection policy.
     zramSwap.enable = lib.mkForce false;
     systemd.oomd.enable = lib.mkForce false;
 
@@ -33,6 +33,20 @@ pkgs.testers.runNixOSTest {
     machine.succeed("systemctl start heim-pc-pytest-temp-gc.service")
     machine.succeed(
         "systemctl show heim-pc-pytest-temp-gc.service -p Result --value | grep -x success"
+    )
+
+    # Root cgroups normally have no memory.events file. The actual service,
+    # including its sandbox, must still produce complete core observations.
+    machine.fail("test -e /sys/fs/cgroup/memory.events")
+    machine.succeed("systemctl start heim-pc-memory-pressure-snapshot.service")
+    machine.succeed(
+        "${pkgs.python3}/bin/python3 -c '"
+        'import json; '
+        'p = json.load(open("/var/lib/heim-pc/memory-pressure/latest.json")); '
+        'assert p["observation_complete"], p["observation_errors"]; '
+        'assert p["root_memory_events_available"] is False; '
+        'assert p["severity"] != "unknown"'
+        "'"
     )
 
     # The two user timers are installed globally but intentionally do not gain

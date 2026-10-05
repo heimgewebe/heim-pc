@@ -28,7 +28,8 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         some_avg10: float = 0.0,
         full_avg10: float = 0.0,
         pressure_present: bool = True,
-        root_events_text: str = "oom 0\noom_kill 0\n",
+        root_events_text: str = "",
+        controllers_text: str = "cpu memory io\n",
     ) -> dict:
         state = root / "state"
         history = state / "history.jsonl"
@@ -41,6 +42,10 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             if pressure_present
             else {}
         )
+        kernel_text = {
+            Path("/sys/fs/cgroup/memory.events"): root_events_text,
+            Path("/sys/fs/cgroup/cgroup.controllers"): controllers_text,
+        }
         with (
             patch.object(snapshot, "STATE_DIR", state),
             patch.object(snapshot, "HISTORY", history),
@@ -58,7 +63,7 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             patch.object(snapshot, "pressure", return_value=pressure),
             patch.object(snapshot, "process_rows", return_value=[]),
             patch.object(snapshot, "cgroup_rows", return_value=[]),
-            patch.object(snapshot, "read_text", return_value=root_events_text),
+            patch.object(snapshot, "read_text", side_effect=kernel_text.__getitem__),
         ):
             self.assertEqual(snapshot.main(), 0)
         self.assertEqual(state.stat().st_mode & 0o777, 0o700)
@@ -92,6 +97,37 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["bounds"]["history_samples"], 240)
         self.assertEqual(payload["bounds"]["history_bytes"], snapshot.MAX_HISTORY_BYTES)
 
+    def test_absent_root_events_are_normal_on_a_healthy_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(Path(temporary), mem_available=500)
+        self.assertTrue(payload["observation_complete"])
+        self.assertEqual(payload["observation_errors"], [])
+        self.assertEqual(payload["severity"], "ok")
+        self.assertFalse(payload["root_memory_events_available"])
+        self.assertEqual(payload["root_memory_events"], {})
+
+    def test_available_root_events_are_retained_as_optional_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary), mem_available=500,
+                root_events_text="oom 2\noom_kill 1\n",
+            )
+        self.assertTrue(payload["observation_complete"])
+        self.assertTrue(payload["root_memory_events_available"])
+        self.assertEqual(payload["root_memory_events"], {"oom": 2, "oom_kill": 1})
+
+    def test_unavailable_memory_controller_is_not_a_healthy_observation(self) -> None:
+        for controllers in ("", "cpu io\n"):
+            with self.subTest(controllers=controllers), tempfile.TemporaryDirectory() as temporary:
+                payload = self._run_snapshot(
+                    Path(temporary), mem_available=500, controllers_text=controllers,
+                )
+            self.assertFalse(payload["observation_complete"])
+            self.assertEqual(payload["severity"], "unknown")
+            self.assertEqual(
+                payload["observation_errors"], ["cgroup_memory_controller_unavailable"]
+            )
+
     def test_history_is_bounded_to_240_samples(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -110,11 +146,13 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(json.loads(lines[-1])["schema_version"], 1)
 
     def test_history_is_bounded_by_serialized_bytes(self) -> None:
-        line = json.dumps({"sample": "x" * 22_000}, separators=(",", ":"))
-        result = snapshot.bounded_history([line] * 239, line)
-        self.assertLessEqual(len(result.encode("utf-8")), snapshot.MAX_HISTORY_BYTES)
-        self.assertLess(len(result.splitlines()), 240)
-        self.assertEqual(json.loads(result.splitlines()[-1]), json.loads(line))
+        for text in ("x" * 22_000, "ä" * 12_000):
+            with self.subTest(multibyte=text.startswith("ä")):
+                line = json.dumps({"sample": text}, ensure_ascii=False, separators=(",", ":"))
+                result = snapshot.bounded_history([line] * 239, line)
+                self.assertLessEqual(len(result.encode("utf-8")), snapshot.MAX_HISTORY_BYTES)
+                self.assertLess(len(result.splitlines()), 240)
+                self.assertEqual(json.loads(result.splitlines()[-1]), json.loads(line))
 
     def test_oversized_regular_history_recovers_on_next_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -132,6 +170,14 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             self.assertTrue(payload["observation_complete"])
             self.assertLessEqual(history.stat().st_size, snapshot.MAX_HISTORY_BYTES)
             self.assertLess(len(history.read_text(encoding="utf-8").splitlines()), 240)
+            # Recovery must also leave the following tick able to update latest.
+            next_payload = self._run_snapshot(root, mem_available=600)
+            self.assertEqual(next_payload["memory"]["available_bytes"], 600)
+            self.assertLessEqual(history.stat().st_size, snapshot.MAX_HISTORY_BYTES)
+            self.assertEqual(
+                json.loads(history.read_text(encoding="utf-8").splitlines()[-1]),
+                next_payload,
+            )
 
     def test_incomplete_required_sources_never_report_ok(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -139,12 +185,12 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
                 Path(temporary),
                 mem_available=500,
                 pressure_present=False,
-                root_events_text="",
+                controllers_text="",
             )
         self.assertFalse(payload["observation_complete"])
         self.assertEqual(payload["severity"], "unknown")
         self.assertIn("memory_psi_incomplete", payload["observation_errors"])
-        self.assertIn("root_memory_events_unreadable", payload["observation_errors"])
+        self.assertIn("cgroup_memory_controller_unavailable", payload["observation_errors"])
 
     def test_unsafe_history_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -162,6 +208,20 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "unsafe"),
             ):
                 snapshot.validate_history()
+
+    def test_unsafe_history_hardlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.write_text("{}\n", encoding="utf-8")
+            history = root / "history.jsonl"
+            history.hardlink_to(target)
+            with (
+                patch.object(snapshot, "HISTORY", history),
+                self.assertRaisesRegex(RuntimeError, "unsafe"),
+            ):
+                snapshot.validate_history()
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}\n")
 
 
 if __name__ == "__main__":
