@@ -467,6 +467,33 @@ def _preflight_recovery_commands(prior_closure: str, mode: str) -> None:
     _profile_set_argv(prior_closure, prior_closure)
 
 
+def _require_recovery_transaction_state(
+    *,
+    prior_closure: str,
+    target_closure: str,
+) -> tuple[str, str]:
+    allowed = {prior_closure, target_closure}
+    current = _resolve_link(
+        CURRENT_SYSTEM_LINK,
+        label="current system before recovery mutation",
+    )
+    profile = _resolve_link(
+        SYSTEM_PROFILE_LINK,
+        label="persistent system profile before recovery mutation",
+    )
+    if current not in allowed:
+        raise RuntimeExecutorError(
+            "recovery refused because current system drifted outside bound "
+            "transaction closures"
+        )
+    if profile not in allowed:
+        raise RuntimeExecutorError(
+            "recovery refused because persistent system profile drifted outside "
+            "bound transaction closures"
+        )
+    return current, profile
+
+
 def _gc_root_path(request_id: str, role: str) -> Path:
     if REQUEST_ID_RE.fullmatch(request_id) is None:
         raise RuntimeExecutorError("request id is invalid")
@@ -1173,6 +1200,7 @@ def _require_root() -> None:
 def _recover(
     *,
     prior_closure: str,
+    target_closure: str,
     mode: str,
     runner: Runner,
     profile_may_have_changed: bool,
@@ -1182,32 +1210,44 @@ def _recover(
     # termination requests arrive.  The shared flag-only handler records them,
     # while nested _run_exact calls defer acting on them until recovery ends.
     with _defer_termination():
-        if profile_may_have_changed:
+        _, observed_profile = _require_recovery_transaction_state(
+            prior_closure=prior_closure,
+            target_closure=target_closure,
+        )
+        if profile_may_have_changed and observed_profile != prior_closure:
             try:
-                observed_profile = _resolve_link(
-                    SYSTEM_PROFILE_LINK,
-                    label="persistent system profile before recovery rollback",
+                profile_argv = _profile_set_argv(prior_closure, prior_closure)
+                # External activation tools do not share our private flock.
+                # Refuse to overwrite any third closure observed immediately
+                # before this rollback effect.
+                _require_recovery_transaction_state(
+                    prior_closure=prior_closure,
+                    target_closure=target_closure,
                 )
+                runner(profile_argv, prior_closure)
+                _require_recovery_transaction_state(
+                    prior_closure=prior_closure,
+                    target_closure=target_closure,
+                )
+                _require_link_target(
+                    SYSTEM_PROFILE_LINK,
+                    prior_closure,
+                    label="recovered persistent system profile",
+                )
+            except _ProcessTerminationUncertain:
+                raise
             except RuntimeExecutorError as exc:
-                errors.append(f"profile rollback precheck failed: {exc}")
-            else:
-                if observed_profile != prior_closure:
-                    try:
-                        runner(
-                            _profile_set_argv(prior_closure, prior_closure),
-                            prior_closure,
-                        )
-                        _require_link_target(
-                            SYSTEM_PROFILE_LINK,
-                            prior_closure,
-                            label="recovered persistent system profile",
-                        )
-                    except _ProcessTerminationUncertain:
-                        raise
-                    except RuntimeExecutorError as exc:
-                        errors.append(f"profile rollback failed: {exc}")
+                errors.append(f"profile rollback failed: {exc}")
+
+        switch_argv = _switch_argv(prior_closure, mode)
+        # Re-check after any profile rollback so third-party drift between
+        # recovery effects stays visible instead of being overwritten.
+        _require_recovery_transaction_state(
+            prior_closure=prior_closure,
+            target_closure=target_closure,
+        )
         try:
-            runner(_switch_argv(prior_closure, mode), prior_closure)
+            runner(switch_argv, prior_closure)
         except _ProcessTerminationUncertain:
             raise
         except RuntimeExecutorError as exc:
@@ -1435,6 +1475,7 @@ def execute_activation(
                     try:
                         _recover(
                             prior_closure=plan["prior_closure"],
+                            target_closure=plan["system_closure"],
                             mode="test",
                             runner=runner,
                             profile_may_have_changed=True,
@@ -1632,6 +1673,7 @@ def execute_persistent_promotion(
                     try:
                         _recover(
                             prior_closure=plan["prior_closure"],
+                            target_closure=plan["system_closure"],
                             mode="switch",
                             runner=runner,
                             profile_may_have_changed=profile_changed,

@@ -1062,6 +1062,104 @@ def test_persistent_promotion_keeps_both_gc_roots_through_recovery(
 
 
 @pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+@pytest.mark.parametrize("drift_field", ["current", "profile"])
+def test_recovery_refuses_external_closure_drift_and_retains_gc_roots(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    drift_field: str,
+) -> None:
+    request_root, state, runner = runtime
+    receipt = build_receipt()
+    foreign = "/nix/store/33333333333333333333333333333333-nixos-system-heim-pc-foreign"
+    request_id = f"{operation}-foreign-{drift_field}"
+    calls: list[list[str]] = []
+
+    def effect_then_external_drift(argv, target_closure):
+        calls.append(list(argv))
+        runner(argv, target_closure)
+        effect_count = 1 if operation == "activation" else 2
+        if len(calls) == effect_count:
+            state[drift_field] = foreign
+            raise executor.RuntimeExecutorError("simulated effect failure after external drift")
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=effect_then_external_drift,
+            **bindings(receipt, authority, plan),
+        )
+        expected_calls = 1
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=effect_then_external_drift,
+            **bindings(receipt, authority, plan),
+        )
+        expected_calls = 2
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="recovery is incomplete",
+    ):
+        invoke()
+
+    assert len(calls) == expected_calls
+    assert state[drift_field] == foreign
+    other = "profile" if drift_field == "current" else "current"
+    assert state[other] in {PRIOR, CLOSURE}
+
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    assert prior_root.is_symlink()
+    assert target_root.is_symlink()
+    assert os.readlink(prior_root) == PRIOR
+    assert os.readlink(target_root) == CLOSURE
+    prior_root.unlink()
+    target_root.unlink()
+
+
+def test_recovery_rechecks_external_drift_before_later_rollback_effect(
+    runtime,
+) -> None:
+    _request_root, state, runner = runtime
+    foreign = "/nix/store/33333333333333333333333333333333-nixos-system-heim-pc-foreign"
+    state.update({"current": CLOSURE, "profile": CLOSURE})
+    calls: list[list[str]] = []
+
+    def drift_after_profile_rollback(argv, target_closure):
+        calls.append(list(argv))
+        runner(argv, target_closure)
+        if len(calls) == 1:
+            state["current"] = foreign
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="current system drifted outside bound transaction closures",
+    ):
+        executor._recover(
+            prior_closure=PRIOR,
+            target_closure=CLOSURE,
+            mode="switch",
+            runner=drift_after_profile_rollback,
+            profile_may_have_changed=True,
+        )
+
+    assert len(calls) == 1
+    assert "--profile" in calls[0]
+    assert state == {"current": foreign, "profile": PRIOR}
+
+
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
 def test_incomplete_recovery_retains_transaction_gc_roots(
     runtime,
     monkeypatch: pytest.MonkeyPatch,
@@ -2637,6 +2735,7 @@ def test_recover_does_not_write_profile_when_profile_is_already_prior(
 
     executor._recover(
         prior_closure=PRIOR,
+        target_closure=CLOSURE,
         mode="test",
         runner=tracking_runner,
         profile_may_have_changed=True,
@@ -2668,6 +2767,7 @@ def test_recover_stops_after_uncertain_profile_rollback(
     ):
         executor._recover(
             prior_closure=PRIOR,
+            target_closure=CLOSURE,
             mode="switch",
             runner=uncertain_recovery_runner,
             profile_may_have_changed=True,
@@ -2806,6 +2906,7 @@ def test_recover_refuses_completed_claim_when_runtime_readback_is_not_restored(
     ):
         executor._recover(
             prior_closure=PRIOR,
+            target_closure=CLOSURE,
             mode="switch",
             runner=lambda _argv, _target: None,
             profile_may_have_changed=True,
