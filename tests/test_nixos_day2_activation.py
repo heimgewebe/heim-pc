@@ -467,6 +467,101 @@ def test_prior_state_is_revalidated_after_gc_root_setup_before_effect(
 
 
 @pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
+@pytest.mark.parametrize(
+    "missing_relative",
+    [
+        "bin/switch-to-configuration",
+        "sw/bin/systemctl",
+        "sw/bin/nix-env",
+    ],
+)
+def test_recovery_executables_are_preflighted_before_effect(
+    runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    missing_relative: str,
+) -> None:
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    missing_tag = {
+        "bin/switch-to-configuration": "switch",
+        "sw/bin/systemctl": "systemctl",
+        "sw/bin/nix-env": "nix-env",
+    }[missing_relative]
+    request_id = f"{operation}-recovery-{missing_tag}"
+    prior_root = executor._gc_root_path(request_id, "prior")
+    target_root = executor._gc_root_path(request_id, "target")
+    missing_path = Path(PRIOR) / missing_relative
+    resolve_calls = 0
+    runner_calls: list[list[str]] = []
+    recovery_calls: list[str] = []
+    original_resolve = executor._resolve_link
+
+    def resolving(path: Path, *, label: str) -> str:
+        nonlocal resolve_calls
+        value = original_resolve(path, label=label)
+        resolve_calls += 1
+        return value
+
+    def require_executable(path: Path, *, label: str) -> Path:
+        if path == missing_path and resolve_calls >= 4:
+            assert prior_root.is_symlink()
+            assert target_root.is_symlink()
+            assert os.readlink(prior_root) == PRIOR
+            assert os.readlink(target_root) == CLOSURE
+            raise executor.RuntimeExecutorError(
+                f"{label} is unavailable: simulated missing recovery executable"
+            )
+        return path
+
+    monkeypatch.setattr(executor, "_resolve_link", resolving)
+    monkeypatch.setattr(executor, "_require_executable", require_executable)
+    monkeypatch.setattr(
+        executor,
+        "_recover",
+        lambda **_kwargs: recovery_calls.append("recover"),
+    )
+
+    def recording_runner(argv, _target_closure):
+        runner_calls.append(list(argv))
+
+    if operation == "activation":
+        authority = activation_authority(receipt, mode="next-boot")
+        plan = _future_test_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_activation(monkeypatch)
+        invoke = lambda: executor.execute_activation(
+            request_id=request_id,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+    else:
+        authority = persistent_authority(receipt)
+        plan = persistent_plan(receipt, authority)
+        write_request(request_root, request_id, receipt, authority, plan)
+        _allow_future_promotion(monkeypatch)
+        invoke = lambda: executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=recording_runner,
+            **bindings(receipt, authority, plan),
+        )
+
+    with pytest.raises(
+        executor.RuntimeExecutorError,
+        match="simulated missing recovery executable",
+    ):
+        invoke()
+
+    assert resolve_calls == 4
+    assert runner_calls == []
+    assert recovery_calls == []
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not os.path.lexists(prior_root)
+    assert not os.path.lexists(target_root)
+
+
+@pytest.mark.parametrize("operation", ["activation", "persistent-promotion"])
 def test_pre_effect_termination_after_reauthorization_does_not_recover(
     runtime,
     monkeypatch: pytest.MonkeyPatch,

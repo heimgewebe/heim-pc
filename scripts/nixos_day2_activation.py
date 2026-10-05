@@ -460,6 +460,13 @@ def _profile_set_argv(executor_closure: str, target_closure: str) -> list[str]:
     ]
 
 
+def _preflight_recovery_commands(prior_closure: str, mode: str) -> None:
+    # Validate every closure-bound executable that _recover() may need while
+    # both transaction closures are still pinned, but do not execute anything.
+    _switch_argv(prior_closure, mode)
+    _profile_set_argv(prior_closure, prior_closure)
+
+
 def _gc_root_path(request_id: str, role: str) -> Path:
     if REQUEST_ID_RE.fullmatch(request_id) is None:
         raise RuntimeExecutorError("request id is invalid")
@@ -1389,6 +1396,7 @@ def execute_activation(
                     label="persistent system profile immediately before test activation",
                 )
                 _raise_if_termination_requested(termination)
+                _preflight_recovery_commands(plan["prior_closure"], "test")
                 plan = managed_nix.authorize_activation_plan_execution(
                     locked_build,
                     locked_authority,
@@ -1564,6 +1572,7 @@ def execute_persistent_promotion(
                     label="persistent system profile immediately before persistent promotion",
                 )
                 _raise_if_termination_requested(termination)
+                _preflight_recovery_commands(plan["prior_closure"], "switch")
                 prior_state_digest = persistent_state_sha256(
                     target=plan["target"],
                     current_closure=pre_current,
