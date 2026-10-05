@@ -906,11 +906,21 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                         "executor command timed out; process group terminated"
                     ) from exc
                 except _ProcessTerminationUncertain as exc:
-                    # Do not send a destructive signal when exit identity is
-                    # uncertain.  Keep the activation lock until the numeric
-                    # process group is positively absent.  Once quiescence is
-                    # proven, convert the status uncertainty into a normal
-                    # effect failure so the caller can recover prior state.
+                    # Exit identity is uncertain, so never send a destructive
+                    # signal here. Reap only this Popen child first: a waitable
+                    # but unreaped zombie keeps its process group visible to
+                    # killpg(..., 0), preventing the quiescence proof forever.
+                    # Blocking wait is fail-closed if the child is still alive.
+                    while True:
+                        try:
+                            process.wait()
+                            break
+                        except (InterruptedError, KeyboardInterrupt):
+                            continue
+                        except OSError as reap_error:
+                            raise _ProcessTerminationUncertain(
+                                "executor leader could not be reaped after uncertain exit"
+                            ) from reap_error
                     _wait_for_process_group_quiescence(process.pid)
                     _wait_for_active_scope_peer_quiescence()
                     cleanup_complete = True

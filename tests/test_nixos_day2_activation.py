@@ -1831,7 +1831,22 @@ def test_run_exact_quiescent_unknown_exit_becomes_recoverable_error(
         pid = 5150
         returncode = None
 
-    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+        def wait(self, timeout=None):
+            assert timeout is None
+            events.append(("wait", timeout))
+            self.returncode = 0
+            return self.returncode
+
+    process = FakeProcess()
+
+    def killpg(pid, sig):
+        events.append(("killpg", pid, sig))
+        assert sig == 0
+        if process.returncode is None:
+            raise AssertionError("process group was probed before leader reap")
+        raise ProcessLookupError
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(
         executor,
         "_wait_for_process_exit_without_reaping",
@@ -1839,7 +1854,7 @@ def test_run_exact_quiescent_unknown_exit_becomes_recoverable_error(
             executor._ProcessTerminationUncertain("simulated missing wait status")
         ),
     )
-    monkeypatch.setattr(executor.os, "killpg", _quiescent_killpg(events))
+    monkeypatch.setattr(executor.os, "killpg", killpg)
 
     with pytest.raises(
         executor.RuntimeExecutorError,
@@ -1853,8 +1868,50 @@ def test_run_exact_quiescent_unknown_exit_becomes_recoverable_error(
             CLOSURE,
         )
 
-    assert events == [("killpg", 5150, 0)]
+    assert events == [
+        ("wait", None),
+        ("killpg", 5150, 0),
+    ]
 
+
+def test_run_exact_unknown_exit_reap_failure_stays_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 5154
+        returncode = None
+
+        def wait(self, timeout=None):
+            assert timeout is None
+            raise OSError("simulated reap failure")
+
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_process_exit_without_reaping",
+        lambda _process, _argv: (_ for _ in ()).throw(
+            executor._ProcessTerminationUncertain("simulated missing wait status")
+        ),
+    )
+    monkeypatch.setattr(
+        executor.os,
+        "killpg",
+        lambda *_args, **_kwargs: pytest.fail(
+            "uncertain reap failure must not signal or probe the process group"
+        ),
+    )
+
+    with pytest.raises(
+        executor._ProcessTerminationUncertain,
+        match="leader could not be reaped after uncertain exit",
+    ):
+        executor._run_exact(
+            [
+                "/nix/store/33333333333333333333333333333333-helper/bin/helper",
+                "switch",
+            ],
+            CLOSURE,
+        )
 
 def test_controlled_termination_covers_hup_and_quit() -> None:
     with executor._controlled_termination() as termination:
