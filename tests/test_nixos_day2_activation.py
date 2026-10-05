@@ -1965,12 +1965,15 @@ def test_run_exact_quiescent_unknown_exit_becomes_recoverable_error(
 def test_run_exact_unknown_exit_reap_failure_stays_uncertain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[tuple[object, ...]] = []
+
     class FakeProcess:
         pid = 5154
         returncode = None
 
         def wait(self, timeout=None):
             assert timeout is None
+            events.append(("wait", timeout))
             raise OSError("simulated reap failure")
 
     monkeypatch.setattr(executor.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
@@ -1980,6 +1983,11 @@ def test_run_exact_unknown_exit_reap_failure_stays_uncertain(
         lambda _process, _argv: (_ for _ in ()).throw(
             executor._ProcessTerminationUncertain("simulated missing wait status")
         ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_wait_for_active_scope_peer_quiescence",
+        lambda: events.append(("scope-quiescent",)),
     )
     monkeypatch.setattr(
         executor.os,
@@ -2000,6 +2008,11 @@ def test_run_exact_unknown_exit_reap_failure_stays_uncertain(
             ],
             CLOSURE,
         )
+
+    assert events == [
+        ("wait", None),
+        ("scope-quiescent",),
+    ]
 
 def test_controlled_termination_covers_hup_and_quit() -> None:
     with executor._controlled_termination() as termination:

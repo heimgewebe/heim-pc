@@ -918,6 +918,11 @@ def _run_exact(argv: Sequence[str], target_closure: str) -> None:
                         except (InterruptedError, KeyboardInterrupt):
                             continue
                         except OSError as reap_error:
+                            # The numeric PGID may no longer be trustworthy when
+                            # reaping itself failed. Keep the global activation
+                            # lock until the request-bound scope is positively
+                            # self-only before propagating the uncertainty.
+                            _wait_for_active_scope_peer_quiescence()
                             raise _ProcessTerminationUncertain(
                                 "executor leader could not be reaped after uncertain exit"
                             ) from reap_error
