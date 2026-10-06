@@ -227,21 +227,60 @@ def main() -> int:
     if "memory" not in controllers:
         observation_errors.append("cgroup_memory_controller_unavailable")
 
-    swap_total = mem.get("SwapTotal", 0)
-    swap_free = mem.get("SwapFree", 0)
-    mem_total = mem.get("MemTotal", 0)
-    mem_available = mem.get("MemAvailable", 0)
-    swap_used = max(0, swap_total - swap_free)
+    mem_total = mem.get("MemTotal")
+    mem_available = mem.get("MemAvailable")
+    swap_total = mem.get("SwapTotal")
+    swap_free = mem.get("SwapFree")
 
-    available_ratio = (mem_available / mem_total) if mem_total else 0.0
-    swap_ratio = (swap_used / swap_total) if swap_total else 0.0
+    if mem_total is not None and mem_total <= 0:
+        observation_errors.append("meminfo_invalid:MemTotal")
+    if mem_available is not None and (
+        mem_available < 0
+        or (mem_total is not None and mem_total > 0 and mem_available > mem_total)
+    ):
+        observation_errors.append("meminfo_invalid:MemAvailable")
+    if swap_total is not None and swap_total < 0:
+        observation_errors.append("meminfo_invalid:SwapTotal")
+    if swap_free is not None and (
+        swap_free < 0
+        or (swap_total is not None and swap_total >= 0 and swap_free > swap_total)
+    ):
+        observation_errors.append("meminfo_invalid:SwapFree")
+
+    memory_ratio_valid = (
+        mem_total is not None
+        and mem_total > 0
+        and mem_available is not None
+        and 0 <= mem_available <= mem_total
+    )
+    swap_ratio_valid = (
+        swap_total is not None
+        and swap_total >= 0
+        and swap_free is not None
+        and 0 <= swap_free <= swap_total
+    )
+    available_ratio = (mem_available / mem_total) if memory_ratio_valid else None
+    swap_used = (swap_total - swap_free) if swap_ratio_valid else None
+    swap_ratio = (
+        (swap_used / swap_total)
+        if swap_ratio_valid and swap_total
+        else (0.0 if swap_ratio_valid else None)
+    )
     some_avg10 = float(psi.get("some", {}).get("avg10", 0.0))
     full_avg10 = float(psi.get("full", {}).get("avg10", 0.0))
 
     severity = "ok"
-    if available_ratio < 0.05 or swap_ratio >= 0.90 or full_avg10 >= 20.0:
+    if (
+        (available_ratio is not None and available_ratio < 0.05)
+        or (swap_ratio is not None and swap_ratio >= 0.90)
+        or full_avg10 >= 20.0
+    ):
         severity = "critical"
-    elif available_ratio < 0.10 or swap_ratio >= 0.80 or some_avg10 >= 10.0:
+    elif (
+        (available_ratio is not None and available_ratio < 0.10)
+        or (swap_ratio is not None and swap_ratio >= 0.80)
+        or some_avg10 >= 10.0
+    ):
         severity = "warning"
     elif observation_errors:
         severity = "unknown"
@@ -255,10 +294,12 @@ def main() -> int:
         "memory": {
             "total_bytes": mem_total,
             "available_bytes": mem_available,
-            "available_ratio": round(available_ratio, 6),
+            "available_ratio": (
+                round(available_ratio, 6) if available_ratio is not None else None
+            ),
             "swap_total_bytes": swap_total,
             "swap_used_bytes": swap_used,
-            "swap_used_ratio": round(swap_ratio, 6),
+            "swap_used_ratio": round(swap_ratio, 6) if swap_ratio is not None else None,
         },
         "pressure": psi,
         "root_memory_events": parse_key_values(root_memory_events_text),
@@ -282,8 +323,8 @@ def main() -> int:
         "status": "recorded",
         "severity": severity,
         "observation_complete": not observation_errors,
-        "available_ratio": round(available_ratio, 4),
-        "swap_used_ratio": round(swap_ratio, 4),
+        "available_ratio": round(available_ratio, 4) if available_ratio is not None else None,
+        "swap_used_ratio": round(swap_ratio, 4) if swap_ratio is not None else None,
         "psi_some_avg10": some_avg10,
         "psi_full_avg10": full_avg10,
     }, sort_keys=True))

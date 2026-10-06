@@ -21,10 +21,11 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self,
         root: Path,
         *,
-        mem_available: int,
+        mem_available: int = 500,
         mem_total: int = 1000,
         swap_total: int = 1000,
         swap_free: int = 1000,
+        meminfo_values: dict[str, int] | None = None,
         some_avg10: float = 0.0,
         full_avg10: float = 0.0,
         pressure_present: bool = True,
@@ -34,6 +35,16 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         state = root / "state"
         history = state / "history.jsonl"
         latest = state / "latest.json"
+        mem_values = (
+            meminfo_values
+            if meminfo_values is not None
+            else {
+                "MemTotal": mem_total,
+                "MemAvailable": mem_available,
+                "SwapTotal": swap_total,
+                "SwapFree": swap_free,
+            }
+        )
         pressure = (
             {
                 "some": {"avg10": some_avg10, "avg60": 0.0, "avg300": 0.0, "total": 0},
@@ -53,12 +64,7 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             patch.object(
                 snapshot,
                 "meminfo",
-                return_value={
-                    "MemTotal": mem_total,
-                    "MemAvailable": mem_available,
-                    "SwapTotal": swap_total,
-                    "SwapFree": swap_free,
-                },
+                return_value=mem_values,
             ),
             patch.object(snapshot, "pressure", return_value=pressure),
             patch.object(snapshot, "process_rows", return_value=[]),
@@ -191,6 +197,154 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["severity"], "unknown")
         self.assertIn("memory_psi_incomplete", payload["observation_errors"])
         self.assertIn("cgroup_memory_controller_unavailable", payload["observation_errors"])
+
+    def test_missing_meminfo_is_unknown_without_false_zero_pressure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={},
+            )
+        self.assertFalse(payload["observation_complete"])
+        self.assertEqual(payload["severity"], "unknown")
+        self.assertIsNone(payload["memory"]["total_bytes"])
+        self.assertIsNone(payload["memory"]["available_bytes"])
+        self.assertIsNone(payload["memory"]["available_ratio"])
+        self.assertIsNone(payload["memory"]["swap_total_bytes"])
+        self.assertIsNone(payload["memory"]["swap_used_bytes"])
+        self.assertIsNone(payload["memory"]["swap_used_ratio"])
+
+    def test_missing_memtotal_is_unknown_without_false_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={
+                    "MemAvailable": 500,
+                    "SwapTotal": 1000,
+                    "SwapFree": 1000,
+                },
+            )
+        self.assertEqual(payload["severity"], "unknown")
+        self.assertIn("meminfo_missing:MemTotal", payload["observation_errors"])
+        self.assertIsNone(payload["memory"]["total_bytes"])
+        self.assertIsNone(payload["memory"]["available_ratio"])
+
+    def test_missing_memavailable_is_unknown_without_false_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={
+                    "MemTotal": 1000,
+                    "SwapTotal": 1000,
+                    "SwapFree": 1000,
+                },
+            )
+        self.assertEqual(payload["severity"], "unknown")
+        self.assertIn("meminfo_missing:MemAvailable", payload["observation_errors"])
+        self.assertIsNone(payload["memory"]["available_bytes"])
+        self.assertIsNone(payload["memory"]["available_ratio"])
+
+    def test_missing_swap_fields_differ_from_valid_no_swap(self) -> None:
+        for missing in ("SwapTotal", "SwapFree"):
+            values = {
+                "MemTotal": 1000,
+                "MemAvailable": 500,
+                "SwapTotal": 0,
+                "SwapFree": 0,
+            }
+            del values[missing]
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                payload = self._run_snapshot(
+                    Path(temporary),
+                    meminfo_values=values,
+                )
+            self.assertEqual(payload["severity"], "unknown")
+            self.assertIn(f"meminfo_missing:{missing}", payload["observation_errors"])
+            self.assertIsNone(payload["memory"]["swap_used_ratio"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            no_swap = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={
+                    "MemTotal": 1000,
+                    "MemAvailable": 500,
+                    "SwapTotal": 0,
+                    "SwapFree": 0,
+                },
+            )
+        self.assertTrue(no_swap["observation_complete"])
+        self.assertEqual(no_swap["severity"], "ok")
+        self.assertEqual(no_swap["memory"]["swap_total_bytes"], 0)
+        self.assertEqual(no_swap["memory"]["swap_used_bytes"], 0)
+        self.assertEqual(no_swap["memory"]["swap_used_ratio"], 0.0)
+
+    def test_incomplete_meminfo_preserves_independent_pressure_alarm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            warning = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={
+                    "SwapTotal": 1000,
+                    "SwapFree": 1000,
+                },
+                some_avg10=10.0,
+            )
+        self.assertFalse(warning["observation_complete"])
+        self.assertEqual(warning["severity"], "warning")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            critical = self._run_snapshot(
+                Path(temporary),
+                meminfo_values={
+                    "MemTotal": 1000,
+                    "SwapTotal": 1000,
+                    "SwapFree": 50,
+                },
+            )
+        self.assertFalse(critical["observation_complete"])
+        self.assertEqual(critical["severity"], "critical")
+        self.assertIn("meminfo_missing:MemAvailable", critical["observation_errors"])
+
+    def test_invalid_meminfo_values_are_unknown_when_no_valid_alarm_exists(self) -> None:
+        cases = (
+            (
+                {
+                    "MemTotal": 0,
+                    "MemAvailable": 0,
+                    "SwapTotal": 0,
+                    "SwapFree": 0,
+                },
+                "meminfo_invalid:MemTotal",
+                "available_ratio",
+            ),
+            (
+                {
+                    "MemTotal": 1000,
+                    "MemAvailable": -1,
+                    "SwapTotal": 0,
+                    "SwapFree": 0,
+                },
+                "meminfo_invalid:MemAvailable",
+                "available_ratio",
+            ),
+            (
+                {
+                    "MemTotal": 1000,
+                    "MemAvailable": 500,
+                    "SwapTotal": 0,
+                    "SwapFree": 1,
+                },
+                "meminfo_invalid:SwapFree",
+                "swap_used_ratio",
+            ),
+        )
+        for values, error, ratio_field in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
+                payload = self._run_snapshot(
+                    Path(temporary),
+                    meminfo_values=values,
+                )
+            self.assertEqual(payload["severity"], "unknown")
+            self.assertIn(error, payload["observation_errors"])
+            self.assertIsNone(payload["memory"][ratio_field])
 
     def test_unsafe_history_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
