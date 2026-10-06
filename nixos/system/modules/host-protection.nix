@@ -88,6 +88,19 @@ in
     # broader ambient startup than the two read-only/observe-only jobs need.
     users.users.alex.linger = false;
 
+    # The pre-NixOS installer wrote these unit names into alex's home, which
+    # outranks /etc/systemd/user. Do not mutate the home from this module.
+    # Instead, fail closed while either legacy main unit still exists; after
+    # deliberate removal the declarative NixOS units become authoritative.
+    environment.etc."systemd/user/heim-pc-storage-pressure-watch.service.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.service
+    '';
+    environment.etc."systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.timer
+    '';
+
     # Independent compressed swap: no swapfile or partition is added to either
     # production disk. 25% of 64 GiB approximates the former host swap capacity.
     zramSwap = {

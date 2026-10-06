@@ -53,7 +53,82 @@ pkgs.testers.runNixOSTest {
     # unattended boot authority through a lingering alex user manager.
     machine.succeed("test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer")
     machine.succeed("test -f /etc/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed(
+        "test -f /etc/systemd/user/heim-pc-storage-pressure-watch.service.d/zz-heim-pc-host-protection.conf"
+    )
+    machine.succeed(
+        "test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf"
+    )
     machine.succeed("test ! -e /var/lib/systemd/linger/alex")
     machine.fail("systemctl is-active user@1000.service")
+
+    # Reproduce exactly the pre-NixOS installer state: a per-user service and
+    # timer main unit. Their presence must block execution without deleting
+    # either file; after deliberate fixture cleanup the NixOS unit takes over.
+    machine.succeed("install -d -m 0700 -o alex -g users /home/alex/.config/systemd/user")
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy storage pressure' "
+        "'[Service]' 'Type=oneshot' 'ExecStart=${pkgs.coreutils}/bin/false' "
+        "> /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy storage pressure timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-storage-pressure-watch.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer")
+
+    machine.succeed("systemctl start user@1000.service")
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p FragmentPath --value "
+        "| grep -Fx /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p DropInPaths --value "
+        "| grep -F zz-heim-pc-host-protection.conf"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p ConditionResult --value) = no"
+    )
+    machine.fail("test -e /home/alex/.local/state/heim-pc/storage-pressure-watch/latest.json")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.timer -p ConditionResult --value) = no"
+    )
+
+    machine.succeed(
+        "rm /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service "
+        "/home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p ExecStart --value "
+        "| grep -F -- --observe-only"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "${pkgs.python3}/bin/python3 -c '"
+        'import json; '
+        'p = json.load(open("/home/alex/.local/state/heim-pc/storage-pressure-watch/latest.json")); '
+        'assert p["maintenance_requests_enabled"] is False'
+        "'"
+    )
   '';
 }
