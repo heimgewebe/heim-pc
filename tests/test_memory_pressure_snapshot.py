@@ -31,6 +31,7 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         pressure_present: bool = True,
         root_events_text: str = "",
         controllers_text: str = "cpu memory io\n",
+        cgroup_rows_result: tuple[list[dict[str, object]], int, bool] | None = None,
     ) -> dict:
         state = root / "state"
         history = state / "history.jsonl"
@@ -68,7 +69,11 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             ),
             patch.object(snapshot, "pressure", return_value=pressure),
             patch.object(snapshot, "process_rows", return_value=[]),
-            patch.object(snapshot, "cgroup_rows", return_value=[]),
+            patch.object(
+                snapshot,
+                "cgroup_rows",
+                return_value=cgroup_rows_result or ([], 0, False),
+            ),
             patch.object(snapshot, "read_text", side_effect=kernel_text.__getitem__),
         ):
             self.assertEqual(snapshot.main(), 0)
@@ -102,6 +107,76 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["observation_errors"], [])
         self.assertEqual(payload["bounds"]["history_samples"], 240)
         self.assertEqual(payload["bounds"]["history_bytes"], snapshot.MAX_HISTORY_BYTES)
+        self.assertEqual(payload["cgroup_scan"], {"scanned": 0, "truncated": False})
+
+    def test_process_rows_keeps_only_the_exact_top_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for offset, rss_kb in enumerate((5, 1, 8, 3, 7, 2, 6, 4), start=100):
+                entry = proc / str(offset)
+                entry.mkdir()
+                (entry / "status").write_text(
+                    (
+                        f"Name:\tp{offset}\n"
+                        f"VmRSS:\t{rss_kb} kB\n"
+                        "VmSwap:\t0 kB\n"
+                        "Uid:\t1000 1000 1000 1000\n"
+                    ),
+                    encoding="utf-8",
+                )
+                (entry / "cgroup").write_text(
+                    f"0::/user.slice/test-{offset}.scope\n",
+                    encoding="utf-8",
+                )
+
+            with patch.object(snapshot, "TOP_PROCESSES", 3):
+                rows = snapshot.process_rows(proc)
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(
+            [row["rss_bytes"] for row in rows],
+            [8 * 1024, 7 * 1024, 6 * 1024],
+        )
+
+    def test_cgroup_scan_cap_is_reported_as_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("a", "b"):
+                entry = root / name
+                entry.mkdir()
+                (entry / "memory.current").write_text("1\n", encoding="ascii")
+                (entry / "memory.swap.current").write_text("0\n", encoding="ascii")
+                (entry / "memory.events").write_text("oom 0\noom_kill 0\n", encoding="ascii")
+                (entry / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+
+            with patch.object(snapshot, "MAX_CGROUPS", 2):
+                rows, scanned, truncated = snapshot.cgroup_rows(root)
+
+        self.assertLessEqual(len(rows), snapshot.TOP_CGROUPS)
+        self.assertEqual(scanned, 2)
+        self.assertTrue(truncated)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = self._run_snapshot(
+                Path(temporary),
+                cgroup_rows_result=([], snapshot.MAX_CGROUPS, True),
+            )
+        self.assertFalse(payload["observation_complete"])
+        self.assertEqual(payload["severity"], "unknown")
+        self.assertIn("cgroup_scan_truncated", payload["observation_errors"])
+        self.assertEqual(
+            payload["cgroup_scan"],
+            {"scanned": snapshot.MAX_CGROUPS, "truncated": True},
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            critical = self._run_snapshot(
+                Path(temporary),
+                mem_available=40,
+                cgroup_rows_result=([], snapshot.MAX_CGROUPS, True),
+            )
+        self.assertFalse(critical["observation_complete"])
+        self.assertEqual(critical["severity"], "critical")
 
     def test_absent_root_events_are_normal_on_a_healthy_host(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

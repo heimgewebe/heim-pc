@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import stat
@@ -86,9 +87,8 @@ def pressure() -> dict[str, dict[str, float | int]]:
     return result
 
 
-def process_rows() -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    proc = Path("/proc")
+def process_rows(proc: Path = Path("/proc")) -> list[dict[str, object]]:
+    top: list[tuple[int, int, dict[str, object]]] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
@@ -118,28 +118,38 @@ def process_rows() -> list[dict[str, object]]:
                 break
         uid_raw = fields.get("Uid", "").split()
         uid = int(uid_raw[0]) if uid_raw and uid_raw[0].isdigit() else None
-        rows.append({
-            "pid": int(entry.name),
+        pid = int(entry.name)
+        total = rss + swap
+        row: dict[str, object] = {
+            "pid": pid,
             "name": fields.get("Name", "?")[:80],
             "uid": uid,
             "rss_bytes": rss,
             "swap_bytes": swap,
-            "total_bytes": rss + swap,
+            "total_bytes": total,
             "cgroup": cgroup[:512],
-        })
-    rows.sort(key=lambda row: int(row["total_bytes"]), reverse=True)
-    return rows[:TOP_PROCESSES]
+        }
+        candidate = (total, pid, row)
+        if len(top) < TOP_PROCESSES:
+            heapq.heappush(top, candidate)
+        elif candidate[:2] > top[0][:2]:
+            heapq.heapreplace(top, candidate)
+    top.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [row for _total, _pid, row in top]
 
 
-def cgroup_rows() -> list[dict[str, object]]:
-    root = Path("/sys/fs/cgroup")
+def cgroup_rows(
+    root: Path = Path("/sys/fs/cgroup"),
+) -> tuple[list[dict[str, object]], int, bool]:
     rows: list[dict[str, object]] = []
-    seen = 0
+    scanned = 0
+    truncated = False
     for base, dirs, _files in os.walk(root):
-        seen += 1
-        if seen > MAX_CGROUPS:
+        if scanned >= MAX_CGROUPS:
             dirs[:] = []
+            truncated = True
             break
+        scanned += 1
         path = Path(base)
         current = read_int(path / "memory.current")
         swap = read_int(path / "memory.swap.current")
@@ -163,7 +173,7 @@ def cgroup_rows() -> list[dict[str, object]]:
             "oom_kill": events.get("oom_kill", 0),
         })
     rows.sort(key=lambda row: int(row["total_bytes"]), reverse=True)
-    return rows[:TOP_CGROUPS]
+    return rows[:TOP_CGROUPS], scanned, truncated
 
 
 def validate_history() -> list[str]:
@@ -269,6 +279,11 @@ def main() -> int:
     some_avg10 = float(psi.get("some", {}).get("avg10", 0.0))
     full_avg10 = float(psi.get("full", {}).get("avg10", 0.0))
 
+    top_processes = process_rows()
+    top_cgroups, cgroups_scanned, cgroup_scan_truncated = cgroup_rows()
+    if cgroup_scan_truncated:
+        observation_errors.append("cgroup_scan_truncated")
+
     severity = "ok"
     if (
         (available_ratio is not None and available_ratio < 0.05)
@@ -304,8 +319,12 @@ def main() -> int:
         "pressure": psi,
         "root_memory_events": parse_key_values(root_memory_events_text),
         "root_memory_events_available": bool(root_memory_events_text),
-        "top_processes": process_rows(),
-        "top_cgroups": cgroup_rows(),
+        "top_processes": top_processes,
+        "top_cgroups": top_cgroups,
+        "cgroup_scan": {
+            "scanned": cgroups_scanned,
+            "truncated": cgroup_scan_truncated,
+        },
         "bounds": {
             "history_samples": MAX_HISTORY,
             "history_bytes": MAX_HISTORY_BYTES,
