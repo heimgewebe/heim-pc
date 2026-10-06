@@ -11,6 +11,10 @@ pkgs.testers.runNixOSTest {
       isNormalUser = true;
       uid = 1000;
     };
+    users.users.other = {
+      isNormalUser = true;
+      uid = 1001;
+    };
     heimPc.hostProtection.enable = true;
 
     # Exercise service credentials and the real sandboxed collector, without
@@ -130,5 +134,22 @@ pkgs.testers.runNixOSTest {
         'assert p["maintenance_requests_enabled"] is False'
         "'"
     )
+
+    # The globally installed user units must remain inert in every other user
+    # manager even when no legacy unit is present in that user's home.
+    machine.succeed("systemctl start user@1001.service")
+    for unit in [
+      "heim-pc-storage-pressure-watch.service",
+      "heim-pc-storage-pressure-watch.timer",
+      "heim-pc-home-hygiene.service",
+      "heim-pc-home-hygiene.timer",
+    ]:
+        machine.succeed(f"systemctl --user --machine=other@.host start {unit}")
+        machine.succeed(
+            f"test $(systemctl --user --machine=other@.host show "
+            f"{unit} -p ConditionResult --value) = no"
+        )
+    machine.fail("test -e /home/other/.local/state/heim-pc/storage-pressure-watch/latest.json")
+    machine.fail("test -e /home/other/.local/state/heim-pc/home-hygiene/latest-inventory.json")
   '';
 }

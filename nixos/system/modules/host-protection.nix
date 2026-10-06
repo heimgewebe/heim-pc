@@ -94,10 +94,12 @@ in
     # deliberate removal the declarative NixOS units become authoritative.
     environment.etc."systemd/user/heim-pc-storage-pressure-watch.service.d/zz-heim-pc-host-protection.conf".text = ''
       [Unit]
+      ConditionUser=alex
       ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.service
     '';
     environment.etc."systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf".text = ''
       [Unit]
+      ConditionUser=alex
       ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.timer
     '';
 
@@ -249,6 +251,7 @@ in
     systemd.user.services.heim-pc-storage-pressure-watch = {
       description = "Observe lightweight root filesystem pressure";
       after = [ "default.target" ];
+      unitConfig.ConditionUser = "alex";
       serviceConfig = {
         Type = "oneshot";
         ExecStart = storagePressureExec;
@@ -273,6 +276,7 @@ in
     systemd.user.timers.heim-pc-storage-pressure-watch = {
       description = "Observe lightweight root filesystem pressure hourly";
       wantedBy = [ "timers.target" ];
+      unitConfig.ConditionUser = "alex";
       timerConfig = {
         OnBootSec = "20min";
         OnCalendar = "hourly";
@@ -286,6 +290,7 @@ in
     systemd.user.services.heim-pc-home-hygiene = {
       description = "Collect read-only Heim-PC home hygiene inventory";
       after = [ "default.target" ];
+      unitConfig.ConditionUser = "alex";
       serviceConfig = {
         Type = "oneshot";
         ExecStart =
@@ -324,6 +329,7 @@ in
     systemd.user.timers.heim-pc-home-hygiene = {
       description = "Run read-only Heim-PC home hygiene inventory weekly";
       wantedBy = [ "timers.target" ];
+      unitConfig.ConditionUser = "alex";
       timerConfig = {
         OnCalendar = "Mon *-*-* 03:30:00";
         RandomizedDelaySec = "30m";
