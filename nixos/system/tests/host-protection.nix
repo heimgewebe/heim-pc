@@ -63,6 +63,15 @@ pkgs.testers.runNixOSTest {
     machine.succeed(
         "test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf"
     )
+    for unit in [
+      "heim-pc-home-hygiene.service",
+      "heim-pc-home-hygiene.timer",
+      "heim-pc-coredump-retention.service",
+      "heim-pc-coredump-retention.timer",
+    ]:
+        machine.succeed(
+            f"test -f /etc/systemd/user/{unit}.d/zz-heim-pc-host-protection.conf"
+        )
     machine.succeed("test ! -e /var/lib/systemd/linger/alex")
     machine.fail("systemctl is-active user@1000.service")
 
@@ -133,6 +142,88 @@ pkgs.testers.runNixOSTest {
         'p = json.load(open("/home/alex/.local/state/heim-pc/storage-pressure-watch/latest.json")); '
         'assert p["maintenance_requests_enabled"] is False'
         "'"
+    )
+
+    # The older home-hygiene installer wrote four user units, including the
+    # mutation-capable coredump-retention service. All four legacy mains must
+    # remain loaded-but-inert while present in alex's home.
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy home hygiene' "
+        "'[Service]' 'Type=oneshot' "
+        "'ExecStart=${pkgs.coreutils}/bin/touch /home/alex/legacy-home-hygiene-ran' "
+        "> /home/alex/.config/systemd/user/heim-pc-home-hygiene.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy home hygiene timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-home-hygiene.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy coredump retention' "
+        "'[Service]' 'Type=oneshot' "
+        "'ExecStart=${pkgs.coreutils}/bin/touch /home/alex/legacy-coredump-retention-ran' "
+        "> /home/alex/.config/systemd/user/heim-pc-coredump-retention.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy coredump retention timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-coredump-retention.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer"
+    )
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-home-hygiene.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-coredump-retention.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-home-hygiene.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer")
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    for unit in [
+      "heim-pc-home-hygiene.service",
+      "heim-pc-home-hygiene.timer",
+      "heim-pc-coredump-retention.service",
+      "heim-pc-coredump-retention.timer",
+    ]:
+        machine.succeed(
+            f"systemctl --user --machine=alex@.host show {unit} -p FragmentPath --value "
+            f"| grep -Fx /home/alex/.config/systemd/user/{unit}"
+        )
+        machine.succeed(
+            f"systemctl --user --machine=alex@.host show {unit} -p DropInPaths --value "
+            "| grep -F zz-heim-pc-host-protection.conf"
+        )
+        machine.succeed(f"systemctl --user --machine=alex@.host start {unit}")
+        machine.succeed(
+            f"test $(systemctl --user --machine=alex@.host show "
+            f"{unit} -p ConditionResult --value) = no"
+        )
+    machine.fail("test -e /home/alex/legacy-home-hygiene-ran")
+    machine.fail("test -e /home/alex/legacy-coredump-retention-ran")
+
+    machine.succeed(
+        "rm /home/alex/.config/systemd/user/heim-pc-home-hygiene.service "
+        "/home/alex/.config/systemd/user/heim-pc-home-hygiene.timer "
+        "/home/alex/.config/systemd/user/heim-pc-coredump-retention.service "
+        "/home/alex/.config/systemd/user/heim-pc-coredump-retention.timer"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show heim-pc-home-hygiene.service "
+        "-p ExecStart --value | grep -F ' inventory '"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host start heim-pc-home-hygiene.service")
+    machine.succeed(
+        "test -f /home/alex/.local/state/heim-pc/home-hygiene/latest-inventory.json"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-coredump-retention.service -p LoadState --value) = not-found"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-coredump-retention.timer -p LoadState --value) = not-found"
     )
 
     # The globally installed user units must remain inert in every other user

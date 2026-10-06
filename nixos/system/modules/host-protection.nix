@@ -103,6 +103,31 @@ in
       ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.timer
     '';
 
+    # The older home-hygiene installer also wrote four main units into alex's
+    # user unit search path, including a mutation-capable coredump-retention
+    # service. Keep every legacy unit inert until its home-level main unit is
+    # deliberately retired; after removal only the Nix inventory units remain.
+    environment.etc."systemd/user/heim-pc-home-hygiene.service.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionUser=alex
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-home-hygiene.service
+    '';
+    environment.etc."systemd/user/heim-pc-home-hygiene.timer.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionUser=alex
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-home-hygiene.timer
+    '';
+    environment.etc."systemd/user/heim-pc-coredump-retention.service.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionUser=alex
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-coredump-retention.service
+    '';
+    environment.etc."systemd/user/heim-pc-coredump-retention.timer.d/zz-heim-pc-host-protection.conf".text = ''
+      [Unit]
+      ConditionUser=alex
+      ConditionPathExists=!%h/.config/systemd/user/heim-pc-coredump-retention.timer
+    '';
+
     # Independent compressed swap: no swapfile or partition is added to either
     # production disk. 25% of 64 GiB approximates the former host swap capacity.
     zramSwap = {
