@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "da31216a959e2a4ab81ded87ed8f5c803bd099de060bd45fa6491d1bdcaa7ddb"
+SOURCE_SNAPSHOT_SHA256 = "13fd90389144aba1507b708f2c37b91fc5fdad30a2977039fb4b74eb8514ea53"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -898,8 +898,12 @@ class T(unittest.TestCase):
             "heim-pc-pytest-temp-gc",
             "heim-pc-storage-pressure-watch",
             "heim-pc-home-hygiene",
+            "heim-pc-coredump-retention",
+            "legacyUserUnitGuardGenerator = pkgs.writeShellScript",
+            "systemd.user.generators.heim-pc-host-protection-legacy-unit-guard",
         ):
             self.assertIn(marker, module)
+        self.assertNotIn('environment.etc."systemd/user/heim-pc-', module)
         for forbidden in (
             'ManagedOOMSwap = "kill";',
             'ManagedOOMMemoryPressure = "kill";',

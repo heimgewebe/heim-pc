@@ -58,20 +58,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer")
     machine.succeed("test -f /etc/systemd/user/heim-pc-home-hygiene.timer")
     machine.succeed(
-        "test -f /etc/systemd/user/heim-pc-storage-pressure-watch.service.d/zz-heim-pc-host-protection.conf"
+        "test -x /etc/systemd/user-generators/heim-pc-host-protection-legacy-unit-guard"
     )
-    machine.succeed(
-        "test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf"
-    )
-    for unit in [
-      "heim-pc-home-hygiene.service",
-      "heim-pc-home-hygiene.timer",
-      "heim-pc-coredump-retention.service",
-      "heim-pc-coredump-retention.timer",
-    ]:
-        machine.succeed(
-            f"test -f /etc/systemd/user/{unit}.d/zz-heim-pc-host-protection.conf"
-        )
     machine.succeed("test ! -e /var/lib/systemd/linger/alex")
     machine.fail("systemctl is-active user@1000.service")
 

@@ -33,6 +33,20 @@ let
     + " --policy ${../../../config/storage-pressure.v1.json}"
     + " --state %h/.local/state/heim-pc/storage-pressure-watch/latest.json"
     + lib.optionalString (!cfg.storagePressure.requestMaintenance) " --observe-only";
+
+  # Generate administrator drop-ins in systemd's user-generator runtime tree.
+  # This avoids colliding with NixOS' generated /etc/systemd/user store tree,
+  # while still applying to higher-priority legacy main units in alex's home.
+  legacyUserUnitGuardGenerator = pkgs.writeShellScript
+    "heim-pc-host-protection-legacy-unit-guard"
+    ''
+      set -eu
+      output="$1"
+      for unit in heim-pc-storage-pressure-watch.service heim-pc-storage-pressure-watch.timer heim-pc-home-hygiene.service heim-pc-home-hygiene.timer heim-pc-coredump-retention.service heim-pc-coredump-retention.timer; do
+        ${pkgs.coreutils}/bin/mkdir -p "$output/$unit.d"
+        ${pkgs.coreutils}/bin/printf '%s\n' '[Unit]' 'ConditionUser=alex' "ConditionPathExists=!%h/.config/systemd/user/$unit" > "$output/$unit.d/zz-heim-pc-host-protection.conf"
+      done
+    '';
 in
 {
   options.heimPc.hostProtection = {
@@ -88,45 +102,12 @@ in
     # broader ambient startup than the two read-only/observe-only jobs need.
     users.users.alex.linger = false;
 
-    # The pre-NixOS installer wrote these unit names into alex's home, which
-    # outranks /etc/systemd/user. Do not mutate the home from this module.
-    # Instead, fail closed while either legacy main unit still exists; after
-    # deliberate removal the declarative NixOS units become authoritative.
-    environment.etc."systemd/user/heim-pc-storage-pressure-watch.service.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.service
-    '';
-    environment.etc."systemd/user/heim-pc-storage-pressure-watch.timer.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-storage-pressure-watch.timer
-    '';
-
-    # The older home-hygiene installer also wrote four main units into alex's
-    # user unit search path, including a mutation-capable coredump-retention
-    # service. Keep every legacy unit inert until its home-level main unit is
-    # deliberately retired; after removal only the Nix inventory units remain.
-    environment.etc."systemd/user/heim-pc-home-hygiene.service.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-home-hygiene.service
-    '';
-    environment.etc."systemd/user/heim-pc-home-hygiene.timer.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-home-hygiene.timer
-    '';
-    environment.etc."systemd/user/heim-pc-coredump-retention.service.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-coredump-retention.service
-    '';
-    environment.etc."systemd/user/heim-pc-coredump-retention.timer.d/zz-heim-pc-host-protection.conf".text = ''
-      [Unit]
-      ConditionUser=alex
-      ConditionPathExists=!%h/.config/systemd/user/heim-pc-coredump-retention.timer
-    '';
+    # The pre-NixOS installers wrote these unit names into alex's home, which
+    # outranks the declarative NixOS main units. Do not mutate the home here.
+    # A user generator adds global fail-closed drop-ins at manager start/reload;
+    # after deliberate legacy-file removal the NixOS inventory units take over.
+    systemd.user.generators.heim-pc-host-protection-legacy-unit-guard =
+      legacyUserUnitGuardGenerator;
 
     # Independent compressed swap: no swapfile or partition is added to either
     # production disk. 25% of 64 GiB approximates the former host swap capacity.
