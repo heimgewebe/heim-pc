@@ -144,13 +144,24 @@ def cgroup_rows(
     rows: list[dict[str, object]] = []
     scanned = 0
     truncated = False
-    for base, dirs, _files in os.walk(root):
-        if scanned >= MAX_CGROUPS:
-            dirs[:] = []
-            truncated = True
-            break
+    pending = [root]
+    while pending:
+        path = pending.pop()
         scanned += 1
-        path = Path(base)
+        # Count both processed and queued paths before accepting a child.
+        # scandir streams a wide directory instead of materializing its names.
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if scanned + len(pending) >= MAX_CGROUPS:
+                        truncated = True
+                        break
+                    pending.append(Path(entry.path))
+        except OSError:
+            # A disappearing or unreadable subtree is incomplete evidence.
+            truncated = True
         current = read_int(path / "memory.current")
         swap = read_int(path / "memory.swap.current")
         if current == 0 and swap == 0:

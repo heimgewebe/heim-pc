@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -137,6 +138,86 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             [row["rss_bytes"] for row in rows],
             [8 * 1024, 7 * 1024, 6 * 1024],
         )
+
+    def test_cgroup_scan_does_not_enumerate_the_entire_child_fanout(self) -> None:
+        root = Path("/test-cgroups")
+        cap = 4
+        consumed = 0
+        closed = []
+
+        def entries(path):
+            nonlocal consumed
+            if Path(path) == root:
+                for number in range(100_000):
+                    consumed += 1
+                    self.assertLessEqual(consumed, cap)
+                    yield SimpleNamespace(
+                        name=f"child-{number}",
+                        path=str(root / f"child-{number}"),
+                        is_dir=lambda follow_symlinks=False: True,
+                        is_symlink=lambda: False,
+                    )
+
+        class Scan:
+            def __init__(self, path):
+                self.path = path
+                self.entries = entries(path)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                self.entries.close()
+                closed.append(self.path)
+
+        with (
+            patch.object(snapshot, "MAX_CGROUPS", cap),
+            patch.object(snapshot.os, "scandir", side_effect=Scan),
+            patch.object(snapshot, "read_int", return_value=1),
+            patch.object(snapshot, "read_text", return_value=""),
+        ):
+            rows, scanned, truncated = snapshot.cgroup_rows(root)
+
+        self.assertEqual((scanned, truncated, consumed), (cap, True, cap))
+        self.assertEqual(len(rows), cap)
+        self.assertEqual(len(closed), cap)
+
+    def test_cgroup_scan_at_the_exact_cap_is_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            with patch.object(snapshot, "MAX_CGROUPS", 3):
+                rows, scanned, truncated = snapshot.cgroup_rows(root)
+        self.assertEqual((rows, scanned, truncated), ([], 3, False))
+
+    def test_cgroup_scan_budget_includes_queued_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "a" / "child").mkdir(parents=True)
+            (root / "b" / "child").mkdir(parents=True)
+            with patch.object(snapshot, "MAX_CGROUPS", 3):
+                rows, scanned, truncated = snapshot.cgroup_rows(root)
+        self.assertEqual((rows, scanned, truncated), ([], 3, True))
+
+    def test_cgroup_scan_error_is_incomplete_evidence(self) -> None:
+        with patch.object(snapshot.os, "scandir", side_effect=PermissionError):
+            rows, scanned, truncated = snapshot.cgroup_rows(Path("/test-cgroups"))
+        self.assertEqual((rows, scanned, truncated), ([], 1, True))
+
+    def test_cgroup_scan_does_not_follow_directory_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "real").mkdir()
+            (root / "link").symlink_to(root / "real", target_is_directory=True)
+            rows, scanned, truncated = snapshot.cgroup_rows(root)
+        self.assertEqual((rows, scanned, truncated), ([], 2, False))
 
     def test_cgroup_scan_cap_is_reported_as_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

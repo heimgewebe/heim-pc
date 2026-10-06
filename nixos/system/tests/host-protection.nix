@@ -131,10 +131,18 @@ pkgs.testers.runNixOSTest {
         'assert p["maintenance_requests_enabled"] is False'
         "'"
     )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-storage-pressure-watch.timer"
+    )
 
     # The older home-hygiene installer wrote four user units, including the
     # mutation-capable coredump-retention service. All four legacy mains must
-    # remain loaded-but-inert while present in alex's home.
+    # remain loaded-but-inert while present in alex's home. The declarative
+    # home-hygiene timer already started with the user manager: daemon-reload
+    # preserves that active state rather than checking new conditions again.
     machine.succeed(
         "printf '%s\\n' '[Unit]' 'Description=Legacy home hygiene' "
         "'[Service]' 'Type=oneshot' "
@@ -168,6 +176,9 @@ pkgs.testers.runNixOSTest {
     machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.service")
     machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer")
     machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-home-hygiene.timer"
+    )
     for unit in [
       "heim-pc-home-hygiene.service",
       "heim-pc-home-hygiene.timer",
@@ -182,6 +193,11 @@ pkgs.testers.runNixOSTest {
             f"systemctl --user --machine=alex@.host show {unit} -p DropInPaths --value "
             "| grep -F zz-heim-pc-host-protection.conf"
         )
+        if unit == "heim-pc-home-hygiene.timer":
+            # The preceding service start proves the legacy job is blocked
+            # even with an active timer. Stop it to test a fresh timer start.
+            machine.fail("test -e /home/alex/legacy-home-hygiene-ran")
+            machine.succeed(f"systemctl --user --machine=alex@.host stop {unit}")
         machine.succeed(f"systemctl --user --machine=alex@.host start {unit}")
         machine.succeed(
             f"test $(systemctl --user --machine=alex@.host show "
@@ -204,6 +220,12 @@ pkgs.testers.runNixOSTest {
     machine.succeed("systemctl --user --machine=alex@.host start heim-pc-home-hygiene.service")
     machine.succeed(
         "test -f /home/alex/.local/state/heim-pc/home-hygiene/latest-inventory.json"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-home-hygiene.timer"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-home-hygiene.timer"
     )
     machine.succeed(
         "test $(systemctl --user --machine=alex@.host show "
