@@ -84,36 +84,42 @@ def process_references(candidate: Path, uid: int, proc_root: Path = Path("/proc"
     """Return same-UID processes whose cwd/root/open file points into candidate."""
     refs: list[str] = []
     try:
-        processes = list(proc_root.iterdir())
+        with os.scandir(proc_root) as processes:
+            for proc_entry in processes:
+                if not proc_entry.name.isdigit():
+                    continue
+                proc = Path(proc_entry.path)
+                try:
+                    if proc.stat().st_uid != uid:
+                        continue
+                except OSError:
+                    continue
+                pid = proc_entry.name
+                for label in ("cwd", "root"):
+                    target = _target_from_proc_link(proc / label)
+                    if target is not None and (
+                        target == candidate or _is_within(target, candidate)
+                    ):
+                        refs.append(f"pid={pid}:{label}")
+                fd_dir = proc / "fd"
+                try:
+                    with os.scandir(fd_dir) as fds:
+                        for fd_entry in fds:
+                            fd = Path(fd_entry.path)
+                            target = _target_from_proc_link(fd)
+                            if target is not None and (
+                                target == candidate or _is_within(target, candidate)
+                            ):
+                                refs.append(f"pid={pid}:fd={fd_entry.name}")
+                                if len(refs) >= 32:
+                                    return refs
+                except OSError:
+                    # Some same-UID services deliberately make /proc/<pid>/fd unreadable.
+                    # The authoritative liveness proof for a pytest garbage tree is its
+                    # own creator PID lock; this scan is additional defense-in-depth.
+                    continue
     except OSError:
-        return ["proc_unreadable"]
-    for proc in processes:
-        if not proc.name.isdigit():
-            continue
-        try:
-            if proc.stat().st_uid != uid:
-                continue
-        except OSError:
-            continue
-        pid = proc.name
-        for label in ("cwd", "root"):
-            target = _target_from_proc_link(proc / label)
-            if target is not None and (target == candidate or _is_within(target, candidate)):
-                refs.append(f"pid={pid}:{label}")
-        fd_dir = proc / "fd"
-        try:
-            fds = list(fd_dir.iterdir())
-        except OSError:
-            # Some same-UID services deliberately make /proc/<pid>/fd unreadable.
-            # The authoritative liveness proof for a pytest garbage tree is its
-            # own creator PID lock; this scan is additional defense-in-depth.
-            continue
-        for fd in fds:
-            target = _target_from_proc_link(fd)
-            if target is not None and (target == candidate or _is_within(target, candidate)):
-                refs.append(f"pid={pid}:fd={fd.name}")
-                if len(refs) >= 32:
-                    return refs
+        return [*refs, "proc_unreadable"]
     return refs
 
 
@@ -124,28 +130,28 @@ def _tree_safety(candidate: Path, uid: int, root_dev: int, max_entries: int) -> 
     while stack:
         directory = stack.pop()
         try:
-            entries = list(os.scandir(directory))
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > max_entries:
+                        return False, "entry_limit_exceeded", seen
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        return False, f"stat_error:{type(exc).__name__}", seen
+                    if info.st_uid != uid:
+                        return False, "foreign_owner", seen
+                    if info.st_dev != root_dev:
+                        return False, "foreign_filesystem", seen
+                    mode = info.st_mode
+                    if stat.S_ISDIR(mode):
+                        stack.append(Path(entry.path))
+                    elif stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+                        continue
+                    else:
+                        return False, "special_file", seen
         except OSError as exc:
             return False, f"scan_error:{type(exc).__name__}", seen
-        for entry in entries:
-            seen += 1
-            if seen > max_entries:
-                return False, "entry_limit_exceeded", seen
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                return False, f"stat_error:{type(exc).__name__}", seen
-            if info.st_uid != uid:
-                return False, "foreign_owner", seen
-            if info.st_dev != root_dev:
-                return False, "foreign_filesystem", seen
-            mode = info.st_mode
-            if stat.S_ISDIR(mode):
-                stack.append(Path(entry.path))
-            elif stat.S_ISREG(mode) or stat.S_ISLNK(mode):
-                continue
-            else:
-                return False, "special_file", seen
     return True, "safe", seen
 
 
@@ -311,45 +317,58 @@ def collect(
         return report
 
     all_mounts = mount_points() if mounts is None else mounts
-    for candidate in sorted(root.iterdir(), key=lambda p: p.name):
-        if not candidate.name.startswith("garbage-"):
-            continue
-        assessment = evaluate_candidate(
-            candidate,
-            uid=uid,
-            root=root_resolved,
-            root_dev=root_info.st_dev,
-            now=now,
-            min_age_seconds=min_age_seconds,
-            max_entries=max_entries,
-            mounts=all_mounts,
-            proc_root=proc_root,
-        )
-        if assessment["decision"] == "remove" and not dry_run:
-            try:
-                # Recheck the creator PID immediately before mutation.
-                lock_pid = assessment.get("lock_pid")
-                if isinstance(lock_pid, int) and (proc_root / str(lock_pid)).exists():
-                    assessment.update(decision="skip", reason="lock_pid_revived")
-                else:
-                    refs = process_references(candidate, uid, proc_root=proc_root)
-                    if refs:
-                        assessment.update(decision="skip", reason="process_reference_recheck", references=refs)
-                    else:
-                        remove_tree(candidate, uid)
-                        assessment["removed"] = not candidate.exists()
-                        if not assessment["removed"]:
-                            raise OSError("candidate still exists after removal")
-            except Exception as exc:  # Fail closed and surface the residue.
-                assessment.update(decision="error", reason=f"remove_error:{type(exc).__name__}")
-                report["errors"].append(f"{candidate.name}:{type(exc).__name__}:{exc}")
-        report["candidates"].append(assessment)
-        if assessment["decision"] == "remove":
-            report["eligible"] += 1
-            if assessment.get("removed") is True:
-                report["removed"] += 1
-        elif assessment["decision"] == "skip":
-            report["skipped"] += 1
+    try:
+        with os.scandir(root) as candidates:
+            for candidate_entry in candidates:
+                if not candidate_entry.name.startswith("garbage-"):
+                    continue
+                candidate = Path(candidate_entry.path)
+                assessment = evaluate_candidate(
+                    candidate,
+                    uid=uid,
+                    root=root_resolved,
+                    root_dev=root_info.st_dev,
+                    now=now,
+                    min_age_seconds=min_age_seconds,
+                    max_entries=max_entries,
+                    mounts=all_mounts,
+                    proc_root=proc_root,
+                )
+                if assessment["decision"] == "remove" and not dry_run:
+                    try:
+                        # Recheck the creator PID immediately before mutation.
+                        lock_pid = assessment.get("lock_pid")
+                        if isinstance(lock_pid, int) and (proc_root / str(lock_pid)).exists():
+                            assessment.update(decision="skip", reason="lock_pid_revived")
+                        else:
+                            refs = process_references(candidate, uid, proc_root=proc_root)
+                            if refs:
+                                assessment.update(
+                                    decision="skip",
+                                    reason="process_reference_recheck",
+                                    references=refs,
+                                )
+                            else:
+                                remove_tree(candidate, uid)
+                                assessment["removed"] = not candidate.exists()
+                                if not assessment["removed"]:
+                                    raise OSError("candidate still exists after removal")
+                    except Exception as exc:  # Fail closed and surface the residue.
+                        assessment.update(
+                            decision="error", reason=f"remove_error:{type(exc).__name__}"
+                        )
+                        report["errors"].append(
+                            f"{candidate.name}:{type(exc).__name__}:{exc}"
+                        )
+                report["candidates"].append(assessment)
+                if assessment["decision"] == "remove":
+                    report["eligible"] += 1
+                    if assessment.get("removed") is True:
+                        report["removed"] += 1
+                elif assessment["decision"] == "skip":
+                    report["skipped"] += 1
+    except OSError as exc:
+        report["errors"].append(f"root_scan:{type(exc).__name__}")
     report["status"] = "error" if report["errors"] else "ok"
     return report
 

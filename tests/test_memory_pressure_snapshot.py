@@ -139,6 +139,59 @@ class MemoryPressureSnapshotTests(unittest.TestCase):
             [8 * 1024, 7 * 1024, 6 * 1024],
         )
 
+    def test_process_scan_starts_before_full_proc_enumeration(self) -> None:
+        proc = Path("/test-proc")
+        consumed = 0
+        first_status_read = False
+
+        def entries(path):
+            nonlocal consumed
+            self.assertEqual(Path(path), proc)
+            consumed += 1
+            yield SimpleNamespace(name="100", path=str(proc / "100"))
+            consumed += 1
+            self.assertTrue(first_status_read)
+
+        class Scan:
+            def __init__(self, path):
+                self.entries = entries(path)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                self.entries.close()
+
+        def read(path: Path) -> str:
+            nonlocal first_status_read
+            if path == proc / "100" / "status":
+                first_status_read = True
+                return (
+                    "Name:\tp100\n"
+                    "VmRSS:\t1 kB\n"
+                    "VmSwap:\t0 kB\n"
+                    "Uid:\t1000 1000 1000 1000\n"
+                )
+            if path == proc / "100" / "cgroup":
+                return "0::/test.scope\n"
+            return ""
+
+        with (
+            patch.object(snapshot.os, "scandir", side_effect=Scan),
+            patch.object(snapshot, "read_text", side_effect=read),
+        ):
+            rows = snapshot.process_rows(proc)
+
+        self.assertEqual(consumed, 2)
+        self.assertTrue(first_status_read)
+        self.assertEqual([row["pid"] for row in rows], [100])
+
     def test_cgroup_scan_does_not_enumerate_the_entire_child_fanout(self) -> None:
         root = Path("/test-cgroups")
         cap = 4

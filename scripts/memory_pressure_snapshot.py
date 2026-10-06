@@ -89,51 +89,55 @@ def pressure() -> dict[str, dict[str, float | int]]:
 
 def process_rows(proc: Path = Path("/proc")) -> list[dict[str, object]]:
     top: list[tuple[int, int, dict[str, object]]] = []
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        status_text = read_text(entry / "status")
-        if not status_text:
-            continue
-        fields: dict[str, str] = {}
-        for line in status_text.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                if key in {"Name", "VmRSS", "VmSwap", "Uid"}:
-                    fields[key] = value.strip()
-        def kb(name: str) -> int:
-            raw = fields.get(name, "0").split()
-            try:
-                return int(raw[0]) * 1024
-            except (ValueError, IndexError):
-                return 0
-        rss = kb("VmRSS")
-        swap = kb("VmSwap")
-        if rss == 0 and swap == 0:
-            continue
-        cgroup = ""
-        for line in read_text(entry / "cgroup").splitlines():
-            if line.startswith("0::"):
-                cgroup = line[3:]
-                break
-        uid_raw = fields.get("Uid", "").split()
-        uid = int(uid_raw[0]) if uid_raw and uid_raw[0].isdigit() else None
-        pid = int(entry.name)
-        total = rss + swap
-        row: dict[str, object] = {
-            "pid": pid,
-            "name": fields.get("Name", "?")[:80],
-            "uid": uid,
-            "rss_bytes": rss,
-            "swap_bytes": swap,
-            "total_bytes": total,
-            "cgroup": cgroup[:512],
-        }
-        candidate = (total, pid, row)
-        if len(top) < TOP_PROCESSES:
-            heapq.heappush(top, candidate)
-        elif candidate[:2] > top[0][:2]:
-            heapq.heapreplace(top, candidate)
+    with os.scandir(proc) as entries:
+        for proc_entry in entries:
+            if not proc_entry.name.isdigit():
+                continue
+            entry = Path(proc_entry.path)
+            status_text = read_text(entry / "status")
+            if not status_text:
+                continue
+            fields: dict[str, str] = {}
+            for line in status_text.splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    if key in {"Name", "VmRSS", "VmSwap", "Uid"}:
+                        fields[key] = value.strip()
+
+            def kb(name: str) -> int:
+                raw = fields.get(name, "0").split()
+                try:
+                    return int(raw[0]) * 1024
+                except (ValueError, IndexError):
+                    return 0
+
+            rss = kb("VmRSS")
+            swap = kb("VmSwap")
+            if rss == 0 and swap == 0:
+                continue
+            cgroup = ""
+            for line in read_text(entry / "cgroup").splitlines():
+                if line.startswith("0::"):
+                    cgroup = line[3:]
+                    break
+            uid_raw = fields.get("Uid", "").split()
+            uid = int(uid_raw[0]) if uid_raw and uid_raw[0].isdigit() else None
+            pid = int(proc_entry.name)
+            total = rss + swap
+            row: dict[str, object] = {
+                "pid": pid,
+                "name": fields.get("Name", "?")[:80],
+                "uid": uid,
+                "rss_bytes": rss,
+                "swap_bytes": swap,
+                "total_bytes": total,
+                "cgroup": cgroup[:512],
+            }
+            candidate = (total, pid, row)
+            if len(top) < TOP_PROCESSES:
+                heapq.heappush(top, candidate)
+            elif candidate[:2] > top[0][:2]:
+                heapq.heapreplace(top, candidate)
     top.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [row for _total, _pid, row in top]
 
