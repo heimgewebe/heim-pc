@@ -189,7 +189,7 @@ def _authoritative_task_record(
     argv: list[str],
     argv_sha256: str,
     receipt_sha256: str,
-) -> bytes:
+) -> tuple[bytes, int, int]:
     """Resolve task outcome against the persistent operator ledger and receipt.
 
     Direct caller-provided receipt projections are not an authority source.
@@ -207,7 +207,7 @@ def _authoritative_task_record(
             row = db.execute(
                 "SELECT task_id, attempt, unit, authoritative_unit, host, cwd, "
                 "state, argv_json, argv_sha256, lifecycle_receipt_sha256, "
-                "terminalized_at_unix, last_observation_json "
+                "created_at_unix, terminalized_at_unix, last_observation_json "
                 "FROM tasks WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
@@ -232,8 +232,10 @@ def _authoritative_task_record(
         or stored_argv != argv
         or row["argv_sha256"] != argv_sha256
         or row["lifecycle_receipt_sha256"] != receipt_sha256
+        or not isinstance(row["created_at_unix"], int)
+        or row["created_at_unix"] < 1
         or not isinstance(row["terminalized_at_unix"], int)
-        or row["terminalized_at_unix"] < 1
+        or row["terminalized_at_unix"] < row["created_at_unix"]
         or observation.get("state") != "completed"
         or observation.get("properties", {}).get("Result") != "success"
         or observation.get("properties", {}).get("ExecMainStatus") != "0"
@@ -262,6 +264,7 @@ def _authoritative_task_record(
         or outcome.get("authoritative_unit") != unit
         or outcome.get("argv_sha256") != argv_sha256
         or outcome.get("state") != "completed"
+        or outcome.get("observed_at_unix") != row["terminalized_at_unix"]
         or outcome.get("observation", {}).get("state") != "completed"
     ):
         raise Day1EvidenceError("authoritative Grabowski lifecycle receipt mismatch")
@@ -270,7 +273,11 @@ def _authoritative_task_record(
         store / "task-output" / f".grabowski-task-output-{task_id}-a{attempt}" / "stdout.log"
     )
     # A successful task may have empty stdout, but evidence-producing collectors may not.
-    return _trusted_task_file(stdout_path, max_bytes=8 * 1024 * 1024)
+    return (
+        _trusted_task_file(stdout_path, max_bytes=8 * 1024 * 1024),
+        row["created_at_unix"],
+        row["terminalized_at_unix"],
+    )
 
 
 def _captured_json(stdout: bytes, *, field: str) -> dict[str, Any]:
@@ -330,7 +337,7 @@ def _verify_execution_receipt(
         or HEX64.fullmatch(lifecycle_receipt_sha256) is None
     ):
         raise Day1EvidenceError(f"{field} lifecycle receipt digest is invalid")
-    captured_stdout = _authoritative_task_record(
+    captured_stdout, task_created_at_unix, task_terminalized_at_unix = _authoritative_task_record(
         task_id=task_id,
         attempt=attempt,
         unit=expected_unit,
@@ -351,6 +358,8 @@ def _verify_execution_receipt(
         "argv": argv,
         "argv_sha256": argv_sha256,
         "lifecycle_receipt_sha256": lifecycle_receipt_sha256,
+        "task_created_at_unix": task_created_at_unix,
+        "task_terminalized_at_unix": task_terminalized_at_unix,
         "captured_stdout_sha256": _sha256_bytes(captured_stdout),
         "captured_stdout": captured_stdout,
     }
@@ -540,7 +549,7 @@ def build_current_binding(
     provenance = program.get("collection_provenance", {})
     program_observed_at = str(scope.get("observed_at", ""))
     program_generated_at = str(program.get("generated_at", ""))
-    _parse_time(program_generated_at)
+    program_generated = _parse_time(program_generated_at)
     program_id = scope.get("observation_id")
     program_binding = scope.get("binding_eligible")
     program_observed = _parse_time(program_observed_at)
@@ -604,6 +613,30 @@ def build_current_binding(
         },
         field="program renderer execution",
     )
+
+    # Session assertions alone cannot establish freshness: the authoritative
+    # Grabowski task ledger must place actual executions inside the window.
+    execution_order = (software_execution, program_execution, renderer_execution)
+    for execution in execution_order:
+        begin = execution["task_created_at_unix"]
+        end = execution["task_terminalized_at_unix"]
+        if not (started.timestamp() <= begin <= end <= completed.timestamp()):
+            raise Day1EvidenceError(
+                "Grabowski task execution falls outside bounded observation session"
+            )
+    if not (
+        software_execution["task_terminalized_at_unix"]
+        <= program_execution["task_created_at_unix"]
+        <= program_execution["task_terminalized_at_unix"]
+        <= renderer_execution["task_created_at_unix"]
+    ):
+        raise Day1EvidenceError("Day-1 collector/renderer tasks are not serially ordered")
+    if (
+        software_execution["task_terminalized_at_unix"] < software_observed.timestamp()
+        or program_execution["task_terminalized_at_unix"] < program_observed.timestamp()
+        or renderer_execution["task_terminalized_at_unix"] < program_generated.timestamp()
+    ):
+        raise Day1EvidenceError("inventory observed/generated time postdates real task execution")
 
     software_report = _captured_json(
         software_execution["captured_stdout"], field="software execution"

@@ -228,8 +228,8 @@ args.json_out.write_text(
                 "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, attempt INTEGER, "
                 "unit TEXT, authoritative_unit TEXT, host TEXT, cwd TEXT, "
                 "state TEXT, argv_json TEXT, argv_sha256 TEXT, "
-                "lifecycle_receipt_sha256 TEXT, terminalized_at_unix INTEGER, "
-                "last_observation_json TEXT)"
+                "lifecycle_receipt_sha256 TEXT, created_at_unix INTEGER, "
+                "terminalized_at_unix INTEGER, last_observation_json TEXT)"
             )
         self.task_db.chmod(0o600)
         self._task_state_patch = patch.object(
@@ -263,6 +263,12 @@ args.json_out.write_text(
     def _register_task(self, receipt: dict, stdout: bytes) -> None:
         task_id = receipt["task_id"]
         unit = receipt["unit"]
+        timing = {
+            "1": (1791385201, 1791385208),
+            "2": (1791385209, 1791385218),
+            "3": (1791385219, 1791385227),
+        }
+        task_created, task_terminal = timing[task_id[0]]
         outcome = {
             "kind": "grabowski_task_lifecycle_receipt",
             "schema_version": 2,
@@ -272,6 +278,7 @@ args.json_out.write_text(
             "authoritative_unit": unit,
             "argv_sha256": receipt["argv_sha256"],
             "state": "completed",
+            "observed_at_unix": task_terminal,
             "observation": {"state": "completed"},
         }
         digest = sha(
@@ -296,12 +303,12 @@ args.json_out.write_text(
         }
         with closing(sqlite3.connect(self.task_db)) as db:
             db.execute(
-                "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id, receipt["attempt"], unit, unit,
                     receipt["host"], receipt["cwd"], "completed",
                     json.dumps(receipt["argv"]), receipt["argv_sha256"],
-                    digest, 1791385230, json.dumps(observation),
+                    digest, task_created, task_terminal, json.dumps(observation),
                 ),
             )
             db.commit()
@@ -536,6 +543,33 @@ args.json_out.write_text(
             encoding="utf-8",
         )
         with self.assertRaisesRegex(Day1EvidenceError, "deterministic render"):
+            self.binding()
+
+    def test_rejects_fake_observation_window_around_stale_tasks(self):
+        receipts = self.execution_receipts()
+        # The inventory timestamps still lie inside the *claimed* short
+        # session, but the actual collector and renderer completed later.
+        with self.assertRaisesRegex(Day1EvidenceError, "outside bounded observation session"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at="2026-10-07T15:00:06Z",
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=receipts[2],
+            )
+
+    def test_rejects_unordered_collector_and_renderer_tasks(self):
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "UPDATE tasks SET created_at_unix = ? WHERE task_id = ?",
+                (1791385202, "2" * 24),
+            )
+            db.commit()
+        with self.assertRaisesRegex(Day1EvidenceError, "not serially ordered"):
             self.binding()
 
     def test_rejects_forged_lifecycle_digest(self):
