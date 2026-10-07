@@ -23,7 +23,8 @@ It provides a complete overview of the canonical documentation zones and their c
 | model | [architecture/model.md](architecture/model.md) | canonical | 2026-09-02 | security |
 | system-constitution | [architecture/system-constitution.md](architecture/system-constitution.md) | canonical | 2026-09-02 | model, security |
 | nixos-executor-2026 | [architecture/nixos-executor-2026.md](architecture/nixos-executor-2026.md) | canonical | 2026-09-02 | system-constitution, model, security, storage-lifecycle, managed-builds, network-identity |
-| nixos-dual-os-restplan-2026 | [architecture/nixos-dual-os-restplan-2026.md](architecture/nixos-dual-os-restplan-2026.md) | canonical | 2026-10-04 | nixos-executor-2026 |
+| nixos-dual-os-restplan-2026 | [architecture/nixos-dual-os-restplan-2026.md](architecture/nixos-dual-os-restplan-2026.md) | canonical | 2026-10-07 | nixos-executor-2026, nixos-day1-workload-parity-2026 |
+| nixos-day1-workload-parity-2026 | [architecture/nixos-day1-workload-parity-2026.md](architecture/nixos-day1-workload-parity-2026.md) | canonical | 2026-10-07 | system-constitution, nixos-executor-2026 |
 | security | [architecture/security.md](architecture/security.md) | canonical | 2026-09-02 | - |
 | zones | [architecture/zones.md](architecture/zones.md) | canonical | 2026-02-28 | - |
 | drift-policy | [architecture/drift-policy.md](architecture/drift-policy.md) | canonical | 2026-02-28 | - |

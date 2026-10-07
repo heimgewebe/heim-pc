@@ -7,8 +7,13 @@ services without reading private content or secrets.
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import os
+import re
+import secrets
 import shutil
+import socket
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,26 +199,33 @@ for table in ['users', '_externalAuths', 'systems', 'system_stats', 'container_s
 
 
 
-def taildrop_summary() -> list[str]:
+def taildrop_summary(inbox: Path | None = None) -> list[str]:
     rows: list[str] = []
     rc, status = run(["systemctl", "--user", "is-active", "heim-taildrop-inbox.service"], timeout=5, max_lines=5)
     rows.append(f"heim-taildrop-inbox.service {status.strip() if status.strip() else 'unknown'}")
-    inbox = Path.home() / "Incoming/Taildrop"
+    inbox = inbox or (Path.home() / "Incoming/Taildrop")
     rows.append(f"inbox {inbox}")
-    recent = []
+    recent_count = 0
+    recent_bytes = 0
     if inbox.exists():
-        for item in sorted(inbox.rglob("*"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        for item in sorted(
+            inbox.rglob("*"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        ):
             if item.is_file() and item.name != "README.txt":
-                recent.append(f"{item.name} {item.stat().st_size} bytes")
-            if len(recent) >= 5:
+                recent_count += 1
+                recent_bytes += item.stat().st_size
+            if recent_count >= 5:
                 break
-    rows.extend(["recent " + entry for entry in recent] or ["recent none"])
+    rows.append(f"recent_files_count {recent_count}")
+    rows.append(f"recent_files_total_bytes {recent_bytes}")
     rc, targets = run(["tailscale", "file", "cp", "--targets"], timeout=10, max_lines=20)
     if rc == 0:
-        rows.append("targets available")
-        rows.extend(targets.splitlines()[:10])
+        target_count = sum(1 for line in targets.splitlines() if line.strip())
+        rows.append(f"targets_available_count {target_count}")
     else:
-        rows.append(f"targets unavailable: {targets}")
+        rows.append("targets_available false")
     return rows
 
 
@@ -240,7 +252,14 @@ def apt_rows(packages: Iterable[str]) -> list[str]:
     return rows
 
 
-def inventory_header(generated_at: str) -> list[str]:
+def inventory_header(
+    generated_at: str,
+    *,
+    observation_id: str = "unbound",
+    binding_eligible: bool = False,
+    collector_sha256: str = "",
+    host: str = "",
+) -> list[str]:
     return [
         "---",
         "id: software-inventory",
@@ -249,6 +268,10 @@ def inventory_header(generated_at: str) -> list[str]:
         "canonicality: observation",
         "temporal_scope: point_in_time",
         f'observed_at: "{generated_at}"',
+        f'observation_id: "{observation_id}"',
+        f"binding_eligible: {str(binding_eligible).lower()}",
+        f'collector_sha256: "{collector_sha256}"',
+        f'observed_host: "{host}"',
         f"last_reviewed: {generated_at[:10]}",
         "depends_on:",
         "  - home-entry",
@@ -276,9 +299,47 @@ def inventory_header(generated_at: str) -> list[str]:
     ]
 
 
+
+OBSERVATION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def normalize_observed_at(value: str | None) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("observed_at must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def observation_binding(value: str | None) -> tuple[str, bool]:
+    if value is None:
+        return secrets.token_hex(32), False
+    if not OBSERVATION_ID_RE.fullmatch(value):
+        raise ValueError("observation_id must be 64 lowercase hex characters")
+    return value, True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate compact heim-pc software inventory.")
+    parser.add_argument("--observation-id", default=None)
+    parser.add_argument("--observed-at", default=None)
+    return parser.parse_args()
+
+
 def main() -> None:
-    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    lines: list[str] = inventory_header(generated_at)
+    args = parse_args()
+    generated_at = normalize_observed_at(args.observed_at)
+    observation_id, id_bound = observation_binding(args.observation_id)
+    binding_eligible = id_bound and args.observed_at is not None
+    collector_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    lines: list[str] = inventory_header(
+        generated_at,
+        observation_id=observation_id,
+        binding_eligible=binding_eligible,
+        collector_sha256=collector_sha256,
+        host=socket.gethostname(),
+    )
     for command, status, path, version in command_rows():
         lines.append(f"| `{command}` | {status} | `{path}` | {version or '-'} |")
 
@@ -321,7 +382,7 @@ def main() -> None:
         "- Paperless credentials are local-only in `~/.config/heim-utilities/paperless.env` and must not be committed.",
         "- Localhost service availability does not by itself prove UI onboarding. Beszel monitoring is accepted only when the WAL-aware read-only database check shows a monitored `heim-pc` system and non-zero stats rows.",
         "- Paperless has a starter taxonomy and a local export/backup path. This proves plumbing, not real document-classification quality.",
-        "- LocalSend has inbox paths and a launcher helper, but LocalSend cross-device transfer remains LAN-optional and not accepted. Remote device transfer is accepted through Tailscale Taildrop: PC→iPad succeeded and iPad→PC delivered `gg.md` into `~/Incoming/Taildrop`.",
+        "- LocalSend has inbox paths and a launcher helper, but LocalSend cross-device transfer remains LAN-optional and not accepted. Remote device transfer is accepted through Tailscale Taildrop: bidirectional transfer succeeded without committing transferred filenames.",
         "- EasyEffects has a profile plan only; no profile is blindly activated without listening/recording validation.",
         "",
     ]

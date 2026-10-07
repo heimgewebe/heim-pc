@@ -2,9 +2,10 @@
 id: nixos-dual-os-restplan-2026
 role: action
 status: canonical
-last_reviewed: 2026-10-04
+last_reviewed: 2026-10-07
 depends_on:
   - nixos-executor-2026
+  - nixos-day1-workload-parity-2026
 verifies_with:
   - scripts/ci/check_repo_index_consistency.py
 ---
@@ -14,6 +15,12 @@ verifies_with:
 ## Ziel
 
 NixOS wird als zweites Betriebssystem ausschließlich auf der separaten 4-TB-Seagate installiert. Pop!_OS auf der 2-TB-WD bleibt vollständig erhalten und bleibt der unabhängige Fallback. Es gibt keinen destruktiven Source-Cutover.
+
+## Betriebsparität und Testboot-Grenze
+
+Die isolierte Seagate-Installation und ein Firmware-ausgewählter NixOS-Testboot sind von der produktiven Rollenübernahme getrennt. `nixos-day1-workload-parity-2026` und `nixos/production/day1-workload-parity-contract-v1.json` regeln ausschließlich, wann NixOS als produktiv paritätischer Ersatz für die heutige Heim-PC-Arbeit gelten darf.
+
+Ein fehlender oder blockierter Day-1-Paritätsnachweis erweitert die Storage-Autorität nicht und macht aus der separaten Seagate-Installation keinen Source-Cutover. Umgekehrt darf ein erfolgreicher Installations-/Testboot-Pfad ohne erfüllte Day-1-Parität nicht als produktiver Umzug, Workload-Parität oder Abschaltung des Pop!_OS-Fallbacks ausgelegt werden.
 
 ## Festgezurrte Hardware-Rollen
 

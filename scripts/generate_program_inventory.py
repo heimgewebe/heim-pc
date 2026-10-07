@@ -250,6 +250,13 @@ def build_snapshot(raw_dir: Path, *, generated_at: str | None = None) -> dict[st
     generated_at = generated_at or utc_now()
     run_result = read_json(raw_dir / "run-result.json", {})
     observed_at = collection_observed_at(raw_dir, run_result)
+    observation_id = run_result.get("observation_id")
+    binding_eligible = bool(
+        run_result.get("binding_eligible") is True
+        and isinstance(observation_id, str)
+        and len(observation_id) == 64
+        and all(ch in "0123456789abcdef" for ch in observation_id)
+    )
     sudo_result = read_json(raw_dir / "full-rootfs-sudo-scan-result.json", {})
     non_sudo_result = read_json(raw_dir / "full-rootfs-scan-result.json", {})
     sudo_delta = read_json(raw_dir / "sudo-delta-summary.json", {})
@@ -284,6 +291,8 @@ def build_snapshot(raw_dir: Path, *, generated_at: str | None = None) -> dict[st
         "observation_scope": {
             "kind": "point_in_time_runtime_observation",
             "observed_at": observed_at,
+            "observation_id": observation_id,
+            "binding_eligible": binding_eligible,
             "does_not_establish": [
                 "current_state_after_observed_at",
                 "service_necessity",
@@ -292,6 +301,13 @@ def build_snapshot(raw_dir: Path, *, generated_at: str | None = None) -> dict[st
             ],
         },
         "source_inventory_path": display_path(raw_dir),
+        "collection_provenance": {
+            "host": run_result.get("host"),
+            "collector_path": "scripts/collect_program_inventory.py",
+            "collector_sha256": run_result.get("collector_sha256"),
+            "raw_manifest_sha256": run_result.get("raw_manifest_sha256"),
+            "raw_artifact_count": run_result.get("raw_artifact_count"),
+        },
         "counts": counts,
         "scan_boundaries": {
             "repo_policy": "Commit compact summaries and generator logic only; keep raw CSV/TXT inventories local.",
@@ -329,6 +345,8 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
         "canonicality: observation",
         "temporal_scope: point_in_time",
         f'observed_at: "{snapshot["observation_scope"]["observed_at"]}"',
+        f'observation_id: "{snapshot["observation_scope"].get("observation_id") or "unbound"}"',
+        f"binding_eligible: {str(snapshot['observation_scope'].get('binding_eligible', False)).lower()}",
         f"last_reviewed: {snapshot['generated_at'][:10]}",
         "depends_on:",
         "  - software-inventory",

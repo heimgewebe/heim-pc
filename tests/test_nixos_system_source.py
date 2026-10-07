@@ -268,6 +268,282 @@ class T(unittest.TestCase):
         self.assertIn("verify_independent_rebuild_candidate", workflow)
         self.assertNotIn("historical_reproducibility", workflow)
 
+    def test_day1_workload_parity_contract_is_fail_closed_and_scoped(self):
+        contract = json.loads(
+            (ROOT / "nixos/production/day1-workload-parity-contract-v1.json").read_text()
+        )
+        doc = (ROOT / "architecture/nixos-day1-workload-parity-2026.md").read_text()
+        restplan = (ROOT / "architecture/nixos-dual-os-restplan-2026.md").read_text()
+        repo_index = (ROOT / "manifest/repo-index.yaml").read_text()
+        doc_frontmatter = doc.split("---", 2)[1]
+        restplan_frontmatter = restplan.split("---", 2)[1]
+        self.assertNotIn(
+            "  - nixos-dual-os-restplan-2026\n",
+            doc_frontmatter,
+        )
+        self.assertIn(
+            "  - nixos-day1-workload-parity-2026\n",
+            restplan_frontmatter,
+        )
+
+        self.assertEqual(contract["schema_version"], 1)
+        self.assertEqual(
+            contract["kind"], "heim_pc.nixos_day1_workload_parity_contract"
+        )
+        self.assertEqual(
+            contract["scope"], "productive-nixos-day1-role-assumption"
+        )
+        self.assertEqual(
+            contract["classification_values"],
+            [
+                "day1-required",
+                "post-migration",
+                "replaced",
+                "retired",
+                "unclassified",
+            ],
+        )
+
+        admission = contract["admission"]
+        self.assertEqual(admission["default"], "blocked")
+        self.assertEqual(
+            admission["current_status"],
+            "blocked-until-fresh-heim-pc-inventory",
+        )
+        self.assertTrue(admission["ready_requires_fresh_heim_pc_inventory"])
+        self.assertTrue(admission["ready_requires_no_unclassified_candidates"])
+        self.assertTrue(
+            admission["ready_requires_day1_required_implementation_target"]
+        )
+        self.assertTrue(
+            admission["ready_requires_day1_required_acceptance_evidence"]
+        )
+        self.assertFalse(admission["historical_inventory_may_grant_readiness"])
+
+        enforcement = contract["enforcement"]
+        self.assertFalse(enforcement["runtime_consumer_implemented"])
+        self.assertFalse(
+            enforcement["absence_of_runtime_consumer_may_grant_readiness"]
+        )
+        self.assertEqual(
+            enforcement["current_authority"],
+            "normative-contract-and-regression-gate-only",
+        )
+        self.assertIn(
+            "reviewed productive-role-assumption consumer",
+            enforcement["successor_requirement"],
+        )
+
+        inventory = contract["inventory"]
+        self.assertEqual(inventory["authoritative_host"], "heim-pc")
+        self.assertIsNone(inventory["current_binding"])
+        self.assertEqual(
+            inventory["unreachable_or_unbound_behavior"],
+            "block-classification-and-readiness",
+        )
+
+        pipeline = inventory["collection_pipeline"]
+        self.assertEqual(
+            pipeline["software"]["collector_and_renderer"],
+            "scripts/generate_software_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["software"]["canonical_outputs"],
+            ["runtime/software-inventory.md"],
+        )
+        self.assertEqual(
+            pipeline["program"]["collector"],
+            "scripts/collect_program_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["program"]["renderer"],
+            "scripts/generate_program_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["program"]["raw_artifacts_policy"],
+            "host-local-outside-git",
+        )
+        self.assertEqual(
+            pipeline["program"]["canonical_outputs"],
+            [
+                "runtime/program-inventory-summary.md",
+                "runtime/program-inventory.v1.json",
+            ],
+        )
+        self.assertEqual(
+            inventory["canonical_outputs"],
+            [
+                "runtime/software-inventory.md",
+                "runtime/program-inventory-summary.md",
+                "runtime/program-inventory.v1.json",
+            ],
+        )
+
+        expected_seeds = {
+            "runtime/software-inventory.md": (
+                "2026-07-09T17:16:37Z",
+                "c3d0622a17cf755a8f69ec53b867a1a1913503cbe57a9cf675d939699ae0c36d",
+            ),
+            "runtime/program-inventory-summary.md": (
+                "2026-07-09T18:15:00Z",
+                "8b6abbeae959996e7bcb396780d8fc31655035c1e3b129fc82efb9e500824640",
+            ),
+            "runtime/program-inventory.v1.json": (
+                "2026-07-09T18:15:00Z",
+                "2726fa724206d01c61e59ea5ad6c7b9eaced7bfe32251073538fd2bf4bc3eeb3",
+            ),
+        }
+        seeds = {seed["path"]: seed for seed in inventory["historical_seed"]}
+        self.assertEqual(set(seeds), set(expected_seeds))
+        for path, (observed_at, sha256) in expected_seeds.items():
+            seed = seeds[path]
+            self.assertEqual(seed["authority"], "candidate-seed-only")
+            self.assertEqual(
+                seed["source_revision"],
+                "d2260b32094fdde5c6efc158e561142d48fe9171",
+            )
+            self.assertEqual(seed["observed_at"], observed_at)
+            self.assertEqual(seed["sha256"], sha256)
+
+        historical_binding = inventory["historical_seed_binding"]
+        self.assertEqual(
+            historical_binding["identity"],
+            "source-revision-path-sha256",
+        )
+        self.assertFalse(
+            historical_binding["mutable_current_outputs_may_replace_historical_seed"]
+        )
+        self.assertTrue(
+            historical_binding[
+                "historical_seed_remains_authoritative_after_current_output_refresh"
+            ]
+        )
+
+        current_binding_schema = inventory["current_binding_schema"]
+        self.assertEqual(current_binding_schema["schema_version"], 1)
+        self.assertEqual(
+            current_binding_schema["required_fields"],
+            ["host", "source_revision", "observation", "outputs", "provenance"],
+        )
+        self.assertEqual(current_binding_schema["host_must_equal"], "heim-pc")
+        self.assertEqual(
+            current_binding_schema["source_revision_format"],
+            "40-lowercase-hex",
+        )
+        self.assertEqual(
+            current_binding_schema["output_binding"],
+            "path+sha256+observed_at+observation_id",
+        )
+        observation = current_binding_schema["observation"]
+        self.assertEqual(observation["kind"], "bounded-session-v1")
+        self.assertEqual(
+            observation["required_fields"],
+            ["id", "started_at", "completed_at"],
+        )
+        self.assertEqual(observation["id_format"], "64-lowercase-hex")
+        self.assertTrue(observation["all_required_outputs_must_share_id"])
+        self.assertTrue(observation["output_observed_at_must_be_within_session"])
+        provenance = current_binding_schema["provenance"]
+        self.assertEqual(provenance["required_fields"], ["software", "program"])
+        self.assertTrue(
+            provenance["software"]["collector_sha256_must_match_source_revision"]
+        )
+        self.assertTrue(
+            provenance["software"]["execution_receipt_sha256_required"]
+        )
+        self.assertTrue(
+            provenance["software"]["execution_receipt_must_bind_observation_id_and_argv"]
+        )
+        self.assertTrue(
+            provenance["program"]["collector_and_renderer_sha256_must_match_source_revision"]
+        )
+        self.assertTrue(
+            provenance["program"]["execution_receipt_sha256_required"]
+        )
+        self.assertTrue(
+            provenance["program"]["execution_receipt_must_bind_observation_id_and_argv"]
+        )
+        self.assertTrue(provenance["program"]["raw_manifest_sha256_required"])
+        self.assertEqual(
+            current_binding_schema["required_output_paths"],
+            inventory["canonical_outputs"],
+        )
+        self.assertEqual(
+            current_binding_schema["required_output_metadata"],
+            ["observed_at", "observation_id", "binding_eligible"],
+        )
+        self.assertTrue(current_binding_schema["binding_eligible_must_be_true"])
+        self.assertTrue(current_binding_schema["output_host_must_equal_authoritative_host"])
+        self.assertTrue(
+            current_binding_schema["freshness_required_at_productive_role_assumption"]
+        )
+        self.assertTrue(
+            current_binding_schema["freshness_policy_must_be_bound_by_reviewed_consumer"]
+        )
+
+        reconciliation = inventory["historical_reconciliation"]
+        self.assertTrue(reconciliation["required"])
+        self.assertEqual(
+            reconciliation["seed_source"],
+            "revision-and-sha256-bound-historical-seed",
+        )
+        self.assertEqual(
+            reconciliation["granularity"], "individual-observed-item"
+        )
+        self.assertTrue(
+            reconciliation["every_historical_item_requires_disposition"]
+        )
+        self.assertFalse(reconciliation["silent_omission_allowed"])
+        self.assertTrue(reconciliation["candidate_groups_are_planning_only"])
+        self.assertEqual(
+            set(reconciliation["allowed_dispositions"]),
+            {
+                "present-and-classified",
+                "absent-and-retired",
+                "absent-and-replaced",
+            },
+        )
+
+        candidates = contract["historical_candidates"]
+        self.assertGreaterEqual(len(candidates), 6)
+        self.assertEqual(
+            {candidate["classification"] for candidate in candidates},
+            {"unclassified"},
+        )
+        self.assertEqual(
+            len({candidate["id"] for candidate in candidates}),
+            len(candidates),
+        )
+
+        excluded = contract["excluded_path"]
+        self.assertEqual(
+            excluded["migration_mode"],
+            "isolated-parallel-disk-dual-os",
+        )
+        self.assertTrue(
+            excluded[
+                "isolated_installation_and_test_boot_may_proceed_under_existing_storage_boot_attestation_gates"
+            ]
+        )
+        self.assertFalse(excluded["productive_role_assumption_authorized"])
+
+        self.assertIn(
+            "nixos-day1-workload-parity-2026.md",
+            repo_index,
+        )
+        self.assertIn(
+            "kein Installationsgate für den isolierten Dual-OS-Testpfad",
+            doc,
+        )
+        self.assertIn(
+            "Ein fehlender oder blockierter Day-1-Paritätsnachweis erweitert die Storage-Autorität nicht",
+            restplan,
+        )
+        self.assertNotIn(
+            '"current_status": "ready"',
+            (ROOT / "nixos/production/day1-workload-parity-contract-v1.json").read_text(),
+        )
+
     def test_pre_cutover_contracts_are_machine_readable_and_fail_closed(self):
         trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
         lifecycle = json.loads((ROOT / "nixos/production/nix-lifecycle-contract-v1.json").read_text())
