@@ -225,8 +225,17 @@ class T(unittest.TestCase):
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["inventory"]["authoritative_host"] = "commonserver"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        with self.assertRaisesRegex(Day1EvidenceError, "does not match reviewed source"):
-            self.binding()
+        result = self.binding()
+        evidence = self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
+        with self.assertRaisesRegex(Day1EvidenceError, "neither the reviewed preimage"):
+            write_evidence(
+                root=self.root,
+                contract_path=path,
+                evidence_path=evidence,
+                binding=result,
+                update_contract=True,
+            )
+        self.assertFalse(evidence.exists())
 
     def test_rejects_unbound_observation_argv(self):
         with self.assertRaisesRegex(Day1EvidenceError, "does not bind observation_id"):
@@ -268,8 +277,9 @@ class T(unittest.TestCase):
         payload = json.loads(contract.read_text(encoding="utf-8"))
         payload["inventory"]["current_binding"] = {"source_revision": "f" * 40}
         contract.write_text(json.dumps(payload), encoding="utf-8")
-        with self.assertRaisesRegex(Day1EvidenceError, "refusing to replace"):
+        with self.assertRaisesRegex(Day1EvidenceError, "neither the reviewed preimage"):
             write_evidence(
+                root=self.root,
                 contract_path=contract,
                 evidence_path=evidence,
                 binding=result,
@@ -285,6 +295,7 @@ class T(unittest.TestCase):
         )
         contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
         write_evidence(
+            root=self.root,
             contract_path=contract,
             evidence_path=evidence,
             binding=result,
@@ -298,6 +309,22 @@ class T(unittest.TestCase):
         self.assertEqual(
             updated["admission"]["current_status"],
             "blocked-until-day1-classification-and-acceptance",
+        )
+
+        write_evidence(
+            root=self.root,
+            contract_path=contract,
+            evidence_path=evidence,
+            binding=result,
+            update_contract=True,
+        )
+        self.assertEqual(
+            json.loads(contract.read_text(encoding="utf-8")),
+            updated,
+        )
+        self.assertEqual(
+            json.loads(evidence.read_text(encoding="utf-8")),
+            stored,
         )
 
 

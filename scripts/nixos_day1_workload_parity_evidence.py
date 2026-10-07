@@ -8,6 +8,7 @@ Day-1 contract and can bind that evidence into ``inventory.current_binding``.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -153,9 +154,14 @@ def build_current_binding(
         contract_relpath = contract_path.relative_to(root).as_posix()
     except ValueError as exc:
         raise Day1EvidenceError("contract path must be inside repository root") from exc
-    _source_file_digest(root, source_revision, contract_relpath)
-
-    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    try:
+        contract = json.loads(
+            _git_blob(root, source_revision, contract_relpath).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Day1EvidenceError(
+            "reviewed Day-1 contract is not valid UTF-8 JSON"
+        ) from exc
     inventory = contract["inventory"]
     schema = inventory["current_binding_schema"]
     authoritative_host = inventory["authoritative_host"]
@@ -319,11 +325,45 @@ def build_current_binding(
 
 def write_evidence(
     *,
+    root: Path,
     contract_path: Path,
     evidence_path: Path,
     binding: dict[str, Any],
     update_contract: bool,
 ) -> None:
+    root = root.resolve()
+    contract_path = contract_path.resolve()
+    try:
+        contract_relpath = contract_path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise Day1EvidenceError("contract path must be inside repository root") from exc
+
+    source_revision = str(binding.get("source_revision", ""))
+    _require_hex(source_revision, HEX40, field="binding source_revision")
+    try:
+        reviewed_contract = json.loads(
+            _git_blob(root, source_revision, contract_relpath).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Day1EvidenceError(
+            "reviewed Day-1 contract is not valid UTF-8 JSON"
+        ) from exc
+
+    expected_bound_contract = copy.deepcopy(reviewed_contract)
+    expected_bound_contract["inventory"]["current_binding"] = binding
+    expected_bound_contract["admission"]["current_status"] = (
+        "blocked-until-day1-classification-and-acceptance"
+    )
+
+    try:
+        existing_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise Day1EvidenceError("worktree Day-1 contract is not valid JSON") from exc
+    if existing_contract not in (reviewed_contract, expected_bound_contract):
+        raise Day1EvidenceError(
+            "worktree Day-1 contract is neither the reviewed preimage nor the identical bound post-state"
+        )
+
     payload = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_day1_workload_parity_current_evidence",
@@ -331,14 +371,6 @@ def write_evidence(
         "classification_complete": False,
         "current_binding": binding,
     }
-    contract = None
-    if update_contract:
-        contract = json.loads(contract_path.read_text(encoding="utf-8"))
-        existing_binding = contract["inventory"].get("current_binding")
-        if existing_binding is not None and existing_binding != binding:
-            raise Day1EvidenceError(
-                "refusing to replace an existing current_binding without a reviewed refresh path"
-            )
 
     if evidence_path.exists():
         try:
@@ -357,13 +389,9 @@ def write_evidence(
             encoding="utf-8",
         )
 
-    if update_contract and contract is not None:
-        contract["inventory"]["current_binding"] = binding
-        contract["admission"]["current_status"] = (
-            "blocked-until-day1-classification-and-acceptance"
-        )
+    if update_contract and existing_contract == reviewed_contract:
         contract_path.write_text(
-            json.dumps(contract, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(expected_bound_contract, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
 
@@ -417,6 +445,7 @@ def main() -> None:
         program_argv=_json_argv(args.program_argv_json, field="program argv"),
     )
     write_evidence(
+        root=root,
         contract_path=contract,
         evidence_path=evidence,
         binding=binding,
