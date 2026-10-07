@@ -152,7 +152,7 @@ def docker_rows() -> list[str]:
     rc, output = run(["docker", "ps", "--filter", "name=heim-util-", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"], timeout=20, max_lines=None)
     if rc != 0:
         return [f"docker ps unavailable: `{output}`"]
-    return output.splitlines() or ["No heim-util containers running."]
+    return [line.rstrip() for line in output.splitlines()] or ["No heim-util containers running."]
 
 
 

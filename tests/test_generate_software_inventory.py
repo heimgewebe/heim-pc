@@ -62,3 +62,18 @@ def test_inventory_header_exposes_binding_provenance():
     assert "binding_eligible: true" in rendered
     assert 'collector_sha256: "' + ("b" * 64) + '"' in rendered
     assert 'observed_host: "heim-pc"' in rendered
+
+
+def test_docker_rows_strip_trailing_whitespace(monkeypatch):
+    def fake_run(argv, timeout=10, max_lines=6):
+        return 0, (
+            "heim-util-agent\timage:1\tUp 1 hour\t\n"
+            "heim-util-web\timage:2\tUp 1 hour\t127.0.0.1:8080->8080/tcp"
+        )
+
+    monkeypatch.setattr(inventory, "run", fake_run)
+
+    assert inventory.docker_rows() == [
+        "heim-util-agent\timage:1\tUp 1 hour",
+        "heim-util-web\timage:2\tUp 1 hour\t127.0.0.1:8080->8080/tcp",
+    ]
