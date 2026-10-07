@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import copy
+from contextlib import closing
 import hashlib
 import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import scripts.nixos_day1_workload_parity_evidence as binder
 from scripts.nixos_day1_workload_parity_evidence import (
     Day1EvidenceError,
     build_current_binding,
@@ -214,10 +219,97 @@ args.json_out.write_text(
         git(root, "commit", "-q", "-m", "source")
         self.revision = git(root, "rev-parse", "HEAD")
 
+        self.task_state_root = root / "grabowski-task-state"
+        (self.task_state_root / "tasks.outcomes").mkdir(parents=True)
+        (self.task_state_root / "task-output").mkdir()
+        self.task_db = self.task_state_root / "tasks.sqlite3"
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, attempt INTEGER, "
+                "unit TEXT, authoritative_unit TEXT, host TEXT, cwd TEXT, "
+                "state TEXT, argv_json TEXT, argv_sha256 TEXT, "
+                "lifecycle_receipt_sha256 TEXT, terminalized_at_unix INTEGER, "
+                "last_observation_json TEXT)"
+            )
+        self.task_db.chmod(0o600)
+        self._task_state_patch = patch.object(
+            binder, "TASK_STATE_ROOT", self.task_state_root
+        )
+        self._task_state_patch.start()
+
+        receipts = self._make_execution_receipts()
+        software_stdout = json.dumps(
+            {
+                "kind": "heim_pc.software_inventory_output",
+                "host": "heim-pc",
+                "observed_at": OBSERVED,
+                "observation_id": OBS_ID,
+                "output_sha256": sha(
+                    (root / "runtime/software-inventory.md").read_bytes()
+                ),
+            }, sort_keys=True
+        ).encode() + b"\n"
+        program_stdout = json.dumps(run_result, indent=2).encode() + b"\n"
+        for receipt, stdout in zip(
+            receipts, (software_stdout, program_stdout, b""), strict=True
+        ):
+            self._register_task(receipt, stdout)
+        self._receipts = receipts
+
     def tearDown(self) -> None:
+        self._task_state_patch.stop()
         self.tmp.cleanup()
 
+    def _register_task(self, receipt: dict, stdout: bytes) -> None:
+        task_id = receipt["task_id"]
+        unit = receipt["unit"]
+        outcome = {
+            "kind": "grabowski_task_lifecycle_receipt",
+            "schema_version": 2,
+            "task_id": task_id,
+            "attempt": receipt["attempt"],
+            "unit": unit,
+            "authoritative_unit": unit,
+            "argv_sha256": receipt["argv_sha256"],
+            "state": "completed",
+            "observation": {"state": "completed"},
+        }
+        digest = sha(
+            json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode()
+        )
+        outcome["receipt_sha256"] = digest
+        receipt["lifecycle_receipt_sha256"] = digest
+        outcome_path = self.task_state_root / "tasks.outcomes" / f"{task_id}.json"
+        outcome_path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
+        outcome_path.chmod(0o600)
+        output_dir = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a{receipt['attempt']}"
+        )
+        output_dir.mkdir(mode=0o700)
+        stdout_path = output_dir / "stdout.log"
+        stdout_path.write_bytes(stdout)
+        stdout_path.chmod(0o600)
+        observation = {
+            "state": "completed",
+            "properties": {"Result": "success", "ExecMainStatus": "0"},
+        }
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id, receipt["attempt"], unit, unit,
+                    receipt["host"], receipt["cwd"], "completed",
+                    json.dumps(receipt["argv"]), receipt["argv_sha256"],
+                    digest, 1791385230, json.dumps(observation),
+                ),
+            )
+            db.commit()
+
     def execution_receipts(self):
+        return copy.deepcopy(self._receipts)
+
+    def _make_execution_receipts(self):
         software_argv = [
             "/usr/bin/python3",
             "scripts/generate_software_inventory.py",
@@ -275,10 +367,12 @@ args.json_out.write_text(
         self.assertEqual(result["observation"]["id"], OBS_ID)
         self.assertEqual(len(result["outputs"]), 3)
         self.assertEqual(
-            result["provenance"]["software"]["execution_receipt_sha256"], RECEIPT_A
+            result["provenance"]["software"]["execution_receipt_sha256"],
+            self._receipts[0]["lifecycle_receipt_sha256"],
         )
         self.assertEqual(
-            result["provenance"]["program"]["execution_receipt_sha256"], RECEIPT_B
+            result["provenance"]["program"]["execution_receipt_sha256"],
+            self._receipts[1]["lifecycle_receipt_sha256"],
         )
         self.assertEqual(
             result["provenance"]["program"]["raw_manifest_sha256"], self.raw_digest
@@ -443,6 +537,87 @@ args.json_out.write_text(
         )
         with self.assertRaisesRegex(Day1EvidenceError, "deterministic render"):
             self.binding()
+
+    def test_rejects_forged_lifecycle_digest(self):
+        receipts = self.execution_receipts()
+        receipts[0]["lifecycle_receipt_sha256"] = "f" * 64
+        with self.assertRaisesRegex(Day1EvidenceError, "authoritative Grabowski ledger"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=receipts[2],
+            )
+
+    def test_rejects_missing_authoritative_task(self):
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute("DELETE FROM tasks WHERE task_id = ?", ("1" * 24,))
+            db.commit()
+        with self.assertRaisesRegex(Day1EvidenceError, "absent from authoritative"):
+            self.binding()
+
+    def test_rejects_tampered_lifecycle_receipt(self):
+        outcome_path = (
+            self.task_state_root / "tasks.outcomes" / ("1" * 24 + ".json")
+        )
+        v = json.loads(outcome_path.read_text())
+        v["state"] = "failed"
+        outcome_path.write_text(json.dumps(v), encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "lifecycle receipt mismatch"):
+            self.binding()
+
+    def test_rejects_modified_software_output_after_collection(self):
+        path = self.root / "runtime/software-inventory.md"
+        path.write_text(path.read_text() + "fabricated: service\n", encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "authenticated collector output"):
+            self.binding()
+
+    def test_rejects_modified_run_result_counters(self):
+        path = self.raw_dir / "run-result.json"
+        run = json.loads(path.read_text())
+        run["process_rows"] = 100000
+        path.write_text(json.dumps(run), encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "authenticated collector output"):
+            self.binding()
+
+    def test_rejects_noop_help_software(self):
+        receipts = self.execution_receipts()
+        receipts[0]["argv"].insert(2, "--help")
+        receipts[0]["argv_sha256"] = argv_sha(receipts[0]["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "complete allowed command shape"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=receipts[2],
+            )
+
+    def test_rejects_noop_help_renderer(self):
+        receipts = self.execution_receipts()
+        receipts[2]["argv"].insert(2, "-h")
+        receipts[2]["argv_sha256"] = argv_sha(receipts[2]["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "complete allowed command shape"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=receipts[2],
+            )
 
     def test_write_evidence_rejects_path_outside_repository(self):
         result = self.binding()

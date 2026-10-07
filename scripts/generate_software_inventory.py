@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -387,7 +388,18 @@ def main() -> None:
         "",
     ]
     OUT.write_text("\n".join(lines), encoding="utf-8")
-    print(OUT)
+    if binding_eligible:
+        # Captured by Grabowski's task-output storage and checked by the
+        # Day-1 binder against the entire committed software inventory.
+        print(json.dumps({
+            "kind": "heim_pc.software_inventory_output",
+            "host": socket.gethostname(),
+            "observed_at": generated_at,
+            "observation_id": observation_id,
+            "output_sha256": hashlib.sha256(OUT.read_bytes()).hexdigest(),
+        }, sort_keys=True))
+    else:
+        print(OUT)
 
 
 if __name__ == "__main__":

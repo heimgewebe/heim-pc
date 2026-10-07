@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import closing
 import hashlib
 import json
+import os
 import re
+import sqlite3
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -26,6 +30,7 @@ DEFAULT_EVIDENCE = (
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID_RE = re.compile(r"^[0-9a-f]{16,64}$")
+TASK_STATE_ROOT = Path.home() / ".local/state/grabowski"
 
 
 class Day1EvidenceError(RuntimeError):
@@ -139,12 +144,143 @@ def _require_argv_binding(
         raise Day1EvidenceError(
             f"{field} must execute /usr/bin/python3 {expected_script} directly"
         )
+    expected_argv = ["/usr/bin/python3", expected_script]
     for option, expected in required_options.items():
         actual = _single_option_value(values, option, field=field)
         if actual != expected:
             raise Day1EvidenceError(f"{field} argv does not bind {option}")
+        expected_argv.extend((option, expected))
+    if values != expected_argv:
+        raise Day1EvidenceError(
+            f"{field} argv is not the complete allowed command shape"
+        )
     return values
 
+
+
+def _validate_private_file(path: Path, *, max_bytes: int) -> None:
+    """Check a private regular task artifact before opening it."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise Day1EvidenceError("authoritative Grabowski task artifact is missing") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or info.st_size > max_bytes
+    ):
+        raise Day1EvidenceError("Grabowski task artifact fails private-file checks")
+
+
+def _trusted_task_file(path: Path, *, max_bytes: int) -> bytes:
+    _validate_private_file(path, max_bytes=max_bytes)
+    return path.read_bytes()
+
+
+def _authoritative_task_record(
+    *,
+    task_id: str,
+    attempt: int,
+    unit: str,
+    host: str,
+    cwd: Path,
+    argv: list[str],
+    argv_sha256: str,
+    receipt_sha256: str,
+) -> bytes:
+    """Resolve task outcome against the persistent operator ledger and receipt.
+
+    Direct caller-provided receipt projections are not an authority source.
+    The production store path is fixed by the executing operator user; tests
+    replace TASK_STATE_ROOT with a private fixture, not via a CLI flag.
+    """
+    store = TASK_STATE_ROOT
+    db_path = store / "tasks.sqlite3"
+    # The file identity is checked before SQLite opens it, without eagerly
+    # copying a potentially large task database into the binder's memory.
+    _validate_private_file(db_path, max_bytes=128 * 1024 * 1024)
+    try:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT task_id, attempt, unit, authoritative_unit, host, cwd, "
+                "state, argv_json, argv_sha256, lifecycle_receipt_sha256, "
+                "terminalized_at_unix, last_observation_json "
+                "FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+    except (sqlite3.Error, OSError) as exc:
+        raise Day1EvidenceError("cannot resolve task in authoritative Grabowski ledger") from exc
+
+    if row is None:
+        raise Day1EvidenceError("task absent from authoritative Grabowski ledger")
+    try:
+        stored_argv = json.loads(row["argv_json"])
+        observation = json.loads(row["last_observation_json"])
+    except (ValueError, TypeError) as exc:
+        raise Day1EvidenceError("Grabowski task ledger has malformed execution evidence") from exc
+    if (
+        row["task_id"] != task_id
+        or row["attempt"] != attempt
+        or row["unit"] != unit
+        or row["authoritative_unit"] != unit
+        or row["host"] != host
+        or row["cwd"] != str(cwd)
+        or row["state"] != "completed"
+        or stored_argv != argv
+        or row["argv_sha256"] != argv_sha256
+        or row["lifecycle_receipt_sha256"] != receipt_sha256
+        or not isinstance(row["terminalized_at_unix"], int)
+        or row["terminalized_at_unix"] < 1
+        or observation.get("state") != "completed"
+        or observation.get("properties", {}).get("Result") != "success"
+        or observation.get("properties", {}).get("ExecMainStatus") != "0"
+    ):
+        raise Day1EvidenceError("task projection differs from authoritative Grabowski ledger")
+
+    receipt_path = store / "tasks.outcomes" / f"{task_id}.json"
+    try:
+        outcome = json.loads(_trusted_task_file(receipt_path, max_bytes=128 * 1024))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Day1EvidenceError("Grabowski lifecycle receipt is invalid JSON") from exc
+    expected_receipt = outcome.get("receipt_sha256")
+    unsigned = dict(outcome)
+    unsigned.pop("receipt_sha256", None)
+    calculated = _sha256_bytes(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    )
+    if (
+        expected_receipt != receipt_sha256
+        or calculated != receipt_sha256
+        or outcome.get("kind") != "grabowski_task_lifecycle_receipt"
+        or outcome.get("schema_version") != 2
+        or outcome.get("task_id") != task_id
+        or outcome.get("attempt") != attempt
+        or outcome.get("unit") != unit
+        or outcome.get("authoritative_unit") != unit
+        or outcome.get("argv_sha256") != argv_sha256
+        or outcome.get("state") != "completed"
+        or outcome.get("observation", {}).get("state") != "completed"
+    ):
+        raise Day1EvidenceError("authoritative Grabowski lifecycle receipt mismatch")
+
+    stdout_path = (
+        store / "task-output" / f".grabowski-task-output-{task_id}-a{attempt}" / "stdout.log"
+    )
+    # A successful task may have empty stdout, but evidence-producing collectors may not.
+    return _trusted_task_file(stdout_path, max_bytes=8 * 1024 * 1024)
+
+
+def _captured_json(stdout: bytes, *, field: str) -> dict[str, Any]:
+    try:
+        value = json.loads(stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Day1EvidenceError(f"{field} captured output is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise Day1EvidenceError(f"{field} captured output must be a JSON object")
+    return value
 
 def _verify_execution_receipt(
     receipt: dict[str, Any],
@@ -194,6 +330,16 @@ def _verify_execution_receipt(
         or HEX64.fullmatch(lifecycle_receipt_sha256) is None
     ):
         raise Day1EvidenceError(f"{field} lifecycle receipt digest is invalid")
+    captured_stdout = _authoritative_task_record(
+        task_id=task_id,
+        attempt=attempt,
+        unit=expected_unit,
+        host=authoritative_host,
+        cwd=root,
+        argv=argv,
+        argv_sha256=argv_sha256,
+        receipt_sha256=lifecycle_receipt_sha256,
+    )
 
     return {
         "task_id": task_id,
@@ -205,6 +351,8 @@ def _verify_execution_receipt(
         "argv": argv,
         "argv_sha256": argv_sha256,
         "lifecycle_receipt_sha256": lifecycle_receipt_sha256,
+        "captured_stdout_sha256": _sha256_bytes(captured_stdout),
+        "captured_stdout": captured_stdout,
     }
 
 
@@ -457,6 +605,20 @@ def build_current_binding(
         field="program renderer execution",
     )
 
+    software_report = _captured_json(
+        software_execution["captured_stdout"], field="software execution"
+    )
+    if software_report != {
+        "kind": "heim_pc.software_inventory_output",
+        "host": authoritative_host,
+        "observed_at": software_observed_at,
+        "observation_id": observation_id,
+        "output_sha256": _sha256_file(software_path),
+    }:
+        raise Day1EvidenceError(
+            "software inventory does not match authenticated collector output"
+        )
+
     for relpath in expected_paths:
         path = root / relpath
         if not path.is_file():
@@ -479,7 +641,7 @@ def build_current_binding(
     if not isinstance(raw_artifact_count, int) or raw_artifact_count < 1:
         raise Day1EvidenceError("program raw_artifact_count must be a positive integer")
 
-    _verify_program_raw_run(
+    raw_run = _verify_program_raw_run(
         raw_dir,
         authoritative_host=authoritative_host,
         observation_id=observation_id,
@@ -488,6 +650,12 @@ def build_current_binding(
         raw_manifest_sha256=raw_manifest_sha,
         raw_artifact_count=raw_artifact_count,
     )
+    if _captured_json(
+        program_execution["captured_stdout"], field="program collector execution"
+    ) != raw_run:
+        raise Day1EvidenceError(
+            "program raw run-result differs from authenticated collector output"
+        )
     _verify_renderer_outputs(
         root=root,
         renderer_relpath=program_renderer,
@@ -496,6 +664,10 @@ def build_current_binding(
         summary_path=summary_path,
         json_path=program_path,
     )
+
+    # Captured stdout is used for verification only and remains local/private.
+    for execution in (software_execution, program_execution, renderer_execution):
+        execution.pop("captured_stdout")
 
     return {
         "host": authoritative_host,
