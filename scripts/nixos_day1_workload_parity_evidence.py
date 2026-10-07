@@ -24,6 +24,7 @@ DEFAULT_EVIDENCE = (
 )
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+TASK_ID_RE = re.compile(r"^[0-9a-f]{16,64}$")
 
 
 class Day1EvidenceError(RuntimeError):
@@ -106,6 +107,12 @@ def _require_hex(value: str, pattern: re.Pattern[str], *, field: str) -> str:
     return value
 
 
+def _sha256_json(value: Any) -> str:
+    return _sha256_bytes(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
 def _require_argv_binding(
     argv: Iterable[str],
     *,
@@ -132,6 +139,64 @@ def _require_argv_binding(
     return values
 
 
+def _verify_execution_receipt(
+    receipt: dict[str, Any],
+    *,
+    authoritative_host: str,
+    observation_id: str,
+    observed_at: str,
+    expected_script: str,
+    field: str,
+) -> dict[str, Any]:
+    task_id = receipt.get("task_id")
+    if not isinstance(task_id, str) or TASK_ID_RE.fullmatch(task_id) is None:
+        raise Day1EvidenceError(f"{field} receipt task_id is invalid")
+    attempt = receipt.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise Day1EvidenceError(f"{field} receipt attempt is invalid")
+    expected_unit = f"grabowski-task-{task_id}-a{attempt}.service"
+    if receipt.get("unit") != expected_unit:
+        raise Day1EvidenceError(f"{field} receipt unit is not task/attempt bound")
+    if receipt.get("host") != authoritative_host:
+        raise Day1EvidenceError(f"{field} receipt host is not authoritative heim-pc")
+    if receipt.get("state") != "completed":
+        raise Day1EvidenceError(f"{field} receipt is not terminal successful")
+
+    argv = receipt.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        raise Day1EvidenceError(f"{field} receipt argv must be an array of strings")
+    argv = _require_argv_binding(
+        argv,
+        observation_id=observation_id,
+        observed_at=observed_at,
+        expected_script=expected_script,
+        field=field,
+    )
+    argv_sha256 = receipt.get("argv_sha256")
+    if not isinstance(argv_sha256, str) or HEX64.fullmatch(argv_sha256) is None:
+        raise Day1EvidenceError(f"{field} receipt argv_sha256 is invalid")
+    if argv_sha256 != _sha256_json(argv):
+        raise Day1EvidenceError(f"{field} receipt argv_sha256 does not authenticate argv")
+
+    lifecycle_receipt_sha256 = receipt.get("lifecycle_receipt_sha256")
+    if (
+        not isinstance(lifecycle_receipt_sha256, str)
+        or HEX64.fullmatch(lifecycle_receipt_sha256) is None
+    ):
+        raise Day1EvidenceError(f"{field} lifecycle receipt digest is invalid")
+
+    return {
+        "task_id": task_id,
+        "attempt": attempt,
+        "unit": expected_unit,
+        "host": authoritative_host,
+        "state": "completed",
+        "argv": argv,
+        "argv_sha256": argv_sha256,
+        "lifecycle_receipt_sha256": lifecycle_receipt_sha256,
+    }
+
+
 def build_current_binding(
     *,
     root: Path,
@@ -140,10 +205,8 @@ def build_current_binding(
     observation_id: str,
     started_at: str,
     completed_at: str,
-    software_execution_receipt_sha256: str,
-    software_argv: Iterable[str],
-    program_execution_receipt_sha256: str,
-    program_argv: Iterable[str],
+    software_execution_receipt: dict[str, Any],
+    program_execution_receipt: dict[str, Any],
 ) -> dict[str, Any]:
     root = root.resolve()
     _require_hex(source_revision, HEX40, field="source_revision")
@@ -166,16 +229,6 @@ def build_current_binding(
     schema = inventory["current_binding_schema"]
     authoritative_host = inventory["authoritative_host"]
 
-    _require_hex(
-        software_execution_receipt_sha256,
-        HEX64,
-        field="software_execution_receipt_sha256",
-    )
-    _require_hex(
-        program_execution_receipt_sha256,
-        HEX64,
-        field="program_execution_receipt_sha256",
-    )
 
     started = _parse_time(started_at)
     completed = _parse_time(completed_at)
@@ -250,17 +303,34 @@ def build_current_binding(
     if len({item["observation_id"] for item in metadata.values()}) != 1:
         raise Day1EvidenceError("required outputs do not share one observation_id")
 
+    software_script = schema["provenance"]["software"]["collector_path"]
+    program_schema = schema["provenance"]["program"]
+    program_collector = program_schema["collector_path"]
+    program_renderer = program_schema["renderer_path"]
+
+    software_execution = _verify_execution_receipt(
+        software_execution_receipt,
+        authoritative_host=authoritative_host,
+        observation_id=observation_id,
+        observed_at=software_observed_at,
+        expected_script=software_script,
+        field="software execution",
+    )
+    program_execution = _verify_execution_receipt(
+        program_execution_receipt,
+        authoritative_host=authoritative_host,
+        observation_id=observation_id,
+        observed_at=program_observed_at,
+        expected_script=program_collector,
+        field="program execution",
+    )
+
     for relpath in expected_paths:
         path = root / relpath
         if not path.is_file():
             raise Day1EvidenceError(f"required output missing: {relpath}")
         row = {"path": relpath, "sha256": _sha256_file(path), **metadata[relpath]}
         outputs.append(row)
-
-    software_script = schema["provenance"]["software"]["collector_path"]
-    program_schema = schema["provenance"]["program"]
-    program_collector = program_schema["collector_path"]
-    program_renderer = program_schema["renderer_path"]
 
     software_collector_sha = _source_file_digest(root, source_revision, software_script)
     program_collector_sha = _source_file_digest(root, source_revision, program_collector)
@@ -277,20 +347,6 @@ def build_current_binding(
     if not isinstance(raw_artifact_count, int) or raw_artifact_count < 1:
         raise Day1EvidenceError("program raw_artifact_count must be a positive integer")
 
-    software_args = _require_argv_binding(
-        software_argv,
-        observation_id=observation_id,
-        observed_at=software_observed_at,
-        expected_script=software_script,
-        field="software execution",
-    )
-    program_args = _require_argv_binding(
-        program_argv,
-        observation_id=observation_id,
-        observed_at=program_observed_at,
-        expected_script=program_collector,
-        field="program execution",
-    )
 
     return {
         "host": authoritative_host,
@@ -306,16 +362,22 @@ def build_current_binding(
             "software": {
                 "collector_path": software_script,
                 "collector_sha256": software_collector_sha,
-                "execution_receipt_sha256": software_execution_receipt_sha256,
-                "argv": software_args,
+                "execution_receipt_sha256": software_execution[
+                    "lifecycle_receipt_sha256"
+                ],
+                "execution": software_execution,
+                "argv": software_execution["argv"],
             },
             "program": {
                 "collector_path": program_collector,
                 "collector_sha256": program_collector_sha,
                 "renderer_path": program_renderer,
                 "renderer_sha256": program_renderer_sha,
-                "execution_receipt_sha256": program_execution_receipt_sha256,
-                "argv": program_args,
+                "execution_receipt_sha256": program_execution[
+                    "lifecycle_receipt_sha256"
+                ],
+                "execution": program_execution,
+                "argv": program_execution["argv"],
                 "raw_manifest_sha256": raw_manifest_sha,
                 "raw_artifact_count": raw_artifact_count,
             },
@@ -333,6 +395,12 @@ def write_evidence(
 ) -> None:
     root = root.resolve()
     contract_path = contract_path.resolve()
+    evidence_path = evidence_path.resolve()
+    try:
+        evidence_path.relative_to(root)
+    except ValueError as exc:
+        raise Day1EvidenceError("evidence path must be inside repository root") from exc
+
     try:
         contract_relpath = contract_path.relative_to(root).as_posix()
     except ValueError as exc:
@@ -396,13 +464,13 @@ def write_evidence(
         )
 
 
-def _json_argv(value: str, *, field: str) -> list[str]:
+def _json_object(value: str, *, field: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
         raise Day1EvidenceError(f"{field} is not valid JSON") from exc
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise Day1EvidenceError(f"{field} must be a JSON array of strings")
+    if not isinstance(parsed, dict):
+        raise Day1EvidenceError(f"{field} must be a JSON object")
     return parsed
 
 
@@ -415,10 +483,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--observation-id", required=True)
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--completed-at", required=True)
-    parser.add_argument("--software-execution-receipt-sha256", required=True)
-    parser.add_argument("--software-argv-json", required=True)
-    parser.add_argument("--program-execution-receipt-sha256", required=True)
-    parser.add_argument("--program-argv-json", required=True)
+    parser.add_argument("--software-execution-receipt-json", required=True)
+    parser.add_argument("--program-execution-receipt-json", required=True)
     parser.add_argument("--update-contract", action="store_true")
     return parser.parse_args()
 
@@ -439,10 +505,14 @@ def main() -> None:
         observation_id=args.observation_id,
         started_at=args.started_at,
         completed_at=args.completed_at,
-        software_execution_receipt_sha256=args.software_execution_receipt_sha256,
-        software_argv=_json_argv(args.software_argv_json, field="software argv"),
-        program_execution_receipt_sha256=args.program_execution_receipt_sha256,
-        program_argv=_json_argv(args.program_argv_json, field="program argv"),
+        software_execution_receipt=_json_object(
+            args.software_execution_receipt_json,
+            field="software execution receipt",
+        ),
+        program_execution_receipt=_json_object(
+            args.program_execution_receipt_json,
+            field="program execution receipt",
+        ),
     )
     write_evidence(
         root=root,

@@ -26,6 +26,25 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def argv_sha(argv: list[str]) -> str:
+    return sha(
+        json.dumps(argv, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def execution_receipt(task_id: str, argv: list[str], digest: str) -> dict:
+    return {
+        "task_id": task_id,
+        "attempt": 1,
+        "unit": f"grabowski-task-{task_id}-a1.service",
+        "host": "heim-pc",
+        "state": "completed",
+        "argv": argv,
+        "argv_sha256": argv_sha(argv),
+        "lifecycle_receipt_sha256": digest,
+    }
+
+
 def git(root: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(root), *args],
@@ -151,6 +170,22 @@ class T(unittest.TestCase):
         self.tmp.cleanup()
 
     def binding(self):
+        software_argv = [
+            "python3",
+            "scripts/generate_software_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
+        program_argv = [
+            "python3",
+            "scripts/collect_program_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
         return build_current_binding(
             root=self.root,
             contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
@@ -158,24 +193,12 @@ class T(unittest.TestCase):
             observation_id=OBS_ID,
             started_at=START,
             completed_at=DONE,
-            software_execution_receipt_sha256=RECEIPT_A,
-            software_argv=[
-                "python3",
-                "scripts/generate_software_inventory.py",
-                "--observation-id",
-                OBS_ID,
-                "--observed-at",
-                OBSERVED,
-            ],
-            program_execution_receipt_sha256=RECEIPT_B,
-            program_argv=[
-                "python3",
-                "scripts/collect_program_inventory.py",
-                "--observation-id",
-                OBS_ID,
-                "--observed-at",
-                OBSERVED,
-            ],
+            software_execution_receipt=execution_receipt(
+                "1" * 24, software_argv, RECEIPT_A
+            ),
+            program_execution_receipt=execution_receipt(
+                "2" * 24, program_argv, RECEIPT_B
+            ),
         )
 
     def test_builds_fail_closed_binding(self):
@@ -192,6 +215,12 @@ class T(unittest.TestCase):
         )
         self.assertEqual(
             result["provenance"]["program"]["raw_manifest_sha256"], "d" * 64
+        )
+        self.assertEqual(
+            result["provenance"]["software"]["execution"]["task_id"], "1" * 24
+        )
+        self.assertEqual(
+            result["provenance"]["program"]["execution"]["task_id"], "2" * 24
         )
 
     def test_rejects_output_outside_session(self):
@@ -238,6 +267,23 @@ class T(unittest.TestCase):
         self.assertFalse(evidence.exists())
 
     def test_rejects_unbound_observation_argv(self):
+        software_argv = [
+            "python3",
+            "scripts/generate_software_inventory.py",
+            "--observation-id",
+            "e" * 64,
+            "--observed-at",
+            OBSERVED,
+            OBS_ID,
+        ]
+        program_argv = [
+            "python3",
+            "scripts/collect_program_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
         with self.assertRaisesRegex(Day1EvidenceError, "does not bind observation_id"):
             build_current_binding(
                 root=self.root,
@@ -246,26 +292,94 @@ class T(unittest.TestCase):
                 observation_id=OBS_ID,
                 started_at=START,
                 completed_at=DONE,
-                software_execution_receipt_sha256=RECEIPT_A,
-                software_argv=[
-                    "python3",
-                    "scripts/generate_software_inventory.py",
-                    "--observation-id",
-                    "e" * 64,
-                    "--observed-at",
-                    OBSERVED,
-                    OBS_ID,
-                ],
-                program_execution_receipt_sha256=RECEIPT_B,
-                program_argv=[
-                    "python3",
-                    "scripts/collect_program_inventory.py",
-                    "--observation-id",
-                    OBS_ID,
-                    "--observed-at",
-                    OBSERVED,
-                ],
+                software_execution_receipt=execution_receipt(
+                    "1" * 24, software_argv, RECEIPT_A
+                ),
+                program_execution_receipt=execution_receipt(
+                    "2" * 24, program_argv, RECEIPT_B
+                ),
             )
+
+    def test_rejects_execution_receipt_argv_hash_mismatch(self):
+        software_argv = [
+            "python3",
+            "scripts/generate_software_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
+        program_argv = [
+            "python3",
+            "scripts/collect_program_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
+        software_receipt = execution_receipt("1" * 24, software_argv, RECEIPT_A)
+        software_receipt["argv_sha256"] = "f" * 64
+        with self.assertRaisesRegex(Day1EvidenceError, "does not authenticate argv"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=software_receipt,
+                program_execution_receipt=execution_receipt(
+                    "2" * 24, program_argv, RECEIPT_B
+                ),
+            )
+
+    def test_rejects_noncompleted_execution_receipt(self):
+        software_argv = [
+            "python3",
+            "scripts/generate_software_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
+        program_argv = [
+            "python3",
+            "scripts/collect_program_inventory.py",
+            "--observation-id",
+            OBS_ID,
+            "--observed-at",
+            OBSERVED,
+        ]
+        software_receipt = execution_receipt("1" * 24, software_argv, RECEIPT_A)
+        software_receipt["state"] = "failed"
+        with self.assertRaisesRegex(Day1EvidenceError, "not terminal successful"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=software_receipt,
+                program_execution_receipt=execution_receipt(
+                    "2" * 24, program_argv, RECEIPT_B
+                ),
+            )
+
+    def test_write_evidence_rejects_path_outside_repository(self):
+        result = self.binding()
+        contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
+        with tempfile.TemporaryDirectory() as other:
+            evidence = Path(other) / "evidence.json"
+            with self.assertRaisesRegex(Day1EvidenceError, "inside repository root"):
+                write_evidence(
+                    root=self.root,
+                    contract_path=contract,
+                    evidence_path=evidence,
+                    binding=result,
+                    update_contract=False,
+                )
+            self.assertFalse(evidence.exists())
 
     def test_write_evidence_refuses_different_existing_binding(self):
         result = self.binding()
