@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.nixos_day1_workload_parity_contract",
+  "scope": "productive-nixos-day1-role-assumption",
+  "classification_values": [
+    "day1-required",
+    "post-migration",
+    "replaced",
+    "retired",
+    "unclassified"
+  ],
+  "admission": {
+    "default": "blocked",
+    "current_status": "blocked-until-fresh-heim-pc-inventory",
+    "ready_requires_fresh_heim_pc_inventory": true,
+    "ready_requires_no_unclassified_candidates": true,
+    "ready_requires_day1_required_implementation_target": true,
+    "ready_requires_day1_required_acceptance_evidence": true,
+    "historical_inventory_may_grant_readiness": false
+  },
+  "excluded_path": {
+    "migration_mode": "isolated-parallel-disk-dual-os",
+    "isolated_installation_and_test_boot_may_proceed_under_existing_storage_boot_attestation_gates": true,
+    "productive_role_assumption_authorized": false
+  },
+  "inventory": {
+    "authoritative_host": "heim-pc",
+    "required_collectors": [
+      "scripts/generate_software_inventory.py",
+      "scripts/generate_program_inventory.py"
+    ],
+    "canonical_outputs": [
+      "runtime/software-inventory.md",
+      "runtime/program-inventory-summary.md"
+    ],
+    "historical_seed": [
+      {
+        "path": "runtime/software-inventory.md",
+        "observed_at": "2026-07-09T17:16:37Z",
+        "authority": "candidate-seed-only"
+      },
+      {
+        "path": "runtime/program-inventory-summary.md",
+        "observed_at": "2026-07-09T18:15:00Z",
+        "authority": "candidate-seed-only"
+      }
+    ],
+    "current_binding": null,
+    "unreachable_or_unbound_behavior": "block-classification-and-readiness",
+    "historical_reconciliation": {
+      "required": true,
+      "source_outputs": [
+        "runtime/software-inventory.md",
+        "runtime/program-inventory-summary.md"
+      ],
+      "granularity": "individual-observed-item",
+      "every_historical_item_requires_disposition": true,
+      "allowed_dispositions": [
+        "present-and-classified",
+        "absent-and-retired",
+        "absent-and-replaced"
+      ],
+      "silent_omission_allowed": false,
+      "candidate_groups_are_planning_only": true
+    }
+  },
+  "historical_candidates": [
+    {
+      "id": "operator-and-transfer",
+      "classification": "unclassified",
+      "historical_examples": [
+        "tailscale",
+        "taildrop"
+      ]
+    },
+    {
+      "id": "oci-utility-services",
+      "classification": "unclassified",
+      "historical_examples": [
+        "paperless-ngx",
+        "postgresql",
+        "redis",
+        "backrest",
+        "beszel",
+        "stirling-pdf"
+      ]
+    },
+    {
+      "id": "backup-and-export",
+      "classification": "unclassified",
+      "historical_examples": [
+        "restic",
+        "paperless-export"
+      ]
+    },
+    {
+      "id": "desktop-applications",
+      "classification": "unclassified",
+      "historical_examples": [
+        "easy-effects",
+        "localsend",
+        "flatpak-apps"
+      ]
+    },
+    {
+      "id": "document-ocr-media-tooling",
+      "classification": "unclassified",
+      "historical_examples": [
+        "qpdf",
+        "tesseract",
+        "ocrmypdf",
+        "libreoffice",
+        "imagemagick",
+        "ffmpeg"
+      ]
+    },
+    {
+      "id": "development-and-operator-tooling",
+      "classification": "unclassified",
+      "historical_examples": [
+        "node",
+        "python",
+        "gh",
+        "git",
+        "bw",
+        "docling",
+        "codex",
+        "claude",
+        "gemini"
+      ]
+    }
+  ],
+  "non_claims": [
+    "historical inventory is current runtime truth",
+    "candidate presence proves day1 necessity",
+    "isolated dual-os installation implies productive parity",
+    "this contract grants storage or boot mutation authority"
+  ]
+}
