@@ -8,14 +8,22 @@ class T(unittest.TestCase):
     def test_relevant_paths_require_heavy_nix_ci(self):
         for path in (
             ".github/workflows/heim-pc-nix.yml",
+            "config/home-hygiene.v1.json",
+            "config/memory-pressure-guard.v1.json",
+            "config/storage-pressure.v1.json",
             "flake.nix",
             "flake.lock",
             "nixos/system/flake.nix",
             "nixos/production/trust-contract-v1.json",
             "scripts/ci/check_pinned_nix_find_contract.py",
             "scripts/ci/nix_changed.py",
+            "scripts/grabowski_memory_guard.py",
+            "scripts/home_hygiene.py",
             "scripts/managed_build.py",
+            "scripts/memory_pressure_snapshot.py",
+            "scripts/pytest_temp_gc.py",
             "scripts/storage_inventory.py",
+            "scripts/storage_pressure_watch.py",
             "scripts/nixos_production_install.py",
         ):
             with self.subTest(path=path):
@@ -25,7 +33,6 @@ class T(unittest.TestCase):
         for path in (
             "README.md",
             "architecture/runaway-guard.md",
-            "scripts/grabowski_memory_guard.py",
             "tests/test_memory_pressure_guard.py",
             "docs/notes.md",
         ):

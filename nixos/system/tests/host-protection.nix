@@ -1,0 +1,256 @@
+{ pkgs }:
+pkgs.testers.runNixOSTest {
+  name = "heim-pc-host-protection";
+
+  nodes.machine = { lib, ... }: {
+    imports = [ ../modules/host-protection.nix ];
+
+    networking.hostName = "heim-pc-host-protection-test";
+    system.stateVersion = "26.05";
+    users.users.alex = {
+      isNormalUser = true;
+      uid = 1000;
+    };
+    users.users.other = {
+      isNormalUser = true;
+      uid = 1001;
+    };
+    heimPc.hostProtection.enable = true;
+
+    # Exercise service credentials and the real sandboxed collector, without
+    # coupling this regression to zram sizing or oomd victim-selection policy.
+    zramSwap.enable = lib.mkForce false;
+    systemd.oomd.enable = lib.mkForce false;
+
+    virtualisation.memorySize = 1024;
+    virtualisation.cores = 1;
+  };
+
+  testScript = ''
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+
+    machine.succeed("getent group users")
+    machine.succeed(
+        "test $(systemctl show heim-pc-pytest-temp-gc.service -p Group --value) = users"
+    )
+    machine.succeed("systemctl start heim-pc-pytest-temp-gc.service")
+    machine.succeed(
+        "systemctl show heim-pc-pytest-temp-gc.service -p Result --value | grep -x success"
+    )
+
+    # Root cgroups normally have no memory.events file. The actual service,
+    # including its sandbox, must still produce complete core observations.
+    machine.fail("test -e /sys/fs/cgroup/memory.events")
+    machine.succeed("systemctl start heim-pc-memory-pressure-snapshot.service")
+    machine.succeed(
+        "${pkgs.python3}/bin/python3 -c '"
+        'import json; '
+        'p = json.load(open("/var/lib/heim-pc/memory-pressure/latest.json")); '
+        'assert p["observation_complete"], p["observation_errors"]; '
+        'assert p["root_memory_events_available"] is False; '
+        'assert p["severity"] != "unknown"'
+        "'"
+    )
+
+    # The two user timers are installed globally but intentionally do not gain
+    # unattended boot authority through a lingering alex user manager.
+    machine.succeed("test -f /etc/systemd/user/heim-pc-storage-pressure-watch.timer")
+    machine.succeed("test -f /etc/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed(
+        "test -x /etc/systemd/user-generators/heim-pc-host-protection-legacy-unit-guard"
+    )
+    machine.succeed("test ! -e /var/lib/systemd/linger/alex")
+    machine.fail("systemctl is-active user@1000.service")
+
+    # Reproduce exactly the pre-NixOS installer state: a per-user service and
+    # timer main unit. Their presence must block execution without deleting
+    # either file; after deliberate fixture cleanup the NixOS unit takes over.
+    machine.succeed("install -d -m 0700 -o alex -g users /home/alex/.config/systemd/user")
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy storage pressure' "
+        "'[Service]' 'Type=oneshot' 'ExecStart=${pkgs.coreutils}/bin/false' "
+        "> /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy storage pressure timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-storage-pressure-watch.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer")
+
+    machine.succeed("systemctl start user@1000.service")
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p FragmentPath --value "
+        "| grep -Fx /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p DropInPaths --value "
+        "| grep -F zz-heim-pc-host-protection.conf"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p ConditionResult --value) = no"
+    )
+    machine.fail("test -e /home/alex/.local/state/heim-pc/storage-pressure-watch/latest.json")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.timer -p ConditionResult --value) = no"
+    )
+
+    machine.succeed(
+        "rm /home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.service "
+        "/home/alex/.config/systemd/user/heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show "
+        "heim-pc-storage-pressure-watch.service -p ExecStart --value "
+        "| grep -F -- --observe-only"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.service"
+    )
+    machine.succeed(
+        "${pkgs.python3}/bin/python3 -c '"
+        'import json; '
+        'p = json.load(open("/home/alex/.local/state/heim-pc/storage-pressure-watch/latest.json")); '
+        'assert p["maintenance_requests_enabled"] is False'
+        "'"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-storage-pressure-watch.timer"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-storage-pressure-watch.timer"
+    )
+
+    # The older home-hygiene installer wrote four user units, including the
+    # mutation-capable coredump-retention service. All four legacy mains must
+    # remain loaded-but-inert while present in alex's home. The declarative
+    # home-hygiene timer already started with the user manager: daemon-reload
+    # preserves that active state rather than checking new conditions again.
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy home hygiene' "
+        "'[Service]' 'Type=oneshot' "
+        "'ExecStart=${pkgs.coreutils}/bin/touch /home/alex/legacy-home-hygiene-ran' "
+        "> /home/alex/.config/systemd/user/heim-pc-home-hygiene.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy home hygiene timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-home-hygiene.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy coredump retention' "
+        "'[Service]' 'Type=oneshot' "
+        "'ExecStart=${pkgs.coreutils}/bin/touch /home/alex/legacy-coredump-retention-ran' "
+        "> /home/alex/.config/systemd/user/heim-pc-coredump-retention.service"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Unit]' 'Description=Legacy coredump retention timer' "
+        "'[Timer]' 'OnBootSec=1h' 'Unit=heim-pc-coredump-retention.service' "
+        "'[Install]' 'WantedBy=timers.target' "
+        "> /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer"
+    )
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-home-hygiene.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-coredump-retention.service")
+    machine.succeed("chown alex:users /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-home-hygiene.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-home-hygiene.timer")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.service")
+    machine.succeed("chmod 0644 /home/alex/.config/systemd/user/heim-pc-coredump-retention.timer")
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-home-hygiene.timer"
+    )
+    for unit in [
+      "heim-pc-home-hygiene.service",
+      "heim-pc-home-hygiene.timer",
+      "heim-pc-coredump-retention.service",
+      "heim-pc-coredump-retention.timer",
+    ]:
+        machine.succeed(
+            f"systemctl --user --machine=alex@.host show {unit} -p FragmentPath --value "
+            f"| grep -Fx /home/alex/.config/systemd/user/{unit}"
+        )
+        machine.succeed(
+            f"systemctl --user --machine=alex@.host show {unit} -p DropInPaths --value "
+            "| grep -F zz-heim-pc-host-protection.conf"
+        )
+        if unit == "heim-pc-home-hygiene.timer":
+            # The preceding service start proves the legacy job is blocked
+            # even with an active timer. Stop it to test a fresh timer start.
+            machine.fail("test -e /home/alex/legacy-home-hygiene-ran")
+            machine.succeed(f"systemctl --user --machine=alex@.host stop {unit}")
+        machine.succeed(f"systemctl --user --machine=alex@.host start {unit}")
+        machine.succeed(
+            f"test $(systemctl --user --machine=alex@.host show "
+            f"{unit} -p ConditionResult --value) = no"
+        )
+    machine.fail("test -e /home/alex/legacy-home-hygiene-ran")
+    machine.fail("test -e /home/alex/legacy-coredump-retention-ran")
+
+    machine.succeed(
+        "rm /home/alex/.config/systemd/user/heim-pc-home-hygiene.service "
+        "/home/alex/.config/systemd/user/heim-pc-home-hygiene.timer "
+        "/home/alex/.config/systemd/user/heim-pc-coredump-retention.service "
+        "/home/alex/.config/systemd/user/heim-pc-coredump-retention.timer"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host daemon-reload")
+    machine.succeed(
+        "systemctl --user --machine=alex@.host show heim-pc-home-hygiene.service "
+        "-p ExecStart --value | grep -F ' inventory '"
+    )
+    machine.succeed("systemctl --user --machine=alex@.host start heim-pc-home-hygiene.service")
+    machine.succeed(
+        "test -f /home/alex/.local/state/heim-pc/home-hygiene/latest-inventory.json"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host start heim-pc-home-hygiene.timer"
+    )
+    machine.succeed(
+        "systemctl --user --machine=alex@.host is-active heim-pc-home-hygiene.timer"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-coredump-retention.service -p LoadState --value) = not-found"
+    )
+    machine.succeed(
+        "test $(systemctl --user --machine=alex@.host show "
+        "heim-pc-coredump-retention.timer -p LoadState --value) = not-found"
+    )
+
+    # The globally installed user units must remain inert in every other user
+    # manager even when no legacy unit is present in that user's home.
+    machine.succeed("systemctl start user@1001.service")
+    for unit in [
+      "heim-pc-storage-pressure-watch.service",
+      "heim-pc-storage-pressure-watch.timer",
+      "heim-pc-home-hygiene.service",
+      "heim-pc-home-hygiene.timer",
+    ]:
+        machine.succeed(f"systemctl --user --machine=other@.host start {unit}")
+        machine.succeed(
+            f"test $(systemctl --user --machine=other@.host show "
+            f"{unit} -p ConditionResult --value) = no"
+        )
+    machine.fail("test -e /home/other/.local/state/heim-pc/storage-pressure-watch/latest.json")
+    machine.fail("test -e /home/other/.local/state/heim-pc/home-hygiene/latest-inventory.json")
+  '';
+}

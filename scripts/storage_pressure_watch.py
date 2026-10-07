@@ -201,6 +201,7 @@ def evaluate(
     current: dict[str, Any],
     previous_state: dict[str, Any] | None,
     *,
+    request_maintenance: bool = True,
     systemctl: Callable[[list[str]], subprocess.CompletedProcess[str]] = _run_systemctl,
 ) -> tuple[dict[str, Any], int]:
     previous_sample = previous_state.get("sample") if isinstance(previous_state, dict) else None
@@ -236,7 +237,7 @@ def evaluate(
     attempts: list[dict[str, Any]] = []
     now_unix = current["observed_at_unix_ns"] // 1_000_000_000
     failed = False
-    if pressure:
+    if pressure and request_maintenance:
         for trigger in policy["service_triggers"]:
             unit = trigger["unit"]
             prior = last_trigger.get(unit)
@@ -275,6 +276,7 @@ def evaluate(
         "kind": "heim_pc_storage_pressure_watch_receipt",
         "status": status,
         "pressure": pressure,
+        "maintenance_requests_enabled": request_maintenance,
         "reasons": reasons,
         "sample": current,
         "previous_sample_observed_at_unix_ns": (
@@ -299,13 +301,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--observe-only", action="store_true")
     args = parser.parse_args()
     try:
         policy = load_policy(args.policy.expanduser().resolve())
         state_path = args.state.expanduser().resolve()
         previous = read_state(state_path)
         current = filesystem_sample(policy["mountpoint"])
-        receipt, returncode = evaluate(policy, current, previous)
+        receipt, returncode = evaluate(
+            policy,
+            current,
+            previous,
+            request_maintenance=not args.observe_only,
+        )
         write_state(state_path, receipt)
     except (PressureWatchError, OSError, ValueError) as exc:
         print(

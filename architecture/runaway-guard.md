@@ -300,11 +300,24 @@ Auf dem Live-Host läuft bereits der unabhängige systemweite Timer
 Die Evidenz liegt begrenzt unter `/var/lib/heim-pc/memory-pressure/`. Dieser
 Snapshot ist passiv und führt keine Prozessmutation aus.
 
-Diese bestehende Laufzeittelemetrie wird von diesem Änderungspaket bewusst
-**nicht dupliziert**. Ihre derzeit fehlende Verankerung im Heim-PC-Repo ist ein
-separater Konvergenzpunkt; der neue Grabowski-Guard hängt für seine Entscheidung
-nicht von diesem Snapshot ab, sondern liest systemd, `/proc` und die
-Operator-Cgroup jeweils frisch.
+NixOS verankert diese passive Beobachtung nun deklarativ als denselben
+`heim-pc-memory-pressure-snapshot.timer` mit begrenzter privater Historie unter
+`/var/lib/heim-pc/memory-pressure/`. Das ändert keine Guard-Entscheidungsautorität:
+der Grabowski-Guard liest systemd, `/proc` und die Operator-Cgroup weiterhin
+jeweils frisch. Seine NixOS-Unit bleibt außerdem fail-closed deaktiviert, solange
+die echte `grabowski-operator.service` nicht Teil des NixOS-Systemgraphen ist.
+`systemd-oomd` erhält in diesem Schritt ausdrücklich keine breite Root-, System-
+oder User-Slice-Victim-Selection; eine solche konkurrierende Policy bleibt
+separat kalibrierungs- und reviewpflichtig.
+Erforderliche Kernquellen (`/proc/meminfo`, Memory-PSI und die Verfügbarkeit
+des Memory-Controllers über `cgroup.controllers`) werden im NixOS-Snapshot als
+Vollständigkeitsstatus ausgewiesen: fehlen sie, darf ein ansonsten unauffälliger
+Tick nicht `severity=ok` melden, sondern wird als unvollständig/`unknown` markiert.
+`memory.events` existiert laut cgroup-v2-Vertrag nur auf Nicht-Root-cgroups.
+Sein Fehlen an der Hierarchiewurzel ist daher kein Fehler der Kernbeobachtung;
+`root_memory_events_available` weist diese optionale Quelle gesondert aus. Die History konvergiert nach Sample-
+und Byte-Limit; eine begrenzt übergroße, reguläre eigene History wird gekürzt
+statt den Timer dauerhaft zu blockieren.
 
 ## Docker-Loggrenze
 

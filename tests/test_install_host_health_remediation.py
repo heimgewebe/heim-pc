@@ -143,7 +143,10 @@ class InstallHostHealthRemediationTests(unittest.TestCase):
         contract = installer.KNOWN_OBSOLETE_ASSETS[old_target]
         self.assertEqual(
             contract["sha256s"],
-            ("2495a0f5be34018e7d9c996a55c50fdadd8ed5276a50d07f182b8371749fa5c5",),
+            (
+                "2495a0f5be34018e7d9c996a55c50fdadd8ed5276a50d07f182b8371749fa5c5",
+                "38bb3a02109203c15ff85e71f12d0855a26ae4d7947d71d9e164f2c39245e995",
+            ),
         )
         self.assertEqual(contract["mode"], 0o755)
         self.assertEqual(contract["live_owner"], ("root", "root"))
