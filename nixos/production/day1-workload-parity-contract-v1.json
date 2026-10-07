@@ -83,20 +83,58 @@
       "required_fields": [
         "host",
         "source_revision",
-        "observed_at",
-        "outputs"
+        "observation",
+        "outputs",
+        "provenance"
       ],
       "host_must_equal": "heim-pc",
       "source_revision_format": "40-lowercase-hex",
-      "output_binding": "path+sha256+observed_at",
-      "all_required_outputs_must_share_observation": true,
+      "output_binding": "path+sha256+observed_at+observation_id",
       "required_output_paths": [
         "runtime/software-inventory.md",
         "runtime/program-inventory-summary.md",
         "runtime/program-inventory.v1.json"
       ],
       "freshness_required_at_productive_role_assumption": true,
-      "freshness_policy_must_be_bound_by_reviewed_consumer": true
+      "freshness_policy_must_be_bound_by_reviewed_consumer": true,
+      "observation": {
+        "kind": "bounded-session-v1",
+        "required_fields": [
+          "id",
+          "started_at",
+          "completed_at"
+        ],
+        "id_format": "64-lowercase-hex",
+        "all_required_outputs_must_share_id": true,
+        "output_observed_at_must_be_within_session": true
+      },
+      "provenance": {
+        "required_fields": [
+          "software",
+          "program"
+        ],
+        "software": {
+          "collector_path": "scripts/generate_software_inventory.py",
+          "collector_sha256_must_match_source_revision": true,
+          "execution_receipt_sha256_required": true,
+          "execution_receipt_must_bind_observation_id_and_argv": true
+        },
+        "program": {
+          "collector_path": "scripts/collect_program_inventory.py",
+          "renderer_path": "scripts/generate_program_inventory.py",
+          "collector_and_renderer_sha256_must_match_source_revision": true,
+          "execution_receipt_sha256_required": true,
+          "raw_manifest_sha256_required": true,
+          "execution_receipt_must_bind_observation_id_and_argv": true
+        }
+      },
+      "required_output_metadata": [
+        "observed_at",
+        "observation_id",
+        "binding_eligible"
+      ],
+      "binding_eligible_must_be_true": true,
+      "output_host_must_equal_authoritative_host": true
     },
     "current_binding": null,
     "unreachable_or_unbound_behavior": "block-classification-and-readiness",

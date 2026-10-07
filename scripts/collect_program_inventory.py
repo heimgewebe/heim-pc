@@ -8,9 +8,13 @@ metadata only: path, size and mtime.
 """
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 import os
+import re
+import secrets
 import socket
 import stat
 import subprocess
@@ -192,8 +196,49 @@ def collect_rootfs_executables(out: Path) -> dict[str, Any]:
     return result
 
 
+
+OBSERVATION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def normalize_observed_at(value: str | None) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("observed_at must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def observation_binding(value: str | None) -> tuple[str, bool]:
+    if value is None:
+        return secrets.token_hex(32), False
+    if not OBSERVATION_ID_RE.fullmatch(value):
+        raise ValueError("observation_id must be 64 lowercase hex characters")
+    return value, True
+
+
+def raw_manifest_sha256(out: Path) -> tuple[str, int]:
+    entries: list[tuple[str, str]] = []
+    for path in sorted(out.iterdir(), key=lambda item: item.name):
+        if not path.is_file() or path.name in {"run-result.json", "SUMMARY.md"}:
+            continue
+        entries.append((path.name, hashlib.sha256(path.read_bytes()).hexdigest()))
+    payload = "".join(f"{name}\0{digest}\n" for name, digest in entries).encode()
+    return hashlib.sha256(payload).hexdigest(), len(entries)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Collect raw heim-pc program inventory.")
+    parser.add_argument("--observation-id", default=None)
+    parser.add_argument("--observed-at", default=None)
+    return parser.parse_args()
+
+
 def main() -> None:
-    observed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    args = parse_args()
+    observed_at = normalize_observed_at(args.observed_at)
+    observation_id, id_bound = observation_binding(args.observation_id)
+    binding_eligible = id_bound and args.observed_at is not None
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = OUT_ROOT / stamp
     out.mkdir(parents=True, exist_ok=True)
@@ -205,10 +250,16 @@ def main() -> None:
     process_count = collect_processes(out)
     executable_count = collect_curated_executables(out)
     rootfs = collect_rootfs_executables(out)
+    raw_manifest, raw_artifact_count = raw_manifest_sha256(out)
     result = {
         "out": str(out),
         "host": socket.gethostname(),
         "observed_at": observed_at,
+        "observation_id": observation_id,
+        "binding_eligible": binding_eligible,
+        "collector_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "raw_manifest_sha256": raw_manifest,
+        "raw_artifact_count": raw_artifact_count,
         "duration_sec": round(time.time() - start, 2),
         "process_rows": process_count,
         "desktop_apps": desktop_count,

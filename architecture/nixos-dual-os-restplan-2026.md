@@ -5,6 +5,7 @@ status: canonical
 last_reviewed: 2026-10-07
 depends_on:
   - nixos-executor-2026
+  - nixos-day1-workload-parity-2026
 verifies_with:
   - scripts/ci/check_repo_index_consistency.py
 ---

@@ -275,6 +275,16 @@ class T(unittest.TestCase):
         doc = (ROOT / "architecture/nixos-day1-workload-parity-2026.md").read_text()
         restplan = (ROOT / "architecture/nixos-dual-os-restplan-2026.md").read_text()
         repo_index = (ROOT / "manifest/repo-index.yaml").read_text()
+        doc_frontmatter = doc.split("---", 2)[1]
+        restplan_frontmatter = restplan.split("---", 2)[1]
+        self.assertNotIn(
+            "  - nixos-dual-os-restplan-2026\n",
+            doc_frontmatter,
+        )
+        self.assertIn(
+            "  - nixos-day1-workload-parity-2026\n",
+            restplan_frontmatter,
+        )
 
         self.assertEqual(contract["schema_version"], 1)
         self.assertEqual(
@@ -413,7 +423,7 @@ class T(unittest.TestCase):
         self.assertEqual(current_binding_schema["schema_version"], 1)
         self.assertEqual(
             current_binding_schema["required_fields"],
-            ["host", "source_revision", "observed_at", "outputs"],
+            ["host", "source_revision", "observation", "outputs", "provenance"],
         )
         self.assertEqual(current_binding_schema["host_must_equal"], "heim-pc")
         self.assertEqual(
@@ -422,15 +432,48 @@ class T(unittest.TestCase):
         )
         self.assertEqual(
             current_binding_schema["output_binding"],
-            "path+sha256+observed_at",
+            "path+sha256+observed_at+observation_id",
+        )
+        observation = current_binding_schema["observation"]
+        self.assertEqual(observation["kind"], "bounded-session-v1")
+        self.assertEqual(
+            observation["required_fields"],
+            ["id", "started_at", "completed_at"],
+        )
+        self.assertEqual(observation["id_format"], "64-lowercase-hex")
+        self.assertTrue(observation["all_required_outputs_must_share_id"])
+        self.assertTrue(observation["output_observed_at_must_be_within_session"])
+        provenance = current_binding_schema["provenance"]
+        self.assertEqual(provenance["required_fields"], ["software", "program"])
+        self.assertTrue(
+            provenance["software"]["collector_sha256_must_match_source_revision"]
         )
         self.assertTrue(
-            current_binding_schema["all_required_outputs_must_share_observation"]
+            provenance["software"]["execution_receipt_sha256_required"]
         )
+        self.assertTrue(
+            provenance["software"]["execution_receipt_must_bind_observation_id_and_argv"]
+        )
+        self.assertTrue(
+            provenance["program"]["collector_and_renderer_sha256_must_match_source_revision"]
+        )
+        self.assertTrue(
+            provenance["program"]["execution_receipt_sha256_required"]
+        )
+        self.assertTrue(
+            provenance["program"]["execution_receipt_must_bind_observation_id_and_argv"]
+        )
+        self.assertTrue(provenance["program"]["raw_manifest_sha256_required"])
         self.assertEqual(
             current_binding_schema["required_output_paths"],
             inventory["canonical_outputs"],
         )
+        self.assertEqual(
+            current_binding_schema["required_output_metadata"],
+            ["observed_at", "observation_id", "binding_eligible"],
+        )
+        self.assertTrue(current_binding_schema["binding_eligible_must_be_true"])
+        self.assertTrue(current_binding_schema["output_host_must_equal_authoritative_host"])
         self.assertTrue(
             current_binding_schema["freshness_required_at_productive_role_assumption"]
         )

@@ -6,7 +6,6 @@ last_reviewed: 2026-10-07
 depends_on:
   - system-constitution
   - nixos-executor-2026
-  - nixos-dual-os-restplan-2026
 verifies_with:
   - tests/test_nixos_system_source.py
 ---
@@ -33,7 +32,13 @@ Die historische Seedbasis ist **nicht** der jeweils aktuelle Inhalt dieser mutab
 
 Eine aktuelle Paritätsklassifikation benötigt einen frischen, ausdrücklich an Host `heim-pc` gebundenen Inventarlauf. Der Software-Pfad wird durch `generate_software_inventory.py` erhoben und gerendert. Die breitere Program-Inventur muss zuerst durch `collect_program_inventory.py` frisch als host-lokale Rohmetadaten außerhalb Git erhoben und anschließend durch `generate_program_inventory.py` in die kanonische Markdown-/JSON-Sicht gerendert werden. Ein bloßes Neu-Rendern alter Rohdaten ist kein frischer Inventarlauf.
 
-Ist der Host nicht erreichbar, fehlt ein erforderlicher Output oder fehlt die aktuelle Bindung, bleibt die Paritätsfreigabe fail-closed.
+Ist der Host nicht erreichbar, fehlt ein erforderlicher Output, fehlt die gemeinsame Observation-ID, ist ein Collector-Lauf nicht bindungsfähig oder fehlt die aktuelle Bindung, bleibt die Paritätsfreigabe fail-closed.
+
+### Gebundener Erhebungsablauf
+
+Für einen bindungsfähigen aktuellen Lauf werden einmalig eine 64-hex `observation_id` und ein gemeinsamer UTC-Zeitanker erzeugt. Dieselben Werte werden an `generate_software_inventory.py --observation-id ... --observed-at ...` und `collect_program_inventory.py --observation-id ... --observed-at ...` übergeben; erst danach rendert `generate_program_inventory.py` die Program-Outputs aus genau diesem Raw-Lauf.
+
+Die spätere `current_binding` akzeptiert nur Outputs mit derselben Observation-ID, `binding_eligible=true`, Host `heim-pc`, source-revisionsgebundenen Collector-Digests und Execution-Receipts, die Observation-ID und exaktes argv binden. Für die Program-Inventur wird zusätzlich der Digest des host-lokalen Raw-Manifests gebunden. Unabhängige Ad-hoc-Läufe ohne explizite Observation-ID bleiben absichtlich nicht bindungsfähig.
 
 ## Klassifikationen
 
@@ -58,7 +63,7 @@ Day-1-Parität ist erst `ready`, wenn gleichzeitig:
 5. jeder `day1-required`-Kandidat eine passende Acceptance-Evidenz besitzt;
 6. historische Inventare ausschließlich als revisions- und SHA-gebundener Seed und nicht als Freigabeautorität verwendet werden.
 
-Der maschinenlesbare Vertrag liegt in `nixos/production/day1-workload-parity-contract-v1.json`. Er definiert bereits die minimale Shape eines späteren `current_binding`: Host, Source-Revision, Beobachtungszeitpunkt und path-/SHA-/observed-at-gebundene Outputs. Eine konkrete Frist für „frisch“ wird nicht beiläufig in diesem Dokument erfunden; bevor `ready` konsumiert werden darf, muss der reviewte produktive Consumer auch eine bounded Freshness-Policy binden.
+Der maschinenlesbare Vertrag liegt in `nixos/production/day1-workload-parity-contract-v1.json`. Er definiert die minimale Shape eines späteren `current_binding`: Host, Source-Revision, eine gemeinsame bounded Observation-Session mit 64-hex `observation_id`, path-/SHA-/Zeit-/Observation-ID-gebundene Outputs und Collector-Provenienz. Software- und Program-Inventur dürfen nur dann derselben Beobachtung zugerechnet werden, wenn sie dieselbe explizit übergebene `observation_id` verwenden; unabhängig erzeugte Default-IDs bleiben nicht bindungsfähig. Die Program-Inventur bindet zusätzlich den Digest des host-lokalen Raw-Manifests. Eine konkrete Frist für „frisch“ wird nicht beiläufig in diesem Dokument erfunden; bevor `ready` konsumiert werden darf, muss der reviewte produktive Consumer auch eine bounded Freshness-Policy und die Execution-Receipts binden.
 
 ### Enforcement-Grenze von v1
 
