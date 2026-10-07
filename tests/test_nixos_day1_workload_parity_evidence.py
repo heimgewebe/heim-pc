@@ -258,6 +258,25 @@ class T(unittest.TestCase):
                 ],
             )
 
+    def test_write_evidence_refuses_different_existing_binding(self):
+        result = self.binding()
+        evidence = (
+            self.root
+            / "nixos/production/day1-workload-parity-current-evidence-v1.json"
+        )
+        contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
+        payload = json.loads(contract.read_text(encoding="utf-8"))
+        payload["inventory"]["current_binding"] = {"source_revision": "f" * 40}
+        contract.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "refusing to replace"):
+            write_evidence(
+                contract_path=contract,
+                evidence_path=evidence,
+                binding=result,
+                update_contract=True,
+            )
+        self.assertFalse(evidence.exists())
+
     def test_write_evidence_keeps_readiness_blocked(self):
         result = self.binding()
         evidence = (

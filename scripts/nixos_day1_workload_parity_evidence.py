@@ -331,12 +331,33 @@ def write_evidence(
         "classification_complete": False,
         "current_binding": binding,
     }
-    evidence_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    contract = None
     if update_contract:
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        existing_binding = contract["inventory"].get("current_binding")
+        if existing_binding is not None and existing_binding != binding:
+            raise Day1EvidenceError(
+                "refusing to replace an existing current_binding without a reviewed refresh path"
+            )
+
+    if evidence_path.exists():
+        try:
+            existing_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise Day1EvidenceError(
+                "existing evidence file is not valid JSON and will not be overwritten"
+            ) from exc
+        if existing_evidence != payload:
+            raise Day1EvidenceError(
+                "refusing to replace different existing Day-1 evidence"
+            )
+    else:
+        evidence_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    if update_contract and contract is not None:
         contract["inventory"]["current_binding"] = binding
         contract["admission"]["current_status"] = (
             "blocked-until-day1-classification-and-acceptance"
