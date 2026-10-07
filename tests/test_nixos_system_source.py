@@ -331,20 +331,119 @@ class T(unittest.TestCase):
             inventory["unreachable_or_unbound_behavior"],
             "block-classification-and-readiness",
         )
+
+        pipeline = inventory["collection_pipeline"]
         self.assertEqual(
-            inventory["required_collectors"],
+            pipeline["software"]["collector_and_renderer"],
+            "scripts/generate_software_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["software"]["canonical_outputs"],
+            ["runtime/software-inventory.md"],
+        )
+        self.assertEqual(
+            pipeline["program"]["collector"],
+            "scripts/collect_program_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["program"]["renderer"],
+            "scripts/generate_program_inventory.py",
+        )
+        self.assertEqual(
+            pipeline["program"]["raw_artifacts_policy"],
+            "host-local-outside-git",
+        )
+        self.assertEqual(
+            pipeline["program"]["canonical_outputs"],
             [
-                "scripts/generate_software_inventory.py",
-                "scripts/generate_program_inventory.py",
+                "runtime/program-inventory-summary.md",
+                "runtime/program-inventory.v1.json",
             ],
         )
-        for seed in inventory["historical_seed"]:
-            source = (ROOT / seed["path"]).read_text()
+        self.assertEqual(
+            inventory["canonical_outputs"],
+            [
+                "runtime/software-inventory.md",
+                "runtime/program-inventory-summary.md",
+                "runtime/program-inventory.v1.json",
+            ],
+        )
+
+        expected_seeds = {
+            "runtime/software-inventory.md": (
+                "2026-07-09T17:16:37Z",
+                "c3d0622a17cf755a8f69ec53b867a1a1913503cbe57a9cf675d939699ae0c36d",
+            ),
+            "runtime/program-inventory-summary.md": (
+                "2026-07-09T18:15:00Z",
+                "8b6abbeae959996e7bcb396780d8fc31655035c1e3b129fc82efb9e500824640",
+            ),
+            "runtime/program-inventory.v1.json": (
+                "2026-07-09T18:15:00Z",
+                "2726fa724206d01c61e59ea5ad6c7b9eaced7bfe32251073538fd2bf4bc3eeb3",
+            ),
+        }
+        seeds = {seed["path"]: seed for seed in inventory["historical_seed"]}
+        self.assertEqual(set(seeds), set(expected_seeds))
+        for path, (observed_at, sha256) in expected_seeds.items():
+            seed = seeds[path]
             self.assertEqual(seed["authority"], "candidate-seed-only")
-            self.assertIn('observed_at: "' + seed["observed_at"] + '"', source)
+            self.assertEqual(
+                seed["source_revision"],
+                "d2260b32094fdde5c6efc158e561142d48fe9171",
+            )
+            self.assertEqual(seed["observed_at"], observed_at)
+            self.assertEqual(seed["sha256"], sha256)
+
+        historical_binding = inventory["historical_seed_binding"]
+        self.assertEqual(
+            historical_binding["identity"],
+            "source-revision-path-sha256",
+        )
+        self.assertFalse(
+            historical_binding["mutable_current_outputs_may_replace_historical_seed"]
+        )
+        self.assertTrue(
+            historical_binding[
+                "historical_seed_remains_authoritative_after_current_output_refresh"
+            ]
+        )
+
+        current_binding_schema = inventory["current_binding_schema"]
+        self.assertEqual(current_binding_schema["schema_version"], 1)
+        self.assertEqual(
+            current_binding_schema["required_fields"],
+            ["host", "source_revision", "observed_at", "outputs"],
+        )
+        self.assertEqual(current_binding_schema["host_must_equal"], "heim-pc")
+        self.assertEqual(
+            current_binding_schema["source_revision_format"],
+            "40-lowercase-hex",
+        )
+        self.assertEqual(
+            current_binding_schema["output_binding"],
+            "path+sha256+observed_at",
+        )
+        self.assertTrue(
+            current_binding_schema["all_required_outputs_must_share_observation"]
+        )
+        self.assertEqual(
+            current_binding_schema["required_output_paths"],
+            inventory["canonical_outputs"],
+        )
+        self.assertTrue(
+            current_binding_schema["freshness_required_at_productive_role_assumption"]
+        )
+        self.assertTrue(
+            current_binding_schema["freshness_policy_must_be_bound_by_reviewed_consumer"]
+        )
 
         reconciliation = inventory["historical_reconciliation"]
         self.assertTrue(reconciliation["required"])
+        self.assertEqual(
+            reconciliation["seed_source"],
+            "revision-and-sha256-bound-historical-seed",
+        )
         self.assertEqual(
             reconciliation["granularity"], "individual-observed-item"
         )

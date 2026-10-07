@@ -25,34 +25,84 @@
   },
   "inventory": {
     "authoritative_host": "heim-pc",
-    "required_collectors": [
-      "scripts/generate_software_inventory.py",
-      "scripts/generate_program_inventory.py"
-    ],
+    "collection_pipeline": {
+      "software": {
+        "collector_and_renderer": "scripts/generate_software_inventory.py",
+        "canonical_outputs": [
+          "runtime/software-inventory.md"
+        ]
+      },
+      "program": {
+        "collector": "scripts/collect_program_inventory.py",
+        "renderer": "scripts/generate_program_inventory.py",
+        "raw_artifacts_policy": "host-local-outside-git",
+        "canonical_outputs": [
+          "runtime/program-inventory-summary.md",
+          "runtime/program-inventory.v1.json"
+        ]
+      }
+    },
     "canonical_outputs": [
       "runtime/software-inventory.md",
-      "runtime/program-inventory-summary.md"
+      "runtime/program-inventory-summary.md",
+      "runtime/program-inventory.v1.json"
     ],
     "historical_seed": [
       {
+        "id": "software-inventory-2026-07-09",
+        "source_revision": "d2260b32094fdde5c6efc158e561142d48fe9171",
         "path": "runtime/software-inventory.md",
         "observed_at": "2026-07-09T17:16:37Z",
+        "sha256": "c3d0622a17cf755a8f69ec53b867a1a1913503cbe57a9cf675d939699ae0c36d",
         "authority": "candidate-seed-only"
       },
       {
+        "id": "program-inventory-summary-2026-07-09",
+        "source_revision": "d2260b32094fdde5c6efc158e561142d48fe9171",
         "path": "runtime/program-inventory-summary.md",
         "observed_at": "2026-07-09T18:15:00Z",
+        "sha256": "8b6abbeae959996e7bcb396780d8fc31655035c1e3b129fc82efb9e500824640",
+        "authority": "candidate-seed-only"
+      },
+      {
+        "id": "program-inventory-json-2026-07-09",
+        "source_revision": "d2260b32094fdde5c6efc158e561142d48fe9171",
+        "path": "runtime/program-inventory.v1.json",
+        "observed_at": "2026-07-09T18:15:00Z",
+        "sha256": "2726fa724206d01c61e59ea5ad6c7b9eaced7bfe32251073538fd2bf4bc3eeb3",
         "authority": "candidate-seed-only"
       }
     ],
+    "historical_seed_binding": {
+      "identity": "source-revision-path-sha256",
+      "mutable_current_outputs_may_replace_historical_seed": false,
+      "historical_seed_remains_authoritative_after_current_output_refresh": true
+    },
+    "current_binding_schema": {
+      "schema_version": 1,
+      "required_fields": [
+        "host",
+        "source_revision",
+        "observed_at",
+        "outputs"
+      ],
+      "host_must_equal": "heim-pc",
+      "source_revision_format": "40-lowercase-hex",
+      "output_binding": "path+sha256+observed_at",
+      "all_required_outputs_must_share_observation": true,
+      "required_output_paths": [
+        "runtime/software-inventory.md",
+        "runtime/program-inventory-summary.md",
+        "runtime/program-inventory.v1.json"
+      ],
+      "freshness_required_at_productive_role_assumption": true,
+      "freshness_policy_must_be_bound_by_reviewed_consumer": true
+    },
     "current_binding": null,
     "unreachable_or_unbound_behavior": "block-classification-and-readiness",
     "historical_reconciliation": {
       "required": true,
-      "source_outputs": [
-        "runtime/software-inventory.md",
-        "runtime/program-inventory-summary.md"
-      ],
+      "seed_source": "revision-and-sha256-bound-historical-seed",
       "granularity": "individual-observed-item",
       "every_historical_item_requires_disposition": true,
       "allowed_dispositions": [

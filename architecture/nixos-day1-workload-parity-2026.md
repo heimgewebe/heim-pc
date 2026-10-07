@@ -25,10 +25,15 @@ Die kanonischen Runtime-Inventare sind Beobachtungen, keine Norm:
 
 - `runtime/software-inventory.md`
 - `runtime/program-inventory-summary.md`
+- `runtime/program-inventory.v1.json`
 
 Ihr `observed_at` begrenzt ihre Autorität. Die derzeit eingecheckten Beobachtungen stammen vom 9. Juli 2026 und dürfen deshalb nur historische Kandidaten liefern. Sie dürfen weder heutige Existenz noch heutige Notwendigkeit noch eine Day-1-Freigabe beweisen.
 
-Eine aktuelle Paritätsklassifikation benötigt einen frischen, ausdrücklich an Host `heim-pc` gebundenen Inventarlauf. Ist der Host nicht erreichbar oder fehlt die aktuelle Bindung, bleibt die Paritätsfreigabe fail-closed.
+Die historische Seedbasis ist **nicht** der jeweils aktuelle Inhalt dieser mutablen Runtime-Dateien. `day1-workload-parity-contract-v1.json` bindet jeden historischen Seed an Source-Revision, Pfad und SHA-256. Eine spätere Aktualisierung der kanonischen Runtime-Inventare darf diese historische Vergleichsbasis deshalb nicht ersetzen oder neu interpretieren.
+
+Eine aktuelle Paritätsklassifikation benötigt einen frischen, ausdrücklich an Host `heim-pc` gebundenen Inventarlauf. Der Software-Pfad wird durch `generate_software_inventory.py` erhoben und gerendert. Die breitere Program-Inventur muss zuerst durch `collect_program_inventory.py` frisch als host-lokale Rohmetadaten außerhalb Git erhoben und anschließend durch `generate_program_inventory.py` in die kanonische Markdown-/JSON-Sicht gerendert werden. Ein bloßes Neu-Rendern alter Rohdaten ist kein frischer Inventarlauf.
+
+Ist der Host nicht erreichbar, fehlt ein erforderlicher Output oder fehlt die aktuelle Bindung, bleibt die Paritätsfreigabe fail-closed.
 
 ## Klassifikationen
 
@@ -40,27 +45,28 @@ Jeder historische oder aktuell beobachtete Kandidat erhält genau eine Klassifik
 - `retired`: wird bewusst nicht migriert; die Entscheidung benötigt eine Begründung;
 - `unclassified`: noch nicht entschieden und daher blockierend.
 
-Ein Kandidat darf nicht allein deshalb als `day1-required` gelten, weil er im historischen Inventar vorhanden war. Umgekehrt darf ein historischer Kandidat nicht still verschwinden: **jedes einzelne** in den gebundenen historischen Inventaren beobachtete Item muss beim frischen Reconcile entweder als weiterhin vorhanden und klassifiziert oder als explizit `retired`/`replaced` dispositioniert werden. Eine Gruppenklassifikation ersetzt diese Item-Reconciliation nicht.
+Ein Kandidat darf nicht allein deshalb als `day1-required` gelten, weil er im historischen Inventar vorhanden war. Umgekehrt darf ein historischer Kandidat nicht still verschwinden: **jedes einzelne** in den revisions- und digestgebundenen historischen Seeds beobachtete Item muss beim frischen Reconcile entweder als weiterhin vorhanden und klassifiziert oder als explizit `retired`/`replaced` dispositioniert werden. Eine Gruppenklassifikation ersetzt diese Item-Reconciliation nicht.
 
 ## Readiness
 
 Day-1-Parität ist erst `ready`, wenn gleichzeitig:
 
 1. ein frischer Inventar-Readback vom Host `heim-pc` gebunden ist;
-2. kein Kandidat `unclassified` bleibt;
-3. jeder `day1-required`-Kandidat ein konkretes Implementierungsziel besitzt;
-4. jeder `day1-required`-Kandidat eine passende Acceptance-Evidenz besitzt;
-5. historische Inventare ausschließlich als Seed und nicht als Freigabeautorität verwendet werden.
+2. alle im Vertrag verlangten kanonischen Outputs aus derselben gebundenen aktuellen Beobachtung stammen;
+3. kein Kandidat `unclassified` bleibt;
+4. jeder `day1-required`-Kandidat ein konkretes Implementierungsziel besitzt;
+5. jeder `day1-required`-Kandidat eine passende Acceptance-Evidenz besitzt;
+6. historische Inventare ausschließlich als revisions- und SHA-gebundener Seed und nicht als Freigabeautorität verwendet werden.
 
-Der maschinenlesbare Vertrag liegt in `nixos/production/day1-workload-parity-contract-v1.json`.
+Der maschinenlesbare Vertrag liegt in `nixos/production/day1-workload-parity-contract-v1.json`. Er definiert bereits die minimale Shape eines späteren `current_binding`: Host, Source-Revision, Beobachtungszeitpunkt und path-/SHA-/observed-at-gebundene Outputs. Eine konkrete Frist für „frisch“ wird nicht beiläufig in diesem Dokument erfunden; bevor `ready` konsumiert werden darf, muss der reviewte produktive Consumer auch eine bounded Freshness-Policy binden.
 
 ### Enforcement-Grenze von v1
 
-v1 definiert die normative Readiness- und Reconciliation-Semantik und wird durch Regressionstests gebunden. Ein produktiver Runtime-/Cutover-Consumer ist in diesem PR **noch nicht implementiert**. Diese Abwesenheit ist fail-closed zu interpretieren: Sie darf niemals `ready` erzeugen oder eine produktive Rollenübernahme autorisieren. Bevor ein späterer Pfad `ready` konsumieren darf, muss ein eigener reviewter Consumer exakt diesen Vertrag binden.
+v1 definiert die normative Readiness- und Reconciliation-Semantik und wird durch Regressionstests gebunden. Ein produktiver Runtime-/Cutover-Consumer ist in diesem PR **noch nicht implementiert**. Diese Abwesenheit ist fail-closed zu interpretieren: Sie darf niemals `ready` erzeugen oder eine produktive Rollenübernahme autorisieren. Bevor ein späterer Pfad `ready` konsumieren darf, muss ein eigener reviewter Consumer exakt diesen Vertrag einschließlich Binding- und Freshness-Semantik binden.
 
 ## Historische Seed-Gruppen
 
-Die folgenden Gruppen strukturieren nur die Planung; sie sind **keine Vollständigkeitsliste**. Vollständigkeit entsteht durch die item-genaue Reconciliation beider historischen Inventaroutputs gegen den frischen Heim-PC-Readback.
+Die folgenden Gruppen strukturieren nur die Planung; sie sind **keine Vollständigkeitsliste**. Vollständigkeit entsteht durch die item-genaue Reconciliation der revisions- und SHA-gebundenen historischen Inventaroutputs gegen den frischen Heim-PC-Readback.
 
 Aus den Beobachtungen vom 9. Juli 2026 werden folgende Prüfdimensionen vorgemerkt:
 
@@ -71,7 +77,7 @@ Aus den Beobachtungen vom 9. Juli 2026 werden folgende Prüfdimensionen vorgemer
 - Dokument-/OCR-/Medienwerkzeuge;
 - Entwicklungs- und Operatorwerkzeuge.
 
-Diese Gruppen sind absichtlich `unclassified`, bis der physische Heim-PC frisch gelesen wurde.
+Diese Gruppen sind absichtlich `unclassified`, bis die vollständige aktuelle Inventarpipeline gebunden und die Items dispositioniert wurden. Einzelne Live-Spot-Reads ersetzen diese Reconciliation nicht.
 
 ## Architekturentscheidungen
 
@@ -86,5 +92,5 @@ Dieser Vertrag:
 - aktiviert keinen Dienst;
 - installiert keine Pakete;
 - verändert keine Storage-, EFI-, LUKS- oder Bootzustände;
-- behauptet keine aktuelle Heim-PC-Runtime, solange kein frischer Readback gebunden ist;
+- behauptet keine aktuelle Heim-PC-Runtime, solange kein vollständiger frischer Readback gebunden ist;
 - erweitert nicht die Autorität des Produktionsinstallers oder des Day-2-Executors.
