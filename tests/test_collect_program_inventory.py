@@ -7,6 +7,7 @@ scripts_path = repo_root / "scripts"
 if str(scripts_path) not in sys.path:
     sys.path.insert(0, str(scripts_path))
 
+import collect_program_inventory as collector
 from collect_program_inventory import observation_binding, raw_manifest_sha256
 
 
@@ -39,3 +40,36 @@ def test_raw_manifest_is_deterministic_and_excludes_receipt_files(tmp_path):
     ).encode()
     assert digest == hashlib.sha256(expected_payload).hexdigest()
     assert count == 2
+
+
+def test_explicit_output_dir_is_fresh_and_below_inventory_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "OUT_ROOT", tmp_path)
+    target = (tmp_path / "bound-run").resolve()
+    out, bound = collector.explicit_output_dir(target, stamp="ignored")
+    assert out == target
+    assert bound is True
+
+
+def test_explicit_output_dir_rejects_reuse(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "OUT_ROOT", tmp_path)
+    target = tmp_path / "existing"
+    target.mkdir()
+    try:
+        collector.explicit_output_dir(target.resolve(), stamp="ignored")
+    except ValueError as exc:
+        assert "already exists" in str(exc)
+    else:
+        raise AssertionError("expected existing raw run to be rejected")
+
+
+def test_explicit_output_dir_rejects_path_outside_inventory_root(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(collector, "OUT_ROOT", root)
+    outside = (tmp_path / "outside").resolve()
+    try:
+        collector.explicit_output_dir(outside, stamp="ignored")
+    except ValueError as exc:
+        assert "below the program-inventory root" in str(exc)
+    else:
+        raise AssertionError("expected outside raw run to be rejected")

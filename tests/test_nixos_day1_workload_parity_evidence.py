@@ -17,6 +17,7 @@ from scripts.nixos_day1_workload_parity_evidence import (
 OBS_ID = "a" * 64
 START = "2026-10-07T15:00:00Z"
 OBSERVED = "2026-10-07T15:00:05Z"
+GENERATED = "2026-10-07T15:00:20Z"
 DONE = "2026-10-07T15:00:30Z"
 RECEIPT_A = "b" * 64
 RECEIPT_B = "c" * 64
@@ -32,13 +33,16 @@ def argv_sha(argv: list[str]) -> str:
     )
 
 
-def execution_receipt(task_id: str, argv: list[str], digest: str) -> dict:
+def execution_receipt(
+    task_id: str, argv: list[str], digest: str, *, cwd: Path
+) -> dict:
     return {
         "task_id": task_id,
         "attempt": 1,
         "unit": f"grabowski-task-{task_id}-a1.service",
         "host": "heim-pc",
         "state": "completed",
+        "cwd": str(cwd),
         "argv": argv,
         "argv_sha256": argv_sha(argv),
         "lifecycle_receipt_sha256": digest,
@@ -67,7 +71,48 @@ class T(unittest.TestCase):
 
         software_script = b"print('software')\n"
         collector_script = b"print('collect')\n"
-        renderer_script = b"print('render')\n"
+        renderer_script = b"""import argparse
+import json
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--raw-dir", type=Path, required=True)
+parser.add_argument("--summary-out", type=Path, required=True)
+parser.add_argument("--json-out", type=Path, required=True)
+parser.add_argument("--generated-at", required=True)
+args = parser.parse_args()
+raw = args.raw_dir.resolve()
+run = json.loads((raw / "run-result.json").read_text(encoding="utf-8"))
+summary = "\\n".join([
+    "---",
+    'observed_at: "' + run["observed_at"] + '"',
+    'observation_id: "' + run["observation_id"] + '"',
+    "binding_eligible: true",
+    "---",
+    "",
+]) + "\\n"
+payload = {
+    "schema": "program-inventory.v1",
+    "generated_at": args.generated_at,
+    "observation_scope": {
+        "observed_at": run["observed_at"],
+        "observation_id": run["observation_id"],
+        "binding_eligible": run["binding_eligible"],
+    },
+    "source_inventory_path": str(raw),
+    "collection_provenance": {
+        "host": run["host"],
+        "collector_sha256": run["collector_sha256"],
+        "raw_manifest_sha256": run["raw_manifest_sha256"],
+        "raw_artifact_count": run["raw_artifact_count"],
+    },
+}
+args.summary_out.write_text(summary, encoding="utf-8")
+args.json_out.write_text(
+    json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\\n",
+    encoding="utf-8",
+)
+"""
         self.software_script = software_script
         self.collector_script = collector_script
         (root / "scripts/generate_software_inventory.py").write_bytes(software_script)
@@ -122,36 +167,39 @@ class T(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        (root / "runtime/program-inventory-summary.md").write_text(
-            "\n".join(
-                [
-                    "---",
-                    f'observed_at: "{OBSERVED}"',
-                    f'observation_id: "{OBS_ID}"',
-                    "binding_eligible: true",
-                    "---",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
+        self.raw_dir = (root / "raw-program-run").resolve()
+        self.raw_dir.mkdir()
+        (self.raw_dir / "a.txt").write_bytes(b"alpha")
+        raw_digest = sha(b"a.txt\0" + sha(b"alpha").encode() + b"\n")
+        self.raw_digest = raw_digest
+        run_result = {
+            "out": str(self.raw_dir),
+            "host": "heim-pc",
+            "observed_at": OBSERVED,
+            "observation_id": OBS_ID,
+            "binding_eligible": True,
+            "collector_sha256": sha(collector_script),
+            "raw_manifest_sha256": raw_digest,
+            "raw_artifact_count": 1,
+        }
+        (self.raw_dir / "run-result.json").write_text(
+            json.dumps(run_result, indent=2) + "\n", encoding="utf-8"
         )
-        (root / "runtime/program-inventory.v1.json").write_text(
-            json.dumps(
-                {
-                    "observation_scope": {
-                        "observed_at": OBSERVED,
-                        "observation_id": OBS_ID,
-                        "binding_eligible": True,
-                    },
-                    "collection_provenance": {
-                        "host": "heim-pc",
-                        "collector_sha256": sha(collector_script),
-                        "raw_manifest_sha256": "d" * 64,
-                        "raw_artifact_count": 7,
-                    },
-                }
-            ),
-            encoding="utf-8",
+        subprocess.run(
+            [
+                "/usr/bin/python3",
+                "scripts/generate_program_inventory.py",
+                "--raw-dir",
+                str(self.raw_dir),
+                "--summary-out",
+                str(root / "runtime/program-inventory-summary.md"),
+                "--json-out",
+                str(root / "runtime/program-inventory.v1.json"),
+                "--generated-at",
+                GENERATED,
+            ],
+            cwd=root,
+            check=True,
         )
 
         git(root, "init", "-q")
@@ -169,9 +217,9 @@ class T(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def binding(self):
+    def execution_receipts(self):
         software_argv = [
-            "python3",
+            "/usr/bin/python3",
             "scripts/generate_software_inventory.py",
             "--observation-id",
             OBS_ID,
@@ -179,13 +227,35 @@ class T(unittest.TestCase):
             OBSERVED,
         ]
         program_argv = [
-            "python3",
+            "/usr/bin/python3",
             "scripts/collect_program_inventory.py",
             "--observation-id",
             OBS_ID,
             "--observed-at",
             OBSERVED,
+            "--output-dir",
+            str(self.raw_dir),
         ]
+        renderer_argv = [
+            "/usr/bin/python3",
+            "scripts/generate_program_inventory.py",
+            "--raw-dir",
+            str(self.raw_dir),
+            "--summary-out",
+            str(self.root / "runtime/program-inventory-summary.md"),
+            "--json-out",
+            str(self.root / "runtime/program-inventory.v1.json"),
+            "--generated-at",
+            GENERATED,
+        ]
+        return (
+            execution_receipt("1" * 24, software_argv, RECEIPT_A, cwd=self.root),
+            execution_receipt("2" * 24, program_argv, RECEIPT_B, cwd=self.root),
+            execution_receipt("3" * 24, renderer_argv, "e" * 64, cwd=self.root),
+        )
+
+    def binding(self):
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
         return build_current_binding(
             root=self.root,
             contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
@@ -193,12 +263,9 @@ class T(unittest.TestCase):
             observation_id=OBS_ID,
             started_at=START,
             completed_at=DONE,
-            software_execution_receipt=execution_receipt(
-                "1" * 24, software_argv, RECEIPT_A
-            ),
-            program_execution_receipt=execution_receipt(
-                "2" * 24, program_argv, RECEIPT_B
-            ),
+            software_execution_receipt=software_receipt,
+            program_execution_receipt=program_receipt,
+            program_renderer_execution_receipt=renderer_receipt,
         )
 
     def test_builds_fail_closed_binding(self):
@@ -214,7 +281,7 @@ class T(unittest.TestCase):
             result["provenance"]["program"]["execution_receipt_sha256"], RECEIPT_B
         )
         self.assertEqual(
-            result["provenance"]["program"]["raw_manifest_sha256"], "d" * 64
+            result["provenance"]["program"]["raw_manifest_sha256"], self.raw_digest
         )
         self.assertEqual(
             result["provenance"]["software"]["execution"]["task_id"], "1" * 24
@@ -267,24 +334,10 @@ class T(unittest.TestCase):
         self.assertFalse(evidence.exists())
 
     def test_rejects_unbound_observation_argv(self):
-        software_argv = [
-            "python3",
-            "scripts/generate_software_inventory.py",
-            "--observation-id",
-            "e" * 64,
-            "--observed-at",
-            OBSERVED,
-            OBS_ID,
-        ]
-        program_argv = [
-            "python3",
-            "scripts/collect_program_inventory.py",
-            "--observation-id",
-            OBS_ID,
-            "--observed-at",
-            OBSERVED,
-        ]
-        with self.assertRaisesRegex(Day1EvidenceError, "does not bind observation_id"):
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
+        software_receipt["argv"][3] = "e" * 64
+        software_receipt["argv_sha256"] = argv_sha(software_receipt["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "does not bind --observation-id"):
             build_current_binding(
                 root=self.root,
                 contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
@@ -292,32 +345,39 @@ class T(unittest.TestCase):
                 observation_id=OBS_ID,
                 started_at=START,
                 completed_at=DONE,
-                software_execution_receipt=execution_receipt(
-                    "1" * 24, software_argv, RECEIPT_A
-                ),
-                program_execution_receipt=execution_receipt(
-                    "2" * 24, program_argv, RECEIPT_B
-                ),
+                software_execution_receipt=software_receipt,
+                program_execution_receipt=program_receipt,
+                program_renderer_execution_receipt=renderer_receipt,
             )
 
-    def test_rejects_execution_receipt_argv_hash_mismatch(self):
-        software_argv = [
-            "python3",
+    def test_rejects_script_name_only_as_nonexecuted_argument(self):
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
+        software_receipt["argv"] = [
+            "/usr/bin/python3",
+            "-c",
+            "print('not the collector')",
             "scripts/generate_software_inventory.py",
             "--observation-id",
             OBS_ID,
             "--observed-at",
             OBSERVED,
         ]
-        program_argv = [
-            "python3",
-            "scripts/collect_program_inventory.py",
-            "--observation-id",
-            OBS_ID,
-            "--observed-at",
-            OBSERVED,
-        ]
-        software_receipt = execution_receipt("1" * 24, software_argv, RECEIPT_A)
+        software_receipt["argv_sha256"] = argv_sha(software_receipt["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "must execute /usr/bin/python3"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=software_receipt,
+                program_execution_receipt=program_receipt,
+                program_renderer_execution_receipt=renderer_receipt,
+            )
+
+    def test_rejects_execution_receipt_argv_hash_mismatch(self):
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
         software_receipt["argv_sha256"] = "f" * 64
         with self.assertRaisesRegex(Day1EvidenceError, "does not authenticate argv"):
             build_current_binding(
@@ -328,29 +388,12 @@ class T(unittest.TestCase):
                 started_at=START,
                 completed_at=DONE,
                 software_execution_receipt=software_receipt,
-                program_execution_receipt=execution_receipt(
-                    "2" * 24, program_argv, RECEIPT_B
-                ),
+                program_execution_receipt=program_receipt,
+                program_renderer_execution_receipt=renderer_receipt,
             )
 
     def test_rejects_noncompleted_execution_receipt(self):
-        software_argv = [
-            "python3",
-            "scripts/generate_software_inventory.py",
-            "--observation-id",
-            OBS_ID,
-            "--observed-at",
-            OBSERVED,
-        ]
-        program_argv = [
-            "python3",
-            "scripts/collect_program_inventory.py",
-            "--observation-id",
-            OBS_ID,
-            "--observed-at",
-            OBSERVED,
-        ]
-        software_receipt = execution_receipt("1" * 24, software_argv, RECEIPT_A)
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
         software_receipt["state"] = "failed"
         with self.assertRaisesRegex(Day1EvidenceError, "not terminal successful"):
             build_current_binding(
@@ -361,10 +404,45 @@ class T(unittest.TestCase):
                 started_at=START,
                 completed_at=DONE,
                 software_execution_receipt=software_receipt,
-                program_execution_receipt=execution_receipt(
-                    "2" * 24, program_argv, RECEIPT_B
-                ),
+                program_execution_receipt=program_receipt,
+                program_renderer_execution_receipt=renderer_receipt,
             )
+
+    def test_rejects_renderer_bound_to_different_raw_run(self):
+        software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
+        other = self.root / "other-raw-run"
+        other.mkdir()
+        raw_index = renderer_receipt["argv"].index("--raw-dir") + 1
+        renderer_receipt["argv"][raw_index] = str(other)
+        renderer_receipt["argv_sha256"] = argv_sha(renderer_receipt["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "does not bind --raw-dir"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=software_receipt,
+                program_execution_receipt=program_receipt,
+                program_renderer_execution_receipt=renderer_receipt,
+            )
+
+    def test_rejects_tampered_raw_run(self):
+        (self.raw_dir / "a.txt").write_bytes(b"changed")
+        with self.assertRaisesRegex(Day1EvidenceError, "raw manifest"):
+            self.binding()
+
+    def test_rejects_manually_modified_rendered_output(self):
+        path = self.root / "runtime/program-inventory.v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["manual_override"] = True
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(Day1EvidenceError, "deterministic render"):
+            self.binding()
 
     def test_write_evidence_rejects_path_outside_repository(self):
         result = self.binding()

@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -113,39 +114,45 @@ def _sha256_json(value: Any) -> str:
     )
 
 
+def _single_option_value(values: list[str], option: str, *, field: str) -> str:
+    positions = [index for index, value in enumerate(values) if value == option]
+    if len(positions) != 1:
+        raise Day1EvidenceError(f"{field} argv must bind exactly one {option}")
+    index = positions[0]
+    if index + 1 >= len(values):
+        raise Day1EvidenceError(f"{field} argv is missing a value for {option}")
+    return values[index + 1]
+
+
 def _require_argv_binding(
     argv: Iterable[str],
     *,
-    observation_id: str,
-    observed_at: str,
+    root: Path,
     expected_script: str,
+    required_options: dict[str, str],
     field: str,
 ) -> list[str]:
     values = list(argv)
-    if not values:
-        raise Day1EvidenceError(f"{field} argv is empty")
-    if expected_script not in values:
-        raise Day1EvidenceError(f"{field} argv does not bind {expected_script}")
-    for option, expected, label in (
-        ("--observation-id", observation_id, "observation_id"),
-        ("--observed-at", observed_at, "observed_at"),
-    ):
-        positions = [index for index, value in enumerate(values) if value == option]
-        if len(positions) != 1:
-            raise Day1EvidenceError(f"{field} argv must bind exactly one {option}")
-        index = positions[0]
-        if index + 1 >= len(values) or values[index + 1] != expected:
-            raise Day1EvidenceError(f"{field} argv does not bind {label}")
+    if len(values) < 2:
+        raise Day1EvidenceError(f"{field} argv is incomplete")
+    if values[0] != "/usr/bin/python3" or values[1] != expected_script:
+        raise Day1EvidenceError(
+            f"{field} must execute /usr/bin/python3 {expected_script} directly"
+        )
+    for option, expected in required_options.items():
+        actual = _single_option_value(values, option, field=field)
+        if actual != expected:
+            raise Day1EvidenceError(f"{field} argv does not bind {option}")
     return values
 
 
 def _verify_execution_receipt(
     receipt: dict[str, Any],
     *,
+    root: Path,
     authoritative_host: str,
-    observation_id: str,
-    observed_at: str,
     expected_script: str,
+    required_options: dict[str, str],
     field: str,
 ) -> dict[str, Any]:
     task_id = receipt.get("task_id")
@@ -161,15 +168,18 @@ def _verify_execution_receipt(
         raise Day1EvidenceError(f"{field} receipt host is not authoritative heim-pc")
     if receipt.get("state") != "completed":
         raise Day1EvidenceError(f"{field} receipt is not terminal successful")
+    cwd = receipt.get("cwd")
+    if not isinstance(cwd, str) or Path(cwd).resolve() != root:
+        raise Day1EvidenceError(f"{field} receipt cwd is not the bound repository root")
 
     argv = receipt.get("argv")
     if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
         raise Day1EvidenceError(f"{field} receipt argv must be an array of strings")
     argv = _require_argv_binding(
         argv,
-        observation_id=observation_id,
-        observed_at=observed_at,
+        root=root,
         expected_script=expected_script,
+        required_options=required_options,
         field=field,
     )
     argv_sha256 = receipt.get("argv_sha256")
@@ -191,10 +201,105 @@ def _verify_execution_receipt(
         "unit": expected_unit,
         "host": authoritative_host,
         "state": "completed",
+        "cwd": str(root),
         "argv": argv,
         "argv_sha256": argv_sha256,
         "lifecycle_receipt_sha256": lifecycle_receipt_sha256,
     }
+
+
+def _raw_manifest_sha256(raw_dir: Path) -> tuple[str, int]:
+    entries: list[tuple[str, str]] = []
+    for path in sorted(raw_dir.iterdir(), key=lambda item: item.name):
+        if not path.is_file() or path.name in {"run-result.json", "SUMMARY.md"}:
+            continue
+        entries.append((path.name, _sha256_file(path)))
+    payload = "".join(f"{name}\0{digest}\n" for name, digest in entries).encode()
+    return _sha256_bytes(payload), len(entries)
+
+
+def _verify_program_raw_run(
+    raw_dir: Path,
+    *,
+    authoritative_host: str,
+    observation_id: str,
+    observed_at: str,
+    collector_sha256: str,
+    raw_manifest_sha256: str,
+    raw_artifact_count: int,
+) -> dict[str, Any]:
+    if not raw_dir.is_dir():
+        raise Day1EvidenceError("program raw inventory directory is missing")
+    run_result_path = raw_dir / "run-result.json"
+    try:
+        run_result = json.loads(run_result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Day1EvidenceError("program raw run-result is missing or invalid") from exc
+    expected = {
+        "out": str(raw_dir),
+        "host": authoritative_host,
+        "observation_id": observation_id,
+        "observed_at": observed_at,
+        "collector_sha256": collector_sha256,
+        "raw_manifest_sha256": raw_manifest_sha256,
+        "raw_artifact_count": raw_artifact_count,
+        "binding_eligible": True,
+    }
+    for key, value in expected.items():
+        if run_result.get(key) != value:
+            raise Day1EvidenceError(f"program raw run-result mismatches {key}")
+    manifest, count = _raw_manifest_sha256(raw_dir)
+    if manifest != raw_manifest_sha256 or count != raw_artifact_count:
+        raise Day1EvidenceError("program raw manifest does not match the collected raw run")
+    return run_result
+
+
+def _verify_renderer_outputs(
+    *,
+    root: Path,
+    renderer_relpath: str,
+    raw_dir: Path,
+    generated_at: str,
+    summary_path: Path,
+    json_path: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="heim-pc-day1-render-") as tmp:
+        tmp_root = Path(tmp)
+        expected_summary = tmp_root / "program-inventory-summary.md"
+        expected_json = tmp_root / "program-inventory.v1.json"
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3",
+                renderer_relpath,
+                "--raw-dir",
+                str(raw_dir),
+                "--summary-out",
+                str(expected_summary),
+                "--json-out",
+                str(expected_json),
+                "--generated-at",
+                generated_at,
+            ],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise Day1EvidenceError(
+                "program renderer verification failed: "
+                + completed.stderr.strip()[:500]
+            )
+        if expected_summary.read_bytes() != summary_path.read_bytes():
+            raise Day1EvidenceError(
+                "program summary is not the deterministic render of the bound raw run"
+            )
+        if expected_json.read_bytes() != json_path.read_bytes():
+            raise Day1EvidenceError(
+                "program JSON is not the deterministic render of the bound raw run"
+            )
 
 
 def build_current_binding(
@@ -207,6 +312,7 @@ def build_current_binding(
     completed_at: str,
     software_execution_receipt: dict[str, Any],
     program_execution_receipt: dict[str, Any],
+    program_renderer_execution_receipt: dict[str, Any],
 ) -> dict[str, Any]:
     root = root.resolve()
     _require_hex(source_revision, HEX40, field="source_revision")
@@ -285,6 +391,8 @@ def build_current_binding(
     scope = program.get("observation_scope", {})
     provenance = program.get("collection_provenance", {})
     program_observed_at = str(scope.get("observed_at", ""))
+    program_generated_at = str(program.get("generated_at", ""))
+    _parse_time(program_generated_at)
     program_id = scope.get("observation_id")
     program_binding = scope.get("binding_eligible")
     program_observed = _parse_time(program_observed_at)
@@ -294,6 +402,10 @@ def build_current_binding(
         raise Day1EvidenceError("program JSON observed_at falls outside observation session")
     if provenance.get("host") != authoritative_host:
         raise Day1EvidenceError("program inventory host is not authoritative heim-pc")
+    source_inventory_path = program.get("source_inventory_path")
+    if not isinstance(source_inventory_path, str) or not source_inventory_path:
+        raise Day1EvidenceError("program inventory is missing source_inventory_path")
+    raw_dir = Path(source_inventory_path).expanduser().resolve()
     metadata["runtime/program-inventory.v1.json"] = {
         "observed_at": program_observed_at,
         "observation_id": program_id,
@@ -310,19 +422,39 @@ def build_current_binding(
 
     software_execution = _verify_execution_receipt(
         software_execution_receipt,
+        root=root,
         authoritative_host=authoritative_host,
-        observation_id=observation_id,
-        observed_at=software_observed_at,
         expected_script=software_script,
+        required_options={
+            "--observation-id": observation_id,
+            "--observed-at": software_observed_at,
+        },
         field="software execution",
     )
     program_execution = _verify_execution_receipt(
         program_execution_receipt,
+        root=root,
         authoritative_host=authoritative_host,
-        observation_id=observation_id,
-        observed_at=program_observed_at,
         expected_script=program_collector,
-        field="program execution",
+        required_options={
+            "--observation-id": observation_id,
+            "--observed-at": program_observed_at,
+            "--output-dir": str(raw_dir),
+        },
+        field="program collector execution",
+    )
+    renderer_execution = _verify_execution_receipt(
+        program_renderer_execution_receipt,
+        root=root,
+        authoritative_host=authoritative_host,
+        expected_script=program_renderer,
+        required_options={
+            "--raw-dir": str(raw_dir),
+            "--summary-out": str(summary_path),
+            "--json-out": str(program_path),
+            "--generated-at": program_generated_at,
+        },
+        field="program renderer execution",
     )
 
     for relpath in expected_paths:
@@ -347,6 +479,23 @@ def build_current_binding(
     if not isinstance(raw_artifact_count, int) or raw_artifact_count < 1:
         raise Day1EvidenceError("program raw_artifact_count must be a positive integer")
 
+    _verify_program_raw_run(
+        raw_dir,
+        authoritative_host=authoritative_host,
+        observation_id=observation_id,
+        observed_at=program_observed_at,
+        collector_sha256=program_collector_sha,
+        raw_manifest_sha256=raw_manifest_sha,
+        raw_artifact_count=raw_artifact_count,
+    )
+    _verify_renderer_outputs(
+        root=root,
+        renderer_relpath=program_renderer,
+        raw_dir=raw_dir,
+        generated_at=program_generated_at,
+        summary_path=summary_path,
+        json_path=program_path,
+    )
 
     return {
         "host": authoritative_host,
@@ -378,6 +527,12 @@ def build_current_binding(
                 ],
                 "execution": program_execution,
                 "argv": program_execution["argv"],
+                "renderer_execution_receipt_sha256": renderer_execution[
+                    "lifecycle_receipt_sha256"
+                ],
+                "renderer_execution": renderer_execution,
+                "renderer_argv": renderer_execution["argv"],
+                "raw_dir": str(raw_dir),
                 "raw_manifest_sha256": raw_manifest_sha,
                 "raw_artifact_count": raw_artifact_count,
             },
@@ -485,6 +640,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--completed-at", required=True)
     parser.add_argument("--software-execution-receipt-json", required=True)
     parser.add_argument("--program-execution-receipt-json", required=True)
+    parser.add_argument("--program-renderer-execution-receipt-json", required=True)
     parser.add_argument("--update-contract", action="store_true")
     return parser.parse_args()
 
@@ -512,6 +668,10 @@ def main() -> None:
         program_execution_receipt=_json_object(
             args.program_execution_receipt_json,
             field="program execution receipt",
+        ),
+        program_renderer_execution_receipt=_json_object(
+            args.program_renderer_execution_receipt_json,
+            field="program renderer execution receipt",
         ),
     )
     write_evidence(
