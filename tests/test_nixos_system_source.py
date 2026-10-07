@@ -310,6 +310,20 @@ class T(unittest.TestCase):
         )
         self.assertFalse(admission["historical_inventory_may_grant_readiness"])
 
+        enforcement = contract["enforcement"]
+        self.assertFalse(enforcement["runtime_consumer_implemented"])
+        self.assertFalse(
+            enforcement["absence_of_runtime_consumer_may_grant_readiness"]
+        )
+        self.assertEqual(
+            enforcement["current_authority"],
+            "normative-contract-and-regression-gate-only",
+        )
+        self.assertIn(
+            "reviewed productive-role-assumption consumer",
+            enforcement["successor_requirement"],
+        )
+
         inventory = contract["inventory"]
         self.assertEqual(inventory["authoritative_host"], "heim-pc")
         self.assertIsNone(inventory["current_binding"])

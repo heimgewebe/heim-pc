@@ -135,5 +135,11 @@
     "candidate presence proves day1 necessity",
     "isolated dual-os installation implies productive parity",
     "this contract grants storage or boot mutation authority"
-  ]
+  ],
+  "enforcement": {
+    "runtime_consumer_implemented": false,
+    "absence_of_runtime_consumer_may_grant_readiness": false,
+    "current_authority": "normative-contract-and-regression-gate-only",
+    "successor_requirement": "bind a reviewed productive-role-assumption consumer before readiness may become ready"
+  }
 }

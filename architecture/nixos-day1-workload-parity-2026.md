@@ -54,6 +54,10 @@ Day-1-Parität ist erst `ready`, wenn gleichzeitig:
 
 Der maschinenlesbare Vertrag liegt in `nixos/production/day1-workload-parity-contract-v1.json`.
 
+### Enforcement-Grenze von v1
+
+v1 definiert die normative Readiness- und Reconciliation-Semantik und wird durch Regressionstests gebunden. Ein produktiver Runtime-/Cutover-Consumer ist in diesem PR **noch nicht implementiert**. Diese Abwesenheit ist fail-closed zu interpretieren: Sie darf niemals `ready` erzeugen oder eine produktive Rollenübernahme autorisieren. Bevor ein späterer Pfad `ready` konsumieren darf, muss ein eigener reviewter Consumer exakt diesen Vertrag binden.
+
 ## Historische Seed-Gruppen
 
 Die folgenden Gruppen strukturieren nur die Planung; sie sind **keine Vollständigkeitsliste**. Vollständigkeit entsteht durch die item-genaue Reconciliation beider historischen Inventaroutputs gegen den frischen Heim-PC-Readback.
