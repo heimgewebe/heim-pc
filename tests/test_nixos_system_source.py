@@ -463,7 +463,29 @@ class T(unittest.TestCase):
         self.assertTrue(
             provenance["program"]["execution_receipt_must_bind_observation_id_and_argv"]
         )
+        self.assertTrue(
+            provenance["program"]["collector_execution_receipt_sha256_required"]
+        )
+        self.assertTrue(
+            provenance["program"][
+                "collector_execution_receipt_must_bind_observation_id_argv_and_output_dir"
+            ]
+        )
+        self.assertTrue(
+            provenance["program"]["renderer_execution_receipt_sha256_required"]
+        )
+        self.assertTrue(
+            provenance["program"][
+                "renderer_execution_receipt_must_bind_raw_dir_outputs_and_generated_at"
+            ]
+        )
         self.assertTrue(provenance["program"]["raw_manifest_sha256_required"])
+        self.assertTrue(
+            provenance["program"]["raw_manifest_must_match_bound_raw_run"]
+        )
+        self.assertTrue(
+            provenance["program"]["rendered_outputs_must_equal_deterministic_rerender"]
+        )
         self.assertEqual(
             current_binding_schema["required_output_paths"],
             inventory["canonical_outputs"],
