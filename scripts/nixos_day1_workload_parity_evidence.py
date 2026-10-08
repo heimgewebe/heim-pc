@@ -45,6 +45,60 @@ def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
+def _snapshot_output_bytes(path: Path) -> bytes:
+    """Read one regular output from a stable descriptor and path identity."""
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        )
+
+    try:
+        linked_before = path.lstat()
+        if (
+            not stat.S_ISREG(linked_before.st_mode)
+            or linked_before.st_nlink != 1
+            or linked_before.st_uid != os.getuid()
+            or linked_before.st_size > 32 * 1024 * 1024
+        ):
+            raise Day1EvidenceError(f"unsafe inventory output: {path}")
+        descriptor = os.open(path, flags)
+        try:
+            opened_before = os.fstat(descriptor)
+            if identity(linked_before) != identity(opened_before):
+                raise Day1EvidenceError(f"inventory output changed during open: {path}")
+            chunks: list[bytes] = []
+            remaining = opened_before.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            opened_after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        linked_after = path.lstat()
+    except OSError as exc:
+        raise Day1EvidenceError(f"cannot read stable inventory output: {path}") from exc
+    if (
+        remaining != 0
+        or identity(opened_before) != identity(opened_after)
+        or identity(opened_before) != identity(linked_after)
+    ):
+        raise Day1EvidenceError(f"inventory output changed during snapshot: {path}")
+    return b"".join(chunks)
+
+
+def _verify_current_output_snapshots(root: Path, snapshots: dict[str, bytes]) -> None:
+    for relpath, original in snapshots.items():
+        if _snapshot_output_bytes(root / relpath) != original:
+            raise Day1EvidenceError(f"bound output changed after verified snapshot: {relpath}")
+
+
 def _parse_time(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -55,8 +109,11 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _frontmatter(path: Path) -> dict[str, str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
+def _frontmatter(path: Path, *, snapshot: bytes | None = None) -> dict[str, str]:
+    try:
+        lines = (snapshot if snapshot is not None else path.read_bytes()).decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise Day1EvidenceError(f"{path} is not UTF-8") from exc
     if not lines or lines[0] != "---":
         raise Day1EvidenceError(f"{path} is missing YAML frontmatter")
     out: dict[str, str] = {}
@@ -432,8 +489,8 @@ def _verify_renderer_outputs(
     renderer_relpath: str,
     raw_dir: Path,
     generated_at: str,
-    summary_path: Path,
-    json_path: Path,
+    summary_bytes: bytes,
+    json_bytes: bytes,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="heim-pc-day1-render-") as tmp:
         tmp_root = Path(tmp)
@@ -464,11 +521,11 @@ def _verify_renderer_outputs(
                 "program renderer verification failed: "
                 + completed.stderr.strip()[:500]
             )
-        if expected_summary.read_bytes() != summary_path.read_bytes():
+        if expected_summary.read_bytes() != summary_bytes:
             raise Day1EvidenceError(
                 "program summary is not the deterministic render of the bound raw run"
             )
-        if expected_json.read_bytes() != json_path.read_bytes():
+        if expected_json.read_bytes() != json_bytes:
             raise Day1EvidenceError(
                 "program JSON is not the deterministic render of the bound raw run"
             )
@@ -517,11 +574,13 @@ def build_current_binding(
     if expected_paths != list(inventory["canonical_outputs"]):
         raise Day1EvidenceError("contract required outputs diverge from canonical outputs")
 
+    # All metadata, authenticated digests and binding hashes use identical bytes.
+    snapshots = {relpath: _snapshot_output_bytes(root / relpath) for relpath in expected_paths}
     outputs: list[dict[str, Any]] = []
     metadata: dict[str, dict[str, Any]] = {}
 
     software_path = root / "runtime/software-inventory.md"
-    software_meta = _frontmatter(software_path)
+    software_meta = _frontmatter(software_path, snapshot=snapshots["runtime/software-inventory.md"])
     software_observed_at = software_meta.get("observed_at", "")
     software_id = software_meta.get("observation_id", "")
     software_binding = _bool_field(
@@ -541,7 +600,7 @@ def build_current_binding(
     }
 
     summary_path = root / "runtime/program-inventory-summary.md"
-    summary_meta = _frontmatter(summary_path)
+    summary_meta = _frontmatter(summary_path, snapshot=snapshots["runtime/program-inventory-summary.md"])
     summary_observed_at = summary_meta.get("observed_at", "")
     summary_id = summary_meta.get("observation_id", "")
     summary_binding = _bool_field(
@@ -559,7 +618,7 @@ def build_current_binding(
     }
 
     program_path = root / "runtime/program-inventory.v1.json"
-    program = json.loads(program_path.read_text(encoding="utf-8"))
+    program = json.loads(snapshots["runtime/program-inventory.v1.json"].decode("utf-8"))
     scope = program.get("observation_scope", {})
     provenance = program.get("collection_provenance", {})
     program_observed_at = str(scope.get("observed_at", ""))
@@ -673,7 +732,7 @@ def build_current_binding(
         "host": authoritative_host,
         "observed_at": software_observed_at,
         "observation_id": observation_id,
-        "output_sha256": _sha256_file(software_path),
+        "output_sha256": _sha256_bytes(snapshots["runtime/software-inventory.md"]),
     }:
         raise Day1EvidenceError(
             "software inventory does not match authenticated collector output"
@@ -683,7 +742,7 @@ def build_current_binding(
         path = root / relpath
         if not path.is_file():
             raise Day1EvidenceError(f"required output missing: {relpath}")
-        row = {"path": relpath, "sha256": _sha256_file(path), **metadata[relpath]}
+        row = {"path": relpath, "sha256": _sha256_bytes(snapshots[relpath]), **metadata[relpath]}
         outputs.append(row)
 
     software_collector_sha = _source_file_digest(root, source_revision, software_script)
@@ -721,9 +780,10 @@ def build_current_binding(
         renderer_relpath=program_renderer,
         raw_dir=raw_dir,
         generated_at=program_generated_at,
-        summary_path=summary_path,
-        json_path=program_path,
+        summary_bytes=snapshots["runtime/program-inventory-summary.md"],
+        json_bytes=snapshots["runtime/program-inventory.v1.json"],
     )
+    _verify_current_output_snapshots(root, snapshots)
 
     # Captured stdout is used for verification only and remains local/private.
     for execution in (software_execution, program_execution, renderer_execution):
@@ -803,6 +863,21 @@ def write_evidence(
         raise Day1EvidenceError(
             "reviewed Day-1 contract is not valid UTF-8 JSON"
         ) from exc
+
+    # Reject output drift between authentication and binding publication.
+    bound_rows = binding.get("outputs")
+    required_paths = reviewed_contract["inventory"]["canonical_outputs"]
+    if (
+        not isinstance(bound_rows, list)
+        or len(bound_rows) != len(required_paths)
+        or any(not isinstance(row, dict) for row in bound_rows)
+        or [row.get("path") for row in bound_rows] != required_paths
+    ):
+        raise Day1EvidenceError("binding output paths differ from reviewed contract")
+    for row in bound_rows:
+        relpath = row["path"]
+        if _sha256_bytes(_snapshot_output_bytes(root / relpath)) != row.get("sha256"):
+            raise Day1EvidenceError(f"bound output changed before evidence publication: {relpath}")
 
     expected_bound_contract = copy.deepcopy(reviewed_contract)
     expected_bound_contract["inventory"]["current_binding"] = binding

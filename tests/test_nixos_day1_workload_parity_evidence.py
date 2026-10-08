@@ -720,6 +720,43 @@ args.json_out.write_text(
         with self.assertRaisesRegex(Day1EvidenceError, "captured stdout differs"):
             self.binding()
 
+    def test_rejects_swapped_software_after_authenticated_snapshot(self):
+        software = self.root / "runtime/software-inventory.md"
+        read_snapshot = binder._snapshot_output_bytes
+        swapped = [False]
+
+        def swap_after_snapshot(path):
+            captured = read_snapshot(path)
+            if path == software and not swapped[0]:
+                swapped[0] = True
+                software.write_text(
+                    software.read_text(encoding="utf-8") + "fabricated service\\n",
+                    encoding="utf-8",
+                )
+            return captured
+
+        with patch.object(binder, "_snapshot_output_bytes", side_effect=swap_after_snapshot):
+            with self.assertRaisesRegex(Day1EvidenceError, "changed after verified snapshot"):
+                self.binding()
+        self.assertTrue(swapped[0])
+
+    def test_rejects_swapped_program_json_after_snapshot(self):
+        program = self.root / "runtime/program-inventory.v1.json"
+        read_snapshot = binder._snapshot_output_bytes
+        swapped = [False]
+
+        def swap_after_snapshot(path):
+            captured = read_snapshot(path)
+            if path == program and not swapped[0]:
+                swapped[0] = True
+                program.write_bytes(captured + b" ")
+            return captured
+
+        with patch.object(binder, "_snapshot_output_bytes", side_effect=swap_after_snapshot):
+            with self.assertRaisesRegex(Day1EvidenceError, "changed after verified snapshot"):
+                self.binding()
+        self.assertTrue(swapped[0])
+
     def test_rejects_modified_software_output_after_collection(self):
         path = self.root / "runtime/software-inventory.md"
         path.write_text(path.read_text() + "fabricated: service\n", encoding="utf-8")
@@ -802,6 +839,28 @@ args.json_out.write_text(
                 update_contract=True,
             )
         self.assertFalse(evidence.exists())
+
+    def test_write_evidence_rejects_modified_output_after_binding(self):
+        result = self.binding()
+        software = self.root / "runtime/software-inventory.md"
+        software.write_text(
+            software.read_text(encoding="utf-8") + "late injection\\n",
+            encoding="utf-8",
+        )
+        evidence = (
+            self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
+        )
+        contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
+        with self.assertRaisesRegex(Day1EvidenceError, "changed before evidence publication"):
+            write_evidence(
+                root=self.root,
+                contract_path=contract,
+                evidence_path=evidence,
+                binding=result,
+                update_contract=True,
+            )
+        self.assertFalse(evidence.exists())
+        self.assertIsNone(json.loads(contract.read_text())["inventory"]["current_binding"])
 
     def test_write_evidence_keeps_readiness_blocked(self):
         result = self.binding()
