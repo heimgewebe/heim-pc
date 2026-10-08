@@ -572,6 +572,33 @@ args.json_out.write_text(
                 program_renderer_execution_receipt=renderer_receipt,
             )
 
+    def test_rejects_raw_swap_during_deterministic_rerender(self):
+        verified_render = binder._verify_renderer_outputs
+        seen = []
+
+        def swap_real_run_after_snapshot(**kwargs):
+            # Only the private copy is rendered; replacing the original must
+            # never influence the verified input set or remain undetected.
+            copied = kwargs["raw_dir"]
+            self.assertNotEqual(copied, self.raw_dir)
+            self.assertEqual((copied / "a.txt").read_bytes(), b"alpha")
+            seen.append(copied)
+            (self.raw_dir / "a.txt").write_bytes(b"replaced")
+            return verified_render(**kwargs)
+
+        with patch.object(binder, "_verify_renderer_outputs", side_effect=swap_real_run_after_snapshot):
+            with self.assertRaisesRegex(Day1EvidenceError, "raw evidence changed"):
+                self.binding()
+        self.assertEqual(len(seen), 1)
+
+    def test_rejects_symlinked_raw_manifest_member(self):
+        original = self.raw_dir / "a.txt"
+        alternative = self.raw_dir / "elsewhere.txt"
+        original.rename(alternative)
+        original.symlink_to(alternative)
+        with self.assertRaisesRegex(Day1EvidenceError, "unsafe inventory output"):
+            self.binding()
+
     def test_rejects_tampered_raw_run(self):
         (self.raw_dir / "a.txt").write_bytes(b"changed")
         with self.assertRaisesRegex(Day1EvidenceError, "raw manifest"):
@@ -720,13 +747,31 @@ args.json_out.write_text(
         with self.assertRaisesRegex(Day1EvidenceError, "captured stdout differs"):
             self.binding()
 
+    def test_rejects_symlinked_canonical_output_ancestor(self):
+        # The canonical runtime/ basename must not be a link to mutable
+        # inventory data elsewhere even when the target is regular same-UID.
+        runtime = self.root / "runtime"
+        moved = self.root / "external-runtime"
+        runtime.rename(moved)
+        runtime.symlink_to(moved, target_is_directory=True)
+        with self.assertRaisesRegex(Day1EvidenceError, "cannot read stable inventory output"):
+            self.binding()
+
+    def test_rejects_symlinked_canonical_output_file(self):
+        software = self.root / "runtime/software-inventory.md"
+        moved = self.root / "runtime/software-inventory-backup.md"
+        software.rename(moved)
+        software.symlink_to(moved)
+        with self.assertRaisesRegex(Day1EvidenceError, "unsafe inventory output"):
+            self.binding()
+
     def test_rejects_swapped_software_after_authenticated_snapshot(self):
         software = self.root / "runtime/software-inventory.md"
         read_snapshot = binder._snapshot_output_bytes
         swapped = [False]
 
-        def swap_after_snapshot(path):
-            captured = read_snapshot(path)
+        def swap_after_snapshot(path, **kwargs):
+            captured = read_snapshot(path, **kwargs)
             if path == software and not swapped[0]:
                 swapped[0] = True
                 software.write_text(
@@ -745,8 +790,8 @@ args.json_out.write_text(
         read_snapshot = binder._snapshot_output_bytes
         swapped = [False]
 
-        def swap_after_snapshot(path):
-            captured = read_snapshot(path)
+        def swap_after_snapshot(path, **kwargs):
+            captured = read_snapshot(path, **kwargs)
             if path == program and not swapped[0]:
                 swapped[0] = True
                 program.write_bytes(captured + b" ")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = ROOT / "nixos/production/day1-workload-parity-contract-v1.json"
@@ -45,7 +45,7 @@ def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
-def _snapshot_output_bytes(path: Path) -> bytes:
+def _snapshot_output_bytes(path: Path, *, max_bytes: int = 32 * 1024 * 1024) -> bytes:
     """Read one regular output from a stable descriptor and path identity."""
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -56,32 +56,49 @@ def _snapshot_output_bytes(path: Path) -> bytes:
             info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
         )
 
+    if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise Day1EvidenceError(f"inventory output path must be absolute and normalized: {path}")
+
+    # O_NOFOLLOW on the final component alone does not protect runtime/ or
+    # any other ancestor. Traverse every component from / using directory
+    # descriptors and refuse symlinks at every level.
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
     try:
-        linked_before = path.lstat()
-        if (
-            not stat.S_ISREG(linked_before.st_mode)
-            or linked_before.st_nlink != 1
-            or linked_before.st_uid != os.getuid()
-            or linked_before.st_size > 32 * 1024 * 1024
-        ):
-            raise Day1EvidenceError(f"unsafe inventory output: {path}")
-        descriptor = os.open(path, flags)
+        directory_fd = os.open("/", directory_flags)
         try:
-            opened_before = os.fstat(descriptor)
-            if identity(linked_before) != identity(opened_before):
-                raise Day1EvidenceError(f"inventory output changed during open: {path}")
-            chunks: list[bytes] = []
-            remaining = opened_before.st_size
-            while remaining:
-                chunk = os.read(descriptor, min(65536, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            opened_after = os.fstat(descriptor)
+            for component in path.parts[1:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            linked_before = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(linked_before.st_mode)
+                or linked_before.st_nlink != 1
+                or linked_before.st_uid != os.getuid()
+                or linked_before.st_size > max_bytes
+            ):
+                raise Day1EvidenceError(f"unsafe inventory output: {path}")
+            descriptor = os.open(path.name, flags, dir_fd=directory_fd)
+            try:
+                opened_before = os.fstat(descriptor)
+                if identity(linked_before) != identity(opened_before):
+                    raise Day1EvidenceError(f"inventory output changed during open: {path}")
+                chunks: list[bytes] = []
+                remaining = opened_before.st_size
+                while remaining:
+                    chunk = os.read(descriptor, min(65536, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                opened_after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            linked_after = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         finally:
-            os.close(descriptor)
-        linked_after = path.lstat()
+            os.close(directory_fd)
     except OSError as exc:
         raise Day1EvidenceError(f"cannot read stable inventory output: {path}") from exc
     if (
@@ -439,17 +456,50 @@ def _verify_execution_receipt(
 
 def _raw_manifest_sha256(raw_dir: Path) -> tuple[str, int]:
     entries: list[tuple[str, str]] = []
-    for path in sorted(raw_dir.iterdir(), key=lambda item: item.name):
-        if not path.is_file() or path.name in {"run-result.json", "SUMMARY.md"}:
+    paths = sorted(raw_dir.iterdir(), key=lambda item: item.name)
+    if len(paths) > 256:
+        raise Day1EvidenceError("program raw evidence has too many entries")
+    for path in paths:
+        if path.name in {"run-result.json", "SUMMARY.md"}:
             continue
-        entries.append((path.name, _sha256_file(path)))
+        entries.append((
+            path.name,
+            _sha256_bytes(_snapshot_output_bytes(path, max_bytes=64 * 1024 * 1024)),
+        ))
     payload = "".join(f"{name}\0{digest}\n" for name, digest in entries).encode()
     return _sha256_bytes(payload), len(entries)
+
+@contextmanager
+def _snapshot_program_raw_dir(raw_dir: Path) -> Iterator[Path]:
+    """Boundedly copy raw evidence once so manifest and renderer see one byte set.
+
+    The private copy is *not* an independent same-UID attestation. It prevents
+    unintended mixing of collection bytes between two verification steps.
+    """
+    with tempfile.TemporaryDirectory(prefix="heim-pc-day1-raw-") as tmp:
+        copied_dir = Path(tmp) / "raw"
+        copied_dir.mkdir(mode=0o700)
+        try:
+            entries = sorted(raw_dir.iterdir(), key=lambda item: item.name)
+        except OSError as exc:
+            raise Day1EvidenceError("program raw evidence directory is inaccessible") from exc
+        if len(entries) > 256:
+            raise Day1EvidenceError("program raw evidence has too many entries")
+        total = 0
+        for entry in entries:
+            raw = _snapshot_output_bytes(entry, max_bytes=64 * 1024 * 1024)
+            total += len(raw)
+            if total > 256 * 1024 * 1024:
+                raise Day1EvidenceError("program raw evidence exceeds snapshot bound")
+            with (copied_dir / entry.name).open("xb") as handle:
+                handle.write(raw)
+        yield copied_dir
 
 
 def _verify_program_raw_run(
     raw_dir: Path,
     *,
+    recorded_raw_dir: Path | None = None,
     authoritative_host: str,
     observation_id: str,
     observed_at: str,
@@ -465,7 +515,7 @@ def _verify_program_raw_run(
     except (OSError, json.JSONDecodeError) as exc:
         raise Day1EvidenceError("program raw run-result is missing or invalid") from exc
     expected = {
-        "out": str(raw_dir),
+        "out": str(recorded_raw_dir if recorded_raw_dir is not None else raw_dir),
         "host": authoritative_host,
         "observation_id": observation_id,
         "observed_at": observed_at,
@@ -491,6 +541,7 @@ def _verify_renderer_outputs(
     generated_at: str,
     summary_bytes: bytes,
     json_bytes: bytes,
+    source_inventory_path: str,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="heim-pc-day1-render-") as tmp:
         tmp_root = Path(tmp)
@@ -521,11 +572,34 @@ def _verify_renderer_outputs(
                 "program renderer verification failed: "
                 + completed.stderr.strip()[:500]
             )
-        if expected_summary.read_bytes() != summary_bytes:
+        # Rendering from a private snapshot changes only the *displayed* raw
+        # source path. Normalize that field to the authenticated original path;
+        # all other computed content must stay byte-for-byte identical.
+        snapshot_path = str(raw_dir)
+        rendered_summary = expected_summary.read_text(encoding="utf-8")
+        marker = f"Raw inventory source: `{snapshot_path}`"
+        if "Raw inventory source:" in rendered_summary:
+            if rendered_summary.count(marker) != 1:
+                raise Day1EvidenceError("renderer raw source display is ambiguous")
+            rendered_summary = rendered_summary.replace(
+                marker, f"Raw inventory source: `{source_inventory_path}`"
+            )
+        if rendered_summary.encode("utf-8") != summary_bytes:
             raise Day1EvidenceError(
                 "program summary is not the deterministic render of the bound raw run"
             )
-        if expected_json.read_bytes() != json_bytes:
+        try:
+            rendered_json = json.loads(expected_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise Day1EvidenceError("program renderer output is not valid JSON") from exc
+        if rendered_json.get("source_inventory_path") != snapshot_path:
+            raise Day1EvidenceError("renderer raw source path does not match snapshot")
+        rendered_json["source_inventory_path"] = source_inventory_path
+        normalized_json = (
+            json.dumps(rendered_json, indent=2, ensure_ascii=False, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        if normalized_json != json_bytes:
             raise Day1EvidenceError(
                 "program JSON is not the deterministic render of the bound raw run"
             )
@@ -760,29 +834,42 @@ def build_current_binding(
     if not isinstance(raw_artifact_count, int) or raw_artifact_count < 1:
         raise Day1EvidenceError("program raw_artifact_count must be a positive integer")
 
-    raw_run = _verify_program_raw_run(
-        raw_dir,
-        authoritative_host=authoritative_host,
-        observation_id=observation_id,
-        observed_at=program_observed_at,
-        collector_sha256=program_collector_sha,
-        raw_manifest_sha256=raw_manifest_sha,
-        raw_artifact_count=raw_artifact_count,
-    )
-    if _captured_json(
-        program_execution["captured_stdout"], field="program collector execution"
-    ) != raw_run:
-        raise Day1EvidenceError(
-            "program raw run-result differs from authenticated collector output"
+    with _snapshot_program_raw_dir(raw_dir) as raw_snapshot:
+        raw_run = _verify_program_raw_run(
+            raw_snapshot,
+            recorded_raw_dir=raw_dir,
+            authoritative_host=authoritative_host,
+            observation_id=observation_id,
+            observed_at=program_observed_at,
+            collector_sha256=program_collector_sha,
+            raw_manifest_sha256=raw_manifest_sha,
+            raw_artifact_count=raw_artifact_count,
         )
-    _verify_renderer_outputs(
-        root=root,
-        renderer_relpath=program_renderer,
-        raw_dir=raw_dir,
-        generated_at=program_generated_at,
-        summary_bytes=snapshots["runtime/program-inventory-summary.md"],
-        json_bytes=snapshots["runtime/program-inventory.v1.json"],
-    )
+        if _captured_json(
+            program_execution["captured_stdout"], field="program collector execution"
+        ) != raw_run:
+            raise Day1EvidenceError(
+                "program raw run-result differs from authenticated collector output"
+            )
+        _verify_renderer_outputs(
+            root=root,
+            renderer_relpath=program_renderer,
+            raw_dir=raw_snapshot,
+            generated_at=program_generated_at,
+            summary_bytes=snapshots["runtime/program-inventory-summary.md"],
+            json_bytes=snapshots["runtime/program-inventory.v1.json"],
+            source_inventory_path=source_inventory_path,
+        )
+        # Preserve the authoritative raw-run reference only while it still
+        # has the same manifest and exact run-result as the snapshot.
+        live_run = json.loads(_snapshot_output_bytes(raw_dir / "run-result.json"))
+        manifest_now, count_now = _raw_manifest_sha256(raw_dir)
+        if (
+            live_run != raw_run
+            or manifest_now != raw_manifest_sha
+            or count_now != raw_artifact_count
+        ):
+            raise Day1EvidenceError("program raw evidence changed during verification")
     _verify_current_output_snapshots(root, snapshots)
 
     # Captured stdout is used for verification only and remains local/private.
