@@ -461,6 +461,12 @@ print(json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":"
 
     def test_builds_fail_closed_binding(self):
         result = self.binding()
+        self.assertEqual(result["kind"], "heim_pc.day1_unadmitted_binding_candidate_v1")
+        for field in (
+            "day1_admission_authorized", "protected_task_output_verified",
+            "executed_source_verified", "immutable_evidence_bundle_verified",
+        ):
+            self.assertIs(result[field], False)
         self.assertEqual(result["host"], "heim-pc")
         self.assertEqual(result["source_revision"], self.revision)
         self.assertEqual(result["observation"]["id"], OBS_ID)
@@ -1119,45 +1125,79 @@ print(json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":"
         self.assertFalse(evidence.exists())
         self.assertIsNone(json.loads(contract.read_text())["inventory"]["current_binding"])
 
-    def test_write_evidence_keeps_readiness_blocked(self):
+    def test_write_evidence_refuses_any_unprotected_current_binding(self):
+        """No output is published from user-UID self-consistent task receipts."""
         result = self.binding()
         evidence = (
-            self.root
-            / "nixos/production/day1-workload-parity-current-evidence-v1.json"
+            self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
         )
         contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
-        write_evidence(
-            root=self.root,
-            contract_path=contract,
-            evidence_path=evidence,
-            binding=result,
-            update_contract=True,
-        )
-        stored = json.loads(evidence.read_text(encoding="utf-8"))
-        updated = json.loads(contract.read_text(encoding="utf-8"))
-        self.assertIs(stored["readiness_authorized"], False)
-        self.assertIs(stored["classification_complete"], False)
-        self.assertEqual(updated["inventory"]["current_binding"], result)
-        self.assertEqual(
-            updated["admission"]["current_status"],
-            "blocked-until-day1-classification-and-acceptance",
-        )
+        initial = contract.read_bytes()
+        for update_contract in (False, True):
+            with self.subTest(update_contract=update_contract):
+                with self.assertRaisesRegex(
+                    Day1EvidenceError,
+                    "independently protected task stdout, executed-source closure",
+                ):
+                    write_evidence(
+                        root=self.root,
+                        contract_path=contract,
+                        evidence_path=evidence,
+                        binding=result,
+                        update_contract=update_contract,
+                    )
+                self.assertFalse(evidence.exists())
+                self.assertEqual(contract.read_bytes(), initial)
+                self.assertIsNone(
+                    json.loads(contract.read_bytes())["inventory"]["current_binding"]
+                )
 
-        write_evidence(
-            root=self.root,
-            contract_path=contract,
-            evidence_path=evidence,
-            binding=result,
-            update_contract=True,
-        )
+    def test_coherently_resealed_runtime_claim_still_cannot_be_published(self):
+        """An attacker with the same UID can rewrite stdout, its v2 hash and
+        the ledger digest together. That is NOT a protected attestation.
+        """
+        # The fake runtime clock changes program JSON and summary-relevant
+        # metadata; all fixture stdout receipts and ledger hashes are resealed.
+        # This candidate is self-consistent but not independently trustworthy.
+        self._reissue_renderer_at("2026-10-07T15:00:24Z")
+        candidate = self.binding()
         self.assertEqual(
-            json.loads(contract.read_text(encoding="utf-8")),
-            updated,
+            candidate["provenance"]["program"]["renderer_execution"][
+                "reported_generated_at"
+            ],
+            "2026-10-07T15:00:24Z",
         )
-        self.assertEqual(
-            json.loads(evidence.read_text(encoding="utf-8")),
-            stored,
+        contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
+        evidence = (
+            self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
         )
+        before = contract.read_bytes()
+        for flags in (False, True):
+            forged = copy.deepcopy(candidate)
+            # The publisher must NEVER trust booleans supplied by the caller,
+            # even all true, until an actual independently protected verifier
+            # exists and enforces one immutable bundle.
+            if flags:
+                for field in (
+                    "day1_admission_authorized", "protected_task_output_verified",
+                    "executed_source_verified", "immutable_evidence_bundle_verified",
+                ):
+                    forged[field] = True
+            for update_contract in (False, True):
+                with self.subTest(flags=flags, update_contract=update_contract):
+                    with self.assertRaisesRegex(
+                        Day1EvidenceError,
+                        "independently protected task stdout, executed-source closure",
+                    ):
+                        write_evidence(
+                            root=self.root,
+                            contract_path=contract,
+                            evidence_path=evidence,
+                            binding=forged,
+                            update_contract=update_contract,
+                        )
+                    self.assertFalse(evidence.exists())
+                    self.assertEqual(contract.read_bytes(), before)
 
 
 if __name__ == "__main__":

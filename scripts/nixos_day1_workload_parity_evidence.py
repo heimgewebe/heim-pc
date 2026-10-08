@@ -674,6 +674,14 @@ def build_current_binding(
     program_execution_receipt: dict[str, Any],
     program_renderer_execution_receipt: dict[str, Any],
 ) -> dict[str, Any]:
+    """Construct an UNADMITTED diagnostic candidate, not live task authority.
+
+    Matching user-UID SQLite rows, lifecycle v2 self-hashes, stdout, scripts
+    and mutable output files does not independently authenticate which source
+    executed or which bytes the operator captured. No current_binding may
+    be published from this candidate until a separately protected producer
+    and immutable-bundle consumer are independently implemented and checked.
+    """
     root = root.resolve()
     _require_hex(source_revision, HEX40, field="source_revision")
     _require_hex(observation_id, HEX64, field="observation_id")
@@ -977,6 +985,11 @@ def build_current_binding(
         execution.pop("captured_stdout")
 
     return {
+        "kind": "heim_pc.day1_unadmitted_binding_candidate_v1",
+        "day1_admission_authorized": False,
+        "protected_task_output_verified": False,
+        "executed_source_verified": False,
+        "immutable_evidence_bundle_verified": False,
         "host": authoritative_host,
         "source_revision": source_revision,
         "observation": {
@@ -1080,6 +1093,20 @@ def write_evidence(
         raise Day1EvidenceError(
             "worktree Day-1 contract is neither the reviewed preimage nor the identical bound post-state"
         )
+
+    # HARD ADMISSION BOUNDARY: until there is an independently protected
+    # task-time stdout + executed-code closure and immutable evidence consumer,
+    # even a perfectly self-consistent candidate may have been forged by one
+    # same-UID writer. No caller-provided proof flag, digest or bool can
+    # substitute for a protected verifier. Do not create either an evidence
+    # file with a current_binding or modify the current-binding contract.
+    # The unavailable verified producer/consumer implementation must be
+    # reviewed as a separate trust-boundary change, not mocked here.
+    raise Day1EvidenceError(
+        "independently protected task stdout, executed-source closure and "
+        "immutable evidence bundle verification are required before "
+        "current_binding publication"
+    )
 
     payload = {
         "schema_version": 1,
