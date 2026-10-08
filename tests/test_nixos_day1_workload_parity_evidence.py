@@ -280,6 +280,8 @@ args.json_out.write_text(
             "state": "completed",
             "observed_at_unix": task_terminal,
             "observation": {"state": "completed"},
+            "captured_stdout_sha256": sha(stdout),
+            "captured_stdout_bytes": len(stdout),
         }
         digest = sha(
             json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode()
@@ -366,6 +368,47 @@ args.json_out.write_text(
             program_execution_receipt=program_receipt,
             program_renderer_execution_receipt=renderer_receipt,
         )
+
+    def _reissue_renderer_at(self, generated_at: str) -> None:
+        # Reissue a coherent test-only lifecycle receipt and ledger entry to
+        # exercise timestamps beyond simple forged-argv rejection.
+        receipt = self._receipts[2]
+        receipt["argv"][-1] = generated_at
+        receipt["argv_sha256"] = argv_sha(receipt["argv"])
+        subprocess.run(receipt["argv"], cwd=self.root, check=True)
+        task_id = receipt["task_id"]
+        path = self.task_state_root / "tasks.outcomes" / f"{task_id}.json"
+        outcome = json.loads(path.read_text(encoding="utf-8"))
+        outcome["argv_sha256"] = receipt["argv_sha256"]
+        outcome.pop("receipt_sha256")
+        digest = sha(json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode())
+        outcome["receipt_sha256"] = digest
+        path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
+        receipt["lifecycle_receipt_sha256"] = digest
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "UPDATE tasks SET argv_json = ?, argv_sha256 = ?, "
+                "lifecycle_receipt_sha256 = ? WHERE task_id = ?",
+                (json.dumps(receipt["argv"]), receipt["argv_sha256"], digest, task_id),
+            )
+            db.commit()
+
+    def _reseal_software_receipt_field(self, field: str, value: str | int) -> None:
+        task_id = "1" * 24
+        path = self.task_state_root / "tasks.outcomes" / f"{task_id}.json"
+        outcome = json.loads(path.read_text(encoding="utf-8"))
+        outcome[field] = value
+        outcome.pop("receipt_sha256")
+        digest = sha(json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode())
+        outcome["receipt_sha256"] = digest
+        path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
+        self._receipts[0]["lifecycle_receipt_sha256"] = digest
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "UPDATE tasks SET lifecycle_receipt_sha256 = ? WHERE task_id = ?",
+                (digest, task_id),
+            )
+            db.commit()
 
     def test_builds_fail_closed_binding(self):
         result = self.binding()
@@ -545,6 +588,16 @@ args.json_out.write_text(
         with self.assertRaisesRegex(Day1EvidenceError, "deterministic render"):
             self.binding()
 
+    def test_rejects_renderer_generation_before_observation(self):
+        self._reissue_renderer_at("2000-01-01T00:00:00Z")
+        with self.assertRaisesRegex(Day1EvidenceError, "generated_at falls outside"):
+            self.binding()
+
+    def test_rejects_renderer_generation_before_program_collection_finished(self):
+        self._reissue_renderer_at("2026-10-07T15:00:10Z")
+        with self.assertRaisesRegex(Day1EvidenceError, "predates completed authenticated"):
+            self.binding()
+
     def test_rejects_fake_observation_window_around_stale_tasks(self):
         receipts = self.execution_receipts()
         # The inventory timestamps still lie inside the *claimed* short
@@ -556,7 +609,7 @@ args.json_out.write_text(
                 source_revision=self.revision,
                 observation_id=OBS_ID,
                 started_at=START,
-                completed_at="2026-10-07T15:00:06Z",
+                completed_at="2026-10-07T15:00:21Z",
                 software_execution_receipt=receipts[0],
                 program_execution_receipt=receipts[1],
                 program_renderer_execution_receipt=receipts[2],
@@ -603,6 +656,61 @@ args.json_out.write_text(
         v["state"] = "failed"
         outcome_path.write_text(json.dumps(v), encoding="utf-8")
         with self.assertRaisesRegex(Day1EvidenceError, "lifecycle receipt mismatch"):
+            self.binding()
+
+    def test_rejects_rewritten_same_uid_stdout_capture(self):
+        path = self.root / "runtime/software-inventory.md"
+        path.write_text(path.read_text() + "fabricated workload\n", encoding="utf-8")
+        report = {
+            "kind": "heim_pc.software_inventory_output",
+            "host": "heim-pc",
+            "observed_at": OBSERVED,
+            "observation_id": OBS_ID,
+            "output_sha256": sha(path.read_bytes()),
+        }
+        stdout = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{'1' * 24}-a1" / "stdout.log"
+        )
+        stdout.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "captured stdout differs"):
+            self.binding()
+
+    def test_rejects_legacy_unsealed_lifecycle_receipt(self):
+        task_id = "1" * 24
+        path = self.task_state_root / "tasks.outcomes" / f"{task_id}.json"
+        outcome = json.loads(path.read_text())
+        outcome.pop("captured_stdout_sha256")
+        outcome.pop("captured_stdout_bytes")
+        outcome.pop("receipt_sha256")
+        digest = sha(json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode())
+        outcome["receipt_sha256"] = digest
+        path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
+        with closing(sqlite3.connect(self.task_db)) as db:
+            db.execute(
+                "UPDATE tasks SET lifecycle_receipt_sha256 = ? WHERE task_id = ?",
+                (digest, task_id),
+            )
+            db.commit()
+        self._receipts[0]["lifecycle_receipt_sha256"] = digest
+        with self.assertRaisesRegex(Day1EvidenceError, "lacks terminally sealed"):
+            self.binding()
+
+    def test_rejects_incorrect_sealed_stdout_digest(self):
+        self._reseal_software_receipt_field("captured_stdout_sha256", "f" * 64)
+        with self.assertRaisesRegex(Day1EvidenceError, "captured stdout differs"):
+            self.binding()
+
+    def test_rejects_incorrect_sealed_stdout_byte_count(self):
+        task_id = "1" * 24
+        stdout = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a1" / "stdout.log"
+        )
+        self._reseal_software_receipt_field(
+            "captured_stdout_bytes", stdout.stat().st_size + 1
+        )
+        with self.assertRaisesRegex(Day1EvidenceError, "captured stdout differs"):
             self.binding()
 
     def test_rejects_modified_software_output_after_collection(self):

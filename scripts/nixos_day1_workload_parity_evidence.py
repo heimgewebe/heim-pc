@@ -272,12 +272,27 @@ def _authoritative_task_record(
     stdout_path = (
         store / "task-output" / f".grabowski-task-output-{task_id}-a{attempt}" / "stdout.log"
     )
-    # A successful task may have empty stdout, but evidence-producing collectors may not.
-    return (
-        _trusted_task_file(stdout_path, max_bytes=8 * 1024 * 1024),
-        row["created_at_unix"],
-        row["terminalized_at_unix"],
-    )
+    stdout_bytes = _trusted_task_file(stdout_path, max_bytes=8 * 1024 * 1024)
+
+    # Do not mistake a fresh hash of mutable stdout.log for task-time
+    # authenticity. Legacy lifecycle receipts lack terminal stdout sealing.
+    sealed_sha = outcome.get("captured_stdout_sha256")
+    sealed_size = outcome.get("captured_stdout_bytes")
+    if (
+        not isinstance(sealed_sha, str)
+        or HEX64.fullmatch(sealed_sha) is None
+        or isinstance(sealed_size, bool)
+        or not isinstance(sealed_size, int)
+        or sealed_size < 0
+    ):
+        raise Day1EvidenceError(
+            "Grabowski lifecycle receipt lacks terminally sealed stdout digest"
+        )
+    if sealed_size != len(stdout_bytes) or sealed_sha != _sha256_bytes(stdout_bytes):
+        raise Day1EvidenceError(
+            "captured stdout differs from the terminally sealed lifecycle receipt"
+        )
+    return (stdout_bytes, row["created_at_unix"], row["terminalized_at_unix"])
 
 
 def _captured_json(stdout: bytes, *, field: str) -> dict[str, Any]:
@@ -557,6 +572,10 @@ def build_current_binding(
         raise Day1EvidenceError("program JSON is not binding-eligible for session")
     if not (started <= program_observed <= completed):
         raise Day1EvidenceError("program JSON observed_at falls outside observation session")
+    if not (program_observed <= program_generated <= completed):
+        raise Day1EvidenceError(
+            "program generated_at falls outside session or predates program observation"
+        )
     if provenance.get("host") != authoritative_host:
         raise Day1EvidenceError("program inventory host is not authoritative heim-pc")
     source_inventory_path = program.get("source_inventory_path")
@@ -637,6 +656,10 @@ def build_current_binding(
         or renderer_execution["task_terminalized_at_unix"] < program_generated.timestamp()
     ):
         raise Day1EvidenceError("inventory observed/generated time postdates real task execution")
+    if program_generated.timestamp() < program_execution["task_terminalized_at_unix"]:
+        raise Day1EvidenceError(
+            "program generated_at predates completed authenticated program collection"
+        )
 
     software_report = _captured_json(
         software_execution["captured_stdout"], field="software execution"
