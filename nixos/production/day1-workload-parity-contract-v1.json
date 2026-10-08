@@ -124,8 +124,14 @@
           "renderer_path": "scripts/generate_program_inventory.py",
           "collector_and_renderer_sha256_must_match_source_revision": true,
           "execution_receipt_sha256_required": true,
+          "execution_receipt_must_bind_observation_id_and_argv": true,
+          "collector_execution_receipt_sha256_required": true,
+          "collector_execution_receipt_must_bind_observation_id_argv_and_output_dir": true,
+          "renderer_execution_receipt_sha256_required": true,
+          "renderer_execution_receipt_must_bind_raw_dir_outputs_and_generated_at": true,
           "raw_manifest_sha256_required": true,
-          "execution_receipt_must_bind_observation_id_and_argv": true
+          "raw_manifest_must_match_bound_raw_run": true,
+          "rendered_outputs_must_equal_deterministic_rerender": true
         }
       },
       "required_output_metadata": [

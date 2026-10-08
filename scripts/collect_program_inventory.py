@@ -227,10 +227,29 @@ def raw_manifest_sha256(out: Path) -> tuple[str, int]:
     return hashlib.sha256(payload).hexdigest(), len(entries)
 
 
+def explicit_output_dir(value: Path | None, *, stamp: str) -> tuple[Path, bool]:
+    if value is None:
+        return OUT_ROOT / stamp, False
+    if not value.is_absolute():
+        raise ValueError("output_dir must be an absolute path")
+    root = OUT_ROOT.expanduser().resolve()
+    out = value.expanduser().resolve()
+    try:
+        relative = out.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("output_dir must stay below the program-inventory root") from exc
+    if not relative.parts:
+        raise ValueError("output_dir must name a fresh child below the program-inventory root")
+    if out.exists():
+        raise ValueError("output_dir already exists; refusing to reuse a raw inventory run")
+    return out, True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect raw heim-pc program inventory.")
     parser.add_argument("--observation-id", default=None)
     parser.add_argument("--observed-at", default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -238,10 +257,10 @@ def main() -> None:
     args = parse_args()
     observed_at = normalize_observed_at(args.observed_at)
     observation_id, id_bound = observation_binding(args.observation_id)
-    binding_eligible = id_bound and args.observed_at is not None
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    out = OUT_ROOT / stamp
-    out.mkdir(parents=True, exist_ok=True)
+    out, output_dir_bound = explicit_output_dir(args.output_dir, stamp=stamp)
+    binding_eligible = id_bound and args.observed_at is not None and output_dir_bound
+    out.mkdir(parents=True, exist_ok=False)
     start = time.time()
     for name, argv in RAW_COMMANDS.items():
         rc, output = run(argv)
