@@ -1,5 +1,8 @@
 import csv
+from datetime import datetime, timezone
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -117,3 +120,98 @@ def test_build_snapshot_rejects_raw_inventory_without_collection_timestamp(tmp_p
 
     with pytest.raises(ValueError, match="missing a trustworthy collection timestamp"):
         build_snapshot(raw, generated_at="2026-09-12T13:00:00Z")
+
+
+def test_real_renderer_subprocess_emits_runtime_timestamp_and_complete_hashes(tmp_path):
+    # An actual separate Python process, not a prelaunch timestamp fixture.
+    # It still does not authenticate task stdout against a same-UID writer.
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    obs_id = "a" * 64
+    (raw / "run-result.json").write_text(json.dumps({
+        "host": "heim-pc",
+        "observed_at": "2026-10-07T15:00:05Z",
+        "observation_id": obs_id,
+        "binding_eligible": True,
+        "collector_sha256": "b" * 64,
+        "raw_manifest_sha256": "c" * 64,
+        "raw_artifact_count": 1,
+    }), encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    program = tmp_path / "program.json"
+    argv = [
+        sys.executable,
+        str(repo_root / "scripts/generate_program_inventory.py"),
+        "--raw-dir", str(raw),
+        "--summary-out", str(summary),
+        "--json-out", str(program),
+    ]
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    proc = subprocess.run(
+        argv, cwd=repo_root, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=True, timeout=30,
+    )
+    after = datetime.now(timezone.utc)
+    proof = json.loads(proc.stdout)
+    generated = datetime.fromisoformat(
+        proof["generated_at"].replace("Z", "+00:00")
+    )
+    assert before <= generated <= after
+    assert proc.stdout == (
+        json.dumps(proof, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    assert proof["kind"] == "heim_pc.program_renderer_output"
+    assert proof["schema_version"] == 1
+    assert proof["generated_at_source"] == "renderer_runtime_clock"
+    assert proof["observation_id"] == obs_id
+    assert json.loads(program.read_bytes())["generated_at"] == proof["generated_at"]
+    for prefix, path in (("summary", summary), ("json", program)):
+        full = path.read_bytes()
+        assert proof[f"{prefix}_sha256"] == hashlib.sha256(full).hexdigest()
+        assert proof[f"{prefix}_bytes"] == len(full)
+    assert "--generated-at" not in argv
+
+
+def test_explicit_override_is_marked_nonadmissible_for_live_tasks(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "run-result.json").write_text(
+        json.dumps({"observed_at": "2026-10-07T15:00:05Z"}),
+        encoding="utf-8",
+    )
+    summary, program = tmp_path / "summary.md", tmp_path / "program.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts/generate_program_inventory.py"),
+            "--raw-dir", str(raw),
+            "--summary-out", str(summary),
+            "--json-out", str(program),
+            "--generated-at", "2099-01-01T00:00:00Z",
+        ],
+        cwd=repo_root, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=True, timeout=30,
+    )
+    proof = json.loads(proc.stdout)
+    assert proof["generated_at"] == "2099-01-01T00:00:00Z"
+    assert proof["generated_at_source"] == "explicit_override_not_admissible"
+    assert json.loads(program.read_bytes())["generated_at"] == proof["generated_at"]
+
+
+def test_renderer_help_does_not_generate_provenance_or_outputs(tmp_path):
+    summary, program = tmp_path / "summary.md", tmp_path / "program.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts/generate_program_inventory.py"),
+            "--help",
+            "--summary-out", str(summary),
+            "--json-out", str(program),
+        ],
+        cwd=repo_root, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=True, timeout=30,
+    )
+    assert b"usage:" in proc.stdout
+    assert b"heim_pc.program_renderer_output" not in proc.stdout
+    assert not summary.exists() and not program.exists()

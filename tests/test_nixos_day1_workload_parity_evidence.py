@@ -4,6 +4,7 @@ import copy
 from contextlib import closing
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -76,18 +77,31 @@ class T(unittest.TestCase):
 
         software_script = b"print('software')\n"
         collector_script = b"print('collect')\n"
+        # A disposable test renderer with a controllable *runtime* clock:
+        # it does not constitute physical-host or protected-task evidence.
         renderer_script = b"""import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--raw-dir", type=Path, required=True)
 parser.add_argument("--summary-out", type=Path, required=True)
 parser.add_argument("--json-out", type=Path, required=True)
-parser.add_argument("--generated-at", required=True)
+parser.add_argument("--generated-at", default=None)
 args = parser.parse_args()
 raw = args.raw_dir.resolve()
 run = json.loads((raw / "run-result.json").read_text(encoding="utf-8"))
+generated = (
+    args.generated_at if args.generated_at is not None
+    else os.environ.get("FIXTURE_GENERATED_AT", "2026-10-07T15:00:20Z")
+)
+source = (
+    "renderer_runtime_clock"
+    if args.generated_at is None
+    else "explicit_override_not_admissible"
+)
 summary = "\\n".join([
     "---",
     'observed_at: "' + run["observed_at"] + '"',
@@ -98,7 +112,7 @@ summary = "\\n".join([
 ]) + "\\n"
 payload = {
     "schema": "program-inventory.v1",
-    "generated_at": args.generated_at,
+    "generated_at": generated,
     "observation_scope": {
         "observed_at": run["observed_at"],
         "observation_id": run["observation_id"],
@@ -112,11 +126,25 @@ payload = {
         "raw_artifact_count": run["raw_artifact_count"],
     },
 }
-args.summary_out.write_text(summary, encoding="utf-8")
-args.json_out.write_text(
-    json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\\n",
-    encoding="utf-8",
-)
+summary_bytes = summary.encode("utf-8")
+json_bytes = (
+    json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\\n"
+).encode("utf-8")
+args.summary_out.write_bytes(summary_bytes)
+args.json_out.write_bytes(json_bytes)
+claim = {
+    "kind": "heim_pc.program_renderer_output",
+    "schema_version": 1,
+    "host": "heim-pc",
+    "observation_id": run["observation_id"],
+    "generated_at": generated,
+    "generated_at_source": source,
+    "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+    "summary_bytes": len(summary_bytes),
+    "json_sha256": hashlib.sha256(json_bytes).hexdigest(),
+    "json_bytes": len(json_bytes),
+}
+print(json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 """
         self.software_script = software_script
         self.collector_script = collector_script
@@ -147,6 +175,15 @@ args.json_out.write_text(
                         "program": {
                             "collector_path": "scripts/collect_program_inventory.py",
                             "renderer_path": "scripts/generate_program_inventory.py",
+                            "renderer_runtime_protocol": {
+                                "kind": "heim_pc.renderer_runtime_provenance_v1",
+                                "live_argv_must_omit_generated_at": True,
+                                "generated_at_source": "renderer_runtime_clock",
+                                "captured_stdout_kind": "heim_pc.program_renderer_output",
+                                "captured_full_output_sha256_and_bytes_required": True,
+                                "offline_rerender_override_only": True,
+                                "independent_stdout_authentication_required_before_admission": True,
+                            },
                         },
                     },
                 },
@@ -190,7 +227,7 @@ args.json_out.write_text(
         (self.raw_dir / "run-result.json").write_text(
             json.dumps(run_result, indent=2) + "\n", encoding="utf-8"
         )
-        subprocess.run(
+        rendered = subprocess.run(
             [
                 "/usr/bin/python3",
                 "scripts/generate_program_inventory.py",
@@ -200,12 +237,14 @@ args.json_out.write_text(
                 str(root / "runtime/program-inventory-summary.md"),
                 "--json-out",
                 str(root / "runtime/program-inventory.v1.json"),
-                "--generated-at",
-                GENERATED,
             ],
             cwd=root,
             check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "FIXTURE_GENERATED_AT": GENERATED},
         )
+        self._renderer_stdout = rendered.stdout
 
         git(root, "init", "-q")
         git(root, "config", "user.email", "test@example.invalid")
@@ -251,7 +290,7 @@ args.json_out.write_text(
         ).encode() + b"\n"
         program_stdout = json.dumps(run_result, indent=2).encode() + b"\n"
         for receipt, stdout in zip(
-            receipts, (software_stdout, program_stdout, b""), strict=True
+            receipts, (software_stdout, program_stdout, self._renderer_stdout), strict=True
         ):
             self._register_task(receipt, stdout)
         self._receipts = receipts
@@ -346,8 +385,6 @@ args.json_out.write_text(
             str(self.root / "runtime/program-inventory-summary.md"),
             "--json-out",
             str(self.root / "runtime/program-inventory.v1.json"),
-            "--generated-at",
-            GENERATED,
         ]
         return (
             execution_receipt("1" * 24, software_argv, RECEIPT_A, cwd=self.root),
@@ -370,26 +407,38 @@ args.json_out.write_text(
         )
 
     def _reissue_renderer_at(self, generated_at: str) -> None:
-        # Reissue a coherent test-only lifecycle receipt and ledger entry to
-        # exercise timestamps beyond simple forged-argv rejection.
+        # Synthetic runtime-clock injection is only a deterministic test
+        # instrument. It is not an operator-issued timestamp or host evidence.
         receipt = self._receipts[2]
-        receipt["argv"][-1] = generated_at
-        receipt["argv_sha256"] = argv_sha(receipt["argv"])
-        subprocess.run(receipt["argv"], cwd=self.root, check=True)
-        task_id = receipt["task_id"]
+        rendered = subprocess.run(
+            receipt["argv"], cwd=self.root, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "FIXTURE_GENERATED_AT": generated_at},
+        )
+        self._reseal_renderer_stdout(rendered.stdout)
+
+    def _reseal_renderer_stdout(self, stdout: bytes) -> None:
+        # Simulate self-consistent same-UID task ledger/output rewriting.
+        # These fixtures NEVER establish independently protected authenticity.
+        task_id = self._receipts[2]["task_id"]
         path = self.task_state_root / "tasks.outcomes" / f"{task_id}.json"
         outcome = json.loads(path.read_text(encoding="utf-8"))
-        outcome["argv_sha256"] = receipt["argv_sha256"]
+        outcome["captured_stdout_sha256"] = sha(stdout)
+        outcome["captured_stdout_bytes"] = len(stdout)
         outcome.pop("receipt_sha256")
         digest = sha(json.dumps(outcome, sort_keys=True, separators=(",", ":")).encode())
         outcome["receipt_sha256"] = digest
         path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
-        receipt["lifecycle_receipt_sha256"] = digest
+        stdout_file = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a1" / "stdout.log"
+        )
+        stdout_file.write_bytes(stdout)
+        self._receipts[2]["lifecycle_receipt_sha256"] = digest
         with closing(sqlite3.connect(self.task_db)) as db:
             db.execute(
-                "UPDATE tasks SET argv_json = ?, argv_sha256 = ?, "
-                "lifecycle_receipt_sha256 = ? WHERE task_id = ?",
-                (json.dumps(receipt["argv"]), receipt["argv_sha256"], digest, task_id),
+                "UPDATE tasks SET lifecycle_receipt_sha256 = ? WHERE task_id = ?",
+                (digest, task_id),
             )
             db.commit()
 
@@ -412,6 +461,12 @@ args.json_out.write_text(
 
     def test_builds_fail_closed_binding(self):
         result = self.binding()
+        self.assertEqual(result["kind"], "heim_pc.day1_unadmitted_binding_candidate_v1")
+        for field in (
+            "day1_admission_authorized", "protected_task_output_verified",
+            "executed_source_verified", "immutable_evidence_bundle_verified",
+        ):
+            self.assertIs(result[field], False)
         self.assertEqual(result["host"], "heim-pc")
         self.assertEqual(result["source_revision"], self.revision)
         self.assertEqual(result["observation"]["id"], OBS_ID)
@@ -432,6 +487,14 @@ args.json_out.write_text(
         )
         self.assertEqual(
             result["provenance"]["program"]["execution"]["task_id"], "2" * 24
+        )
+        reported = result["provenance"]["program"]["renderer_execution"]
+        self.assertEqual(reported["reported_generated_at"], GENERATED)
+        self.assertEqual(
+            reported["reported_generated_at_source"], "renderer_runtime_clock"
+        )
+        self.assertEqual(
+            reported["reported_stdout_record_kind"], "heim_pc.program_renderer_output"
         )
 
     def test_rejects_output_outside_session(self):
@@ -664,7 +727,7 @@ args.json_out.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(Day1EvidenceError, "deterministic render"):
+        with self.assertRaisesRegex(Day1EvidenceError, "renderer captured stdout"):
             self.binding()
 
     def test_rejects_renderer_generation_before_observation(self):
@@ -683,6 +746,109 @@ args.json_out.write_text(
         self._reissue_renderer_at("2026-10-07T15:00:18Z")
         with self.assertRaisesRegex(Day1EvidenceError, "predates authenticated renderer task start"):
             self.binding()
+
+    def test_accepts_truthful_renderer_runtime_timestamp_after_delayed_dispatch(self):
+        # Deterministic synthetic clock, NOT protected host/task attestation.
+        # The runtime timestamp is several seconds after task creation.
+        self._reissue_renderer_at("2026-10-07T15:00:24Z")
+        binding = self.binding()
+        execution = binding["provenance"]["program"]["renderer_execution"]
+        self.assertNotIn("--generated-at", execution["argv"])
+        self.assertGreater(
+            binder._parse_time("2026-10-07T15:00:24Z").timestamp(),
+            execution["task_created_at_unix"],
+        )
+        self.assertLessEqual(
+            binder._parse_time("2026-10-07T15:00:24Z").timestamp(),
+            execution["task_terminalized_at_unix"],
+        )
+
+    def test_renderer_prelaunch_generated_at_override_is_not_admissible(self):
+        receipts = list(self.execution_receipts())
+        renderer = receipts[2]
+        renderer["argv"].extend(["--generated-at", "2099-01-01T00:00:00Z"])
+        renderer["argv_sha256"] = argv_sha(renderer["argv"])
+        with self.assertRaisesRegex(Day1EvidenceError, "complete allowed command shape"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=renderer,
+            )
+
+    def test_rejects_same_uid_resealed_renderer_stdout_wrong_output_hash(self):
+        task_id = "3" * 24
+        path = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a1" / "stdout.log"
+        )
+        forged = json.loads(path.read_bytes())
+        forged["json_sha256"] = "f" * 64
+        self._reseal_renderer_stdout(
+            (json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        with self.assertRaisesRegex(Day1EvidenceError, "renderer captured stdout"):
+            self.binding()
+
+    def test_rejects_forged_renderer_time_even_with_resealed_stdout(self):
+        task_id = "3" * 24
+        path = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a1" / "stdout.log"
+        )
+        forged = json.loads(path.read_bytes())
+        forged["generated_at"] = "2026-10-07T15:00:25Z"
+        self._reseal_renderer_stdout(
+            (json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        with self.assertRaisesRegex(Day1EvidenceError, "renderer captured stdout"):
+            self.binding()
+
+    def test_rejects_renderer_stdout_override_origin_or_truncation(self):
+        task_id = "3" * 24
+        path = (
+            self.task_state_root / "task-output"
+            / f".grabowski-task-output-{task_id}-a1" / "stdout.log"
+        )
+        original = path.read_bytes()
+        spoof = json.loads(original)
+        spoof["generated_at_source"] = "explicit_override_not_admissible"
+        self._reseal_renderer_stdout(
+            (json.dumps(spoof, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        with self.assertRaisesRegex(Day1EvidenceError, "renderer captured stdout"):
+            self.binding()
+        self._reseal_renderer_stdout(original[:-1])
+        with self.assertRaisesRegex(Day1EvidenceError, "renderer captured stdout"):
+            self.binding()
+
+    def test_rejects_renderer_time_after_task_terminalization(self):
+        self._reissue_renderer_at("2026-10-07T15:00:29Z")
+        with self.assertRaisesRegex(Day1EvidenceError, "postdates real task execution"):
+            self.binding()
+
+    def test_rejects_renderer_unregistered_restart_attempt(self):
+        receipts = list(self.execution_receipts())
+        renderer = receipts[2]
+        renderer["attempt"] = 2
+        renderer["unit"] = f"grabowski-task-{'3' * 24}-a2.service"
+        with self.assertRaisesRegex(Day1EvidenceError, "authoritative Grabowski ledger"):
+            build_current_binding(
+                root=self.root,
+                contract_path=self.root / "nixos/production/day1-workload-parity-contract-v1.json",
+                source_revision=self.revision,
+                observation_id=OBS_ID,
+                started_at=START,
+                completed_at=DONE,
+                software_execution_receipt=receipts[0],
+                program_execution_receipt=receipts[1],
+                program_renderer_execution_receipt=renderer,
+            )
 
     def test_rejects_fake_observation_window_around_stale_tasks(self):
         receipts = self.execution_receipts()
@@ -959,45 +1125,79 @@ args.json_out.write_text(
         self.assertFalse(evidence.exists())
         self.assertIsNone(json.loads(contract.read_text())["inventory"]["current_binding"])
 
-    def test_write_evidence_keeps_readiness_blocked(self):
+    def test_write_evidence_refuses_any_unprotected_current_binding(self):
+        """No output is published from user-UID self-consistent task receipts."""
         result = self.binding()
         evidence = (
-            self.root
-            / "nixos/production/day1-workload-parity-current-evidence-v1.json"
+            self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
         )
         contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
-        write_evidence(
-            root=self.root,
-            contract_path=contract,
-            evidence_path=evidence,
-            binding=result,
-            update_contract=True,
-        )
-        stored = json.loads(evidence.read_text(encoding="utf-8"))
-        updated = json.loads(contract.read_text(encoding="utf-8"))
-        self.assertIs(stored["readiness_authorized"], False)
-        self.assertIs(stored["classification_complete"], False)
-        self.assertEqual(updated["inventory"]["current_binding"], result)
-        self.assertEqual(
-            updated["admission"]["current_status"],
-            "blocked-until-day1-classification-and-acceptance",
-        )
+        initial = contract.read_bytes()
+        for update_contract in (False, True):
+            with self.subTest(update_contract=update_contract):
+                with self.assertRaisesRegex(
+                    Day1EvidenceError,
+                    "independently protected task stdout, executed-source closure",
+                ):
+                    write_evidence(
+                        root=self.root,
+                        contract_path=contract,
+                        evidence_path=evidence,
+                        binding=result,
+                        update_contract=update_contract,
+                    )
+                self.assertFalse(evidence.exists())
+                self.assertEqual(contract.read_bytes(), initial)
+                self.assertIsNone(
+                    json.loads(contract.read_bytes())["inventory"]["current_binding"]
+                )
 
-        write_evidence(
-            root=self.root,
-            contract_path=contract,
-            evidence_path=evidence,
-            binding=result,
-            update_contract=True,
-        )
+    def test_coherently_resealed_runtime_claim_still_cannot_be_published(self):
+        """An attacker with the same UID can rewrite stdout, its v2 hash and
+        the ledger digest together. That is NOT a protected attestation.
+        """
+        # The fake runtime clock changes program JSON and summary-relevant
+        # metadata; all fixture stdout receipts and ledger hashes are resealed.
+        # This candidate is self-consistent but not independently trustworthy.
+        self._reissue_renderer_at("2026-10-07T15:00:24Z")
+        candidate = self.binding()
         self.assertEqual(
-            json.loads(contract.read_text(encoding="utf-8")),
-            updated,
+            candidate["provenance"]["program"]["renderer_execution"][
+                "reported_generated_at"
+            ],
+            "2026-10-07T15:00:24Z",
         )
-        self.assertEqual(
-            json.loads(evidence.read_text(encoding="utf-8")),
-            stored,
+        contract = self.root / "nixos/production/day1-workload-parity-contract-v1.json"
+        evidence = (
+            self.root / "nixos/production/day1-workload-parity-current-evidence-v1.json"
         )
+        before = contract.read_bytes()
+        for flags in (False, True):
+            forged = copy.deepcopy(candidate)
+            # The publisher must NEVER trust booleans supplied by the caller,
+            # even all true, until an actual independently protected verifier
+            # exists and enforces one immutable bundle.
+            if flags:
+                for field in (
+                    "day1_admission_authorized", "protected_task_output_verified",
+                    "executed_source_verified", "immutable_evidence_bundle_verified",
+                ):
+                    forged[field] = True
+            for update_contract in (False, True):
+                with self.subTest(flags=flags, update_contract=update_contract):
+                    with self.assertRaisesRegex(
+                        Day1EvidenceError,
+                        "independently protected task stdout, executed-source closure",
+                    ):
+                        write_evidence(
+                            root=self.root,
+                            contract_path=contract,
+                            evidence_path=evidence,
+                            binding=forged,
+                            update_contract=update_contract,
+                        )
+                    self.assertFalse(evidence.exists())
+                    self.assertEqual(contract.read_bytes(), before)
 
 
 if __name__ == "__main__":

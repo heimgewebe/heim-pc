@@ -381,6 +381,41 @@ def _captured_json(stdout: bytes, *, field: str) -> dict[str, Any]:
         raise Day1EvidenceError(f"{field} captured output must be a JSON object")
     return value
 
+
+def _verify_renderer_stdout(
+    captured_stdout: bytes, *,
+    host: str, observation_id: str, generated_at: str,
+    summary_bytes: bytes, json_bytes: bytes,
+) -> None:
+    """Require the exact renderer-runtime stdout claim about complete files.
+
+    This binds syntax and bytes to the existing lifecycle receipt. It is NOT
+    independent same-UID authentication until Grabowski supplies a separately
+    protected terminal-stdout proof and an immutable evidence consumer.
+    """
+    expected = {
+        "kind": "heim_pc.program_renderer_output",
+        "schema_version": 1,
+        "host": host,
+        "observation_id": observation_id,
+        "generated_at": generated_at,
+        "generated_at_source": "renderer_runtime_clock",
+        "summary_sha256": _sha256_bytes(summary_bytes),
+        "summary_bytes": len(summary_bytes),
+        "json_sha256": _sha256_bytes(json_bytes),
+        "json_bytes": len(json_bytes),
+    }
+    exact_stdout = (
+        json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    if len(captured_stdout) > 2048 or captured_stdout != exact_stdout:
+        raise Day1EvidenceError(
+            "renderer captured stdout does not bind runtime generated_at "
+            "and complete program summary/JSON output bytes"
+        )
+
+
 def _verify_execution_receipt(
     receipt: dict[str, Any],
     *,
@@ -639,6 +674,14 @@ def build_current_binding(
     program_execution_receipt: dict[str, Any],
     program_renderer_execution_receipt: dict[str, Any],
 ) -> dict[str, Any]:
+    """Construct an UNADMITTED diagnostic candidate, not live task authority.
+
+    Matching user-UID SQLite rows, lifecycle v2 self-hashes, stdout, scripts
+    and mutable output files does not independently authenticate which source
+    executed or which bytes the operator captured. No current_binding may
+    be published from this candidate until a separately protected producer
+    and immutable-bundle consumer are independently implemented and checked.
+    """
     root = root.resolve()
     _require_hex(source_revision, HEX40, field="source_revision")
     _require_hex(observation_id, HEX64, field="observation_id")
@@ -760,6 +803,19 @@ def build_current_binding(
     program_schema = schema["provenance"]["program"]
     program_collector = program_schema["collector_path"]
     program_renderer = program_schema["renderer_path"]
+    renderer_protocol = program_schema.get("renderer_runtime_protocol")
+    if renderer_protocol != {
+        "kind": "heim_pc.renderer_runtime_provenance_v1",
+        "live_argv_must_omit_generated_at": True,
+        "generated_at_source": "renderer_runtime_clock",
+        "captured_stdout_kind": "heim_pc.program_renderer_output",
+        "captured_full_output_sha256_and_bytes_required": True,
+        "offline_rerender_override_only": True,
+        "independent_stdout_authentication_required_before_admission": True,
+    }:
+        raise Day1EvidenceError(
+            "reviewed Day-1 renderer runtime protocol is not exact"
+        )
 
     software_execution = _verify_execution_receipt(
         software_execution_receipt,
@@ -793,10 +849,24 @@ def build_current_binding(
             "--raw-dir": str(raw_dir),
             "--summary-out": str(summary_path),
             "--json-out": str(program_path),
-            "--generated-at": program_generated_at,
+            # Binding-eligible live executions MUST derive their generated_at
+            # inside the process, not from an argv guess made before dispatch.
         },
         field="program renderer execution",
     )
+    _verify_renderer_stdout(
+        renderer_execution["captured_stdout"],
+        host=authoritative_host,
+        observation_id=observation_id,
+        generated_at=program_generated_at,
+        summary_bytes=snapshots["runtime/program-inventory-summary.md"],
+        json_bytes=snapshots["runtime/program-inventory.v1.json"],
+    )
+    # These are validated *reported* fields, not independently trusted
+    # task-time proof while ledger/stdout remain writable by the same UID.
+    renderer_execution["reported_generated_at"] = program_generated_at
+    renderer_execution["reported_generated_at_source"] = "renderer_runtime_clock"
+    renderer_execution["reported_stdout_record_kind"] = "heim_pc.program_renderer_output"
 
     # Session assertions alone cannot establish freshness: the authoritative
     # Grabowski task ledger must place actual executions inside the window.
@@ -915,6 +985,11 @@ def build_current_binding(
         execution.pop("captured_stdout")
 
     return {
+        "kind": "heim_pc.day1_unadmitted_binding_candidate_v1",
+        "day1_admission_authorized": False,
+        "protected_task_output_verified": False,
+        "executed_source_verified": False,
+        "immutable_evidence_bundle_verified": False,
         "host": authoritative_host,
         "source_revision": source_revision,
         "observation": {
@@ -1018,6 +1093,20 @@ def write_evidence(
         raise Day1EvidenceError(
             "worktree Day-1 contract is neither the reviewed preimage nor the identical bound post-state"
         )
+
+    # HARD ADMISSION BOUNDARY: until there is an independently protected
+    # task-time stdout + executed-code closure and immutable evidence consumer,
+    # even a perfectly self-consistent candidate may have been forged by one
+    # same-UID writer. No caller-provided proof flag, digest or bool can
+    # substitute for a protected verifier. Do not create either an evidence
+    # file with a current_binding or modify the current-binding contract.
+    # The unavailable verified producer/consumer implementation must be
+    # reviewed as a separate trust-boundary change, not mocked here.
+    raise Day1EvidenceError(
+        "independently protected task stdout, executed-source closure and "
+        "immutable evidence bundle verification are required before "
+        "current_binding publication"
+    )
 
     payload = {
         "schema_version": 1,
