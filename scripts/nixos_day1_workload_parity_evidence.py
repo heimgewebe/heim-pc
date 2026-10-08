@@ -170,15 +170,18 @@ def _git_blob(root: Path, revision: str, relpath: str) -> bytes:
     return completed.stdout
 
 
-def _source_file_digest(root: Path, revision: str, relpath: str) -> str:
+def _reviewed_source_bytes(root: Path, revision: str, relpath: str) -> bytes:
     source = _git_blob(root, revision, relpath)
     worktree = (root / relpath).read_bytes()
-    source_digest = _sha256_bytes(source)
-    if _sha256_bytes(worktree) != source_digest:
+    if _sha256_bytes(worktree) != _sha256_bytes(source):
         raise Day1EvidenceError(
             f"{relpath} does not match reviewed source revision {revision}"
         )
-    return source_digest
+    return source
+
+
+def _source_file_digest(root: Path, revision: str, relpath: str) -> str:
+    return _sha256_bytes(_reviewed_source_bytes(root, revision, relpath))
 
 
 def _require_hex(value: str, pattern: re.Pattern[str], *, field: str) -> str:
@@ -542,15 +545,34 @@ def _verify_renderer_outputs(
     summary_bytes: bytes,
     json_bytes: bytes,
     source_inventory_path: str,
+    renderer_source: bytes,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="heim-pc-day1-render-") as tmp:
         tmp_root = Path(tmp)
         expected_summary = tmp_root / "program-inventory-summary.md"
         expected_json = tmp_root / "program-inventory.v1.json"
+        # Execute the exact reviewed Git blob over a private stdin pipe;
+        # reopening the worktree script pathname after digest verification
+        # would allow another same-UID process to swap its code before Python
+        # loads it. The trusted wrapper restores argv and __file__ semantics.
+        if not renderer_source or len(renderer_source) > 1024 * 1024:
+            raise Day1EvidenceError("reviewed renderer source size is invalid")
+        runner = (
+            "import sys\n"
+            "script_path = sys.argv[1]\n"
+            "args = sys.argv[2:]\n"
+            "script_source = sys.stdin.buffer.read()\n"
+            "sys.argv = [script_path, *args]\n"
+            "scope = {'__name__': '__main__', '__file__': script_path}\n"
+            "exec(compile(script_source, script_path, 'exec'), scope)\n"
+        )
         completed = subprocess.run(
             [
                 "/usr/bin/python3",
-                renderer_relpath,
+                "-I",
+                "-c",
+                runner,
+                str(root / renderer_relpath),
                 "--raw-dir",
                 str(raw_dir),
                 "--summary-out",
@@ -562,15 +584,15 @@ def _verify_renderer_outputs(
             ],
             cwd=root,
             check=False,
+            input=renderer_source,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             timeout=120,
         )
         if completed.returncode != 0:
             raise Day1EvidenceError(
                 "program renderer verification failed: "
-                + completed.stderr.strip()[:500]
+                + completed.stderr.decode("utf-8", errors="replace").strip()[:500]
             )
         # Rendering from a private snapshot changes only the *displayed* raw
         # source path. Normalize that field to the authenticated original path;
@@ -715,6 +737,16 @@ def build_current_binding(
     if not isinstance(source_inventory_path, str) or not source_inventory_path:
         raise Day1EvidenceError("program inventory is missing source_inventory_path")
     raw_dir = Path(source_inventory_path).expanduser().resolve()
+    home = str(Path.home())
+    canonical_source_path = str(raw_dir)
+    if canonical_source_path == home:
+        canonical_source_path = "~"
+    elif canonical_source_path.startswith(home + "/"):
+        canonical_source_path = "~" + canonical_source_path[len(home):]
+    if source_inventory_path != canonical_source_path:
+        raise Day1EvidenceError(
+            "program inventory source path differs from canonical renderer path"
+        )
     metadata["runtime/program-inventory.v1.json"] = {
         "observed_at": program_observed_at,
         "observation_id": program_id,
@@ -821,7 +853,10 @@ def build_current_binding(
 
     software_collector_sha = _source_file_digest(root, source_revision, software_script)
     program_collector_sha = _source_file_digest(root, source_revision, program_collector)
-    program_renderer_sha = _source_file_digest(root, source_revision, program_renderer)
+    reviewed_renderer_source = _reviewed_source_bytes(
+        root, source_revision, program_renderer
+    )
+    program_renderer_sha = _sha256_bytes(reviewed_renderer_source)
 
     if software_meta.get("collector_sha256") != software_collector_sha:
         raise Day1EvidenceError("software output collector digest mismatches source revision")
@@ -859,7 +894,10 @@ def build_current_binding(
             summary_bytes=snapshots["runtime/program-inventory-summary.md"],
             json_bytes=snapshots["runtime/program-inventory.v1.json"],
             source_inventory_path=source_inventory_path,
+            renderer_source=reviewed_renderer_source,
         )
+        if _source_file_digest(root, source_revision, program_renderer) != program_renderer_sha:
+            raise Day1EvidenceError("renderer source changed during verification")
         # Preserve the authoritative raw-run reference only while it still
         # has the same manifest and exact run-result as the snapshot.
         live_run = json.loads(_snapshot_output_bytes(raw_dir / "run-result.json"))

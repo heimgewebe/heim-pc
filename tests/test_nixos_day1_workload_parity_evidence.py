@@ -552,6 +552,58 @@ args.json_out.write_text(
                 program_renderer_execution_receipt=renderer_receipt,
             )
 
+    def test_rejects_raw_source_symlink_alias(self):
+        alias = self.root / "alias-of-raw-run"
+        alias.symlink_to(self.raw_dir, target_is_directory=True)
+        path = self.root / "runtime/program-inventory.v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["source_inventory_path"] = str(alias)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "source path differs from canonical"):
+            self.binding()
+
+    def test_rejects_raw_source_noncanonical_dotdot(self):
+        intermediate = self.root / "existing-parent"
+        intermediate.mkdir()
+        path = self.root / "runtime/program-inventory.v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["source_inventory_path"] = str(
+            self.root / "existing-parent" / ".." / "raw-program-run"
+        )
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(Day1EvidenceError, "source path differs from canonical"):
+            self.binding()
+
+    def test_verifier_executes_reviewed_renderer_blob_not_changed_path(self):
+        # The worktree script is replaced after its vetted bytes were read.
+        # The verifier must still execute the *reviewed* source from the pipe.
+        script = self.root / "scripts/generate_program_inventory.py"
+        original = script.read_bytes()
+        script.write_text("raise RuntimeError('replacement renderer executed')\n")
+        binder._verify_renderer_outputs(
+            root=self.root,
+            renderer_relpath="scripts/generate_program_inventory.py",
+            raw_dir=self.raw_dir,
+            generated_at=GENERATED,
+            summary_bytes=(self.root / "runtime/program-inventory-summary.md").read_bytes(),
+            json_bytes=(self.root / "runtime/program-inventory.v1.json").read_bytes(),
+            source_inventory_path=str(self.raw_dir),
+            renderer_source=original,
+        )
+
+    def test_rejects_renderer_source_swap_after_verification(self):
+        original_verifier = binder._verify_renderer_outputs
+
+        def replace_after_rerender(**kwargs):
+            original_verifier(**kwargs)
+            (self.root / "scripts/generate_program_inventory.py").write_text(
+                "raise RuntimeError('changed after verification')\n"
+            )
+
+        with patch.object(binder, "_verify_renderer_outputs", side_effect=replace_after_rerender):
+            with self.assertRaisesRegex(Day1EvidenceError, "does not match reviewed source"):
+                self.binding()
+
     def test_rejects_renderer_bound_to_different_raw_run(self):
         software_receipt, program_receipt, renderer_receipt = self.execution_receipts()
         other = self.root / "other-raw-run"
