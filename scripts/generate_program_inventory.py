@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
+import socket
 import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -455,11 +457,46 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_outputs(snapshot: dict[str, Any], summary_out: Path, json_out: Path) -> None:
+def write_outputs(
+    snapshot: dict[str, Any], summary_out: Path, json_out: Path,
+) -> tuple[bytes, bytes]:
+    """Write the exact bytes later described by the renderer's stdout claim.
+
+    The returned immutable in-process buffers are provenance inputs, not
+    independent assurance that user-writable paths remain unchanged.
+    """
+    summary_bytes = render_markdown(snapshot).encode("utf-8")
+    json_bytes = (
+        json.dumps(snapshot, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode("utf-8")
     summary_out.parent.mkdir(parents=True, exist_ok=True)
     json_out.parent.mkdir(parents=True, exist_ok=True)
-    summary_out.write_text(render_markdown(snapshot), encoding="utf-8")
-    json_out.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    summary_out.write_bytes(summary_bytes)
+    json_out.write_bytes(json_bytes)
+    return summary_bytes, json_bytes
+
+
+def render_execution_provenance(
+    snapshot: dict[str, Any], summary_bytes: bytes, json_bytes: bytes, *,
+    host: str, generated_at_source: str,
+) -> bytes:
+    """Return one canonical stdout JSON line, never path-only success text."""
+    payload = {
+        "kind": "heim_pc.program_renderer_output",
+        "schema_version": 1,
+        "host": host,
+        "observation_id": snapshot["observation_scope"].get("observation_id"),
+        "generated_at": snapshot["generated_at"],
+        "generated_at_source": generated_at_source,
+        "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        "summary_bytes": len(summary_bytes),
+        "json_sha256": hashlib.sha256(json_bytes).hexdigest(),
+        "json_bytes": len(json_bytes),
+    }
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
 
 
 def parse_args() -> argparse.Namespace:
@@ -467,16 +504,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help="Directory containing local raw program inventory files.")
     parser.add_argument("--summary-out", type=Path, default=DEFAULT_SUMMARY, help="Markdown summary output path.")
     parser.add_argument("--json-out", type=Path, default=DEFAULT_JSON, help="Compact JSON output path.")
-    parser.add_argument("--generated-at", default=None, help="Override generated_at for deterministic tests.")
+    parser.add_argument(
+        "--generated-at", default=None,
+        help="Deterministic offline re-render override only; never valid in an admitted live task.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    snapshot = build_snapshot(args.raw_dir.expanduser().resolve(), generated_at=args.generated_at)
-    write_outputs(snapshot, args.summary_out, args.json_out)
-    print(args.summary_out)
-    print(args.json_out)
+    # Measure the timestamp inside the actual renderer process. No prelaunch
+    # task argv timestamp can truthfully state when a delayed task will run.
+    generated_at = utc_now() if args.generated_at is None else args.generated_at
+    timestamp_origin = (
+        "renderer_runtime_clock"
+        if args.generated_at is None
+        else "explicit_override_not_admissible"
+    )
+    snapshot = build_snapshot(
+        args.raw_dir.expanduser().resolve(), generated_at=generated_at
+    )
+    summary_bytes, json_bytes = write_outputs(
+        snapshot, args.summary_out, args.json_out
+    )
+    proof = render_execution_provenance(
+        snapshot, summary_bytes, json_bytes,
+        host=socket.gethostname(), generated_at_source=timestamp_origin,
+    )
+    # One stdout record is only a task-time claim until Grabowski independently
+    # seals its actual captured bytes and a protected consumer verifies them.
+    os.write(1, proof)
 
 
 if __name__ == "__main__":

@@ -129,6 +129,15 @@
           "collector_execution_receipt_must_bind_observation_id_argv_and_output_dir": true,
           "renderer_execution_receipt_sha256_required": true,
           "renderer_execution_receipt_must_bind_raw_dir_outputs_and_generated_at": true,
+          "renderer_runtime_protocol": {
+            "kind": "heim_pc.renderer_runtime_provenance_v1",
+            "live_argv_must_omit_generated_at": true,
+            "generated_at_source": "renderer_runtime_clock",
+            "captured_stdout_kind": "heim_pc.program_renderer_output",
+            "captured_full_output_sha256_and_bytes_required": true,
+            "offline_rerender_override_only": true,
+            "independent_stdout_authentication_required_before_admission": true
+          },
           "raw_manifest_sha256_required": true,
           "raw_manifest_must_match_bound_raw_run": true,
           "rendered_outputs_must_equal_deterministic_rerender": true
