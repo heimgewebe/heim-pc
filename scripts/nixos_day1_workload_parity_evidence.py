@@ -660,6 +660,10 @@ def build_current_binding(
         raise Day1EvidenceError(
             "program generated_at predates completed authenticated program collection"
         )
+    if program_generated.timestamp() < renderer_execution["task_created_at_unix"]:
+        raise Day1EvidenceError(
+            "program generated_at predates authenticated renderer task start"
+        )
 
     software_report = _captured_json(
         software_execution["captured_stdout"], field="software execution"

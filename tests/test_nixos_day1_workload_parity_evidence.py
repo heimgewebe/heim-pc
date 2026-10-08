@@ -598,6 +598,13 @@ args.json_out.write_text(
         with self.assertRaisesRegex(Day1EvidenceError, "predates completed authenticated"):
             self.binding()
 
+    def test_rejects_renderer_generation_before_renderer_task_start(self):
+        # The collector has already completed, but Grabowski did not yet
+        # create the renderer task. A declared render time is not evidence.
+        self._reissue_renderer_at("2026-10-07T15:00:18Z")
+        with self.assertRaisesRegex(Day1EvidenceError, "predates authenticated renderer task start"):
+            self.binding()
+
     def test_rejects_fake_observation_window_around_stale_tasks(self):
         receipts = self.execution_receipts()
         # The inventory timestamps still lie inside the *claimed* short
