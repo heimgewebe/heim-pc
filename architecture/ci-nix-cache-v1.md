@@ -34,8 +34,14 @@ and whose branch is `main`. The job binds GitHub environment
 `ci-cache-publisher`, which is restricted to `main`.
 
 Pull-request and fork workflows never receive the signing or upload credentials.
-The publisher validates the triggering workflow file path from the GitHub
-workflow_run payload, not merely its non-unique display name.
+The publisher checks the stable GitHub workflow ID 351684660 before handling
+publisher secrets. Display names are not unique, and workflow-run paths may
+include a branch suffix; a deleted/recreated workflow must be reviewed and
+its new ID explicitly authorized before publication can resume.
+The upload SSH host and pinned host public key are configured in the existing
+protected GitHub environment ci-cache-publisher as CI_CACHE_UPLOAD_SSH_HOST
+and CI_CACHE_UPLOAD_SSH_HOST_KEY. They are not part of the public workflow;
+both environment values must be present and the SSH host key remains pinned.
 The publisher resolves the exact Ollama and llama.cpp derivations from the
 successful Main source graph, realizes those outputs, copies their closures
 recursively into a local `file://` binary cache signed with the dedicated Nix

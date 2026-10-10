@@ -159,15 +159,40 @@ def test_same_nix_signing_key_name_does_not_hide_mismatched_material():
     assert public(second) != expected
 
 
-def test_publisher_binds_actual_workflow_file_before_secrets():
+def test_publisher_binds_stable_workflow_id_before_secrets():
     workflow = PUBLISHER.read_text(encoding="utf-8")
-    path = ".github/workflows/heim-pc-nix.yml"
-    assert f"github.event.workflow_run.path == '{path}'" in workflow
-    assert 'SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}' in workflow
-    assert f'test "$SOURCE_WORKFLOW_PATH" = "{path}"' in workflow
+    assert "github.event.workflow_run.workflow_id == 351684660" in workflow
+    assert (
+        "SOURCE_WORKFLOW_ID: "
+        + chr(36) + "{{ github.event.workflow_run.workflow_id }}"
+    ) in workflow
+    assert 'test "$SOURCE_WORKFLOW_ID" = "351684660"' in workflow
+    assert "github.event.workflow_run.path ==" not in workflow
+    assert 'test "$SOURCE_WORKFLOW_PATH"' not in workflow
     assert workflow.index("Verify publisher source identity") < workflow.index(
         "Create signed append-only cache payload"
     )
+
+
+def test_upload_origin_is_only_in_protected_publisher_environment():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    global_env = workflow.split("\nenv:\n", 1)[1].split("\njobs:\n", 1)[0]
+    assert "CI_NIX_CACHE_SSH_HOST" not in global_env
+
+    upload_step = workflow.split(
+        "- name: Upload cache through restricted publisher key", 1
+    )[1].split("- name: Verify public signed-cache readback", 1)[0]
+    assert (
+        "CI_NIX_CACHE_SSH_HOST: " + chr(36) + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST }}"
+    ) in upload_step
+    assert (
+        "CI_NIX_CACHE_SSH_HOST_KEY: "
+        + chr(36) + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST_KEY }}"
+    ) in upload_step
+    assert 'test -n "$CI_NIX_CACHE_SSH_HOST"' in upload_step
+    assert 'test -n "$CI_NIX_CACHE_SSH_HOST_KEY"' in upload_step
+    assert "StrictHostKeyChecking=yes" in upload_step
+    assert "environment: ci-cache-publisher" in workflow
 
 
 def test_publisher_only_claims_readback_after_trusted_nix_substitution():
