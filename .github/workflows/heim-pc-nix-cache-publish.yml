@@ -133,8 +133,8 @@ jobs:
       - name: Upload cache through restricted publisher key
         env:
           UPLOAD_KEY_B64: ${{ secrets.CI_CACHE_UPLOAD_SSH_KEY_B64 }}
-          CI_NIX_CACHE_SSH_HOST: ${{ vars.CI_CACHE_UPLOAD_SSH_HOST }}
-          CI_NIX_CACHE_SSH_HOST_KEY: ${{ vars.CI_CACHE_UPLOAD_SSH_HOST_KEY }}
+          CI_NIX_CACHE_SSH_HOST: ${{ secrets.CI_CACHE_UPLOAD_SSH_HOST }}
+          CI_NIX_CACHE_SSH_HOST_KEY: ${{ secrets.CI_CACHE_UPLOAD_SSH_HOST_KEY }}
         run: |
           set -euo pipefail
           cache_dir="$RUNNER_TEMP/ci-nix-cache"

@@ -183,12 +183,14 @@ def test_upload_origin_is_only_in_protected_publisher_environment():
         "- name: Upload cache through restricted publisher key", 1
     )[1].split("- name: Verify public signed-cache readback", 1)[0]
     assert (
-        "CI_NIX_CACHE_SSH_HOST: " + chr(36) + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST }}"
+        "CI_NIX_CACHE_SSH_HOST: " + chr(36) + "{{ secrets.CI_CACHE_UPLOAD_SSH_HOST }}"
     ) in upload_step
     assert (
         "CI_NIX_CACHE_SSH_HOST_KEY: "
-        + chr(36) + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST_KEY }}"
+        + chr(36) + "{{ secrets.CI_CACHE_UPLOAD_SSH_HOST_KEY }}"
     ) in upload_step
+    assert "vars.CI_CACHE_UPLOAD_SSH_HOST" not in upload_step
+    assert "vars.CI_CACHE_UPLOAD_SSH_HOST_KEY" not in upload_step
     assert 'test -n "$CI_NIX_CACHE_SSH_HOST"' in upload_step
     assert 'test -n "$CI_NIX_CACHE_SSH_HOST_KEY"' in upload_step
     assert "StrictHostKeyChecking=yes" in upload_step
