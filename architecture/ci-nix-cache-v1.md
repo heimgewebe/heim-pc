@@ -34,6 +34,8 @@ and whose branch is `main`. The job binds GitHub environment
 `ci-cache-publisher`, which is restricted to `main`.
 
 Pull-request and fork workflows never receive the signing or upload credentials.
+The publisher validates the triggering workflow file path from the GitHub
+workflow_run payload, not merely its non-unique display name.
 The publisher resolves the exact Ollama and llama.cpp derivations from the
 successful Main source graph, realizes those outputs, copies their closures
 recursively into a local `file://` binary cache signed with the dedicated Nix
@@ -76,6 +78,14 @@ the behavior of distinct same-name signing keys under a real Nix CLI.
 
 The invalid-signature probe tests Nix signature mechanics only. It is not
 evidence of cross-run reuse.
+
+After upload, this job removes the two locally realized heavy outputs from
+its disposable CI Nix store, disables local builds and fallback, configures
+the expected HTTPS substituter and trusted CI public key, and re-realizes each
+output from that remote cache. Only a successful Nix signature and NAR integrity
+substitution counts as published readback; matching StorePath or Sig string
+prefixes alone would not prove delivery. This does not authorize production
+trust or demonstrate cross-run reuse, which needs separate acceptance.
 
 ## Rotation and revocation
 

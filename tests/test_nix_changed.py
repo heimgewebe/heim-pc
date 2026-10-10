@@ -29,6 +29,17 @@ class T(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(nix_changed.path_requires_nix(path))
 
+    def test_signed_cache_controls_cannot_skip_nix_ci(self):
+        for path in (
+            ".github/workflows/heim-pc-nix-cache-publish.yml",
+            "scripts/ci/check_nix_cache_signature_rejection.sh",
+            "tests/test_ci_nix_cache.py",
+            "tests/test_nix_changed.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(nix_changed.path_requires_nix(path))
+                self.assertTrue(nix_changed.changed_paths_require_nix([path]))
+
     def test_unrelated_paths_skip_heavy_nix_ci(self):
         for path in (
             "README.md",

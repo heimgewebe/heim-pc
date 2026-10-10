@@ -23,6 +23,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.path == '.github/workflows/heim-pc-nix.yml' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -31,6 +32,7 @@ jobs:
       EXPECTED_SOURCE_REVISION: ${{ github.event.workflow_run.head_sha }}
       SOURCE_EVENT: ${{ github.event.workflow_run.event }}
       SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
       SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
     steps:
       - name: Checkout exact successful Main source
@@ -44,6 +46,7 @@ jobs:
           set -euo pipefail
           test "$SOURCE_EVENT" = "push"
           test "$SOURCE_BRANCH" = "main"
+          test "$SOURCE_WORKFLOW_PATH" = ".github/workflows/heim-pc-nix.yml"
           test "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
           test -z "$(git status --porcelain)"
@@ -152,11 +155,22 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --silent --show-error "$CI_NIX_CACHE_URL/nix-cache-info" >/dev/null
+
+          # The ephemeral CI store currently has the built outputs. Delete only
+          # these outputs so their following realization must use the remote
+          # HTTPS substituter, not an already-present local store path.
+          export NIX_CONFIG="experimental-features = nix-command flakes
+          require-sigs = true
+          substituters = $CI_NIX_CACHE_URL
+          trusted-public-keys = $CI_NIX_CACHE_PUBLIC_KEY
+          fallback = false
+          max-jobs = 0"
+
           for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
-            base="$(basename "$store_path")"
-            hash="${base%%-*}"
-            narinfo="$(curl --fail --silent --show-error "$CI_NIX_CACHE_URL/$hash.narinfo")"
-            grep -Fqx "StorePath: $store_path" <<< "$narinfo"
-            grep -q "^Sig: $CI_NIX_CACHE_KEY_NAME:" <<< "$narinfo"
-            printf 'PUBLISHED_SIGNED_PATH=%s\n' "$store_path"
+            nix-store --delete "$store_path" >/dev/null
+            test ! -e "$store_path"
+            realized="$(nix-store --realise "$store_path")"
+            test "$realized" = "$store_path"
+            test -e "$store_path"
+            printf 'PUBLISHED_TRUSTED_SUBSTITUTION=%s\n' "$store_path"
           done

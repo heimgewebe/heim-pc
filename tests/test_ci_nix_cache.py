@@ -69,7 +69,8 @@ def test_publisher_resolves_exact_heavy_derivations_and_signs_before_upload():
     assert "?secret-key=$signing_key" in workflow
     assert "rsync -r --ignore-existing" in workflow
     assert "StrictHostKeyChecking=yes" in workflow
-    assert "PUBLISHED_SIGNED_PATH" in workflow
+    assert "PUBLISHED_TRUSTED_SUBSTITUTION" in workflow
+    assert "PUBLISHED_SIGNED_PATH" not in workflow
 
 
 def test_consumer_keeps_all_existing_nix_gates_and_invalid_signature_probe():
@@ -156,3 +157,31 @@ def test_same_nix_signing_key_name_does_not_hide_mismatched_material():
     assert expected.startswith("same-name-test-1:")
     assert public(first) == expected
     assert public(second) != expected
+
+
+def test_publisher_binds_actual_workflow_file_before_secrets():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    path = ".github/workflows/heim-pc-nix.yml"
+    assert f"github.event.workflow_run.path == '{path}'" in workflow
+    assert 'SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}' in workflow
+    assert f'test "$SOURCE_WORKFLOW_PATH" = "{path}"' in workflow
+    assert workflow.index("Verify publisher source identity") < workflow.index(
+        "Create signed append-only cache payload"
+    )
+
+
+def test_publisher_only_claims_readback_after_trusted_nix_substitution():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    tail = workflow[workflow.index("      - name: Verify public signed-cache readback"):]
+    assert "require-sigs = true" in tail
+    assert "fallback = false" in tail
+    assert "max-jobs = 0" in tail
+    assert "trusted-public-keys = $CI_NIX_CACHE_PUBLIC_KEY" in tail
+    assert "substituters = $CI_NIX_CACHE_URL" in tail
+    assert 'nix-store --delete "$store_path"' in tail
+    assert 'test ! -e "$store_path"' in tail
+    assert 'nix-store --realise "$store_path"' in tail
+    assert "PUBLISHED_TRUSTED_SUBSTITUTION" in tail
+    assert "PUBLISHED_SIGNED_PATH" not in tail
+    assert "--no-check-sigs" not in tail
+    assert "require-sigs = false" not in tail
