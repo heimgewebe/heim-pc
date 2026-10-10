@@ -122,6 +122,32 @@ class StoragePressureWatchTests(unittest.TestCase):
             ],
         )
 
+    def test_observe_only_pressure_never_requests_maintenance(self) -> None:
+        systemctl = FakeSystemctl()
+        current = sample(
+            observed=7_200_000_000_000,
+            used=1_600 * 1024**3,
+            available=400 * 1024**3,
+            percent=78.0,
+        )
+        receipt, returncode = watch.evaluate(
+            policy(),
+            current,
+            None,
+            request_maintenance=False,
+            systemctl=systemctl,
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(receipt["status"], "pressure-observed")
+        self.assertTrue(receipt["pressure"])
+        self.assertFalse(receipt["maintenance_requests_enabled"])
+        self.assertEqual(
+            receipt["reasons"],
+            ["used-percent", "available-bytes"],
+        )
+        self.assertEqual(receipt["trigger_attempts"], [])
+        self.assertEqual(systemctl.calls, [])
+
     def test_cooldown_prevents_repeated_heavy_runs(self) -> None:
         systemctl = FakeSystemctl()
         now_ns = 10_000_000_000_000

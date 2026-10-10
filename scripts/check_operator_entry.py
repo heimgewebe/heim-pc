@@ -237,19 +237,27 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         errors.append("capabilityLocators.audioTranscription.intents is incomplete")
     if transcription.get("schemaVersion") != 1:
         errors.append("capabilityLocators.audioTranscription.schemaVersion must be 1")
-    if transcription.get("authority") != "heim_pc_asr_open_engine":
-        errors.append("capabilityLocators.audioTranscription.authority is invalid")
+    if transcription.get("authority") != "heimgewebe_asr_open_engine":
+        errors.append("capabilityLocators.audioTranscription.authority must name the generic ASR authority")
     if transcription.get("authorityKind") != "capability_locator_only":
         errors.append("capabilityLocators.audioTranscription.authorityKind must remain locator-only")
-    for field in ("repository", "architecture", "policy", "runbook"):
+    expected_asr_paths = {
+        "repository": "${HOME}/repos/asr",
+        "architecture": "${HOME}/repos/asr/architecture/asr-engine.md",
+        "policy": "${HOME}/repos/asr/manifest/asr-engine-policy.v1.json",
+        "contract": "${HOME}/repos/asr/manifest/asr-transcript-contract.v1.json",
+        "runbook": "${HOME}/repos/asr/runbooks/asr-local-transcription.md",
+    }
+    for field, expected_value in expected_asr_paths.items():
         _require_host_path(
             transcription.get(field),
             f"capabilityLocators.audioTranscription.{field}",
             errors,
         )
-    expected_asr_runbook = "${HOME}/repos/heim-pc/runbooks/asr-local-transcription.md"
-    if transcription.get("runbook") != expected_asr_runbook:
-        errors.append("capabilityLocators.audioTranscription.runbook must name the canonical ASR runbook")
+        if transcription.get(field) != expected_value:
+            errors.append(
+                f"capabilityLocators.audioTranscription.{field} must point to the generic ASR authority"
+            )
     reuse_policy = _require_object(
         transcription.get("reusePolicy"),
         "capabilityLocators.audioTranscription.reusePolicy",
@@ -269,22 +277,34 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     ):
         if reuse_policy.get(flag) is not False:
             errors.append(f"capabilityLocators.audioTranscription.reusePolicy.{flag} must remain false")
-    _require_host_path(
-        reuse_policy.get("sharedRuntimeCacheRoot"),
-        "capabilityLocators.audioTranscription.reusePolicy.sharedRuntimeCacheRoot",
-        errors,
-    )
-    expected_asr_cache_root = "${HOME}/.local/cache/heim-pc/asr-open-engine"
-    if reuse_policy.get("sharedRuntimeCacheRoot") != expected_asr_cache_root:
-        errors.append(
-            "capabilityLocators.audioTranscription.reusePolicy.sharedRuntimeCacheRoot must name the canonical shared ASR cache"
+    expected_runtime_roots = {
+        "sharedRuntimeCacheRoot": "${HOME}/.local/cache/heimgewebe/asr",
+        "sharedRuntimeStateRoot": "${HOME}/.local/state/heimgewebe/asr",
+    }
+    for field, expected_value in expected_runtime_roots.items():
+        _require_host_path(
+            reuse_policy.get(field),
+            f"capabilityLocators.audioTranscription.reusePolicy.{field}",
+            errors,
         )
+        if reuse_policy.get(field) != expected_value:
+            errors.append(
+                f"capabilityLocators.audioTranscription.reusePolicy.{field} must name the generic ASR runtime root"
+            )
     expected_asr_entry = [
+        "python3",
+        "${HOME}/repos/asr/scripts/asr_engine.py",
+    ]
+    if transcription.get("entryArgvPrefix") != expected_asr_entry:
+        errors.append("capabilityLocators.audioTranscription.entryArgvPrefix must name the generic ASR entry")
+    expected_compatibility_entry = [
         "python3",
         "${HOME}/repos/heim-pc/scripts/asr_engine.py",
     ]
-    if transcription.get("entryArgvPrefix") != expected_asr_entry:
-        errors.append("capabilityLocators.audioTranscription.entryArgvPrefix must name the canonical ASR entry")
+    if transcription.get("compatibilityEntryArgvPrefix") != expected_compatibility_entry:
+        errors.append(
+            "capabilityLocators.audioTranscription.compatibilityEntryArgvPrefix must name the host compatibility wrapper"
+        )
     if transcription.get("defaultOperation") != "transcribe":
         errors.append("capabilityLocators.audioTranscription.defaultOperation must be transcribe")
     if transcription.get("readinessOperation") != "doctor":
@@ -306,7 +326,6 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         set(transcription_limits)
     ):
         errors.append("capabilityLocators.audioTranscription.doesNotEstablish is incomplete")
-
     document_text = _require_object(
         capability_locators.get("documentTextExtraction"),
         "capabilityLocators.documentTextExtraction",

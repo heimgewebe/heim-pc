@@ -4,6 +4,8 @@ import io
 import tarfile
 import importlib.util
 import json
+import os
+import sqlite3
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -43,6 +45,9 @@ ARTIFACT = {
 }
 MERGED_ARTIFACT = dict(ARTIFACT, source_authority="merged-main")
 MANAGED_POLICY_SHA256 = "c" * 64
+RECOVERY_ADMISSION_SCOPE = json.loads(
+    prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8")
+)["admission_scope"]
 SYNTHETIC_ARTIFACT_PATH = Path("/tmp/heim-pc-synthetic-install-artifact.json")
 _READINESS_TEST_ROOT = tempfile.TemporaryDirectory(prefix="heim-pc-precutover-readiness-tests-")
 
@@ -148,6 +153,11 @@ PARTUUIDS = [
     "22222222-2222-4222-8222-222222222222",
     "33333333-3333-4333-8333-333333333333",
 ]
+PREIMAGE_PARTUUIDS = [
+    "aaaaaaaa-1111-4111-8111-111111111111",
+    "bbbbbbbb-2222-4222-8222-222222222222",
+    "cccccccc-3333-4333-8333-333333333333",
+]
 PUBLIC_CONTRACT = json.loads((ROOT / "nixos" / "production" / "contract-v1.json").read_text())
 PRIVATE_IDENTITY = {
     "schema_version": 1,
@@ -158,6 +168,17 @@ PRIVATE_IDENTITY = {
         "exact_by_id": SEAGATE,
         "exact_serial": "SYNTH-TARGET-SERIAL",
         "exact_wwn": "eui.synthetic-target",
+        "preimage": {
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
+            "logical_sector_size": 512,
+            "signatures": [{"type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "size_bytes": 1073741824, "start_sector": 2048, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"type": "vfat", "uuid": "SYN-TARGET-EFI"}]},
+                {"number": 2, "size_bytes": 4294967296, "start_sector": 2099200, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}]},
+                {"number": 3, "size_bytes": 3995417255424, "start_sector": 10487808, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "fstype": "", "uuid": "", "signatures": []},
+            ],
+        },
     },
     "protected_disks": [{
         "role": "popos-fallback",
@@ -195,13 +216,18 @@ def observation():
             "size_bytes": 4000787030016,
             "transport": "nvme",
             "filesystem": None,
-            "partition_table": None,
-            "gpt_disk_guid": "",
+            "partition_table": "gpt",
+            "gpt_disk_guid": "44444444-4444-4444-8444-444444444444",
             "logical_sector_size": 512,
+            "holders": [],
             "mountpoints": [],
             "mounted": False,
-            "signatures": [],
-            "partitions": [],
+            "signatures": [{"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": "44444444-4444-4444-8444-444444444444"}],
+            "partitions": [
+                {"number": 1, "path": "/dev/nvme0n1p1", "size_bytes": 1073741824, "start_sector": 2048, "end_sector": 2099199, "partuuid": PREIMAGE_PARTUUIDS[0], "type_guid": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "NIXOS2_EFI", "partflags": "", "fstype": "vfat", "uuid": "SYN-TARGET-EFI", "signatures": [{"device": f"{SEAGATE}-part1", "offset": "0x100", "type": "vfat", "uuid": "SYN-TARGET-EFI"}], "holders": [], "descendants": []},
+                {"number": 2, "path": "/dev/nvme0n1p2", "size_bytes": 4294967296, "start_sector": 2099200, "end_sector": 10487807, "partuuid": PREIMAGE_PARTUUIDS[1], "type_guid": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": "NIXOS2_RECOVERY", "partflags": "", "fstype": "ext4", "uuid": "SYN-TARGET-RECOVERY", "signatures": [{"device": f"{SEAGATE}-part2", "offset": "0x100", "type": "ext4", "uuid": "SYN-TARGET-RECOVERY"}], "holders": [], "descendants": []},
+                {"number": 3, "path": "/dev/nvme0n1p3", "size_bytes": 3995417255424, "start_sector": 10487808, "end_sector": 7814037134, "partuuid": PREIMAGE_PARTUUIDS[2], "type_guid": "ca7d7ccb-63ed-4c53-861c-1742536059cc", "partlabel": "NIXOS2_CRYPT", "partflags": "", "fstype": "", "uuid": "", "signatures": [], "holders": [], "descendants": []},
+            ],
         },
         "protected": {
             "requested_path": WD,
@@ -228,6 +254,18 @@ def observation():
         "root_source": "/dev/nvme1n1p3",
         "efi_source": "/dev/nvme1n1p1",
         "efi_content_sha256": "e" * 64,
+        "protected_bootability": {
+            "schema_version": 1,
+            "proof": "bootcurrent-protected-esp-loader-v1",
+            "boot_current": "0000",
+            "entry": "Boot0000",
+            "active": True,
+            "partition_number": 1,
+            "esp_partuuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "loader_relative_path": "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI",
+            "loader_size_bytes": 98504,
+            "efi_nvram_sha256": "a" * 64,
+        },
     }
 
 
@@ -275,14 +313,17 @@ def synthetic_readiness_path(
     *,
     recovery_path: Path | None = None,
     lifecycle_path: Path | None = None,
+    critical_path: Path | None = None,
 ) -> Path:
     root = Path(tempfile.mkdtemp(prefix="case-", dir=_READINESS_TEST_ROOT.name))
     recovery_path = recovery_path or prod.RECOVERY_CONTRACT_PATH
     lifecycle_path = lifecycle_path or prod.NIX_LIFECYCLE_CONTRACT_PATH
+    critical_path = critical_path or prod.CRITICAL_USER_DATA_CONTRACT_PATH
     recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
     observed_at = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
     lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    critical_sha = hashlib.sha256(critical_path.read_bytes()).hexdigest()
     bindings = []
     for index, item in enumerate(recovery["required_evidence"]):
         receipt_path = root / f"receipt-{index}.json"
@@ -292,6 +333,14 @@ def synthetic_readiness_path(
             "kind": item["evidence_schema"],
             "result": "passed",
             "producer_receipt_sha256": "a" * 64,
+            "facts": (
+                {
+                    "critical_scope_sha256": critical_sha,
+                    "source_inventory_sha256": "c" * 64,
+                }
+                if item["id"] == "off-host-home-restore"
+                else {"synthetic_fact_sha256": "a" * 64}
+            ),
         }
         evidence_provenance = {
             "schema_version": 1,
@@ -325,6 +374,15 @@ def synthetic_readiness_path(
                 "kind": item["restore_test_schema"],
                 "result": "passed",
                 "producer_receipt_sha256": "b" * 64,
+                "facts": (
+                    {
+                        "critical_scope_sha256": critical_sha,
+                        "source_inventory_sha256": "c" * 64,
+                        "restored_inventory_sha256": "c" * 64,
+                    }
+                    if item["id"] == "off-host-home-restore"
+                    else {"synthetic_fact_sha256": "b" * 64}
+                ),
             }
             restore_provenance = {
                 "schema_version": 1,
@@ -405,6 +463,7 @@ def synthetic_readiness_path(
         "source_revision": REVISION,
         "recovery_contract_sha256": recovery_sha,
         "nix_lifecycle_contract_sha256": lifecycle_sha,
+        "critical_user_data_contract_sha256": critical_sha,
         "recovery_evidence_receipts": bindings,
         "observed_at": observed_at,
         "freshness_seconds": recovery["evidence_freshness"]["maximum_age_seconds"],
@@ -433,12 +492,15 @@ def plan(
         selected_readiness_path is None
         and selected_artifact["source_authority"] == "merged-main"
     ):
-        recovery_path, lifecycle_path = prod.readiness_contract_paths_for_source(
-            selected_flake_source
-        )
+        (
+            recovery_path,
+            lifecycle_path,
+            critical_path,
+        ) = prod.readiness_contract_paths_for_source(selected_flake_source)
         selected_readiness_path = synthetic_readiness_path(
             recovery_path=recovery_path,
             lifecycle_path=lifecycle_path,
+            critical_path=critical_path,
         )
     return prod.compile_plan(
         obs or observation(),
@@ -493,6 +555,50 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
         "closure_path_count": compiled["install_artifact"]["closure_path_count"],
     }
     monkeypatch.setattr(prod, "verify_host_tools_available", lambda _plan: [])
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_device_available",
+        lambda _artifact: log.append("tpm2-ready") or {"device_count": 1},
+    )
+    monkeypatch.setattr(
+        prod,
+        "prepare_recovery_key_destination",
+        lambda _path: log.append("recovery-destination-ready"),
+    )
+    monkeypatch.setattr(
+        prod,
+        "write_recovery_key",
+        lambda _path, _payload: log.append("recovery-key-stage") or ("e" * 64),
+    )
+    monkeypatch.setattr(
+        prod,
+        "create_luks_bootstrap_key",
+        lambda: log.append("bootstrap-key-create")
+        or {"fd": 123, "device": 1, "inode": 2, "size": prod.LUKS_BOOTSTRAP_KEY_BYTES},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_command_bootstrap_argv",
+        lambda command, _binding: (
+            [
+                item.replace(
+                    prod.LUKS_BOOTSTRAP_FD_SENTINEL, "/proc/self/fd/123"
+                )
+                for item in command["argv"]
+            ],
+            (),
+        ),
+    )
+    def close_bootstrap(binding):
+        log.append("bootstrap-key-close")
+        binding["fd"] = None
+    monkeypatch.setattr(prod, "close_luks_bootstrap_key", close_bootstrap)
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_luks_enrollment",
+        lambda _contract, **_kwargs:
+            log.append("tpm2-enroll-verify") or {"tpm2_token_count": 1},
+    )
     monkeypatch.setattr(prod, "verify_host_nix_root_absent", lambda: log.append("nix-root-absent"))
     monkeypatch.setattr(prod, "prepare_verifier_image_archive", lambda _plan, _artifact: log.append("archive-create") or archive)
     monkeypatch.setattr(prod, "validate_verifier_image_archive", lambda *args, **kwargs: log.append("archive-verify") or archive)
@@ -530,6 +636,16 @@ def test_contract_is_bound_to_physical_seagate_and_protected_wd():
     assert target["kernel_name_authoritative"] is False
     assert contract["protected_disks"][0]["by_id"] == WD
     assert len(contract["protected_disks"][0]["partition_table_fingerprint"]) == 4
+
+
+def test_public_contract_rejects_tpm2_pcrlock_discovery():
+    value = json.loads(json.dumps(PUBLIC_CONTRACT))
+    value["topology"]["luks"]["unlock"]["pcrlock"] = True
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="public LUKS TPM2 unlock policy",
+    ):
+        prod.storage_identity.validate_public_contract(value)
 
 
 def test_public_contract_contains_no_private_hardware_identifiers():
@@ -580,6 +696,47 @@ def test_valid_preflight_binds_root_and_efi_to_protected_wd():
     assert result["protected"]["efi_source"] == "/dev/nvme1n1p1"
 
 
+
+def test_target_disk_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device holders"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_partition_holder_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["holders"] = ["dm-0"]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_nested_block_descendant_is_rejected_before_preimage_acceptance():
+    obs = observation()
+    obs["target"]["partitions"][2]["descendants"] = [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="active block-device descendants"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_nested_block_descendant_inventory_recurses():
+    observed = prod._nested_block_descendants([
+        {
+            "path": "/dev/dm-0",
+            "type": "crypt",
+            "mountpoints": [None],
+            "children": [
+                {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+            ],
+        },
+    ])
+    assert observed == [
+        {"path": "/dev/dm-0", "type": "crypt", "mountpoints": []},
+        {"path": "/dev/dm-1", "type": "lvm", "mountpoints": ["/mnt"]},
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "wrong"),
     [
@@ -609,16 +766,108 @@ def test_kernel_name_cannot_be_target_authority():
     [
         lambda target: target.update(mounted=True, mountpoints=["/mnt/wrong"]),
         lambda target: target.update(partitions=[{"number": 1}]),
-        lambda target: target.update(partition_table="gpt"),
+        lambda target: target.update(partition_table="dos"),
         lambda target: target.update(filesystem="ext4"),
         lambda target: target.update(signatures=[{"type": "gpt"}]),
     ],
 )
-def test_nonblank_or_mounted_target_is_rejected(mutation):
+def test_target_mount_or_private_preimage_drift_is_rejected(mutation):
     obs = observation()
     mutation(obs["target"])
     with pytest.raises(prod.ProductionInstallError):
         prod.validate_preflight(obs, CONTRACT)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("start_sector", 4096),
+        ("partuuid", "99999999-9999-4999-8999-999999999999"),
+        ("type_guid", "0fc63daf-8483-4772-8e79-3d69d8477de4"),
+        ("partlabel", "UNEXPECTED"),
+        ("fstype", "xfs"),
+        ("uuid", "UNEXPECTED-UUID"),
+    ],
+)
+def test_target_partition_private_preimage_drift_is_rejected(field, wrong):
+    obs = observation()
+    obs["target"]["partitions"][0][field] = wrong
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_target_signature_private_preimage_drift_is_rejected():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"][0]["uuid"] = "DIFFERENT"
+    with pytest.raises(prod.ProductionInstallError, match="preimage"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_null_uuid_gpt_signatures_are_bound_and_accepted():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": None},
+        {"type": "PMBR", "uuid": None},
+    ]
+    contract = prod.storage_identity.bind_contract(
+        PUBLIC_CONTRACT, identity, expected_revision=REVISION
+    )
+    obs = observation()
+    obs["target"]["signatures"] = [
+        {"device": SEAGATE, "offset": "0x200", "type": "gpt", "uuid": None},
+        {"device": SEAGATE, "offset": "0x1fe", "type": "PMBR", "uuid": None},
+    ]
+    result = prod.validate_preflight(obs, contract)
+    assert result["target"]["requested_path"] == SEAGATE
+
+
+def test_null_uuid_is_rejected_for_filesystem_signature():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["partitions"][0]["signatures"] = [
+        {"type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_live_null_uuid_is_rejected_for_filesystem_signature():
+    obs = observation()
+    obs["target"]["partitions"][0]["signatures"] = [
+        {"device": f"{SEAGATE}-part1", "type": "vfat", "uuid": None},
+    ]
+    with pytest.raises(prod.ProductionInstallError, match="signature identity is invalid"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_missing_signature_uuid_field_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [{"type": "gpt"}]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
+
+
+def test_non_string_non_null_signature_uuid_is_rejected():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["target_identity"]["preimage"]["signatures"] = [
+        {"type": "gpt", "uuid": 123},
+    ]
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="signature identity is invalid",
+    ):
+        prod.storage_identity.bind_contract(
+            PUBLIC_CONTRACT, identity, expected_revision=REVISION
+        )
 
 
 def test_target_protected_alias_collision_is_rejected():
@@ -637,6 +886,66 @@ def test_root_and_efi_must_be_on_protected_wd(key, wrong):
     obs[key] = wrong
     with pytest.raises(prod.ProductionInstallError):
         prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_proof_is_required():
+    obs = observation()
+    del obs["protected_bootability"]
+    with pytest.raises(prod.ProductionInstallError, match="bootability proof"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_must_target_wd_esp():
+    obs = observation()
+    obs["protected_bootability"]["esp_partuuid"] = PREIMAGE_PARTUUIDS[0]
+    with pytest.raises(prod.ProductionInstallError, match="does not bind the WD ESP"):
+        prod.validate_preflight(obs, CONTRACT)
+
+
+def test_protected_firmware_bootability_parser_binds_current_loader(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "SYSTEMD" / "SYSTEMD-BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0000\n"
+        "Timeout: 1 seconds\n"
+        "BootOrder: 0000,0001\n"
+        "Boot0000* Pop!_OS 22.04 LTS\t"
+        "HD(1,GPT,aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1,0x1000,0x1fefff)"
+        "/File(\\EFI\\SYSTEMD\\SYSTEMD-BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    proof = prod.protected_firmware_bootability(CONTRACT, efi_root=root)
+    assert proof["boot_current"] == "0000"
+    assert proof["esp_partuuid"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
+    assert proof["loader_relative_path"] == "EFI/SYSTEMD/SYSTEMD-BOOTX64.EFI"
+    assert proof["loader_size_bytes"] == len(b"efi-loader")
+    assert proof["efi_nvram_sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_protected_firmware_bootability_parser_rejects_seagate_entry(monkeypatch, tmp_path):
+    root = tmp_path / "efi"
+    loader = root / "EFI" / "BOOT" / "BOOTX64.EFI"
+    loader.parent.mkdir(parents=True)
+    loader.write_bytes(b"efi-loader")
+    payload = (
+        "BootCurrent: 0002\n"
+        "Boot0002* UEFI OS\t"
+        "HD(1,GPT," + PREIMAGE_PARTUUIDS[0] + ",0x800,0x200000)"
+        "/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+    ).encode()
+
+    class Result:
+        stdout = payload
+
+    monkeypatch.setattr(prod, "_run", lambda argv: Result())
+    with pytest.raises(prod.ProductionInstallError, match="protected WD ESP"):
+        prod.protected_firmware_bootability(CONTRACT, efi_root=root)
 
 
 def test_protected_partition_fingerprint_mismatch_is_rejected():
@@ -661,9 +970,12 @@ def test_protected_signature_and_efi_content_are_bound_into_fingerprint():
     changed_disk["protected"]["signatures"][0]["offset"] = "0x201"
     changed_efi = observation()
     changed_efi["efi_content_sha256"] = "f" * 64
+    changed_boot = observation()
+    changed_boot["protected_bootability"]["loader_size_bytes"] += 1
     assert prod.protected_fingerprint(prod.validate_preflight(changed_partition, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_disk, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
     assert prod.protected_fingerprint(prod.validate_preflight(changed_efi, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
+    assert prod.protected_fingerprint(prod.validate_preflight(changed_boot, CONTRACT)["protected"]) != prod.protected_fingerprint(baseline)
 
 
 def test_protected_efi_content_digest_changes_with_bytes_and_rejects_symlinks(tmp_path):
@@ -787,12 +1099,58 @@ def test_filesystem_and_luks_commands_use_target_derived_partition_by_ids():
     assert f"{SEAGATE}-part1" in by_effect["efi-filesystem"]["argv"]
     assert f"{SEAGATE}-part2" in by_effect["recovery-filesystem"]["argv"]
     crypt = f"{SEAGATE}-part3"
-    assert crypt in by_effect["luks-format"]["argv"]
-    assert crypt in by_effect["luks-open"]["argv"]
+    sentinel = prod.LUKS_BOOTSTRAP_FD_SENTINEL
+
+    for effect in (
+        "luks-format",
+        "luks-tpm2-enroll",
+        "luks-recovery-enroll",
+        "luks-bootstrap-wipe",
+        "luks-open",
+    ):
+        assert crypt in by_effect[effect]["argv"]
+
     assert f"/dev/disk/by-partuuid/{PARTUUIDS[0]}" not in by_effect["efi-filesystem"]["argv"]
-    assert by_effect["luks-format"]["secret_binding"] == "luks-passphrase-v1"
-    assert by_effect["luks-format"]["argv"][by_effect["luks-format"]["argv"].index("--uuid") + 1] == PARTUUIDS[2]
-    assert by_effect["luks-open"]["secret_binding"] == "luks-passphrase-v1"
+    luks_format = by_effect["luks-format"]
+    assert luks_format["bootstrap_key_fd"] is True
+    assert luks_format["argv"][luks_format["argv"].index("--uuid") + 1] == PARTUUIDS[2]
+    assert luks_format["argv"][luks_format["argv"].index("--key-slot") + 1] == "0"
+    assert luks_format["argv"][luks_format["argv"].index("--key-file") + 1] == sentinel
+
+    enroll = by_effect["luks-tpm2-enroll"]
+    assert enroll["bootstrap_key_fd"] is True
+    assert enroll["argv"][:3] == [
+        prod.SEALED_TOOL_LAUNCHER,
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/systemd-cryptenroll",
+    ]
+    assert f"--unlock-key-file={sentinel}" in enroll["argv"]
+    assert "--tpm2-device=auto" in enroll["argv"]
+    assert "--tpm2-pcrs=7" in enroll["argv"]
+    assert "--tpm2-pcrlock=" in enroll["argv"]
+    assert "--tpm2-public-key=" in enroll["argv"]
+    assert "--tpm2-with-pin=no" in enroll["argv"]
+    assert compiled["luks_unlock_policy"]["pcrlock"] is False
+
+    recovery = by_effect["luks-recovery-enroll"]
+    assert recovery["sensitive_stdout"] == "luks-recovery-key-v1"
+    assert "--unlock-tpm2-device=auto" in recovery["argv"]
+    assert "--recovery-key" in recovery["argv"]
+
+    wipe = by_effect["luks-bootstrap-wipe"]
+    assert "--wipe-slot=0" in wipe["argv"]
+
+    opened = by_effect["luks-open"]["argv"]
+    assert opened[:3] == [
+        prod.SEALED_TOOL_LAUNCHER,
+        f"PATH={SYSTEM_PATH}/sw/bin:{prod.TRUSTED_PATH}",
+        f"{SYSTEM_PATH}/sw/bin/systemd-cryptsetup",
+    ]
+    assert opened[-5:] == [
+        "attach", "heimpc-nixos-crypt", crypt, "-", prod.TPM2_BOOT_OPTIONS
+    ]
+    assert compiled["luks_unlock_policy"] == PUBLIC_CONTRACT["topology"]["luks"]["unlock"]
+    assert compiled["recovery_key_output_path"].endswith("/luks-recovery-key.txt")
     assert compiled["partition_binding_verification_required"] is True
 
 
@@ -816,13 +1174,22 @@ def test_private_storage_identity_and_loader_entry_are_bound_create_only(monkeyp
     entry = entries / "nixos-generation-1.conf"
     entry.write_text("title NixOS\nsort-key nixos\nlinux /EFI/nixos/kernel.efi\noptions quiet root=/dev/mapper/heimpc-nixos-crypt\n")
     prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
-    expected = f"rd.luks.name={PARTUUIDS[2]}=heimpc-nixos-crypt"
-    assert entry.read_text().count(expected) == 1
+    expected_name = f"rd.luks.name={PARTUUIDS[2]}=heimpc-nixos-crypt"
+    expected_options = (
+        f"rd.luks.options={PARTUUIDS[2]}=tpm2-device=auto,headless=yes"
+    )
+    assert entry.read_text().count(expected_name) == 1
+    assert entry.read_text().count(expected_options) == 1
     class Result:
         stdout = (PARTUUIDS[2] + "\n").encode()
         returncode = 0
         stderr = b""
     monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    monkeypatch.setattr(
+        prod,
+        "verify_tpm2_luks_enrollment",
+        lambda _contract, **_kwargs: {"tpm2_token_count": 1, "recovery_token_count": 1},
+    )
     prod.verify_private_boot_binding(mount_root=str(tmp_path), contract=CONTRACT)
 
 
@@ -836,8 +1203,347 @@ def test_loader_entry_rejects_conflicting_private_luks_token(tmp_path):
         "title NixOS\nsort-key nixos\noptions "
         "rd.luks.name=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa=heimpc-nixos-crypt\n"
     )
-    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS"):
+    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS name"):
         prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
+
+
+def test_loader_entry_rejects_conflicting_private_luks_options_token(tmp_path):
+    (tmp_path / "persist").mkdir()
+    prod.stage_private_storage_identity(mount_root=str(tmp_path), contract=CONTRACT)
+    entries = tmp_path / "boot/loader/entries"
+    entries.mkdir(parents=True)
+    entry = entries / "nixos-generation-1.conf"
+    entry.write_text(
+        "title NixOS\nsort-key nixos\noptions "
+        f"rd.luks.options={PARTUUIDS[2]}=password-echo=yes\n"
+    )
+    with pytest.raises(prod.ProductionInstallError, match="conflicting private LUKS options"):
+        prod.bind_private_boot_entries(mount_root=str(tmp_path), contract=CONTRACT)
+
+
+def test_tpm2_luks_enrollment_requires_pcr7_recovery_and_bootstrap_retirement(monkeypatch):
+    bootstrap_state = {
+        "keyslots": {"0": {"type": "luks2"}, "1": {"type": "luks2"}},
+        "tokens": {
+            "0": {
+                "type": prod.TPM2_TOKEN_TYPE,
+                "keyslots": ["1"],
+                "tpm2-pcrs": [7],
+                "tpm2-pin": False,
+            }
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: bootstrap_state)
+    interim = prod.verify_tpm2_luks_enrollment(
+        CONTRACT, require_recovery=False, bootstrap_slot_present=True
+    )
+    assert interim["tpm2_token_count"] == 1
+    assert interim["recovery_token_count"] == 0
+    assert interim["pcrs"] == [7]
+    assert interim["bootstrap_slot_present"] is True
+
+    final = {
+        "keyslots": {"1": {"type": "luks2"}, "2": {"type": "luks2"}},
+        "tokens": {
+            "0": {
+                "type": prod.TPM2_TOKEN_TYPE,
+                "keyslots": ["1"],
+                "tpm2-pcrs": [7],
+                "tpm2-pin": False,
+            },
+            "1": {
+                "type": prod.RECOVERY_TOKEN_TYPE,
+                "keyslots": ["2"],
+            },
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: final)
+    result = prod.verify_tpm2_luks_enrollment(CONTRACT)
+    assert result["tpm2_token_count"] == 1
+    assert result["recovery_token_count"] == 1
+    assert result["keyslot_count"] == 2
+    assert result["pcrs"] == [7]
+    assert result["bootstrap_slot_present"] is False
+    assert result["persistent_passphrase"] is False
+    assert result["recovery_key"] is True
+
+    wrong_pcr = json.loads(json.dumps(final))
+    wrong_pcr["tokens"]["0"]["tpm2-pcrs"] = []
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: wrong_pcr)
+    with pytest.raises(prod.ProductionInstallError, match="PCR policy mismatch"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    for field, value in (
+        ("tpm2-pcrlock", True),
+        ("tpm2-pcrlock-nv", "synthetic-nv-handle"),
+        ("tpm2_pcrlock_nv", "synthetic-nv-handle"),
+    ):
+        unexpected_pcrlock = json.loads(json.dumps(final))
+        unexpected_pcrlock["tokens"]["0"][field] = value
+        monkeypatch.setattr(
+            prod, "_json_command", lambda _argv, state=unexpected_pcrlock: state
+        )
+        with pytest.raises(
+            prod.ProductionInstallError, match="pcrlock material"
+        ):
+            prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    for field, value in (
+        ("tpm2_pubkey", "c3ludGhldGljLXB1YmtleQ=="),
+        ("tpm2_pubkey_pcrs", [11]),
+        ("tpm2-pubkey", "c3ludGhldGljLXB1YmtleQ=="),
+    ):
+        unexpected_pubkey = json.loads(json.dumps(final))
+        unexpected_pubkey["tokens"]["0"][field] = value
+        monkeypatch.setattr(
+            prod, "_json_command", lambda _argv, state=unexpected_pubkey: state
+        )
+        with pytest.raises(
+            prod.ProductionInstallError, match="public-key material"
+        ):
+            prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    no_recovery = json.loads(json.dumps(final))
+    del no_recovery["tokens"]["1"]
+    del no_recovery["keyslots"]["2"]
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: no_recovery)
+    with pytest.raises(prod.ProductionInstallError, match="token set is invalid"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+    lingering_bootstrap = json.loads(json.dumps(final))
+    lingering_bootstrap["keyslots"]["0"] = {"type": "luks2"}
+    monkeypatch.setattr(prod, "_json_command", lambda _argv: lingering_bootstrap)
+    with pytest.raises(prod.ProductionInstallError, match="keyslot set violates"):
+        prod.verify_tpm2_luks_enrollment(CONTRACT)
+
+
+def _recovery_key_test_path(monkeypatch, tmp_path):
+    parent = tmp_path / "heim-pc"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    base = parent / "nixos-production-recovery"
+    monkeypatch.setattr(prod, "PRODUCTION_RECOVERY_KEY_BASE", base)
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_OWNER_GID", os.getegid())
+    path = base / (("a" * 40) + "-" + ("b" * 16)) / "luks-recovery-key.txt"
+    prod.prepare_recovery_key_destination(path)
+    return path
+
+
+def _recovery_key_payload():
+    return (b"ABCDEFGH-" * 7) + b"ABCDEFGH\n"
+
+
+def test_write_recovery_key_is_private_single_link_create_only(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    payload = _recovery_key_payload()
+    digest = prod.write_recovery_key(path, payload)
+    info = path.lstat()
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert path.read_bytes() == payload
+    assert stat.S_ISREG(info.st_mode)
+    assert info.st_nlink == 1
+    assert info.st_uid == os.geteuid()
+    assert info.st_gid == os.getegid()
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    with pytest.raises(prod.ProductionInstallError, match="already exists"):
+        prod.write_recovery_key(path, payload)
+
+
+def test_write_recovery_key_unlinks_created_file_when_fchmod_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_fchmod(_fd, _mode):
+        raise OSError("synthetic recovery fchmod failure")
+
+    monkeypatch.setattr(prod.os, "fchmod", fail_fchmod)
+    with pytest.raises(OSError, match="synthetic recovery fchmod failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_unlinks_created_file_when_write_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_unlinks_created_file_when_file_fsync_fails(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+
+    def fail_fsync(_fd):
+        raise OSError("synthetic recovery fsync failure")
+
+    monkeypatch.setattr(prod.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="synthetic recovery fsync failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+    assert not os.path.lexists(path)
+
+
+
+def test_write_recovery_key_binds_created_identity_before_mutating_file(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    events = []
+    real_fstat = prod.os.fstat
+    real_fchmod = prod.os.fchmod
+    real_write = prod._write_all_fd
+    real_fsync = prod.os.fsync
+
+    def record_fstat(fd):
+        events.append("fstat")
+        return real_fstat(fd)
+
+    def record_fchmod(fd, mode):
+        events.append("fchmod")
+        return real_fchmod(fd, mode)
+
+    def record_write(fd, value):
+        events.append("write")
+        return real_write(fd, value)
+
+    def record_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(prod.os, "fstat", record_fstat)
+    monkeypatch.setattr(prod.os, "fchmod", record_fchmod)
+    monkeypatch.setattr(prod, "_write_all_fd", record_write)
+    monkeypatch.setattr(prod.os, "fsync", record_fsync)
+
+    prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert events[:4] == ["fstat", "fchmod", "write", "fsync"]
+
+
+def test_write_recovery_key_cleanup_unlinks_same_created_identity(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    created_identity = []
+    unlinked_identity = []
+    real_fstat = prod.os.fstat
+    real_unlink = prod.os.unlink
+
+    def capture_fstat(fd):
+        info = real_fstat(fd)
+        if not created_identity:
+            created_identity.append((info.st_dev, info.st_ino))
+        return info
+
+    def capture_unlink(name, *, dir_fd=None):
+        linked = prod.os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        unlinked_identity.append((linked.st_dev, linked.st_ino))
+        return real_unlink(name, dir_fd=dir_fd)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod.os, "fstat", capture_fstat)
+    monkeypatch.setattr(prod.os, "unlink", capture_unlink)
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert unlinked_identity == created_identity
+    assert not os.path.lexists(path)
+
+
+def test_write_recovery_key_cleanup_preserves_foreign_replacement(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    displaced = path.with_name("displaced-created-recovery-key")
+    foreign = b"foreign-replacement\n"
+
+    def replace_then_fail(_fd, _payload):
+        os.rename(path, displaced)
+        path.write_bytes(foreign)
+        os.chmod(path, 0o600)
+        raise prod.ProductionInstallError("synthetic replacement write failure")
+
+    monkeypatch.setattr(prod, "_write_all_fd", replace_then_fail)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic replacement write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert path.read_bytes() == foreign
+    assert displaced.exists()
+
+
+def test_write_recovery_key_cleanup_fsyncs_parent_directory(monkeypatch, tmp_path):
+    path = _recovery_key_test_path(monkeypatch, tmp_path)
+    fsync_modes = []
+    real_fsync = prod.os.fsync
+
+    def record_fsync(fd):
+        fsync_modes.append(stat.S_IFMT(prod.os.fstat(fd).st_mode))
+        return real_fsync(fd)
+
+    def fail_write(_fd, _payload):
+        raise prod.ProductionInstallError("synthetic recovery write failure")
+
+    monkeypatch.setattr(prod.os, "fsync", record_fsync)
+    monkeypatch.setattr(prod, "_write_all_fd", fail_write)
+
+    with pytest.raises(prod.ProductionInstallError, match="synthetic recovery write failure"):
+        prod.write_recovery_key(path, _recovery_key_payload())
+
+    assert stat.S_IFDIR in fsync_modes
+    assert not os.path.lexists(path)
+
+def test_luks_bootstrap_key_is_sealed_unlinked_memfd(monkeypatch):
+    binding = prod.create_luks_bootstrap_key()
+    fd = binding["fd"]
+    info = os.fstat(fd)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_nlink == 0
+    assert info.st_size == prod.LUKS_BOOTSTRAP_KEY_BYTES
+    expected_seals = (
+        prod.fcntl.F_SEAL_GROW
+        | prod.fcntl.F_SEAL_SHRINK
+        | prod.fcntl.F_SEAL_WRITE
+        | prod.fcntl.F_SEAL_SEAL
+    )
+    assert prod.fcntl.fcntl(fd, prod.fcntl.F_GET_SEALS) == expected_seals
+
+    command = {
+        "argv": [
+            "cryptsetup",
+            "--key-file",
+            prod.LUKS_BOOTSTRAP_FD_SENTINEL,
+        ],
+        "bootstrap_key_fd": True,
+    }
+    argv, pass_fds = prod._command_bootstrap_argv(command, binding)
+    assert argv[-1] == f"/proc/self/fd/{fd}"
+    assert pass_fds == (fd,)
+
+    prod.close_luks_bootstrap_key(binding)
+    assert binding["fd"] is None
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
+def test_verify_scratch_state_has_no_filesystem_bootstrap_key_dependency(
+    monkeypatch, tmp_path
+):
+    mount_root = tmp_path / "mount-root"
+    btrfs_root = tmp_path / "btrfs-stage"
+    mount_root.mkdir()
+    btrfs_root.mkdir()
+    monkeypatch.setattr(prod, "MOUNT_ROOT", str(mount_root))
+    monkeypatch.setattr(prod, "BTRFS_STAGE_ROOT", str(btrfs_root))
+
+    class Result:
+        returncode = 1
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(prod, "_run", lambda argv, **kwargs: Result())
+    prod.verify_scratch_state("heimpc-nixos-crypt")
 
 
 def test_nixos_install_uses_exact_sealed_artifact_without_docker_in_apply():
@@ -959,7 +1665,6 @@ def _mock_historical_apply_until_final_gate(monkeypatch, compiled):
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     return mock_trusted_build_gate(monkeypatch, compiled)
 
 
@@ -1136,6 +1841,7 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
         "readiness_bundle_sha256": None,
         "recovery_contract_sha256": None,
         "nix_lifecycle_contract_sha256": None,
+        "critical_user_data_contract_sha256": None,
         "recovery_evidence_count": 0,
     }
     assert "super-secret-material" not in json.dumps(summary)
@@ -1144,8 +1850,11 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
 
 def test_plan_contains_no_secret_material():
     serialized = json.dumps(plan())
-    assert "passphrase" not in serialized.lower() or "luks-passphrase-v1" in serialized
+    assert "luks-passphrase-v1" not in serialized
+    assert "getpass" not in serialized.lower()
     assert "$y$j9T$" not in serialized
+    assert prod.LUKS_BOOTSTRAP_FD_SENTINEL in serialized
+    assert "luks-bootstrap.key" not in serialized
 
 
 def test_main_never_surfaces_exception_text(monkeypatch, tmp_path, capsys):
@@ -3229,6 +3938,29 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     ]
 
 
+def test_post_mutation_failure_receipt_preserves_bootstrap_memfd_cleanup():
+    compiled = plan()
+    error = prod.PostMutationInstallError(
+        "teardown-incomplete",
+        private_evidence={
+            "mutation_attempted": True,
+            "teardown_failures": [
+                "luks-bootstrap-memfd-cleanup",
+                "not-a-real-teardown-effect",
+            ],
+        },
+    )
+
+    receipt = prod._post_mutation_failure_receipt(
+        plan=compiled,
+        artifact=ARTIFACT,
+        error=error,
+    )
+
+    assert receipt["alarm_code"] == "teardown-incomplete"
+    assert receipt["teardown_failures"] == ["luks-bootstrap-memfd-cleanup"]
+
+
 def test_main_failure_receipt_construction_interrupt_persists_bound_fallback(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(prod, "load_install_artifact", lambda _path: ARTIFACT)
     monkeypatch.setattr(prod, "managed_policy_sha256_for_source", lambda *_args: MANAGED_POLICY_SHA256)
@@ -4269,7 +5001,6 @@ def test_execute_plan_starts_signal_deferral_before_owned_setup(
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     handoff = {}
     gate_events = mock_trusted_build_gate(monkeypatch, compiled)
 
@@ -4317,6 +5048,7 @@ def test_execute_plan_starts_signal_deferral_before_owned_setup(
     assert gate_events == [
         "nix-root-absent",
         "signal-deferral",
+        "recovery-destination-ready",
         "archive-create",
         "docker-stop",
         "docker-quiesced",
@@ -4345,7 +5077,6 @@ def test_execute_plan_interrupt_before_freeze_handoff_thaws_local_owner(
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     gate_events = mock_trusted_build_gate(monkeypatch, compiled)
     handoff = {}
 
@@ -4404,7 +5135,6 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "validate_protected_state", lambda *_args: compiled["preflight"]["protected"])
     monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
@@ -4417,7 +5147,10 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
         stdout = b""
         stderr = b""
 
-    def fake_run(argv, *, input_bytes=None, check=True):
+    calls = []
+
+    def fake_run(argv, *, input_bytes=None, check=True, pass_fds=()):
+        calls.append((argv, pass_fds))
         if argv == first_argv:
             raise prod.ProductionInstallError("private command detail")
         return Result()
@@ -4432,9 +5165,11 @@ def test_failed_first_destructive_command_becomes_post_mutation_alarm(monkeypatc
             observer=lambda _contract: observation(),
         )
     assert exc.value.code == "apply-failed-after-mutation-attempt"
+    assert calls[0] == (first_argv, ())
     assert "private command detail" not in prod.POST_MUTATION_PUBLIC_MESSAGES[exc.value.code]
-    assert gate_events[:9] == [
+    assert gate_events[:10] == [
         "nix-root-absent",
+        "recovery-destination-ready",
         "archive-create",
         "docker-stop",
         "docker-quiesced",
@@ -4465,7 +5200,6 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
@@ -4501,6 +5235,303 @@ def test_unexpected_post_mutation_baseexception_becomes_bound_alarm(monkeypatch,
     assert gate_events[-3:] == ["seal-cleanup", "docker-restore", "efi-thaw"]
 
 
+def _expected_root_source_git_argv(source_fd, arguments):
+    return [
+        "git",
+        "--no-replace-objects",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "diff.external=",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "status.submoduleSummary=false",
+        f"--work-tree=/proc/self/fd/{source_fd}",
+        "-C",
+        f"/proc/self/fd/{source_fd}",
+        *arguments,
+    ]
+
+
+def test_root_source_git_argv_pins_work_tree_to_checkout_fd():
+    argv = prod._root_source_git_argv(17, ["rev-parse", "HEAD"])
+    assert "--work-tree=/proc/self/fd/17" in argv
+    assert argv[argv.index("-C") + 1] == "/proc/self/fd/17"
+
+
+def _fixture_blob_oid(payload: bytes) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"base\n")
+    owner = checkout_root.stat()
+    blob_oid = _fixture_blob_oid(b"base\n")
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(flake_source), REVISION) == REVISION
+    assert len(calls) == 4
+    expected_suffixes = [
+        ["rev-parse", "HEAD"],
+        ["ls-tree", "-r", "-z", REVISION],
+        ["ls-files", "--stage", "-z"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    ]
+    for (argv, kwargs), suffix in zip(calls, expected_suffixes):
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(source_fd, suffix)
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
+    assert all(
+        not any(arg.startswith("safe.directory=") for arg in argv)
+        for argv, _kwargs in calls
+    )
+
+
+def test_root_source_git_owner_drop_is_reused_by_policy_and_readiness(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    production_root = checkout_root / "nixos" / "production"
+    policy_path = checkout_root / prod.MANAGED_BUILD_POLICY_RELATIVE
+    flake_source.mkdir(parents=True)
+    production_root.mkdir(parents=True)
+    policy_path.parent.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
+    policy = {"schema_version": 1, "kind": "synthetic-managed-policy"}
+    policy_path.write_text(json.dumps(policy) + "\n", encoding="utf-8")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = (str(checkout_root.resolve()) + "\n").encode()
+        stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(source_fd)
+        checkout_info = checkout_root.stat()
+        flake_info = flake_source.stat()
+        assert (fd_info.st_dev, fd_info.st_ino) == (
+            checkout_info.st_dev,
+            checkout_info.st_ino,
+        )
+        assert (fd_info.st_dev, fd_info.st_ino) != (
+            flake_info.st_dev,
+            flake_info.st_ino,
+        )
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    expected_paths = (
+        production_root / "recovery-contract-v1.json",
+        production_root / "nix-lifecycle-contract-v1.json",
+        production_root / "critical-user-data-contract-v1.json",
+    )
+    assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
+    assert prod.managed_policy_sha256_for_source(str(flake_source)) == prod.sha256_json(policy)
+    assert len(calls) == 2
+    for argv, kwargs in calls:
+        source_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert argv == _expected_root_source_git_argv(
+            source_fd, ["rev-parse", "--show-toplevel"]
+        )
+        assert kwargs == {
+            "run_as_uid": owner.st_uid,
+            "run_as_gid": owner.st_gid,
+            "pass_fds": (source_fd,),
+        }
+
+
+def test_root_source_git_rejects_symlinked_git_marker(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    real_marker = tmp_path / "real-git-marker"
+    real_marker.mkdir()
+    (checkout_root / ".git").symlink_to(real_marker, target_is_directory=True)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+
+    with pytest.raises(prod.ProductionInstallError, match="must not be a symlink"):
+        prod.verify_source(str(flake_source), REVISION)
+
+
+def test_root_source_git_context_pins_open_source_across_path_swap(tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    other_source = tmp_path / "other-source"
+    other_source.mkdir()
+
+    source_fd, checkout_fd, _uid, _gid = prod._open_root_source_git_context(flake_source)
+    try:
+        before = prod.os.fstat(source_fd)
+        moved = checkout_root / "nixos" / "system-original"
+        flake_source.rename(moved)
+        flake_source.symlink_to(other_source, target_is_directory=True)
+        after = prod.os.fstat(source_fd)
+        replacement = flake_source.stat()
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        assert (replacement.st_dev, replacement.st_ino) != (before.st_dev, before.st_ino)
+    finally:
+        prod.os.close(checkout_fd)
+        prod.os.close(source_fd)
+
+
+def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    (checkout_root / "tracked.txt").write_bytes(b"EVIL\n")
+    blob_oid = _fixture_blob_oid(b"base\n")
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(f"100644 blob {blob_oid}\ttracked.txt\0".encode())
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(f"100644 {blob_oid} 0\ttracked.txt\0".encode())
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    assert all("status" not in argv for argv, _kwargs in calls)
+
+
+def test_verify_source_root_rejects_untracked_file_outside_flake_source(monkeypatch, tmp_path):
+    checkout_root = tmp_path / "checkout"
+    flake_source = checkout_root / "nixos" / "system"
+    flake_source.mkdir(parents=True)
+    (checkout_root / ".git").mkdir()
+    owner = checkout_root.stat()
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        fd_info = os.fstat(checkout_fd)
+        assert (fd_info.st_dev, fd_info.st_ino) == (owner.st_dev, owner.st_ino)
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return Result((REVISION + "\n").encode())
+        if argv[-4:] == ["ls-tree", "-r", "-z", REVISION]:
+            return Result(b"")
+        if argv[-3:] == ["ls-files", "--stage", "-z"]:
+            return Result(b"")
+        if argv[-4:] == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return Result(b"outside-flake.txt\0")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    with pytest.raises(prod.ProductionInstallError, match="must be clean"):
+        prod.verify_source(str(flake_source), REVISION)
+    assert calls
+    for argv, kwargs in calls:
+        checkout_fd = int(argv[argv.index("-C") + 1].rsplit("/", 1)[1])
+        assert kwargs["pass_fds"] == (checkout_fd,)
+
+
+def test_verify_source_non_root_does_not_change_git_identity(monkeypatch, tmp_path):
+    calls = []
+
+    class Result:
+        def __init__(self, stdout):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = b""
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "rev-parse" in argv:
+            return Result((REVISION + "\n").encode())
+        return Result(b"")
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(prod, "_run", fake_run)
+
+    assert prod.verify_source(str(tmp_path), REVISION) == REVISION
+    assert calls == [
+        (["git", "-C", str(tmp_path), "rev-parse", "HEAD"], {}),
+        (["git", "-C", str(tmp_path), "status", "--porcelain"], {}),
+    ]
+
+
 def test_run_uses_fixed_trusted_environment(monkeypatch):
     captured = {}
 
@@ -4518,6 +5549,29 @@ def test_run_uses_fixed_trusted_environment(monkeypatch):
     assert captured["env"]["PATH"] == prod.TRUSTED_PATH
     assert captured["env"]["HOME"] == "/"
     assert set(captured["env"]) == {"PATH", "LC_ALL", "LANG", "HOME", "SYSTEMD_COLORS"}
+    assert "user" not in captured
+    assert "group" not in captured
+    assert "extra_groups" not in captured
+
+
+def test_run_drops_source_git_credentials_and_supplementary_groups(monkeypatch):
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod.subprocess, "run", fake_run)
+    prod._run(["git", "--version"], run_as_uid=1234, run_as_gid=5678)
+    assert captured["user"] == 1234
+    assert captured["group"] == 5678
+    assert captured["extra_groups"] == []
 
 
 def test_run_with_sensitive_stdin_never_surfaces_command_stderr(monkeypatch):
@@ -4654,6 +5708,367 @@ def test_target_partition_bindings_reject_partlabel_alias_outside_seagate(monkey
         prod.verify_target_partition_bindings(CONTRACT)
 
 
+def test_managed_nix_verification_snapshot_parent_uses_root_apply_lock(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    lock_dir = tmp_path / "production-apply-locks"
+    calls = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "PRODUCTION_APPLY_LOCK_DIR", lock_dir)
+    monkeypatch.setattr(
+        prod,
+        "_require_root_owned_directory",
+        lambda path, *, mode: calls.append((path, mode)),
+    )
+
+    assert prod._managed_nix_verification_snapshot_parent(store_root) == lock_dir
+    assert calls == [(lock_dir, 0o700)]
+
+
+def test_managed_nix_verification_snapshot_parent_keeps_nonroot_cache_parent(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 1000)
+
+    def unexpected_root_check(*args, **kwargs):
+        raise AssertionError("non-root verification must not require the root apply lock")
+
+    monkeypatch.setattr(prod, "_require_root_owned_directory", unexpected_root_check)
+    assert prod._managed_nix_verification_snapshot_parent(store_root) == store_root.parent
+
+
+def test_managed_nix_verification_snapshot_parent_fails_closed_without_safe_root(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "managed" / "nix-store"
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+
+    def reject_root(*args, **kwargs):
+        raise prod.ProductionInstallError("root-owned directory is unavailable")
+
+    monkeypatch.setattr(prod, "_require_root_owned_directory", reject_root)
+    with pytest.raises(
+        prod.ProductionInstallError, match="root-owned directory is unavailable"
+    ):
+        prod._managed_nix_verification_snapshot_parent(store_root)
+
+
+def _write_nix_db_schema(db_dir: Path) -> Path:
+    schema = db_dir / "schema"
+    schema.write_text("10", encoding="ascii")
+    return schema
+
+
+def _verification_snapshot_destination(tmp_path: Path) -> Path:
+    snapshot_dir = tmp_path / "verification-db"
+    snapshot_dir.mkdir(mode=0o700)
+    snapshot_dir.chmod(0o700)
+    return snapshot_dir / "db.sqlite"
+
+
+def test_managed_nix_verification_db_snapshot_materializes_wal_without_mutating_source(
+    tmp_path,
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    schema = _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = (source.read_bytes(), wal.read_bytes(), schema.read_bytes())
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        assert (source.read_bytes(), wal.read_bytes(), schema.read_bytes()) == before
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+        assert destination.stat().st_mode & 0o777 == 0o400
+        assert (destination.parent / "schema").read_text(encoding="ascii") == "10"
+        assert (destination.parent / "schema").stat().st_mode & 0o777 == 0o400
+        snapshot = sqlite3.connect(
+            f"file:{destination}?immutable=1", uri=True
+        )
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_db_snapshot_accepts_empty_wal(tmp_path):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    schema = _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        assert writer.execute("pragma wal_checkpoint(truncate)").fetchone()[0] == 0
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size == 0
+        before = (source.read_bytes(), wal.read_bytes(), schema.read_bytes())
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        assert (source.read_bytes(), wal.read_bytes(), schema.read_bytes()) == before
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+        snapshot = sqlite3.connect(
+            f"file:{destination}?immutable=1", uri=True
+        )
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_db_snapshot_allows_wal_ctime_only_drift(
+    monkeypatch, tmp_path
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    real_connect = sqlite3.connect
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.commit()
+        writer.execute("pragma wal_checkpoint(truncate)")
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+        wal = source.with_name("db.sqlite-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+        before = wal.lstat()
+        source_uri = source.as_uri() + "?mode=ro"
+
+        def connect(database, *args, **kwargs):
+            if database == source_uri:
+                mode = stat.S_IMODE(wal.lstat().st_mode)
+                os.chmod(wal, mode | stat.S_IXUSR)
+                os.chmod(wal, mode)
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(prod.sqlite3, "connect", connect)
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+
+        after = wal.lstat()
+        assert after.st_ctime_ns != before.st_ctime_ns
+        assert (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        ) == (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        snapshot = real_connect(f"file:{destination}?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+        finally:
+            snapshot.close()
+    finally:
+        writer.close()
+
+
+def test_managed_nix_verification_snapshot_stays_frozen_after_source_wal_restart(
+    tmp_path,
+):
+    store_root = tmp_path / "nix-store"
+    db_dir = store_root / "var" / "nix" / "db"
+    db_dir.mkdir(parents=True)
+    _write_nix_db_schema(db_dir)
+    source = db_dir / "db.sqlite"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("pragma journal_mode = wal")
+        writer.execute("pragma wal_autocheckpoint = 0")
+        writer.execute("create table ValidPaths (path text primary key)")
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/baseline",))
+        writer.execute("insert into ValidPaths values (?)", (SYSTEM_PATH,))
+        writer.commit()
+
+        destination = _verification_snapshot_destination(tmp_path)
+        assert prod._managed_nix_verification_db_snapshot(
+            managed_nix_store_root=store_root,
+            destination=destination,
+            system_path=SYSTEM_PATH,
+        ) == destination
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+
+        assert writer.execute("pragma wal_checkpoint(truncate)").fetchone()[0] == 0
+        writer.execute("delete from ValidPaths where path = ?", (SYSTEM_PATH,))
+        writer.execute("insert into ValidPaths values (?)", ("/nix/store/live-new",))
+        writer.commit()
+
+        live = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)
+        try:
+            assert live.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() is None
+            assert live.execute(
+                "select 1 from ValidPaths where path = ?",
+                ("/nix/store/live-new",),
+            ).fetchone() == (1,)
+        finally:
+            live.close()
+
+        snapshot = sqlite3.connect(destination.as_uri() + "?immutable=1", uri=True)
+        try:
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                (SYSTEM_PATH,),
+            ).fetchone() == (1,)
+            assert snapshot.execute(
+                "select 1 from ValidPaths where path = ?",
+                ("/nix/store/live-new",),
+            ).fetchone() is None
+        finally:
+            snapshot.close()
+        assert {entry.name for entry in destination.parent.iterdir()} == {
+            "db.sqlite",
+            "schema",
+        }
+    finally:
+        writer.close()
+
+
+def test_managed_nix_volume_backing_root_is_bound_to_success_receipt(monkeypatch):
+    store_root = managed_receipt(ARTIFACT)["store_root"]
+    volume = {
+        "Name": NIX_VOLUME,
+        "Driver": "local",
+        "Scope": "local",
+        "Options": {
+            "device": store_root,
+            "o": "bind",
+            "type": "none",
+        },
+    }
+    monkeypatch.setattr(prod, "_json_command", lambda argv: [volume])
+    assert prod._managed_nix_volume_backing_root(
+        ARTIFACT, store_root
+    ) == Path(store_root)
+
+    volume["Options"] = dict(volume["Options"], device=store_root + "-other")
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="Docker volume no longer matches",
+    ):
+        prod._managed_nix_volume_backing_root(ARTIFACT, store_root)
+
+
+def test_readonly_nix_verifier_overlays_private_db_directory(tmp_path):
+    snapshot = _verification_snapshot_destination(tmp_path)
+    snapshot.write_bytes(b"snapshot")
+    schema = snapshot.parent / "schema"
+    schema.write_text("10", encoding="ascii")
+    snapshot.chmod(0o400)
+    schema.chmod(0o400)
+
+    argv = prod._nix_volume_argv(
+        ARTIFACT,
+        ["path-info", SYSTEM_PATH],
+        db_snapshot=snapshot,
+    )
+    private_mount = f"{snapshot.parent}:/subject/nix/var/nix/db:ro"
+    assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
+    assert private_mount in argv
+    assert argv.index(f"{NIX_VOLUME}:/subject/nix:ro") < argv.index(private_mount)
+    assert not any(
+        item.endswith("/subject/nix/var/nix/db/db.sqlite:ro")
+        for item in argv
+    )
+
+
+def test_readonly_nix_verifier_rejects_snapshot_sidecars(tmp_path):
+    snapshot = _verification_snapshot_destination(tmp_path)
+    snapshot.write_bytes(b"snapshot")
+    schema = snapshot.parent / "schema"
+    schema.write_text("10", encoding="ascii")
+    snapshot.chmod(0o400)
+    schema.chmod(0o400)
+    (snapshot.parent / "db.sqlite-wal").write_bytes(b"live-wal")
+
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="snapshot directory contains unexpected files",
+    ):
+        prod._nix_volume_argv(
+            ARTIFACT,
+            ["path-info", SYSTEM_PATH],
+            db_snapshot=snapshot,
+        )
+
+
 def test_readonly_nix_verifier_uses_pinned_image_binary_and_separate_subject_store():
     argv = prod._nix_volume_argv(ARTIFACT, ["store", "verify", "--no-trust", SYSTEM_PATH])
     assert f"{NIX_VOLUME}:/subject/nix:ro" in argv
@@ -4664,8 +6079,13 @@ def test_readonly_nix_verifier_uses_pinned_image_binary_and_separate_subject_sto
     assert prod.READONLY_NIX_FEATURES in argv
 
 
-def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatch):
+def test_install_artifact_environment_recomputes_and_verifies_closure(
+    monkeypatch, tmp_path
+):
     calls = []
+    managed_root = tmp_path / "nix-store"
+    managed_root.mkdir()
+    receipt_store_root = managed_receipt(ARTIFACT)["store_root"]
 
     class Result:
         def __init__(self, stdout=b""):
@@ -4685,13 +6105,42 @@ def test_install_artifact_environment_recomputes_and_verifies_closure(monkeypatc
             return Result(json.dumps(CLOSURE_PATH_INFO).encode())
         return Result()
 
+    def snapshot_db(*, managed_nix_store_root, destination, system_path):
+        assert managed_nix_store_root == managed_root
+        assert system_path == SYSTEM_PATH
+        destination.write_bytes(b"snapshot")
+        schema = destination.parent / "schema"
+        schema.write_text("10", encoding="ascii")
+        destination.chmod(0o400)
+        schema.chmod(0o400)
+        return destination
+
     monkeypatch.setattr(prod, "_run", fake_run)
-    prod.verify_install_artifact_environment(ARTIFACT)
-    verifier = next(argv for argv in calls if "store" in argv and "verify" in argv and "--no-trust" in argv)
+    monkeypatch.setattr(
+        prod,
+        "_managed_nix_volume_backing_root",
+        lambda artifact, store_root: managed_root,
+    )
+    monkeypatch.setattr(
+        prod, "_managed_nix_verification_db_snapshot", snapshot_db
+    )
+    prod.verify_install_artifact_environment(ARTIFACT, receipt_store_root)
+    verifier = next(
+        argv
+        for argv in calls
+        if "store" in argv and "verify" in argv and "--no-trust" in argv
+    )
     assert f"{NIX_VOLUME}:/subject/nix:ro" in verifier
     assert verifier[verifier.index("--store") + 1] == prod.READONLY_NIX_STORE
+    assert any(
+        item.endswith(":/subject/nix/var/nix/db:ro")
+        for item in verifier
+    )
     with pytest.raises(prod.ProductionInstallError, match="closure metadata"):
-        prod.verify_install_artifact_environment(dict(ARTIFACT, closure_manifest_sha256="0" * 64))
+        prod.verify_install_artifact_environment(
+            dict(ARTIFACT, closure_manifest_sha256="0" * 64),
+            receipt_store_root,
+        )
 
 
 def test_attestation_verifier_runner_uses_isolated_writable_home(monkeypatch, tmp_path):
@@ -5148,18 +6597,8 @@ def test_independent_rebuild_historical_closure_variance_uses_reviewed_semantic_
     assert result["historical_reproducibility_verification"] == evidence
 
 
-def test_merged_main_plan_requires_readiness_and_independent_attestation():
+def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_attestation():
     receipt = managed_receipt(MERGED_ARTIFACT)
-    with pytest.raises(prod.ProductionInstallError, match="requires validated pre-cutover readiness"):
-        prod.compile_plan(
-            observation(), install_artifact=MERGED_ARTIFACT,
-            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
-            managed_build_receipt=receipt,
-            managed_policy_sha256=MANAGED_POLICY_SHA256,
-            flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
-        )
-    readiness_path = synthetic_readiness_path()
     with pytest.raises(prod.ProductionInstallError, match="requires independent managed-build attestation"):
         prod.compile_plan(
             observation(), install_artifact=MERGED_ARTIFACT,
@@ -5167,11 +6606,88 @@ def test_merged_main_plan_requires_readiness_and_independent_attestation():
             managed_build_receipt=receipt,
             managed_policy_sha256=MANAGED_POLICY_SHA256,
             flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
-            pre_cutover_readiness_path=readiness_path,
         )
-    compiled = plan(artifact=MERGED_ARTIFACT, receipt=receipt)
+    compiled = prod.compile_plan(
+        observation(), install_artifact=MERGED_ARTIFACT,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt,
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
+        flake_source=str(prod.FLAKE_SOURCE), contract=CONTRACT,
+        managed_build_attestation_verification=managed_attestation_verification(MERGED_ARTIFACT, receipt),
+    )
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["recovery_admission_scope"] == RECOVERY_ADMISSION_SCOPE
+    assert compiled["pre_cutover_readiness"] is None
     assert compiled["managed_build_attestation_required"] is True
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("boot", "shared_esp_forbidden", False),
+        ("boot", "touch_efi_variables", True),
+        ("protected", "esp_must_remain_unchanged", False),
+        ("protected", "filesystem_signatures_must_remain_unchanged", False),
+    ],
+)
+def test_dual_os_readiness_skip_requires_hard_source_isolation(section, key, value):
+    contract = json.loads(json.dumps(CONTRACT))
+    if section == "boot":
+        contract["boot"][key] = value
+    else:
+        contract["protected_disks"][0][key] = value
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
+    ):
+        prod.pre_cutover_readiness_required(contract, RECOVERY_ADMISSION_SCOPE)
+
+
+def test_destructive_source_cutover_cannot_skip_recovery_readiness():
+    contract = json.loads(json.dumps(CONTRACT))
+    contract["source_preservation"]["destructive_source_cutover"] = True
+    contract["source_preservation"]["pre_cutover_readiness_required"] = False
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="destructive source cutover requires pre-cutover readiness",
+    ):
+        prod.pre_cutover_readiness_required(contract, RECOVERY_ADMISSION_SCOPE)
+
+
+def test_merged_main_destructive_source_cutover_requires_readiness_bundle():
+    contract = json.loads(json.dumps(CONTRACT))
+    contract["source_preservation"]["destructive_source_cutover"] = True
+    contract["source_preservation"]["pre_cutover_readiness_required"] = True
+    receipt = managed_receipt(MERGED_ARTIFACT)
+
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="requires validated pre-cutover readiness",
+    ):
+        prod.compile_plan(
+            observation(),
+            install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source=str(prod.FLAKE_SOURCE),
+            contract=contract,
+            managed_build_attestation_verification=managed_attestation_verification(
+                MERGED_ARTIFACT, receipt
+            ),
+        )
+
+
+def test_recovery_scope_must_match_isolated_replacement_path():
+    contract = json.loads(json.dumps(CONTRACT))
+    scope = json.loads(json.dumps(RECOVERY_ADMISSION_SCOPE))
+    scope["excluded_installation"]["migration_mode"] = "all-production-storage-mutations"
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="pre-cutover readiness may be skipped only for isolated retained-source dual-OS",
+    ):
+        prod.pre_cutover_readiness_required(contract, scope)
 
 
 def test_proof_only_plan_does_not_claim_production_attestation():
@@ -5367,6 +6883,44 @@ def test_private_target_partuuid_must_be_a_canonical_gpt_guid():
         prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
 
 
+def test_planned_target_partuuids_must_be_disjoint_from_replacement_preimage():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partuuids_must_be_disjoint_from_protected_disk():
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    identity["topology"]["partitions"][0]["partuuid"] = (
+        identity["protected_disks"][0]["partition_table_fingerprint"][0]["partuuid"]
+    )
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTUUIDs must be disjoint from the protected disk",
+    ):
+        prod.storage_identity.bind_contract(PUBLIC_CONTRACT, identity, expected_revision=REVISION)
+
+
+def test_planned_target_partlabels_must_be_disjoint_from_replacement_preimage():
+    public = json.loads(json.dumps(PUBLIC_CONTRACT))
+    identity = json.loads(json.dumps(PRIVATE_IDENTITY))
+    public["topology"]["partitions"][0]["label"] = (
+        identity["target_identity"]["preimage"]["partitions"][0]["partlabel"]
+    )
+    identity["public_contract_sha256"] = prod.storage_identity.sha256_json(public)
+    with pytest.raises(
+        prod.storage_identity.IdentityContractError,
+        match="planned target PARTLABELs must be disjoint",
+    ):
+        prod.storage_identity.bind_contract(public, identity, expected_revision=REVISION)
+
+
 def test_proof_only_artifact_can_plan_but_cannot_apply(monkeypatch, tmp_path):
     compiled = plan()
     touched = []
@@ -5484,7 +7038,6 @@ def test_credential_staging_failure_uses_dedicated_post_mutation_alarm(monkeypat
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
     monkeypatch.setattr(prod, "verify_target_partition_bindings", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_installed_target", lambda *_args: None)
@@ -5583,21 +7136,26 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
 
     recovery_path = production_root / "recovery-contract-v1.json"
     lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
-    expected_paths = (recovery_path, lifecycle_path)
+    critical_path = production_root / "critical-user-data-contract-v1.json"
+    expected_paths = (recovery_path, lifecycle_path, critical_path)
     assert prod.readiness_contract_paths_for_source(str(source_root)) == expected_paths
     assert prod.readiness_contract_paths_for_source(str(flake_source)) == expected_paths
     recovery = json.loads(prod.RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8"))
     lifecycle = json.loads(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    critical_payload = prod.CRITICAL_USER_DATA_CONTRACT_PATH.read_bytes()
     recovery["source_fixture_marker"] = "historical"
     lifecycle["source_fixture_marker"] = "historical"
     recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
     lifecycle_path.write_text(json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8")
+    critical_path.write_bytes(critical_payload)
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
+    critical_path.chmod(0o644)
 
     readiness_path = synthetic_readiness_path(
         recovery_path=recovery_path,
         lifecycle_path=lifecycle_path,
+        critical_path=critical_path,
     )
     compiled = plan(
         artifact=MERGED_ARTIFACT,
@@ -5607,8 +7165,10 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
     readiness = compiled["pre_cutover_readiness"]
     recovery_sha = hashlib.sha256(recovery_path.read_bytes()).hexdigest()
     lifecycle_sha = hashlib.sha256(lifecycle_path.read_bytes()).hexdigest()
+    critical_sha = hashlib.sha256(critical_path.read_bytes()).hexdigest()
     assert readiness["recovery_contract_sha256"] == recovery_sha
     assert readiness["nix_lifecycle_contract_sha256"] == lifecycle_sha
+    assert readiness["critical_user_data_contract_sha256"] == critical_sha
     assert recovery_sha != hashlib.sha256(prod.RECOVERY_CONTRACT_PATH.read_bytes()).hexdigest()
     assert lifecycle_sha != hashlib.sha256(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes()).hexdigest()
 
@@ -5618,6 +7178,7 @@ def test_readiness_contracts_are_resolved_from_flake_source(tmp_path):
     "receipt",
     "recovery-contract",
     "lifecycle-contract",
+    "critical-contract",
 ])
 def test_apply_readiness_tamper_is_explicitly_pre_mutation(
     monkeypatch, tmp_path, tamper_target
@@ -5629,14 +7190,18 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     recovery_path = production_root / "recovery-contract-v1.json"
     lifecycle_path = production_root / "nix-lifecycle-contract-v1.json"
+    critical_path = production_root / "critical-user-data-contract-v1.json"
     recovery_path.write_bytes(prod.RECOVERY_CONTRACT_PATH.read_bytes())
     lifecycle_path.write_bytes(prod.NIX_LIFECYCLE_CONTRACT_PATH.read_bytes())
+    critical_path.write_bytes(prod.CRITICAL_USER_DATA_CONTRACT_PATH.read_bytes())
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
+    critical_path.chmod(0o644)
 
     readiness_path = synthetic_readiness_path(
         recovery_path=recovery_path,
         lifecycle_path=lifecycle_path,
+        critical_path=critical_path,
     )
     compiled = plan(
         artifact=MERGED_ARTIFACT,
@@ -5659,10 +7224,14 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
         value = json.loads(recovery_path.read_text(encoding="utf-8"))
         value["tamper_marker"] = True
         recovery_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    else:
+    elif tamper_target == "lifecycle-contract":
         value = json.loads(lifecycle_path.read_text(encoding="utf-8"))
         value["tamper_marker"] = True
         lifecycle_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        value = json.loads(critical_path.read_text(encoding="utf-8"))
+        value["scope_semantics"] = "changed-after-plan"
+        critical_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
     _mock_historical_apply_until_final_gate(monkeypatch, compiled)
     monkeypatch.setattr(prod, "_attempt_teardown", lambda *args, **kwargs: ([], None))
@@ -5801,7 +7370,6 @@ def test_guard_failure_before_first_effect_is_not_a_post_mutation_alarm(monkeypa
     monkeypatch.setattr(prod, "verify_partuuid_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "verify_partlabel_namespace_clear", lambda *_args: None)
     monkeypatch.setattr(prod, "read_credential_hash", lambda *_args: b"hash\n")
-    monkeypatch.setattr(prod.getpass, "getpass", lambda *args, **kwargs: "passphrase")
     monkeypatch.setattr(prod, "_mountpoint_is_mounted", lambda _path: False)
     mock_trusted_build_gate(monkeypatch, compiled)
 

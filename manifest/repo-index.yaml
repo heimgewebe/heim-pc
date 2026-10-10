@@ -9,10 +9,11 @@ zones:
       - operatorium-entry.md
       - asr-engine.md
       - document-text-engine.md
-      - asr-golden-corpus.md
       - model.md
       - system-constitution.md
       - nixos-executor-2026.md
+      - nixos-dual-os-restplan-2026.md
+      - nixos-day1-workload-parity-2026.md
       - security.md
       - zones.md
       - drift-policy.md

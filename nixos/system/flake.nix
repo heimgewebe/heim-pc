@@ -167,6 +167,29 @@
         ];
       };
 
+      # Dedicated non-installing offline inventory live media. The shared live
+      # module keeps Gate A/B defaults unchanged and narrows this variant to the
+      # root-owned one-shot inventory service with networking and desktop off.
+      nixosConfigurations.heim-pc-live-inventory = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcSourceRevision = sourceRevision;
+          heimPcLiveProfile = {
+            nvidiaOpen = false;
+            edition = "inventory";
+            inventoryMode = true;
+          };
+        };
+        modules = [
+          (nixpkgs + "/nixos/modules/installer/cd-dvd/iso-image.nix")
+          ./modules/desktop.nix
+          ./modules/nvidia.nix
+          ./modules/physical-gates.nix
+          ./modules/live-media.nix
+        ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -243,6 +266,7 @@
         physical-gate-open-system = self.nixosConfigurations.heim-pc-physical-gate-open.config.system.build.toplevel;
         physical-gate-live-proprietary-iso = self.nixosConfigurations.heim-pc-live-gate-proprietary.config.system.build.isoImage;
         physical-gate-live-open-iso = self.nixosConfigurations.heim-pc-live-gate-open.config.system.build.isoImage;
+        physical-gate-live-inventory-iso = self.nixosConfigurations.heim-pc-live-inventory.config.system.build.isoImage;
         vm = self.nixosConfigurations.heim-pc-vm.config.system.build.vm;
         provenance-guard = provenanceGuard;
         provenance-bundle = provenanceBundle;
@@ -318,6 +342,7 @@
             live = map (name: configs.${name}.config) [
               "heim-pc-live-gate-proprietary" "heim-pc-live-gate-open"
             ];
+            inventory = configs.heim-pc-live-inventory.config;
             contract = builtins.fromJSON (builtins.readFile ../production/contract-v1.json);
             topology = contract.topology;
             byRole = role: builtins.head (builtins.filter (p: p.role == role) topology.partitions);
@@ -359,6 +384,68 @@
           assert storage target == storage proprietary && storage target == storage open;
           assert !target.heimPc.physicalGates.enable;
           assert proprietary.heimPc.physicalGates.enable && open.heimPc.physicalGates.enable;
+          assert target.heimPc.hostProtection.enable;
+          assert proprietary.heimPc.hostProtection.enable && open.heimPc.hostProtection.enable;
+          assert !vm.heimPc.hostProtection.enable;
+          assert target.zramSwap.enable;
+          assert target.zramSwap.algorithm == "zstd";
+          assert target.zramSwap.memoryPercent == 25;
+          assert target.zramSwap.priority == 1000;
+          assert target.users.users.alex.linger == false;
+          assert target.systemd.services.heim-pc-pytest-temp-gc.serviceConfig.Group
+            == target.users.users.alex.group;
+          assert builtins.hasAttr target.users.users.alex.group target.users.groups;
+          assert target.systemd.oomd.enable;
+          assert !target.systemd.oomd.enableRootSlice;
+          assert !target.systemd.oomd.enableSystemSlice;
+          assert !target.systemd.oomd.enableUserSlices;
+          assert !target.heimPc.hostProtection.grabowskiGuard.enable;
+          assert !builtins.hasAttr "heim-pc-grabowski-memory-guard" target.systemd.services;
+          assert !target.heimPc.hostProtection.storagePressure.requestMaintenance;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.timers;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.timers;
+          assert nixpkgs.lib.hasInfix "--observe-only"
+            target.systemd.user.services.heim-pc-storage-pressure-watch.serviceConfig.ExecStart;
+          assert builtins.all (c:
+            c.networking.networkmanager.enable
+            && c.security.polkit.enable
+            && c.services.displayManager.autoLogin.enable
+            && c.heimPc.desktop.enable
+            && c.heimPc.hardware.nvidia.enable
+            && c.heimPc.physicalGates.enable
+          ) live;
+          assert !inventory.networking.networkmanager.enable;
+          assert !inventory.networking.useDHCP;
+          assert !inventory.security.polkit.enable;
+          assert !inventory.security.rtkit.enable;
+          assert !inventory.services.pipewire.enable;
+          assert !inventory.services.displayManager.autoLogin.enable;
+          assert !inventory.heimPc.desktop.enable;
+          assert !inventory.heimPc.hardware.nvidia.enable;
+          assert !inventory.heimPc.physicalGates.enable;
+          assert inventory.users.users.root.hashedPassword == "!";
+          assert !(builtins.elem "wheel" inventory.users.users.alex.extraGroups);
+          assert !(builtins.elem "disk" inventory.users.users.alex.extraGroups);
+          assert builtins.hasAttr "heim-pc-offline-critical-user-data-inventory"
+            inventory.systemd.services;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.Restart == "no";
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.PrivateNetwork;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.PrivateMounts;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.NoNewPrivileges;
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.User == "root";
+          assert inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.unitConfig.ConditionPathExists
+            == "/dev/disk/by-label/HEIMPC_EVIDENCE";
+          assert builtins.elem "systemd-udev-settle.service"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.wants;
+          assert builtins.elem "heim-pc-offline-inventory"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.RuntimeDirectory;
+          assert builtins.elem "heim-pc-recovery-evidence"
+            inventory.systemd.services.heim-pc-offline-critical-user-data-inventory.serviceConfig.RuntimeDirectory;
+          assert !inventory.virtualisation.podman.enable
+            && inventory.fileSystems."/".fsType == "tmpfs";
           assert targetCredentialsUnset;
           assert !credentialConflictEval.success;
           assert !missingPersistConflictEval.success;
@@ -471,29 +558,159 @@
             cp ${../production/nix-lifecycle-contract-v1.json} "$out/nix-lifecycle-contract-v1.json"
           '';
 
+        host-protection-contract =
+          let
+            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            vm = self.nixosConfigurations.heim-pc-vm.config;
+          in
+          assert target.heimPc.hostProtection.enable;
+          assert target.zramSwap.enable;
+          assert target.zramSwap.memoryPercent == 25;
+          assert target.zramSwap.algorithm == "zstd";
+          assert target.zramSwap.priority == 1000;
+          assert target.users.users.alex.linger == false;
+          assert target.systemd.services.heim-pc-pytest-temp-gc.serviceConfig.Group
+            == target.users.users.alex.group;
+          assert builtins.hasAttr target.users.users.alex.group target.users.groups;
+          assert target.systemd.oomd.enable;
+          assert !target.systemd.oomd.enableRootSlice;
+          assert !target.systemd.oomd.enableSystemSlice;
+          assert !target.systemd.oomd.enableUserSlices;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-memory-pressure-snapshot" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.services;
+          assert builtins.hasAttr "heim-pc-pytest-temp-gc" target.systemd.timers;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.services;
+          assert builtins.hasAttr "heim-pc-storage-pressure-watch" target.systemd.user.timers;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.services;
+          assert builtins.hasAttr "heim-pc-home-hygiene" target.systemd.user.timers;
+          assert !(builtins.hasAttr "heim-pc-grabowski-memory-guard" target.systemd.services);
+          assert !vm.heimPc.hostProtection.enable;
+          pkgs.runCommand "heim-pc-host-protection-contract" { } ''
+            mkdir -p "$out"
+            touch "$out/pass"
+          '';
+
         recovery-readiness-contract =
           let
-            contract = builtins.fromJSON (builtins.readFile ../production/recovery-contract-v1.json);
+            recoveryPath = ../production/recovery-contract-v1.json;
+            criticalUserDataPath = ../production/critical-user-data-contract-v1.json;
+            criticalUserHomePath = ../production/critical-user-home-data-contract-v1.json;
+            contract = builtins.fromJSON (builtins.readFile recoveryPath);
+            criticalUserData = builtins.fromJSON (builtins.readFile criticalUserDataPath);
+            criticalUserHome = builtins.fromJSON (builtins.readFile criticalUserHomePath);
+            criticalUserDataSha256 = builtins.hashFile "sha256" criticalUserDataPath;
+            criticalUserHomeSha256 = builtins.hashFile "sha256" criticalUserHomePath;
+            homeMember = builtins.elemAt criticalUserData.members 0;
+            materialization = criticalUserHome.materialization_policy;
+            bootstrapRole = builtins.getAttr "bootstrap-direct" materialization.roles;
+            authorityRole = builtins.getAttr "authority-reconcile" materialization.roles;
+            coldRole = builtins.getAttr "cold-preservation" materialization.roles;
+            coldImportRoot = "/var/lib/heim-pc-data/import/legacy-2026";
             target = self.nixosConfigurations.heim-pc-storage-target.config;
           in
           assert contract.status == "external-evidence-required";
+          assert contract.admission_scope.complete_evidence_required_for == "destructive-source-cutover";
+          assert contract.admission_scope.excluded_installation.migration_mode == "isolated-parallel-disk-dual-os";
+          assert contract.admission_scope.excluded_installation.source_preservation_mode == "retained-protected-source";
+          assert !contract.admission_scope.excluded_installation.destructive_source_cutover;
+          assert !contract.admission_scope.excluded_installation.pre_cutover_readiness_required;
           assert contract.admission.point_of_no_return_blocked_without_complete_evidence;
-          assert contract.admission.production_storage_mutation_blocked_without_complete_evidence;
+          assert contract.admission.destructive_source_cutover_blocked_without_complete_evidence;
+          assert !(contract.admission ? production_storage_mutation_blocked_without_complete_evidence);
+          assert contract.critical_user_data_scope.contract_kind == "heim_pc.critical_user_data_scope_contract";
+          assert contract.critical_user_data_scope.scope == "critical-user-data";
+          assert contract.critical_user_data_scope.sha256 == criticalUserDataSha256;
+          assert contract.critical_user_data_scope.off_host_restore_critical_scope_sha256_bound;
+          assert contract.critical_user_data_scope.off_host_restore_source_inventory_sha256_bound;
+          assert contract.critical_user_data_scope.off_host_restore_restored_inventory_sha256_bound;
+          assert contract.critical_user_data_scope.off_host_restore_inventory_sha256_equality_required;
+          assert contract.critical_user_data_scope.aggregate_member_contracts_bound;
+          assert contract.readiness_bundle.critical_user_data_contract_sha256_bound;
+          assert criticalUserData.schema_version == 1;
+          assert criticalUserData.kind == "heim_pc.critical_user_data_scope_contract";
+          assert criticalUserData.scope == "critical-user-data";
+          assert criticalUserData.scope_semantics == "explicit-positive-selection";
+          assert criticalUserData.inventory_implementation.algorithm == "member-inventory-sha256-v1";
+          assert criticalUserData.inventory_implementation.root_inventory_script == "scripts/nixos_critical_user_data_inventory.py";
+          assert criticalUserData.inventory_implementation.aggregate_inventory_script == "scripts/nixos_critical_data_inventory.py";
+          assert criticalUserData.inventory_implementation.aggregate_execution_mode == "external-verified-payload-exec-v1";
+          assert criticalUserData.inventory_implementation.authoritative_member_source_stability == "kernel-local-pci-nvme-readonly-mountinfo-v3";
+          assert builtins.length criticalUserData.members == 1;
+          assert homeMember.id == "home";
+          assert homeMember.contract_file == "critical-user-home-data-contract-v1.json";
+          assert homeMember.contract_sha256 == criticalUserHomeSha256;
+          assert homeMember.destination.nixos_storage_domain == "per-entry-policy";
+          assert homeMember.destination.logical_path == "materialization-policy";
+          assert homeMember.restore_mode == "source-scope-with-role-specific-materialization";
+          assert criticalUserHome.scope == "critical-user-data-home";
+          assert criticalUserHome.scope_semantics == "explicit-path-set";
+          assert criticalUserHome.root == "/home/alex";
+          assert criticalUserHome.inventory.algorithm == "canonical-record-stream-sha256-v7";
+          assert criticalUserHome.inventory.uid_gid_bound;
+          assert criticalUserHome.inventory.explicit_ancestor_metadata_bound;
+          assert criticalUserHome.inventory.xattrs_sha256_bound;
+          assert criticalUserHome.selection_policy.default == "exclude";
+          assert !criticalUserHome.selection_policy.unlisted_paths_are_migration_data;
+          assert materialization.schema_version == 1;
+          assert materialization.kind == "heim_pc.critical_user_data_materialization_policy";
+          assert materialization.source_scope_and_nixos_target_layout_are_separate;
+          assert materialization.source_equivalent_disposable_restore_required;
+          assert materialization.cold_import_root == coldImportRoot;
+          assert !materialization.first_productive_boot_requires_cold_import_completion;
+          assert bootstrapRole.nixos_storage_domain == "@home";
+          assert bootstrapRole.target_mapping == "same-absolute-path";
+          assert bootstrapRole.source_path_is_live_target_path;
+          assert authorityRole.nixos_storage_domain == "@data";
+          assert authorityRole.staging_root == "${coldImportRoot}/authority";
+          assert !authorityRole.source_path_is_live_target_path;
+          assert authorityRole.direct_activation_forbidden;
+          assert coldRole.nixos_storage_domain == "@data";
+          assert coldRole.staging_root == coldImportRoot;
+          assert !coldRole.source_path_is_live_target_path;
+          assert !coldRole.required_before_first_productive_boot;
+          assert !criticalUserData.migration_policy.source_paths_define_nixos_target_layout;
+          assert criticalUserData.migration_policy.cold_preservation_storage_domain == "@data";
+          assert criticalUserData.migration_policy.cold_preservation_import_root == coldImportRoot;
+          assert !criticalUserData.migration_policy.cold_preservation_required_before_first_productive_boot;
+          assert !criticalUserData.migration_policy.local_only_repository_auto_checkout;
+          assert !criticalUserData.migration_policy.legacy_library_source_path_restored;
+          assert criticalUserData.migration_policy.operator_state_direct_restore_forbidden;
           assert builtins.hasAttr "heim-pc/recovery-contract.json" target.environment.etc;
+          assert builtins.hasAttr "heim-pc/critical-user-data-contract.json" target.environment.etc;
+          assert builtins.hasAttr "heim-pc/critical-user-home-data-contract.json" target.environment.etc;
+          assert !builtins.hasAttr "heim-pc/critical-docker-volume-data-contract.json" target.environment.etc;
           pkgs.runCommand "heim-pc-recovery-readiness-contract" { } ''
             mkdir -p "$out"
-            cp ${../production/recovery-contract-v1.json} "$out/recovery-contract-v1.json"
+            cp ${recoveryPath} "$out/recovery-contract-v1.json"
+            cp ${criticalUserDataPath} "$out/critical-user-data-contract-v1.json"
+            cp ${criticalUserHomePath} "$out/critical-user-home-data-contract-v1.json"
           '';
 
         intentional-break-rejected =
           let
+            proofBase = {
+              networking.hostName = "intentional-break-proof";
+              fileSystems."/" = {
+                device = "none";
+                fsType = "tmpfs";
+              };
+              boot.loader.grub.enable = false;
+              system.stateVersion = "26.05";
+            };
+            healthy = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [ proofBase ];
+            };
             broken = nixpkgs.lib.nixosSystem {
               inherit system;
-              modules = [ self.nixosModules.intentionalBreak ];
+              modules = [ proofBase self.nixosModules.intentionalBreak ];
             };
-            evaluated = builtins.tryEval broken.config.system.build.toplevel.drvPath;
+            healthyEval = builtins.tryEval healthy.config.system.build.toplevel.drvPath;
+            brokenEval = builtins.tryEval broken.config.system.build.toplevel.drvPath;
           in
-          assert !evaluated.success;
+          assert healthyEval.success;
+          assert !brokenEval.success;
           pkgs.runCommand "heim-pc-intentional-break-rejected" { } ''
             mkdir -p "$out"
             touch "$out/pass"
@@ -514,9 +731,9 @@
           '';
 
         integration = import ./tests/integration.nix { inherit pkgs; };
+        host-protection = import ./tests/host-protection.nix { inherit pkgs; };
         firstboot-credentials = import ./tests/firstboot-credentials.nix {
-          inherit pkgs;
-          sourceRevision = "eb260b0b82199e380d881b2436e403dcda64ca32";
+          inherit pkgs sourceRevision;
         };
         trust-zones = import ./tests/trust-zones.nix { inherit pkgs; };
       };

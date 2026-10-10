@@ -3,8 +3,27 @@
   "kind": "heim_pc.nixos_recovery_readiness_contract",
   "profile": "nixos-executor-2026",
   "status": "external-evidence-required",
+  "admission_scope": {
+    "complete_evidence_required_for": "destructive-source-cutover",
+    "excluded_installation": {
+      "migration_mode": "isolated-parallel-disk-dual-os",
+      "source_preservation_mode": "retained-protected-source",
+      "destructive_source_cutover": false,
+      "pre_cutover_readiness_required": false
+    }
+  },
   "same_disk_recovery_partition_is_off_host_backup": false,
   "secrets_in_repository_forbidden": true,
+  "critical_user_data_scope": {
+    "contract_kind": "heim_pc.critical_user_data_scope_contract",
+    "scope": "critical-user-data",
+    "sha256": "d979b42a8a030ca37b5a3c57ac192c81324d72bf3ac292adbda427eeec2c8097",
+    "off_host_restore_critical_scope_sha256_bound": true,
+    "aggregate_member_contracts_bound": true,
+    "off_host_restore_source_inventory_sha256_bound": true,
+    "off_host_restore_restored_inventory_sha256_bound": true,
+    "off_host_restore_inventory_sha256_equality_required": true
+  },
   "required_evidence": [
     {
       "id": "off-host-home-restore",
@@ -70,13 +89,13 @@
   "admission": {
     "all_required_evidence_must_be_fresh": true,
     "point_of_no_return_blocked_without_complete_evidence": true,
-    "production_storage_mutation_blocked_without_complete_evidence": true
+    "destructive_source_cutover_blocked_without_complete_evidence": true
   },
   "does_not_establish": [
     "existence of any off-host backup",
     "successful restore",
     "fresh recovery media",
-    "permission to mutate production storage",
+    "permission to authorize a destructive source cutover",
     "permission to cross the point of no return"
   ],
   "evidence_receipt": {
@@ -117,16 +136,17 @@
     "recovery_contract_sha256_bound": true,
     "nix_lifecycle_contract_sha256_bound": true,
     "evidence_freshness_bound": true,
-    "production_effects_authorized": false
+    "production_effects_authorized": false,
+    "critical_user_data_contract_sha256_bound": true
   },
   "evidence_attestation": {
-    "status": "unprovisioned",
+    "status": "provisioned",
     "trust_model": "github-artifact-attestation",
-    "repository": null,
-    "signer_workflow": null,
-    "signer_digest": null,
-    "source_digest": null,
-    "source_ref": null,
+    "repository": "heimgewebe/recovery-evidence-authority",
+    "signer_workflow": "heimgewebe/recovery-evidence-authority/.github/workflows/recovery-evidence.yml",
+    "signer_digest": "ec61ef05c6467e02941ada789adb2250c63a8b48",
+    "source_digest": "ec61ef05c6467e02941ada789adb2250c63a8b48",
+    "source_ref": "refs/heads/main",
     "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
     "deny_self_hosted_runners": true,
     "attestation_predicate_source_revision_bound": true,

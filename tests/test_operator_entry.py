@@ -39,20 +39,24 @@ class OperatorEntryTests(unittest.TestCase):
             set(transcription["intents"]),
             {"audio.transcribe", "speech_to_text", "transcription", "asr"},
         )
-        self.assertEqual(transcription["authority"], "heim_pc_asr_open_engine")
+        self.assertEqual(transcription["authority"], "heimgewebe_asr_open_engine")
         self.assertEqual(transcription["authorityKind"], "capability_locator_only")
-        self.assertEqual(transcription["repository"], "${HOME}/repos/heim-pc")
+        self.assertEqual(transcription["repository"], "${HOME}/repos/asr")
         self.assertEqual(
             transcription["architecture"],
-            "${HOME}/repos/heim-pc/architecture/asr-engine.md",
+            "${HOME}/repos/asr/architecture/asr-engine.md",
         )
         self.assertEqual(
             transcription["policy"],
-            "${HOME}/repos/heim-pc/manifest/asr-engine-policy.v1.json",
+            "${HOME}/repos/asr/manifest/asr-engine-policy.v1.json",
+        )
+        self.assertEqual(
+            transcription["contract"],
+            "${HOME}/repos/asr/manifest/asr-transcript-contract.v1.json",
         )
         self.assertEqual(
             transcription["runbook"],
-            "${HOME}/repos/heim-pc/runbooks/asr-local-transcription.md",
+            "${HOME}/repos/asr/runbooks/asr-local-transcription.md",
         )
         reuse_policy = transcription["reusePolicy"]
         self.assertTrue(reuse_policy["resolveBeforeSetup"])
@@ -60,13 +64,21 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertTrue(reuse_policy["setupOnlyWhenReadinessReportsMissing"])
         self.assertEqual(
             reuse_policy["sharedRuntimeCacheRoot"],
-            "${HOME}/.local/cache/heim-pc/asr-open-engine",
+            "${HOME}/.local/cache/heimgewebe/asr",
+        )
+        self.assertEqual(
+            reuse_policy["sharedRuntimeStateRoot"],
+            "${HOME}/.local/state/heimgewebe/asr",
         )
         self.assertFalse(reuse_policy["perRequestVirtualenvAllowed"])
         self.assertFalse(reuse_policy["perRequestModelCacheAllowed"])
         self.assertFalse(reuse_policy["perRequestPackageInstallAllowed"])
         self.assertEqual(
             transcription["entryArgvPrefix"],
+            ["python3", "${HOME}/repos/asr/scripts/asr_engine.py"],
+        )
+        self.assertEqual(
+            transcription["compatibilityEntryArgvPrefix"],
             ["python3", "${HOME}/repos/heim-pc/scripts/asr_engine.py"],
         )
         self.assertEqual(transcription["defaultOperation"], "transcribe")
@@ -369,7 +381,7 @@ class OperatorEntryTests(unittest.TestCase):
                 receipt = checker.check(home=tmp_path, require_installed=False)
             self.assertFalse(receipt["valid"])
             self.assertIn(
-                "capabilityLocators.audioTranscription.runbook must name the canonical ASR runbook",
+                "capabilityLocators.audioTranscription.runbook must point to the generic ASR authority",
                 receipt["errors"],
             )
             self.assertIn(
@@ -377,7 +389,7 @@ class OperatorEntryTests(unittest.TestCase):
                 receipt["errors"],
             )
             self.assertIn(
-                "capabilityLocators.audioTranscription.reusePolicy.sharedRuntimeCacheRoot must name the canonical shared ASR cache",
+                "capabilityLocators.audioTranscription.reusePolicy.sharedRuntimeCacheRoot must name the generic ASR runtime root",
                 receipt["errors"],
             )
             self.assertIn(
@@ -510,10 +522,34 @@ class OperatorEntryTests(unittest.TestCase):
             "über die host-local Capability-Auflösung lesen. Ein `blocked` ist kein "
             "Miss und darf nicht durch einen Ersatzpfad umgangen werden. Nur ein "
             "explizites `not_found` darf zu einer bereits deklarierten Spezialroute "
-            "weiterführen:\n\n"
-            "`grabowski_host_capability_resolve(intent=\"audio.transcribe\")`"
+            "weiterführen."
         )
         self.assertTrue(section.startswith(expected_opening), section)
+        precondition = (
+            "Host-Cutover-Schritte 1–3 erfolgreich abgeschlossen sind: "
+            "Installationsplan prüfen → `--apply --replace-existing` ausführen → "
+            "`check_operator_entry.py --require-installed` erfolgreich prüfen"
+        )
+        self.assertIn(precondition, section)
+        self.assertLess(
+            section.index(precondition),
+            section.index('`grabowski_host_capability_resolve(intent="audio.transcribe")`'),
+        )
+
+        cutover = runbook.split("## Host-Cutover", 1)[1].split("\n## ", 1)[0]
+        plan_index = cutover.index("Installationsplan")
+        apply_index = cutover.index("--apply --replace-existing")
+        verify_index = cutover.index("--require-installed")
+        resolve_index = cutover.index("grabowski_host_capability_resolve")
+        self.assertLess(plan_index, apply_index)
+        self.assertLess(apply_index, verify_index)
+        self.assertLess(verify_index, resolve_index)
+        for non_claim in ("mutation_permission", "retry_permission", "task_completion"):
+            self.assertIn(non_claim, runbook)
+        self.assertIn(
+            "Do not delete or replace the shared ASR cache as an automatic recovery action.",
+            runbook,
+        )
 
         readme_route = readme.split(
             "Für ChatGPT über Grabowski beginnt jede neue Operatorroute mit:", 1

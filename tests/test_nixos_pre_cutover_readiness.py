@@ -79,18 +79,39 @@ def _synthetic_attestation_verifier(argv: list[str]) -> subprocess.CompletedProc
     return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
 
 
-def _contracts(tmp_path: Path, *, provisioned: bool = True) -> tuple[Path, Path]:
+def _contracts(tmp_path: Path, *, provisioned: bool = True) -> tuple[Path, Path, Path]:
     recovery = json.loads((ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text())
     lifecycle = json.loads((ROOT / "nixos" / "production" / "nix-lifecycle-contract-v1.json").read_text())
+    critical_payload = (
+        ROOT / "nixos" / "production" / "critical-user-data-contract-v1.json"
+    ).read_bytes()
     if provisioned:
         recovery["evidence_attestation"] = dict(TEST_ATTESTATION_POLICY)
+    else:
+        recovery["evidence_attestation"] = {
+            "status": "unprovisioned",
+            "trust_model": "github-artifact-attestation",
+            "repository": None,
+            "signer_workflow": None,
+            "signer_digest": None,
+            "source_digest": None,
+            "source_ref": None,
+            "predicate_type": "https://heimgewebe.local/attestations/nixos-recovery-evidence/v1",
+            "deny_self_hosted_runners": True,
+            "attestation_predicate_source_revision_bound": True,
+            "producer_receipt_digest_bound": True,
+            "provisioning_authority": "later-cutover-process",
+        }
     recovery_path = tmp_path / "recovery-contract.json"
     lifecycle_path = tmp_path / "lifecycle-contract.json"
+    critical_path = tmp_path / "critical-user-data-contract.json"
     recovery_path.write_text(json.dumps(recovery, sort_keys=True) + "\n", encoding="utf-8")
     lifecycle_path.write_text(json.dumps(lifecycle, sort_keys=True) + "\n", encoding="utf-8")
+    critical_path.write_bytes(critical_payload)
     recovery_path.chmod(0o644)
     lifecycle_path.chmod(0o644)
-    return recovery_path, lifecycle_path
+    critical_path.chmod(0o644)
+    return recovery_path, lifecycle_path, critical_path
 
 
 def _provenance(
@@ -101,6 +122,7 @@ def _provenance(
     recovery_sha256: str,
     observed_at: str,
     receipt_digit: str,
+    critical_scope_sha256: str,
 ) -> dict:
     return {
         "schema_version": 1,
@@ -118,6 +140,19 @@ def _provenance(
             "kind": schema,
             "result": "passed",
             "producer_receipt_sha256": receipt_digit * 64,
+            "facts": (
+                {
+                    "critical_scope_sha256": critical_scope_sha256,
+                    "source_inventory_sha256": "c" * 64,
+                    **(
+                        {"restored_inventory_sha256": "c" * 64}
+                        if kind == ready.RECOVERY_RESTORE_TEST_PROVENANCE_KIND
+                        else {}
+                    ),
+                }
+                if requirement["id"] == "off-host-home-restore"
+                else {"synthetic_fact_sha256": receipt_digit * 64}
+            ),
         },
         "production_effects_authorized": False,
     }
@@ -125,9 +160,12 @@ def _provenance(
 
 def _fixture(tmp_path: Path, *, provisioned: bool = True):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    recovery_path, lifecycle_path = _contracts(tmp_path, provisioned=provisioned)
+    recovery_path, lifecycle_path, critical_path = _contracts(
+        tmp_path, provisioned=provisioned
+    )
     recovery = json.loads(recovery_path.read_text())
     recovery_sha = _sha(recovery_path)
+    critical_sha = _sha(critical_path)
     receipts = []
     receipt_paths = {}
     for index, requirement in enumerate(recovery["required_evidence"]):
@@ -144,6 +182,7 @@ def _fixture(tmp_path: Path, *, provisioned: bool = True):
                 recovery_sha256=recovery_sha,
                 observed_at="2026-09-18T09:50:00Z",
                 receipt_digit="a",
+                critical_scope_sha256=critical_sha,
             ),
         )
         evidence_attestation_path = tmp_path / f"evidence-attestation-{index}.json"
@@ -160,6 +199,7 @@ def _fixture(tmp_path: Path, *, provisioned: bool = True):
                     recovery_sha256=recovery_sha,
                     observed_at="2026-09-18T09:45:00Z",
                     receipt_digit="b",
+                    critical_scope_sha256=critical_sha,
                 ),
             )
             restore_attestation_path = tmp_path / f"restore-attestation-{index}.json"
@@ -206,25 +246,89 @@ def _fixture(tmp_path: Path, *, provisioned: bool = True):
         "source_revision": REVISION,
         "recovery_contract_sha256": recovery_sha,
         "nix_lifecycle_contract_sha256": _sha(lifecycle_path),
+        "critical_user_data_contract_sha256": critical_sha,
         "recovery_evidence_receipts": receipts,
         "observed_at": "2026-09-18T09:55:00Z",
         "freshness_seconds": recovery["evidence_freshness"]["maximum_age_seconds"],
         "production_effects_authorized": False,
     }
     _write_private(bundle_path, bundle)
-    return bundle_path, recovery_path, lifecycle_path, receipt_paths
+    return bundle_path, recovery_path, lifecycle_path, receipt_paths, critical_path
 
 
 def _validate(fx, *, verifier=_synthetic_attestation_verifier):
-    bundle, recovery, lifecycle, _receipts = fx
+    bundle, recovery, lifecycle, _receipts, critical = fx
     return ready.validate_readiness(
         bundle,
         source_revision=REVISION,
         recovery_contract_path=recovery,
         lifecycle_contract_path=lifecycle,
+        critical_user_data_contract_path=critical,
         now=NOW,
         attestation_verifier=verifier,
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("aggregate_execution_mode", "verified-payload-self-bootstrap-v1"),
+        ("authoritative_member_source_stability", "kernel-block-readonly-mountinfo-v1"),
+    ],
+)
+def test_critical_user_data_validator_rejects_inventory_implementation_drift(
+    field, value
+):
+    contract_path = ROOT / "nixos" / "production" / "critical-user-data-contract-v1.json"
+    recovery_path = ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+    contract["inventory_implementation"][field] = value
+
+    with pytest.raises(
+        ready.ReadinessError,
+        match="aggregate inventory policy is invalid",
+    ):
+        ready._validate_critical_user_data_contract(
+            contract,
+            recovery_contract=recovery,
+            contract_sha256=recovery["critical_user_data_scope"]["sha256"],
+        )
+
+
+def test_recovery_contract_scope_is_source_cutover_only():
+    scope = ready.validate_recovery_contract_scope(
+        ROOT / "nixos" / "production" / "recovery-contract-v1.json"
+    )
+    assert scope == {
+        "complete_evidence_required_for": "destructive-source-cutover",
+        "excluded_installation": {
+            "migration_mode": "isolated-parallel-disk-dual-os",
+            "source_preservation_mode": "retained-protected-source",
+            "destructive_source_cutover": False,
+            "pre_cutover_readiness_required": False,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing-scope", "global-scope", "legacy-global-admission"],
+)
+def test_recovery_contract_rejects_global_or_missing_admission_scope(mutation):
+    recovery = json.loads(
+        (ROOT / "nixos" / "production" / "recovery-contract-v1.json").read_text()
+    )
+    if mutation == "missing-scope":
+        recovery.pop("admission_scope")
+    elif mutation == "global-scope":
+        recovery["admission_scope"]["complete_evidence_required_for"] = (
+            "production-storage-mutation"
+        )
+    else:
+        recovery["admission"]["production_storage_mutation_blocked_without_complete_evidence"] = True
+    with pytest.raises(ready.ReadinessError):
+        ready._recovery_policy(recovery)
 
 
 def test_unprovisioned_external_trust_root_blocks_readiness(tmp_path):
@@ -334,6 +438,114 @@ def _rewrite_receipt_and_rebind(fx, evidence_id, transform):
         if binding["evidence_id"] == evidence_id:
             binding["sha256"] = _sha(path)
     _write_private(fx[0], bundle)
+
+
+@pytest.mark.parametrize("provenance_kind", ["primary", "restore"])
+def test_off_host_home_restore_critical_scope_digest_mismatch_is_rejected(
+    tmp_path, provenance_kind
+):
+    fx = _fixture(tmp_path)
+    receipt_path = fx[3]["off-host-home-restore"]
+    receipt = json.loads(receipt_path.read_text())
+    if provenance_kind == "primary":
+        provenance_path = Path(receipt["evidence_provenance_path"])
+        digest_field = "evidence_provenance_sha256"
+    else:
+        provenance_path = Path(receipt["restore_test"]["evidence_provenance_path"])
+        digest_field = None
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence"]["facts"]["critical_scope_sha256"] = "0" * 64
+    _write_private(provenance_path, provenance)
+    if provenance_kind == "primary":
+        receipt[digest_field] = _sha(provenance_path)
+    else:
+        receipt["restore_test"]["evidence_provenance_sha256"] = _sha(provenance_path)
+    _write_private(receipt_path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == "off-host-home-restore":
+            binding["sha256"] = _sha(receipt_path)
+    _write_private(fx[0], bundle)
+    with pytest.raises(
+        ready.ReadinessError,
+        match="critical-user-data scope digest mismatch",
+    ):
+        _validate(fx)
+
+
+@pytest.mark.parametrize(
+    ("provenance_kind", "field", "message"),
+    [
+        ("primary", "source_inventory_sha256", "source inventory digest"),
+        ("restore", "source_inventory_sha256", "source inventory digest"),
+        ("restore", "restored_inventory_sha256", "restored inventory digest"),
+    ],
+)
+def test_off_host_home_restore_inventory_digest_fact_is_required(
+    tmp_path, provenance_kind, field, message
+):
+    fx = _fixture(tmp_path)
+    receipt_path = fx[3]["off-host-home-restore"]
+    receipt = json.loads(receipt_path.read_text())
+    if provenance_kind == "primary":
+        provenance_path = Path(receipt["evidence_provenance_path"])
+        digest_owner = receipt
+        digest_field = "evidence_provenance_sha256"
+    else:
+        provenance_path = Path(
+            receipt["restore_test"]["evidence_provenance_path"]
+        )
+        digest_owner = receipt["restore_test"]
+        digest_field = "evidence_provenance_sha256"
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence"]["facts"].pop(field)
+    _write_private(provenance_path, provenance)
+    digest_owner[digest_field] = _sha(provenance_path)
+    _write_private(receipt_path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == "off-host-home-restore":
+            binding["sha256"] = _sha(receipt_path)
+    _write_private(fx[0], bundle)
+
+    with pytest.raises(ready.ReadinessError, match=message):
+        _validate(fx)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("source_inventory_sha256", "restore source inventory digest mismatch"),
+        (
+            "restored_inventory_sha256",
+            "source/restored aggregate inventory digest mismatch",
+        ),
+    ],
+)
+def test_off_host_home_restore_inventory_digest_mismatch_is_rejected(
+    tmp_path, field, message
+):
+    fx = _fixture(tmp_path)
+    receipt_path = fx[3]["off-host-home-restore"]
+    receipt = json.loads(receipt_path.read_text())
+    provenance_path = Path(
+        receipt["restore_test"]["evidence_provenance_path"]
+    )
+    provenance = json.loads(provenance_path.read_text())
+    provenance["evidence"]["facts"][field] = "d" * 64
+    _write_private(provenance_path, provenance)
+    receipt["restore_test"]["evidence_provenance_sha256"] = _sha(
+        provenance_path
+    )
+    _write_private(receipt_path, receipt)
+    bundle = json.loads(fx[0].read_text())
+    for binding in bundle["recovery_evidence_receipts"]:
+        if binding["evidence_id"] == "off-host-home-restore":
+            binding["sha256"] = _sha(receipt_path)
+    _write_private(fx[0], bundle)
+
+    with pytest.raises(ready.ReadinessError, match=message):
+        _validate(fx)
 
 
 def test_readiness_bundle_wrong_mode_is_rejected(tmp_path):
@@ -575,6 +787,7 @@ def test_same_bytes_provenance_replacement_is_plan_drift(tmp_path):
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )
@@ -715,6 +928,7 @@ def test_same_bytes_attestation_replacement_is_plan_drift(tmp_path):
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )
@@ -782,6 +996,7 @@ def test_symlink_private_file_is_rejected(tmp_path):
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )
@@ -799,6 +1014,7 @@ def test_symlink_parent_component_is_rejected(tmp_path):
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )
@@ -818,12 +1034,16 @@ def test_same_bytes_file_replacement_is_still_plan_drift(tmp_path):
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )
 
 
-@pytest.mark.parametrize("target", ["bundle", "receipt", "recovery-contract", "lifecycle-contract"])
+@pytest.mark.parametrize(
+    "target",
+    ["bundle", "receipt", "recovery-contract", "lifecycle-contract", "critical-contract"],
+)
 def test_revalidation_detects_any_plan_time_drift(tmp_path, target):
     fx = _fixture(tmp_path)
     snapshot = _validate(fx)
@@ -840,16 +1060,21 @@ def test_revalidation_detects_any_plan_time_drift(tmp_path, target):
         value = json.loads(fx[1].read_text())
         value["status"] = "changed"
         fx[1].write_text(json.dumps(value, sort_keys=True) + "\n")
-    else:
+    elif target == "lifecycle-contract":
         value = json.loads(fx[2].read_text())
         value["automatic_gc"] = True
         fx[2].write_text(json.dumps(value, sort_keys=True) + "\n")
+    else:
+        value = json.loads(fx[4].read_text())
+        value["scope_semantics"] = "changed-after-plan"
+        fx[4].write_text(json.dumps(value, sort_keys=True) + "\n")
     with pytest.raises(ready.ReadinessError):
         ready.revalidate_readiness(
             snapshot,
             source_revision=REVISION,
             recovery_contract_path=fx[1],
             lifecycle_contract_path=fx[2],
+            critical_user_data_contract_path=fx[4],
             now=NOW,
             attestation_verifier=_synthetic_attestation_verifier,
         )

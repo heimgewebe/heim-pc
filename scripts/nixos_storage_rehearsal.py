@@ -28,8 +28,18 @@ TARGET_KIND = "heim_pc.storage_target_observation"
 AUTHORITY_KIND = "heim_pc.nixos_storage_sandbox_authority"
 READBACK_KIND = "heim_pc.storage_rehearsal_readback"
 RECOVERY_KIND = "heim_pc.offline_recovery_evidence"
+SCRATCH_MANIFEST_KIND = "heim_pc.nixos_storage_scratch_manifest"
 EXECUTOR_TASK = "HEIM-PC-NIXOS-MIGRATION-V1-T003"
 SANDBOX_RESOURCE = "service.heim-pc-nixos-storage-rehearsal-sandbox"
+T003_SCRATCH_PREFIX = "heim-pc-t003-"
+SCRATCH_TERMINAL_STATES = ("success", "error", "abort", "retry")
+SCRATCH_REMOVE_KINDS = {
+    "backing-image",
+    "overlay-upper",
+    "overlay-work",
+    "namespace-scratch",
+    "temporary-scratch",
+}
 MOUNT_ROOT = "/mnt/nixos-rehearsal"
 # Keep staging outside the target root: mounting @root must not hide it.
 BTRFS_STAGE_ROOT = f"{MOUNT_ROOT}-btrfs-stage"
@@ -486,6 +496,206 @@ def validate_sandbox_authority(
     }
 
 
+def _scratch_run_token(run_id: str) -> str:
+    token = run_id.rsplit("-", 1)[-1].lower()
+    if re.fullmatch(r"[0-9a-f]{8,64}", token) is None:
+        raise RehearsalError("sandbox authority run_id lacks a strong cleanup token")
+    return token
+
+
+def _scratch_name_matches_run_token(name: str, run_token: str) -> bool:
+    prefix = f"{T003_SCRATCH_PREFIX}{run_token}"
+    lowered = name.lower()
+    if not lowered.startswith(prefix):
+        return False
+    suffix = lowered[len(prefix):]
+    return not suffix or suffix[0] in {"-", "."}
+
+
+def _canonical_scratch_path(value: Any, label: str) -> str:
+    text = _nonempty_text(value, label, 1024)
+    path = PurePosixPath(text)
+    if not path.is_absolute() or os.path.normpath(text) != text:
+        raise RehearsalError(f"{label} must be a canonical absolute scratch path")
+    if text.startswith("/run/shm/"):
+        text = "/dev/shm/" + text.removeprefix("/run/shm/")
+    elif not text.startswith("/dev/shm/"):
+        raise RehearsalError(f"{label} must be one direct /dev/shm entry")
+    scratch = PurePosixPath(text)
+    if scratch.parent != PurePosixPath("/dev/shm"):
+        raise RehearsalError(f"{label} must be one direct /dev/shm entry")
+    if not scratch.name.startswith(T003_SCRATCH_PREFIX):
+        raise RehearsalError(f"{label} must use the T003 scratch prefix")
+    return str(scratch)
+
+
+def _optional_scratch_path(value: Any, label: str) -> str | None:
+    try:
+        return _canonical_scratch_path(value, label)
+    except RehearsalError:
+        return None
+
+
+def validate_scratch_manifest(
+    value: Any,
+    preflight: dict[str, Any],
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = _exact_keys(
+        value,
+        {
+            "schema_version",
+            "kind",
+            "source_task",
+            "run_id",
+            "target_path",
+            "target_identity",
+            "artifacts",
+            "unused_artifact_kinds",
+            "inventory_complete",
+            "manifest_sha256",
+        },
+        "scratch manifest",
+    )
+    if manifest["schema_version"] != 1 or manifest["kind"] != SCRATCH_MANIFEST_KIND:
+        raise RehearsalError("scratch manifest identity mismatch")
+    if manifest["source_task"] != EXECUTOR_TASK:
+        raise RehearsalError("scratch manifest must be produced for T003")
+    if _bool(manifest["inventory_complete"], "scratch manifest.inventory_complete") is not True:
+        raise RehearsalError("scratch manifest must assert a complete run inventory")
+    manifest_sha = _validate_self_digest(manifest, "manifest_sha256", "scratch manifest")
+    run_id = _nonempty_text(manifest["run_id"], "scratch manifest.run_id", 128)
+    if run_id != authority["run_id"]:
+        raise RehearsalError("scratch manifest run_id mismatch")
+    run_token = _scratch_run_token(run_id)
+    if _canonical_device(manifest["target_path"], "scratch manifest.target_path") != preflight["target_path"]:
+        raise RehearsalError("scratch manifest target path mismatch")
+    if _nonempty_text(
+        manifest["target_identity"], "scratch manifest.target_identity"
+    ) != preflight["device_identity"]:
+        raise RehearsalError("scratch manifest target identity mismatch")
+    if not isinstance(manifest["artifacts"], list) or len(manifest["artifacts"]) > 128:
+        raise RehearsalError("scratch manifest artifacts must be a bounded list")
+    raw_unused = manifest["unused_artifact_kinds"]
+    if not isinstance(raw_unused, list) or len(raw_unused) > len(SCRATCH_REMOVE_KINDS):
+        raise RehearsalError("scratch manifest unused_artifact_kinds must be a bounded list")
+    unused_kinds = {
+        _nonempty_text(item, "scratch manifest unused artifact kind", 64)
+        for item in raw_unused
+    }
+    if len(unused_kinds) != len(raw_unused) or not unused_kinds.issubset(SCRATCH_REMOVE_KINDS):
+        raise RehearsalError("scratch manifest unused artifact kinds are invalid")
+
+    artifacts: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for index, raw in enumerate(manifest["artifacts"]):
+        item = _exact_keys(
+            raw,
+            {"kind", "path", "path_type", "disposition"},
+            f"scratch manifest artifact {index}",
+        )
+        kind = _nonempty_text(item["kind"], f"scratch artifact {index}.kind", 64)
+        path_type = _nonempty_text(
+            item["path_type"], f"scratch artifact {index}.path_type", 16
+        )
+        disposition = _nonempty_text(
+            item["disposition"], f"scratch artifact {index}.disposition", 16
+        )
+        if path_type not in {"file", "directory"}:
+            raise RehearsalError("scratch artifact path_type must be file or directory")
+        if disposition not in {"remove", "retain"}:
+            raise RehearsalError("scratch artifact disposition must be remove or retain")
+        path = _canonical_scratch_path(item["path"], f"scratch artifact {index}.path")
+        if path in seen_paths:
+            raise RehearsalError("scratch manifest paths must be unique")
+        seen_paths.add(path)
+        if disposition == "remove":
+            if kind not in SCRATCH_REMOVE_KINDS:
+                raise RehearsalError("only declared scratch kinds may be removed")
+            if not _scratch_name_matches_run_token(
+                PurePosixPath(path).name,
+                run_token,
+            ):
+                raise RehearsalError("removable scratch path is not bound to the T003 run token")
+        elif kind != "evidence":
+            raise RehearsalError("only evidence artifacts may be retained")
+        artifacts.append(
+            {
+                "kind": kind,
+                "path": path,
+                "path_type": path_type,
+                "disposition": disposition,
+            }
+        )
+
+    used_remove_kinds = {
+        item["kind"] for item in artifacts if item["disposition"] == "remove"
+    }
+    if used_remove_kinds.intersection(unused_kinds):
+        raise RehearsalError("scratch kind cannot be both used and unused")
+    if used_remove_kinds.union(unused_kinds) != SCRATCH_REMOVE_KINDS:
+        raise RehearsalError("scratch manifest must account for every cleanup kind")
+
+    backing_path = _optional_scratch_path(
+        preflight["backing_file"], "target preflight backing_file"
+    )
+    backing_items = [
+        item
+        for item in artifacts
+        if item["kind"] == "backing-image" and item["disposition"] == "remove"
+    ]
+    if preflight["device_kind"] == "nbd" and backing_path is not None:
+        raise RehearsalError(
+            "NBD target with T003 tmpfs backing requires explicit disconnect authority"
+        )
+    if backing_path is not None:
+        if len(backing_items) != 1:
+            raise RehearsalError("T003 tmpfs backing image must have exactly one cleanup binding")
+        backing = backing_items[0]
+        if backing["path"] != backing_path or backing["path_type"] != "file":
+            raise RehearsalError("backing-image cleanup does not match the admitted target")
+    elif backing_items:
+        raise RehearsalError("external backing image is outside T003 scratch cleanup authority")
+
+    return {
+        "schema_version": 1,
+        "kind": SCRATCH_MANIFEST_KIND,
+        "run_id": run_id,
+        "run_token": run_token,
+        "manifest_sha256": manifest_sha,
+        "artifacts": artifacts,
+        "unused_artifact_kinds": sorted(unused_kinds),
+    }
+
+
+def _scratch_cleanup_commands(
+    scratch: dict[str, Any],
+) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    for artifact in scratch["artifacts"]:
+        if artifact["disposition"] != "remove":
+            continue
+        if artifact["path_type"] == "directory":
+            argv = [
+                "/usr/bin/rm",
+                "-rf",
+                "--one-file-system",
+                "--",
+                artifact["path"],
+            ]
+        else:
+            argv = ["/usr/bin/rm", "-f", "--", artifact["path"]]
+        commands.append(
+            {
+                "effect": f"scratch-{artifact['kind']}-remove",
+                "argv": argv,
+                "artifact_kind": artifact["kind"],
+                "scratch_path": artifact["path"],
+            }
+        )
+    return commands
+
+
 def _partition_path(target_path: str, number: int) -> str:
     suffix = f"p{number}" if target_path[-1].isdigit() else str(number)
     return f"{target_path}{suffix}"
@@ -505,12 +715,16 @@ def _effect_plan_sha256(material: dict[str, Any]) -> str:
 def compile_effect_plan(
     target_evidence: Any,
     sandbox_authority: Any,
+    scratch_manifest: Any | None = None,
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     contract = load_contract()
     preflight = validate_target_evidence(target_evidence, now=now)
     authority = validate_sandbox_authority(sandbox_authority, preflight, now=now)
+    if scratch_manifest is None:
+        raise RehearsalError("scratch manifest is required")
+    scratch = validate_scratch_manifest(scratch_manifest, preflight, authority)
     target = preflight["target_path"]
     partitions = sorted(contract["topology"]["partitions"], key=lambda item: item["number"])
     efi = _partition_by_role(contract, "efi-system-partition")
@@ -638,6 +852,34 @@ def compile_effect_plan(
         {"effect": "btrfs-stage-unmount", "argv": ["umount", BTRFS_STAGE_ROOT]},
         {"effect": "luks-close", "argv": ["cryptsetup", "close", mapper_name]},
     ])
+    # A disposable loop target remains kernel-pinned after unlinking its backing
+    # file until every descendant mapping is closed and the loop itself is
+    # detached.  T003 owns the admitted whole-device target, so detach only
+    # that exact loop after mounts and dm-crypt have been torn down.  NBD
+    # lifecycle remains outside this plan because its producer is not bound by
+    # the loop-target authority.
+    if preflight["device_kind"] == "loop":
+        teardown_commands.append({
+            "effect": "loop-detach",
+            "argv": ["/usr/sbin/losetup", "-d", target],
+        })
+        # losetup -d may return success after only marking a busy loop for
+        # autoclear.  Scratch unlink is unsafe until the kernel backing
+        # association itself is gone, so make that readback part of the
+        # release stream whose complete success gates cleanup.
+        loop_backing_sysfs = (
+            f"/sys/block/{PurePosixPath(target).name}/loop/backing_file"
+        )
+        teardown_commands.append({
+            "effect": "loop-detach-readback",
+            "argv": ["/usr/bin/test", "!", "-e", loop_backing_sysfs],
+        })
+    # Keep path removal out of the release command stream. If an unmount,
+    # dm-crypt close or loop detach fails for a reason other than "already
+    # absent", unlinking the backing image would recreate the deleted-but-pinned
+    # tmpfs failure. The runtime executor may enter scratch cleanup only after
+    # the complete kernel-release phase has succeeded.
+    scratch_cleanup_commands = _scratch_cleanup_commands(scratch)
 
     material = {
         "schema_version": 1,
@@ -650,6 +892,31 @@ def compile_effect_plan(
         "commands": commands,
         "teardown_commands": teardown_commands,
         "teardown_required": contract["runtime_effect_boundary"]["teardown_required"],
+        "teardown_contract": {
+            "required_on_terminal_states": list(SCRATCH_TERMINAL_STATES),
+            "must_attempt_all_release_commands": True,
+            "already_absent_is_success": True,
+            "scratch_cleanup_requires_release_success": True,
+            "release_failure_disposition": "retain-scratch-and-retry-release-before-cleanup",
+            "retry_idempotent": True,
+            "scratch_manifest_sha256": scratch["manifest_sha256"],
+        },
+        "scratch_cleanup_commands": scratch_cleanup_commands,
+        "scratch_cleanup": {
+            "run_id": scratch["run_id"],
+            "run_token": scratch["run_token"],
+            "remove_artifacts": [
+                _copy_json(item)
+                for item in scratch["artifacts"]
+                if item["disposition"] == "remove"
+            ],
+            "retained_evidence": [
+                _copy_json(item)
+                for item in scratch["artifacts"]
+                if item["disposition"] == "retain"
+            ],
+            "unused_artifact_kinds": list(scratch["unused_artifact_kinds"]),
+        },
         "expected_readback": {
             "partition_table": contract["topology"]["partition_table"],
             "partitions": _copy_json(partitions),
@@ -679,10 +946,13 @@ def validate_topology_readback(
     value: Any,
     target_evidence: Any,
     sandbox_authority: Any,
+    scratch_manifest: Any | None = None,
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    plan = compile_effect_plan(target_evidence, sandbox_authority, now=now)
+    plan = compile_effect_plan(
+        target_evidence, sandbox_authority, scratch_manifest, now=now
+    )
     readback = _exact_keys(
         value,
         {
@@ -918,9 +1188,11 @@ def main() -> int:
     plan = subparsers.add_parser("plan")
     plan.add_argument("--target-evidence", required=True)
     plan.add_argument("--sandbox-authority", required=True)
+    plan.add_argument("--scratch-manifest", required=True)
     readback = subparsers.add_parser("validate-readback")
     readback.add_argument("--target-evidence", required=True)
     readback.add_argument("--sandbox-authority", required=True)
+    readback.add_argument("--scratch-manifest", required=True)
     readback.add_argument("--readback", required=True)
     recovery = subparsers.add_parser("validate-recovery")
     recovery.add_argument("--evidence", required=True)
@@ -939,13 +1211,16 @@ def main() -> int:
             result = validate_target_evidence(_read_json(args.target_evidence))
         elif args.command == "plan":
             result = compile_effect_plan(
-                _read_json(args.target_evidence), _read_json(args.sandbox_authority)
+                _read_json(args.target_evidence),
+                _read_json(args.sandbox_authority),
+                _read_json(args.scratch_manifest),
             )
         elif args.command == "validate-readback":
             result = validate_topology_readback(
                 _read_json(args.readback),
                 _read_json(args.target_evidence),
                 _read_json(args.sandbox_authority),
+                _read_json(args.scratch_manifest),
             )
         else:
             result = validate_recovery_evidence(_read_json(args.evidence))

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "kind": "heim_pc.critical_user_data_scope_contract",
+  "scope": "critical-user-data",
+  "scope_semantics": "explicit-positive-selection",
+  "members": [
+    {
+      "id": "home",
+      "contract_file": "critical-user-home-data-contract-v1.json",
+      "contract_sha256": "385cf944e6a28c94a4593eeb1e6e5c87141cb26a4dc8a6cc96b783e21a623347",
+      "destination": {
+        "nixos_storage_domain": "per-entry-policy",
+        "logical_path": "materialization-policy"
+      },
+      "restore_mode": "source-scope-with-role-specific-materialization"
+    }
+  ],
+  "inventory_implementation": {
+    "algorithm": "member-inventory-sha256-v1",
+    "root_inventory_script": "scripts/nixos_critical_user_data_inventory.py",
+    "root_inventory_script_sha256": "5f3b9aa1e2ad49da932ac699023f7f020e562d1d6ec0584a8c9dafb6ffaef572",
+    "aggregate_inventory_script": "scripts/nixos_critical_data_inventory.py",
+    "aggregate_inventory_script_sha256": "f71996ac1b3722a0785465e9504c2cfd23878d1b85597ddaff7a5bebf0a49d84",
+    "aggregate_execution_mode": "external-verified-payload-exec-v1",
+    "member_contract_digest_bound": true,
+    "source_and_restored_aggregate_inventory_sha256_must_match": true,
+    "authoritative_member_source_stability": "kernel-local-pci-nvme-readonly-mountinfo-v3"
+  },
+  "migration_policy": {
+    "selection_model": "explicit-positive-allowlist",
+    "unlisted_data_migrated": false,
+    "system_state_recreated_from_nix": true,
+    "old_system_disk_preserved_as_independent_fallback": true,
+    "remote_reproducible_repositories_excluded": true,
+    "operator_state_restored_via_authority_reconcile": true,
+    "application_level_service_reconstruction_required": true,
+    "legacy_docker_volume_tree_migrated": false,
+    "root_owned_grabowski_runtime_state_migrated": false,
+    "root_owned_grabowski_runtime_state_reinitialized_from_verified_deploy": true,
+    "source_paths_define_nixos_target_layout": false,
+    "cold_preservation_storage_domain": "@data",
+    "cold_preservation_import_root": "/var/lib/heim-pc-data/import/legacy-2026",
+    "cold_preservation_required_before_first_productive_boot": false,
+    "local_only_repository_auto_checkout": false,
+    "legacy_library_source_path_restored": false,
+    "operator_state_direct_restore_forbidden": true
+  },
+  "required_classes": [
+    "credentials-and-identity",
+    "legacy-library-preservation",
+    "local-only-repository",
+    "grabowski-authority-state",
+    "grabowski-audit-chain",
+    "grabowski-durable-outbox",
+    "bureau-authority-state",
+    "chronik-history-state",
+    "observer-findings"
+  ],
+  "off_host_restore": {
+    "backup_must_be_complete_for_scope": true,
+    "target_must_be_independent": true,
+    "disposable_restore_target_required": true,
+    "network_required_for_restore": false,
+    "source_and_restored_inventory_sha256_must_match": true,
+    "source_equivalent_disposable_restore_required": true,
+    "final_nixos_materialization_may_use_different_paths": true
+  },
+  "does_not_establish": [
+    "existence of an off-host backup",
+    "sufficient off-host capacity",
+    "successful source-equivalent disposable restore",
+    "production of cold-preservation capsules",
+    "successful library or repository import",
+    "authority-safe activation of restored operator state",
+    "permission to mutate production storage",
+    "permission to cross the point of no return"
+  ]
+}

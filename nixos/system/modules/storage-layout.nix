@@ -15,6 +15,7 @@ let
   recovery = partitionByRole "recovery-surface";
   encrypted = partitionByRole "encrypted-system";
   mapperName = topology.luks.mapper_name;
+  unlock = topology.luks.unlock;
   mapperDevice = "/dev/mapper/${mapperName}";
 
   # The private LUKS token is the only unlock authority for this profile, so the
@@ -96,11 +97,12 @@ let
 
       patch_entries() {
         load_identity
-        local boot_source expected_boot entry options_count options expected_token token seen tmp
+        local boot_source expected_boot entry options_count options expected_name_token expected_options_token token seen_name seen_options tmp
         expected_boot="$(resolve_partuuid "$efi_partuuid")"
         boot_source="$(findmnt --first-only --nofsroot -rn -o SOURCE --mountpoint /boot 2>/dev/null)" || fail "/boot is not mounted as an exact private EFI mountpoint"
         [[ -n "$boot_source" && "$boot_source" != *$'\n'* && "$(readlink -f -- "$boot_source")" == "$expected_boot" ]] || fail "/boot is not the private EFI partition"
-        expected_token="rd.luks.name=$encrypted_partuuid=$mapper_name"
+        expected_name_token="rd.luks.name=$encrypted_partuuid=$mapper_name"
+        expected_options_token="rd.luks.options=$encrypted_partuuid=tpm2-device=auto,headless=yes"
         shopt -s nullglob
         entries=(/boot/loader/entries/*.conf)
         found=0
@@ -115,18 +117,21 @@ let
           [[ "$options_count" == 1 ]] || fail "NixOS loader entry must contain exactly one options line"
           options="$(grep '^options ' "$entry")"
           read -r -a words <<< "''${options#options }"
-          kept=(); seen=0
+          kept=(); seen_name=0; seen_options=0
           for token in "''${words[@]}"; do
             if [[ "$token" == rd.luks.name=*="${mapperName}" ]]; then
-              [[ "$token" == "$expected_token" && "$seen" == 0 ]] || fail "conflicting private LUKS token in loader entry"
-              seen=1
+              [[ "$token" == "$expected_name_token" && "$seen_name" == 0 ]] || fail "conflicting private LUKS name token in loader entry"
+              seen_name=1
+            elif [[ "$token" == rd.luks.options="$encrypted_partuuid"=* ]]; then
+              [[ "$token" == "$expected_options_token" && "$seen_options" == 0 ]] || fail "conflicting private LUKS options token in loader entry"
+              seen_options=1
             else
               kept+=("$token")
             fi
           done
           new_options="options"
           for token in "''${kept[@]}"; do new_options+=" $token"; done
-          new_options+=" $expected_token"
+          new_options+=" $expected_name_token $expected_options_token"
           tmp="$(mktemp --tmpdir="$(dirname -- "$entry")" .heim-pc-loader.XXXXXX)"
           chmod --reference="$entry" "$tmp"
           chown --reference="$entry" "$tmp"
@@ -184,11 +189,22 @@ in
         && recovery.mountpoint == "/recovery"
         && encrypted.encryption == "luks2"
         && encrypted.filesystem == "btrfs"
-        && topology.luks.version == 2;
-      message = "storage target must stay bound to isolated EFI/recovery/LUKS2/Btrfs production semantics";
+        && topology.luks.version == 2
+        && unlock.mode == "tpm2-auto"
+        && unlock.device == "auto"
+        && unlock.pcrs == [ 7 ]
+        && unlock.pcrlock == false
+        && unlock.with_pin == false
+        && unlock.bootstrap_key == "ephemeral-random-memfd"
+        && unlock.bootstrap_keyslot == 0
+        && unlock.persistent_passphrase == false
+        && unlock.recovery_key == true
+        && unlock.headless == true;
+      message = "storage target must stay bound to isolated EFI/recovery/LUKS2/Btrfs TPM2-auto production semantics";
     }
   ];
 
+  environment.systemPackages = [ pkgs.systemd ];
   boot.initrd.systemd.enable = true;
   boot.initrd.luks.forceLuksSupportInInitrd = true;
   fileSystems = lib.mkForce btrfsFileSystems;

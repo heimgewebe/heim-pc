@@ -2,7 +2,14 @@
   "schema_version": 1,
   "kind": "heim_pc.nixos_production_storage_contract",
   "profile": "nixos-executor-2026",
-  "migration_mode": "isolated-parallel-disk",
+  "migration_mode": "isolated-parallel-disk-dual-os",
+  "source_preservation": {
+    "mode": "retained-protected-source",
+    "destructive_source_cutover": false,
+    "pre_cutover_readiness_required": false,
+    "protected_source_bootability_required": true,
+    "protected_source_bootability_proof": "bootcurrent-protected-esp-loader-v1"
+  },
   "target_identity": {
     "role": "nixos-primary",
     "transport": "nvme",
@@ -11,9 +18,11 @@
     "exact_model": "Seagate ZP4000GP304001",
     "capture_required_before_mutation": true,
     "kernel_name_authoritative": false,
-    "requires_blank": true,
+    "requires_blank": false,
     "requires_unmounted": true,
-    "exact_size_bytes": 4000787030016
+    "exact_size_bytes": 4000787030016,
+    "existing_state_policy": "replace-exact-private-preimage",
+    "requires_no_active_descendants": true
   },
   "protected_disks": [
     {
@@ -94,7 +103,19 @@
     ],
     "luks": {
       "version": 2,
-      "mapper_name": "heimpc-nixos-crypt"
+      "mapper_name": "heimpc-nixos-crypt",
+      "unlock": {
+        "mode": "tpm2-auto",
+        "device": "auto",
+        "pcrs": [7],
+        "pcrlock": false,
+        "with_pin": false,
+        "bootstrap_key": "ephemeral-random-memfd",
+        "bootstrap_keyslot": 0,
+        "persistent_passphrase": false,
+        "recovery_key": true,
+        "headless": true
+      }
     },
     "btrfs": {
       "label": "HEIMPC_NIXOS",

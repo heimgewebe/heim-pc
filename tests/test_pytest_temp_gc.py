@@ -8,7 +8,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import uuid
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("pytest_temp_gc", ROOT / "scripts/pytest_temp_gc.py")
@@ -138,6 +140,181 @@ def test_special_files_fail_closed() -> None:
 
         assert candidate.exists()
         assert report["candidates"][0]["reason"] == "special_file"
+
+
+def test_tree_entry_limit_stops_lazy_fanout_early() -> None:
+    consumed = 0
+    closed = False
+    uid = os.getuid()
+    root_dev = 123
+
+    class Entry:
+        def __init__(self, number: int):
+            self.path = f"/candidate/file-{number}"
+
+        def stat(self, *, follow_symlinks: bool):
+            assert follow_symlinks is False
+            return SimpleNamespace(
+                st_uid=uid,
+                st_dev=root_dev,
+                st_mode=stat.S_IFREG | 0o600,
+            )
+
+    def entries(_path):
+        nonlocal consumed
+        for number in range(10_000):
+            consumed += 1
+            yield Entry(number)
+
+    class Scan:
+        def __init__(self, path):
+            self.entries = entries(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exception):
+            nonlocal closed
+            self.entries.close()
+            closed = True
+
+    with patch.object(gc.os, "scandir", side_effect=Scan):
+        safe, reason, seen = gc._tree_safety(
+            Path("/candidate"), uid, root_dev, max_entries=4
+        )
+
+    assert (safe, reason, seen) == (False, "entry_limit_exceeded", 5)
+    assert consumed == 5
+    assert closed
+
+
+def test_process_reference_scans_proc_and_fds_lazily() -> None:
+    candidate = Path("/tmp/candidate")
+    proc_root = Path("/test-proc")
+    uid = os.getuid()
+    proc_consumed = 0
+    fd_consumed = 0
+    process_probed = False
+    fd_probed = False
+
+    def proc_entries():
+        nonlocal proc_consumed
+        proc_consumed += 1
+        yield SimpleNamespace(name="100", path=str(proc_root / "100"))
+        proc_consumed += 1
+        assert process_probed
+
+    def fd_entries():
+        nonlocal fd_consumed
+        fd_consumed += 1
+        yield SimpleNamespace(name="3", path=str(proc_root / "100" / "fd" / "3"))
+        fd_consumed += 1
+        assert fd_probed
+
+    class Scan:
+        def __init__(self, path):
+            path = Path(path)
+            if path == proc_root:
+                self.entries = proc_entries()
+            elif path == proc_root / "100" / "fd":
+                self.entries = fd_entries()
+            else:
+                raise AssertionError(f"unexpected scan: {path}")
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exception):
+            self.entries.close()
+
+    def target(link: Path):
+        nonlocal process_probed, fd_probed
+        if link.parent == proc_root / "100":
+            process_probed = True
+        if link.parent == proc_root / "100" / "fd":
+            fd_probed = True
+        return None
+
+    with (
+        patch.object(gc.os, "scandir", side_effect=Scan),
+        patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=uid)),
+        patch.object(gc, "_target_from_proc_link", side_effect=target),
+    ):
+        refs = gc.process_references(candidate, uid, proc_root=proc_root)
+
+    assert refs == []
+    assert (proc_consumed, fd_consumed) == (2, 2)
+    assert process_probed
+    assert fd_probed
+
+
+def test_collect_starts_candidate_evaluation_before_full_root_enumeration() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        first = root / f"garbage-{uuid.uuid4()}"
+        consumed = 0
+        evaluated = False
+
+        def entries(path):
+            nonlocal consumed
+            assert Path(path) == root
+            consumed += 1
+            yield SimpleNamespace(name=first.name, path=str(first))
+            consumed += 1
+            assert evaluated
+
+        class Scan:
+            def __init__(self, path):
+                self.entries = entries(path)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exception):
+                self.entries.close()
+
+        def evaluate(candidate: Path, **_kwargs):
+            nonlocal evaluated
+            evaluated = True
+            return {
+                "path": str(candidate),
+                "name": candidate.name,
+                "decision": "skip",
+                "reason": "test",
+            }
+
+        with (
+            patch.object(gc.os, "scandir", side_effect=Scan),
+            patch.object(gc, "evaluate_candidate", side_effect=evaluate),
+        ):
+            report = gc.collect(
+                root,
+                now=time.time(),
+                min_age_seconds=600,
+                mounts=[],
+            )
+
+    assert report["status"] == "ok"
+    assert consumed == 2
+    assert evaluated
 
 
 def test_systemd_service_sees_host_tmp_and_runs_as_alex() -> None:

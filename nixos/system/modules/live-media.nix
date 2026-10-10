@@ -2,15 +2,41 @@
   config,
   lib,
   pkgs,
+  heimPcSourceRevision ? "prototype-unbound",
   heimPcLiveProfile ? {
     nvidiaOpen = false;
     edition = "proprietary";
+    inventoryMode = false;
   },
   ...
 }:
 let
   liveUser = "alex";
   edition = heimPcLiveProfile.edition;
+  inventoryMode = heimPcLiveProfile.inventoryMode or false;
+  inventoryPayload = pkgs.runCommand "heim-pc-offline-inventory-payload" { } ''
+    install -Dm0444 ${../../../scripts/nixos_production_identity.py} "$out/scripts/nixos_production_identity.py"
+    install -Dm0444 ${../../../scripts/nixos_critical_user_data_inventory.py} "$out/scripts/nixos_critical_user_data_inventory.py"
+    install -Dm0444 ${../../../scripts/nixos_critical_data_inventory.py} "$out/scripts/nixos_critical_data_inventory.py"
+    install -Dm0444 ${../../production/contract-v1.json} "$out/nixos/production/contract-v1.json"
+    install -Dm0444 ${../../production/critical-user-data-contract-v1.json} "$out/nixos/production/critical-user-data-contract-v1.json"
+    install -Dm0444 ${../../production/critical-user-home-data-contract-v1.json} "$out/nixos/production/critical-user-home-data-contract-v1.json"
+  '';
+  offlineInventory = pkgs.writeShellApplication {
+    name = "heim-pc-offline-critical-user-data-inventory";
+    runtimeInputs = with pkgs; [
+      coreutils
+      python3
+      util-linux
+    ];
+    text = ''
+      exec ${pkgs.python3}/bin/python \
+        ${../../../scripts/nixos_critical_user_data_offline_inventory.py} \
+        --payload-root ${inventoryPayload} \
+        --expected-source-revision ${lib.escapeShellArg heimPcSourceRevision} \
+        --apply
+    '';
+  };
   liveSafety = pkgs.writeShellApplication {
     name = "heim-pc-live-safety";
     runtimeInputs = with pkgs; [
@@ -166,13 +192,42 @@ in
       assertion = !config.heimPc.physicalGates.modelRuntime;
       message = "physical gate live media must keep Ollama/llama CUDA out of the copytoram image";
     }
+    {
+      assertion = !inventoryMode || !config.networking.networkmanager.enable;
+      message = "offline inventory live media must keep NetworkManager disabled";
+    }
+    {
+      assertion = !inventoryMode || !config.networking.useDHCP;
+      message = "offline inventory live media must keep DHCP disabled";
+    }
+    {
+      assertion = !inventoryMode || !config.security.polkit.enable;
+      message = "offline inventory live media must not expose Polkit";
+    }
+    {
+      assertion = !inventoryMode || !config.services.displayManager.autoLogin.enable;
+      message = "offline inventory live media must not auto-login a user";
+    }
+    {
+      assertion = !inventoryMode || !config.heimPc.desktop.enable;
+      message = "offline inventory live media must remain headless";
+    }
+    {
+      assertion = !inventoryMode || !config.heimPc.hardware.nvidia.enable;
+      message = "offline inventory live media must not load the NVIDIA desktop stack";
+    }
+    {
+      assertion = !inventoryMode || !config.heimPc.physicalGates.enable;
+      message = "offline inventory live media must not expose physical test gates";
+    }
   ];
 
   nixpkgs.config.allowUnfree = true;
 
   networking = {
-    hostName = "heim-pc-gate-live-${edition}";
-    networkmanager.enable = true;
+    hostName = if inventoryMode then "heim-pc-inventory-live" else "heim-pc-gate-live-${edition}";
+    networkmanager.enable = !inventoryMode;
+    useDHCP = lib.mkIf inventoryMode false;
     firewall.enable = true;
   };
 
@@ -185,14 +240,24 @@ in
     makeBiosBootable = true;
     makeEfiBootable = true;
     makeUsbBootable = true;
-    edition = "heim-gate-${edition}";
-    volumeID = if edition == "open" then "NIXOS-HEIM-GATE-OPEN" else "NIXOS-HEIM-GATE-PROP";
-    appendToMenuLabel = " Heim-PC Gate A/B Live";
-    configurationName = if edition == "open" then "Open NVIDIA" else "Proprietary NVIDIA";
+    edition = if inventoryMode then "heim-inventory" else "heim-gate-${edition}";
+    volumeID =
+      if inventoryMode then "HEIMPC_INVENTORY"
+      else if edition == "open" then "NIXOS-HEIM-GATE-OPEN"
+      else "NIXOS-HEIM-GATE-PROP";
+    appendToMenuLabel =
+      if inventoryMode then " Heim-PC Offline Inventory"
+      else " Heim-PC Gate A/B Live";
+    configurationName =
+      if inventoryMode then "Offline Critical-User-Data Inventory"
+      else if edition == "open" then "Open NVIDIA"
+      else "Proprietary NVIDIA";
     squashfsCompression = "zstd -Xcompression-level 6";
   };
 
-  system.nixos.variant_id = "heim-pc-gate-live";
+  system.nixos.variant_id =
+    if inventoryMode then "heim-pc-offline-inventory-live"
+    else "heim-pc-gate-live";
   system.stateVersion = "26.05";
 
   # This intentionally acknowledges NixOS' lockout assertion. The live system
@@ -206,7 +271,7 @@ in
   users.users.${liveUser} = {
     isNormalUser = true;
     hashedPassword = "!";
-    extraGroups = [
+    extraGroups = lib.optionals (!inventoryMode) [
       "audio"
       "video"
       "networkmanager"
@@ -214,22 +279,26 @@ in
   };
 
   security.sudo.enable = lib.mkForce false;
-  security.polkit.enable = true;
+  security.polkit.enable = !inventoryMode;
 
   services = {
     openssh.enable = lib.mkForce false;
     udisks2.enable = lib.mkForce false;
     displayManager.autoLogin = {
-      enable = true;
+      enable = !inventoryMode;
       user = liveUser;
     };
   };
 
-  # Build the safety script independently without realizing the full ISO.
+  # Build proof helpers independently without realizing the full ISO.
   system.build.heimPcLiveSafety = liveSafety;
+  system.build.heimPcOfflineCriticalUserDataInventory = offlineInventory;
 
   systemd.services.heim-pc-live-safety = {
-    description = "Fail closed before Heim-PC physical Gate A/B desktop";
+    description =
+      if inventoryMode
+      then "Fail closed before Heim-PC offline inventory"
+      else "Fail closed before Heim-PC physical Gate A/B desktop";
     wantedBy = [ "multi-user.target" ];
     before = [ "display-manager.service" ];
     after = [
@@ -247,37 +316,96 @@ in
 
   # The graphical test surface must not become available when the storage and
   # privilege preflight failed.
-  systemd.services.display-manager = {
+  systemd.services.display-manager = lib.mkIf (!inventoryMode) {
     requires = [ "heim-pc-live-safety.service" ];
     after = [ "heim-pc-live-safety.service" ];
+  };
+
+  systemd.services.heim-pc-offline-critical-user-data-inventory = lib.mkIf inventoryMode {
+    description = "One-shot offline authoritative Heim-PC critical-user-data inventory";
+    wantedBy = [ "multi-user.target" ];
+    requires = [ "heim-pc-live-safety.service" ];
+    wants = [ "systemd-udev-settle.service" ];
+    after = [
+      "heim-pc-live-safety.service"
+      "systemd-udev-settle.service"
+    ];
+    unitConfig.ConditionPathExists = "/dev/disk/by-label/HEIMPC_EVIDENCE";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = lib.getExe offlineInventory;
+      RemainAfterExit = true;
+      Restart = "no";
+      User = "root";
+      Group = "root";
+      UMask = "0077";
+      RuntimeDirectory = [
+        "heim-pc-offline-inventory"
+        "heim-pc-recovery-evidence"
+      ];
+      RuntimeDirectoryMode = "0700";
+      RuntimeDirectoryPreserve = "yes";
+      TimeoutStartSec = "6h";
+      RuntimeMaxSec = "6h";
+      Environment = "PYTHONDONTWRITEBYTECODE=1";
+      PrivateNetwork = true;
+      PrivateMounts = true;
+      PrivateDevices = false;
+      PrivateTmp = true;
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = false;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectHostname = true;
+      ProtectClock = true;
+      RestrictSUIDSGID = true;
+      RestrictRealtime = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      CapabilityBoundingSet = [
+        "CAP_SYS_ADMIN"
+        "CAP_DAC_OVERRIDE"
+        "CAP_DAC_READ_SEARCH"
+      ];
+      ReadWritePaths = [
+        "/run/heim-pc-offline-inventory"
+        "/run/heim-pc-recovery-evidence"
+      ];
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
   };
 
   powerManagement.enable = true;
 
   heimPc = {
-    desktop.enable = true;
+    desktop.enable = !inventoryMode;
     hardware.nvidia = {
-      enable = true;
+      enable = !inventoryMode;
       openKernelModule = heimPcLiveProfile.nvidiaOpen;
     };
     physicalGates = {
-      enable = true;
+      enable = !inventoryMode;
       bootReadiness = false;
       modelRuntime = false;
     };
   };
 
-  environment.systemPackages = with pkgs; [
-    liveSafety
-    firefox
-    usbutils
-    pciutils
-    vulkan-tools
-    alsa-utils
-    pipewire
-    wireplumber
-    jack2
-    jq
-    curl
-  ];
+  environment.systemPackages =
+    [ liveSafety ]
+    ++ lib.optionals (!inventoryMode) (with pkgs; [
+      firefox
+      usbutils
+      pciutils
+      vulkan-tools
+      alsa-utils
+      pipewire
+      wireplumber
+      jack2
+      jq
+      curl
+    ]);
 }

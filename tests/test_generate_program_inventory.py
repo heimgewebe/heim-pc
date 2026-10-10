@@ -23,7 +23,7 @@ def write_csv(path: Path, rows: list[dict[str, str]], fields: list[str]) -> None
 def test_build_snapshot_compacts_raw_inventory(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
-    (raw / "run-result.json").write_text(json.dumps({"process_rows": 3, "executables": 7, "desktop_apps": 2, "observed_at": "2026-07-09T18:15:00Z"}), encoding="utf-8")
+    (raw / "run-result.json").write_text(json.dumps({"process_rows": 3, "executables": 7, "desktop_apps": 2, "observed_at": "2026-07-09T18:15:00Z", "observation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding_eligible": True, "host": "heim-pc", "collector_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "raw_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "raw_artifact_count": 7}), encoding="utf-8")
     (raw / "full-rootfs-scan-result.json").write_text(json.dumps({"count": 10}), encoding="utf-8")
     (raw / "full-rootfs-sudo-scan-result.json").write_text(json.dumps({"count": 12, "note": "metadata only", "stderr_tail": ["find: one denied"]}), encoding="utf-8")
     (raw / "sudo-delta-summary.json").write_text(json.dumps({"added_by_sudo": 2, "top_added_prefixes": [["/var/lib", 2]], "top_added_names": [["run", 2]]}), encoding="utf-8")
@@ -54,6 +54,8 @@ def test_build_snapshot_compacts_raw_inventory(tmp_path):
     assert snapshot["observation_scope"] == {
         "kind": "point_in_time_runtime_observation",
         "observed_at": "2026-07-09T18:15:00Z",
+        "observation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "binding_eligible": True,
         "does_not_establish": [
             "current_state_after_observed_at",
             "service_necessity",
@@ -67,6 +69,9 @@ def test_build_snapshot_compacts_raw_inventory(tmp_path):
     assert snapshot["desktop_groups"]["Entwicklung / Operator"] == ["GitKraken"]
     assert snapshot["operator_tools"] == {"git": ["/usr/bin/git"]}
     assert snapshot["docker_containers"][0]["name"] == "heim-util-beszel"
+    assert snapshot["collection_provenance"]["host"] == "heim-pc"
+    assert snapshot["collection_provenance"]["collector_sha256"] == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert snapshot["collection_provenance"]["raw_manifest_sha256"] == "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
 
 def test_render_and_write_outputs(tmp_path):

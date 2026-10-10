@@ -988,16 +988,28 @@ def test_contract_loader_rejects_activation_receipt_or_rollback_schema_drift(
         managed_nix._load_managed_contract()
 
 
-@pytest.mark.parametrize("mode", ["test", "next-boot"])
-def test_every_advertised_v1_activation_mode_is_reachable(mode: str) -> None:
+def test_next_boot_activation_mode_is_reachable_under_current_managed_floor() -> None:
     built = receipt()
-    plan = validate_authority(built, authority(built, mode=mode))
-    assert plan["mode"] == mode
+    assert built["effect_scope"] == "boot-critical"
+    plan = validate_authority(built, authority(built, mode="next-boot"))
+    assert plan["mode"] == "next-boot"
     assert validate_activation_plan(plan) == plan
     result = make_activation_receipt(
         plan, live_closure=CLOSURE, readback_evidence_sha256="f" * 64
     )
-    assert validate_activation_receipt(result)["mode"] == mode
+    assert validate_activation_receipt(result)["mode"] == "next-boot"
+
+
+def test_current_managed_floor_rejects_test_even_for_normal_declared_effects() -> None:
+    built = make_receipt(build_request=request(possible_effects=["package-set"]))
+    assert classify_effect(built["possible_effects"]) == "normal"
+    assert built["effect_scope"] == "boot-critical"
+    candidate = authority(built, mode="test")
+    with pytest.raises(
+        ManagedNixError,
+        match="boot-critical activation requires the next-boot path",
+    ):
+        validate_authority(built, candidate)
 
 
 def test_persistent_promotion_v2_is_additive_and_v1_modes_remain_unchanged() -> None:

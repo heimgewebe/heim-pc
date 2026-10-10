@@ -267,6 +267,7 @@ KNOWN_OBSOLETE_ASSETS: dict[str, dict[str, Any]] = {
     "usr/local/libexec/heim-pc/pytest-temp-gc": {
         "sha256s": (
             "2495a0f5be34018e7d9c996a55c50fdadd8ed5276a50d07f182b8371749fa5c5",
+            "38bb3a02109203c15ff85e71f12d0855a26ae4d7947d71d9e164f2c39245e995",
         ),
         "mode": 0o755,
         "live_owner": ("root", "root"),

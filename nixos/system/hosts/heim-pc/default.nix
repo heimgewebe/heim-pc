@@ -38,7 +38,7 @@ let
   );
 in
 {
-  imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/physical-gates.nix ];
+  imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ];
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
 
@@ -57,6 +57,8 @@ in
     fsType = "ext4";
   };
   boot.loader.systemd-boot.enable = true;
+  # Bound retained boot entries so the dedicated 1 GiB ESP cannot grow without limit.
+  boot.loader.systemd-boot.configurationLimit = 10;
   boot.loader.efi.canTouchEfiVariables = false;
   system.stateVersion = "26.05";
 
@@ -96,6 +98,8 @@ in
     openKernelModule = heimPcProfile.nvidiaOpen or false;
   };
   heimPc.physicalGates.enable = heimPcProfile.physicalGates or false;
+  heimPc.hostProtection.enable = heimPcProfile.physical or false;
+  heimPc.day2Activation.enable = heimPcProfile.physical or false;
 
   # Host policy: users.mutableUsers is intentionally global (and is the NixOS
   # default), because later password rotations must survive activation. No
