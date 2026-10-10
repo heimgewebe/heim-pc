@@ -69,7 +69,7 @@ def test_publisher_resolves_exact_heavy_derivations_and_signs_before_upload():
     assert "?secret-key=$signing_key" in workflow
     assert "rsync -r --ignore-existing" in workflow
     assert "StrictHostKeyChecking=yes" in workflow
-    assert "PUBLISHED_TRUSTED_SUBSTITUTION" in workflow
+    assert "PUBLISHED_TRUSTED_CLOSURE" in workflow
     assert "PUBLISHED_SIGNED_PATH" not in workflow
 
 
@@ -197,19 +197,23 @@ def test_upload_origin_is_only_in_protected_publisher_environment():
     assert "environment: ci-cache-publisher" in workflow
 
 
-def test_publisher_only_claims_readback_after_trusted_nix_substitution():
+def test_publisher_recovers_entire_signed_closure_from_fresh_empty_cache():
     workflow = PUBLISHER.read_text(encoding="utf-8")
     tail = workflow[workflow.index("      - name: Verify public signed-cache readback"):]
     assert "require-sigs = true" in tail
     assert "fallback = false" in tail
-    assert "narinfo-cache-negative-ttl = 0" in tail
-    assert "max-jobs = 0" in tail
     assert "trusted-public-keys = $CI_NIX_CACHE_PUBLIC_KEY" in tail
     assert "substituters = $CI_NIX_CACHE_URL" in tail
-    assert 'nix-store --delete "$store_path"' in tail
-    assert 'test ! -e "$store_path"' in tail
-    assert 'nix-store --realise "$store_path"' in tail
-    assert "PUBLISHED_TRUSTED_SUBSTITUTION" in tail
-    assert "PUBLISHED_SIGNED_PATH" not in tail
+    assert 'test ! -e "$readback_cache_dir"' in tail
+    assert "nix copy " in tail
+    assert '--from "$CI_NIX_CACHE_URL"' in tail
+    assert '--to "file://$readback_cache_dir"' in tail
+    assert '"$OLLAMA_PATH" "$LLAMA_CPP_PATH"' in tail
+    assert 'nix path-info --recursive --store "file://$readback_cache_dir"' in tail
+    assert 'nix path-info --recursive "$OLLAMA_PATH" "$LLAMA_CPP_PATH"' in tail
+    assert 'cmp -s "$expected_closure" "$remote_closure"' in tail
+    assert "PUBLISHED_TRUSTED_CLOSURE" in tail
+    assert "PUBLISHED_TRUSTED_SUBSTITUTION" not in tail
+    assert "nix-store --delete" not in tail
     assert "--no-check-sigs" not in tail
     assert "require-sigs = false" not in tail

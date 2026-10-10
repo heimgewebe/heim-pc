@@ -158,9 +158,8 @@ jobs:
           set -euo pipefail
           curl --fail --silent --show-error "$CI_NIX_CACHE_URL/nix-cache-info" >/dev/null
 
-          # The ephemeral CI store currently has the built outputs. Delete only
-          # these outputs so their following realization must use the remote
-          # HTTPS substituter, not an already-present local store path.
+          # Download the entire closure from the published remote cache to a
+          # fresh, empty binary cache. Never trust runner-local dependencies.
           export NIX_CONFIG="experimental-features = nix-command flakes
           require-sigs = true
           substituters = $CI_NIX_CACHE_URL
@@ -170,11 +169,29 @@ jobs:
           narinfo-cache-negative-ttl = 0
           max-jobs = 0"
 
+          readback_cache_dir="$RUNNER_TEMP/ci-nix-cache-remote-readback"
+          test ! -e "$readback_cache_dir"
+          mkdir -m 0700 "$readback_cache_dir"
+
+          expected_closure="$RUNNER_TEMP/ci-nix-cache-expected-closure.txt"
+          remote_closure="$RUNNER_TEMP/ci-nix-cache-remote-closure.txt"
+          nix path-info --recursive "$OLLAMA_PATH" "$LLAMA_CPP_PATH" |
+            LC_ALL=C sort -u > "$expected_closure"
+          test -s "$expected_closure"
+
+          # --from is explicit: a local /nix/store hit cannot mask remote corruption.
+          # --to starts empty: every closure NAR must be fetched and validated.
+          nix copy --from "$CI_NIX_CACHE_URL" --to "file://$readback_cache_dir" \
+            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+
+          nix path-info --recursive --store "file://$readback_cache_dir" \
+            "$OLLAMA_PATH" "$LLAMA_CPP_PATH" |
+            LC_ALL=C sort -u > "$remote_closure"
+          test -s "$remote_closure"
+          cmp -s "$expected_closure" "$remote_closure"
+
           for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
-            nix-store --delete "$store_path" >/dev/null
-            test ! -e "$store_path"
-            realized="$(nix-store --realise "$store_path")"
-            test "$realized" = "$store_path"
-            test -e "$store_path"
-            printf 'PUBLISHED_TRUSTED_SUBSTITUTION=%s\n' "$store_path"
+            grep -Fqx -- "$store_path" "$remote_closure"
+            printf 'PUBLISHED_TRUSTED_CLOSURE=%s\n' "$store_path"
           done
+          printf 'PUBLISHED_TRUSTED_CLOSURE_PATHS=%s\n' "$(wc -l < "$remote_closure")"
