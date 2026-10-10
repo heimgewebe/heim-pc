@@ -108,6 +108,13 @@ jobs:
           printf '%s' "$SIGNING_KEY_B64" | base64 --decode > "$signing_key"
           chmod 600 "$signing_key"
 
+          # Require the exact public key trusted by CI consumers, not only its name.
+          derived_public_key="$(nix key convert-secret-to-public < "$signing_key")"
+          if [[ "$derived_public_key" != "$CI_NIX_CACHE_PUBLIC_KEY" ]]; then
+            echo "Cache signing key does not match the trusted CI public key; refusing publication" >&2
+            exit 1
+          fi
+
           nix copy \
             --to "file://$cache_dir?secret-key=$signing_key" \
             "$OLLAMA_PATH" "$LLAMA_CPP_PATH"

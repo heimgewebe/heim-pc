@@ -47,6 +47,14 @@ The SSH public key installed on `commonserver` is forced through:
 This makes the publisher write-only, prevents deletion, and refuses overwriting
 existing cache objects.
 
+Before copying or uploading any cache payload, the publisher derives the exact
+Ed25519 public key from its decoded signing secret using Nix itself and compares
+the full name-and-public-material value against the consumer-trusted
+CI_NIX_CACHE_PUBLIC_KEY. A rotated secret with the same key name but different
+key material aborts publication before any upload. Neither the secret nor the
+derived public key is printed. Regression tests check both workflow ordering and
+the behavior of distinct same-name signing keys under a real Nix CLI.
+
 ## Failure behavior
 
 - Cache miss: Nix builds locally.

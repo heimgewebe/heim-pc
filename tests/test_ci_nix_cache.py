@@ -1,5 +1,9 @@
 from pathlib import Path
 import json
+import shutil
+import subprocess
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONSUMER = ROOT / ".github" / "workflows" / "heim-pc-nix.yml"
@@ -116,3 +120,39 @@ def test_consumer_keeps_all_existing_nix_gates_and_invalid_signature_probe():
     assert "nix copy --no-recursive --from" not in probe
     assert "require-sigs = false" not in probe
     assert 'grep -Eiq "signature|trusted key|trusted public key|not signed"' not in probe
+
+
+def test_publisher_rejects_mismatched_signing_secret_before_copy_or_upload():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    assert f"CI_NIX_CACHE_PUBLIC_KEY: {CACHE_KEY}" in workflow
+    derive = 'derived_public_key="$(nix key convert-secret-to-public < "$signing_key")"'
+    check = 'if [[ "$derived_public_key" != "$CI_NIX_CACHE_PUBLIC_KEY" ]]; then'
+    assert derive in workflow
+    assert check in workflow
+    assert workflow.index(derive) < workflow.index(check)
+    assert workflow.index(check) < workflow.index("nix copy ")
+    assert workflow.index(check) < workflow.index("rsync -r --ignore-existing")
+    assert "refusing publication" in workflow
+
+
+@pytest.mark.skipif(shutil.which("nix") is None, reason="Nix CLI unavailable")
+def test_same_nix_signing_key_name_does_not_hide_mismatched_material():
+    nix = shutil.which("nix")
+    assert nix is not None
+
+    def generate():
+        return subprocess.run(
+            [nix, "--extra-experimental-features", "nix-command", "key", "generate-secret", "--key-name", "same-name-test-1"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def public(secret):
+        return subprocess.run(
+            [nix, "--extra-experimental-features", "nix-command", "key", "convert-secret-to-public"],
+            input=secret, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    first, second = generate(), generate()
+    expected = public(first)
+    assert expected.startswith("same-name-test-1:")
+    assert public(first) == expected
+    assert public(second) != expected
