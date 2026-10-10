@@ -12,12 +12,14 @@ from collections.abc import Iterable
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 NIX_EXACT_PATHS = frozenset(
     {
+        ".github/workflows/heim-pc-nix-cache-publish.yml",
         ".github/workflows/heim-pc-nix.yml",
         "config/home-hygiene.v1.json",
         "config/memory-pressure-guard.v1.json",
         "config/storage-pressure.v1.json",
         "flake.nix",
         "flake.lock",
+        "scripts/ci/check_nix_cache_signature_rejection.sh",
         "scripts/ci/check_pinned_nix_find_contract.py",
         "scripts/ci/nix_changed.py",
         "scripts/grabowski_memory_guard.py",
@@ -27,6 +29,8 @@ NIX_EXACT_PATHS = frozenset(
         "scripts/pytest_temp_gc.py",
         "scripts/storage_inventory.py",
         "scripts/storage_pressure_watch.py",
+        "tests/test_ci_nix_cache.py",
+        "tests/test_nix_changed.py",
     }
 )
 NIXOS_SCRIPT_RE = re.compile(r"^scripts/nixos_[^/]*\.py$")
