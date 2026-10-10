@@ -33,6 +33,17 @@ jobs:
       SOURCE_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
       SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
     steps:
+      - name: Mask protected upload metadata
+        env:
+          CI_NIX_CACHE_SSH_HOST: ${{ vars.CI_CACHE_UPLOAD_SSH_HOST }}
+          CI_NIX_CACHE_SSH_HOST_KEY: ${{ vars.CI_CACHE_UPLOAD_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$CI_NIX_CACHE_SSH_HOST"
+          test -n "$CI_NIX_CACHE_SSH_HOST_KEY"
+          printf '::add-mask::%s\n' "$CI_NIX_CACHE_SSH_HOST"
+          printf '::add-mask::%s\n' "$CI_NIX_CACHE_SSH_HOST_KEY"
+
       - name: Checkout exact successful Main source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

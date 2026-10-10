@@ -211,3 +211,32 @@ def test_publisher_only_claims_readback_after_trusted_nix_substitution():
     assert "PUBLISHED_SIGNED_PATH" not in tail
     assert "--no-check-sigs" not in tail
     assert "require-sigs = false" not in tail
+
+def test_publisher_masks_protected_upload_metadata_before_any_work():
+    """Protect environment variables from later command and SSH diagnostic logs."""
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    publisher_steps = workflow.split("    steps:\n", 1)[1]
+    first_step = publisher_steps.split("      - name: ", 2)[1]
+    assert first_step.startswith("Mask protected upload metadata\n")
+
+    env_host = (
+        "CI_NIX_CACHE_SSH_HOST: " + chr(36)
+        + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST }}"
+    )
+    env_host_key = (
+        "CI_NIX_CACHE_SSH_HOST_KEY: " + chr(36)
+        + "{{ vars.CI_CACHE_UPLOAD_SSH_HOST_KEY }}"
+    )
+    assert env_host in first_step
+    assert env_host_key in first_step
+    for name in ("CI_NIX_CACHE_SSH_HOST", "CI_NIX_CACHE_SSH_HOST_KEY"):
+        assert 'test -n "$' + name + '"' in first_step
+        assert "printf '::add-mask::%s\\n' " + '"$' + name + '"' in first_step
+
+    assert workflow.index("Mask protected upload metadata") < workflow.index(
+        "Checkout exact successful Main source"
+    )
+    assert workflow.index("Checkout exact successful Main source") < workflow.index(
+        "Upload cache through restricted publisher key"
+    )
+    assert "set -x" not in first_step
