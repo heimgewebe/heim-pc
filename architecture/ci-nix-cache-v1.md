@@ -84,8 +84,10 @@ its disposable CI Nix store, disables local builds and fallback, configures
 the expected HTTPS substituter and trusted CI public key, and re-realizes each
 output from that remote cache. Only a successful Nix signature and NAR integrity
 substitution counts as published readback; matching StorePath or Sig string
-prefixes alone would not prove delivery. This does not authorize production
-trust or demonstrate cross-run reuse, which needs separate acceptance.
+prefixes alone would not prove delivery. The readback disables Nix's negative
+narinfo lookup cache (TTL 0) so earlier pre-upload cache misses cannot hide
+the newly published paths. This does not authorize production trust or
+establish cross-run reuse, which needs separate acceptance.
 
 ## Rotation and revocation
 

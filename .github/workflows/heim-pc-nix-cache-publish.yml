@@ -164,6 +164,8 @@ jobs:
           substituters = $CI_NIX_CACHE_URL
           trusted-public-keys = $CI_NIX_CACHE_PUBLIC_KEY
           fallback = false
+          # Heavy builds may have cached a pre-upload miss from this substituter.
+          narinfo-cache-negative-ttl = 0
           max-jobs = 0"
 
           for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do

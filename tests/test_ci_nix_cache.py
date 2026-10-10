@@ -175,6 +175,7 @@ def test_publisher_only_claims_readback_after_trusted_nix_substitution():
     tail = workflow[workflow.index("      - name: Verify public signed-cache readback"):]
     assert "require-sigs = true" in tail
     assert "fallback = false" in tail
+    assert "narinfo-cache-negative-ttl = 0" in tail
     assert "max-jobs = 0" in tail
     assert "trusted-public-keys = $CI_NIX_CACHE_PUBLIC_KEY" in tail
     assert "substituters = $CI_NIX_CACHE_URL" in tail
