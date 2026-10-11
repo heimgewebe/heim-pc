@@ -33,6 +33,16 @@ successful `heim-pc-nix` `push` run whose source repository is this repository
 and whose branch is `main`. The job binds GitHub environment
 `ci-cache-publisher`, which is restricted to `main`.
 
+Publication is **off by default**, including after this PR reaches `main`.
+The job-level `if` additionally requires the **repository-level** GitHub
+Actions variable `CI_NIX_CACHE_PUBLISH_ENABLED` to equal the literal `true`.
+An unset value is empty and therefore skips the job before allocating a runner
+or accessing protected publisher secrets. This PR does not create or enable
+that variable. An owner may opt in only for a separately authorized Main-only
+signed publication trial; disable it again after the intended run. Activating
+it is not a cross-run success claim: the independent signed-substitution and
+wall-clock acceptance checks below remain mandatory.
+
 Pull-request and fork workflows never receive the signing or upload credentials.
 The publisher checks the stable GitHub workflow ID 351684660 before handling
 publisher secrets. Display names are not unique, and workflow-run paths may

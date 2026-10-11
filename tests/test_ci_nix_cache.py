@@ -54,6 +54,23 @@ def test_publisher_is_main_only_and_secrets_never_enter_pull_request_workflow():
     assert "persist-credentials: false" in workflow
 
 
+def test_publisher_requires_explicit_repo_opt_in_before_runner_or_secrets():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    assert "workflow_dispatch:" not in workflow
+    job_if = workflow.split("\njobs:\n  publish:\n    if: >-\n", 1)[1].split(
+        "\n    runs-on:", 1
+    )[0]
+    conditions = [line.strip() for line in job_if.splitlines() if line.strip()]
+    assert conditions[0] == "vars.CI_NIX_CACHE_PUBLISH_ENABLED == 'true' &&"
+    assert "github.event.workflow_run.conclusion == 'success' &&" in conditions
+    assert "github.event.workflow_run.event == 'push' &&" in conditions
+    assert "github.event.workflow_run.head_branch == 'main' &&" in conditions
+    assert "github.event.workflow_run.workflow_id == 351684660 &&" in conditions
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in conditions
+    assert "secrets." not in job_if
+    assert workflow.index("    if: >-") < workflow.index("    environment: ci-cache-publisher")
+
+
 def test_publisher_resolves_exact_heavy_derivations_and_signs_before_upload():
     workflow = PUBLISHER.read_text(encoding="utf-8")
 
