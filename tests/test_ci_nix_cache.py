@@ -229,6 +229,14 @@ def test_publisher_recovers_entire_signed_closure_from_fresh_empty_cache():
     assert 'nix path-info --recursive --store "file://$readback_cache_dir"' in tail
     assert 'nix path-info --recursive "$OLLAMA_PATH" "$LLAMA_CPP_PATH"' in tail
     assert 'cmp -s "$expected_closure" "$remote_closure"' in tail
+    # Copying between binary caches does not by itself enforce signatures.
+    # Verify the full fetched closure under the exact trusted CI key.
+    verify = 'nix store verify --store "file://$readback_cache_dir" --recursive'
+    assert verify in tail
+    assert tail.index('nix copy --from "$CI_NIX_CACHE_URL"') < tail.index(verify)
+    assert tail.index(verify) < tail.index("PUBLISHED_TRUSTED_CLOSURE=")
+    assert "--no-trust" not in tail
+    assert "--no-contents" not in tail
     assert "PUBLISHED_TRUSTED_CLOSURE" in tail
     assert "PUBLISHED_TRUSTED_SUBSTITUTION" not in tail
     assert "nix-store --delete" not in tail

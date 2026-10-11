@@ -95,15 +95,16 @@ the behavior of distinct same-name signing keys under a real Nix CLI.
 The invalid-signature probe tests Nix signature mechanics only. It is not
 evidence of cross-run reuse.
 
-After upload, this job removes the two locally realized heavy outputs from
-its disposable CI Nix store, disables local builds and fallback, configures
-the expected HTTPS substituter and trusted CI public key, and re-realizes each
-output from that remote cache. Only a successful Nix signature and NAR integrity
-substitution counts as published readback; matching StorePath or Sig string
-prefixes alone would not prove delivery. The readback disables Nix's negative
-narinfo lookup cache (TTL 0) so earlier pre-upload cache misses cannot hide
-the newly published paths. This does not authorize production trust or
-establish cross-run reuse, which needs separate acceptance.
+After upload, this job copies the **complete** remote closure into a new,
+empty temporary binary cache with local builds and fallback disabled. Nix
+2.35.2 accepts untrusted signatures during cache-to-cache copy, so that step
+alone does not establish authenticity. The subsequent `nix store verify`
+checks both NAR contents and signatures for every transitive path under the
+exact trusted CI public key; only then may the job compare complete closure
+identities and publish its success receipt. The readback disables Nix's
+negative narinfo lookup cache (TTL 0) so pre-upload misses cannot hide newly
+published paths. Production trust and the separate cross-run performance
+acceptance contract stay unchanged.
 
 ## Rotation and revocation
 

@@ -185,6 +185,11 @@ jobs:
           nix copy --from "$CI_NIX_CACHE_URL" --to "file://$readback_cache_dir" \
             "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
 
+          # Cache-to-cache copy alone accepts untrusted NAR signatures. Verify
+          # both contents and trusted signing keys across every closure path.
+          nix store verify --store "file://$readback_cache_dir" --recursive \
+            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+
           nix path-info --recursive --store "file://$readback_cache_dir" \
             "$OLLAMA_PATH" "$LLAMA_CPP_PATH" |
             LC_ALL=C sort -u > "$remote_closure"
