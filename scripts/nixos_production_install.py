@@ -132,6 +132,9 @@ EFI_BOOT_TRUST_MAX_BYTES = 4 * 1024 * 1024
 # Linux include/uapi/linux/magic.h: only efivarfs, not a root-owned fake tree,
 # may supply UEFI variable bytes to physical TPM2 PCR7 admission.
 EFIVARFS_SUPER_MAGIC = 0xDE5E81E4
+# Linux procfs reports the immutable kernel mount ID for each open fd.
+PROC_SUPER_MAGIC = 0x9FA0
+PROC_FDINFO_ROOT = Path("/proc/self/fdinfo")
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
@@ -1595,6 +1598,44 @@ def _filesystem_magic(fd: int) -> int:
         raise ProductionInstallError("physical EFI variables filesystem cannot be identified") from exc
 
 
+def _kernel_fd_mount_id(fd: int) -> int:
+    """Require an exact kernel procfs mount identity, not path/mountinfo text."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        proc_fd = os.open(PROC_FDINFO_ROOT, flags)
+    except OSError as exc:
+        raise ProductionInstallError("kernel fd mount identity is unavailable") from exc
+    try:
+        if _filesystem_magic(proc_fd) != PROC_SUPER_MAGIC:
+            raise ProductionInstallError("kernel fd mount identity is not on procfs")
+        try:
+            fdinfo = os.open(str(fd), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=proc_fd)
+        except OSError as exc:
+            raise ProductionInstallError("kernel fd mount identity cannot be opened") from exc
+        try:
+            with os.fdopen(fdinfo, "rb", closefd=False) as stream:
+                blob = stream.read(4097)
+        finally:
+            os.close(fdinfo)
+        if not blob or len(blob) > 4096:
+            raise ProductionInstallError("kernel fd mount identity is invalid")
+        try:
+            lines = blob.decode("ascii", "strict").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ProductionInstallError("kernel fd mount identity cannot be parsed") from exc
+        matches = [line[7:].strip() for line in lines if line.startswith("mnt_id:")]
+        if len(matches) != 1 or not matches[0].isdigit():
+            raise ProductionInstallError("kernel fd mount ID is missing or malformed")
+        mount_id = int(matches[0], 10)
+        if not (0 < mount_id < 2**63):
+            raise ProductionInstallError("kernel fd mount ID is invalid")
+        return mount_id
+    finally:
+        os.close(proc_fd)
+
+
 def _open_verified_efivarfs() -> int:
     """Anchor all UEFI-variable reads to the real kernel efivarfs superblock."""
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
@@ -1619,6 +1660,9 @@ def _open_verified_efivarfs() -> int:
             raise ProductionInstallError("physical EFI variables directory identity is unsafe")
         if _filesystem_magic(directory_fd) != EFIVARFS_SUPER_MAGIC:
             raise ProductionInstallError("physical EFI variables are not on efivarfs")
+        # Fail before opening any leaf if the kernel cannot identify the
+        # actual mounted instance, needed to exclude per-file bind mounts.
+        _kernel_fd_mount_id(directory_fd)
         return directory_fd
     except BaseException:
         os.close(directory_fd)
@@ -1641,9 +1685,16 @@ def _read_boot_trust_efivar(name: str) -> bytes:
             raise ProductionInstallError("physical Secure Boot variable is unavailable") from exc
         try:
             info = os.fstat(fd)
+            mounted_parent = os.fstat(directory_fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
                     or info.st_gid != 0 or info.st_nlink != 1):
                 raise ProductionInstallError("physical Secure Boot variable ownership is unsafe")
+            if (
+                info.st_dev != mounted_parent.st_dev
+                or _filesystem_magic(fd) != EFIVARFS_SUPER_MAGIC
+                or _kernel_fd_mount_id(fd) != _kernel_fd_mount_id(directory_fd)
+            ):
+                raise ProductionInstallError("physical EFI variable leaf is not on the verified efivarfs mount")
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 blob = stream.read(EFI_BOOT_TRUST_MAX_BYTES + 1)
             if not (5 <= len(blob) <= EFI_BOOT_TRUST_MAX_BYTES):

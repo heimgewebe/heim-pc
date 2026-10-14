@@ -7548,6 +7548,58 @@ def test_physical_secure_boot_jit_policy_drift_blocks_before_sgdisk(monkeypatch,
     assert compiled["commands"][0]["argv"] not in effects
 
 
+def test_physical_efi_leaf_bind_mount_is_rejected(monkeypatch, tmp_path):
+    # Simulate a file bind-mounted over an existing efivarfs variable name:
+    # O_NOFOLLOW sees a plain regular file; filesystem and parent ownership
+    # alone are not a complete same-mount proof.
+    leaf = tmp_path / f"SecureBoot-{prod.EFI_GLOBAL_GUID}"
+    leaf.write_bytes((6).to_bytes(4, "little") + bytes([1]))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    monkeypatch.setattr(prod, "_open_verified_efivarfs", lambda: os.open(tmp_path, flags))
+    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: prod.EFIVARFS_SUPER_MAGIC)
+    monkeypatch.setattr(
+        prod, "_kernel_fd_mount_id",
+        lambda fd: 11 if stat.S_ISDIR(os.fstat(fd).st_mode) else 12,
+    )
+    real_fstat = os.fstat
+
+    def pretend_root_owned(fd):
+        info = real_fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            fields[stat.ST_GID] = 0
+            return os.stat_result(fields)
+        return info
+
+    with monkeypatch.context() as local:
+        local.setattr(prod.os, "fstat", pretend_root_owned)
+        with pytest.raises(prod.ProductionInstallError, match="not on the verified efivarfs mount"):
+            prod._read_boot_trust_efivar("SecureBoot")
+
+
+def test_physical_kernel_fd_mount_id_actual_procfs_smoke():
+    # A real kernel fdinfo read on the test host, not just a mocked value.
+    fd = os.open("/proc/self/fdinfo", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        mount_id = prod._kernel_fd_mount_id(fd)
+        assert type(mount_id) is int and mount_id > 0
+        assert prod._kernel_fd_mount_id(fd) == mount_id
+    finally:
+        os.close(fd)
+
+
+def test_physical_efi_fdinfo_mount_id_parser_rejects_untrusted_procfs(monkeypatch, tmp_path):
+    monkeypatch.setattr(prod, "PROC_FDINFO_ROOT", tmp_path)
+    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(prod.ProductionInstallError, match="not on procfs"):
+            prod._kernel_fd_mount_id(fd)
+    finally:
+        os.close(fd)
+
+
 def test_physical_secure_boot_rejects_root_owned_ordinary_mount(monkeypatch, tmp_path):
     # A root-controlled bind mount or a synthetic regular tree is not firmware.
     fake = tmp_path / "efivars"
