@@ -17,6 +17,18 @@ Non-production prototype for the long-term Heim-PC operating-system architecture
 
 This directory is deliberately safe to evaluate/build in isolation. It must not be interpreted as permission to install NixOS, change partitions, replace the bootloader or switch the running Heim-PC.
 
+## Physical PCR7 security hold (#202, 14 October 2026)
+
+Physical TPM2 PCR7 auto-unlock remains blocked even when firmware Secure Boot
+reports enabled: the current systemd-boot profile has unsigned mutable loader
+entries, including private PARTUUID command-line arguments patched after
+installation. Its NixOS kernel, initrd, loader configuration and recovery
+chain have NOT been independently authenticated. Root-owned efivarfs reads
+verify SecureBoot, SetupMode and PK/KEK/db/dbx and bind them to a JIT
+pre-mutation comparison. This is a protective hold, not a signed boot
+implementation, and it does not authorize any Seagate, WD, EFI or TPM write.
+No-apply planning and independent Day-1 work remain available.
+
 ## Architecture thesis
 
 NixOS is being tested not merely as a desktop distribution, but as the declarative control substrate for an autonomous operator machine:
