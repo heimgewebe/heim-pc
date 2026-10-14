@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "4031005f80dc14c2498d6c88edc1146bc1d1af81e1ea809fe6bebb4d5cf24748"
+SOURCE_SNAPSHOT_SHA256 = "528834fbabfc0cc5d4540a484cd9f1c22b3edc8c96a4dc3c73c38cb24664c728"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -222,6 +222,16 @@ class T(unittest.TestCase):
 
     def test_root_lock_is_bound(self):
         self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
+
+    def test_limine_secure_boot_proof_is_options_only_and_not_activatable(self):
+        flake = (SOURCE / "flake.nix").read_text(encoding="utf-8")
+        self.assertIn("limine-secureboot-module-options-eval =", flake)
+        self.assertNotIn("limine-storage-target-proof =", flake)
+        self.assertIn("cfg.boot.initrd.luks.devices == {}", flake)
+        self.assertIn('nixpkgs.lib.hasPrefix "rd.luks." param', flake)
+        self.assertIn("boot.loader.systemd-boot.enable = lib.mkForce false", flake)
+        self.assertNotIn("nixosConfigurations.heim-pc-storage-limine-proof =", flake)
+        self.assertIn('pkgs.runCommand "heim-pc-limine-module-options-only"', flake)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()
