@@ -36,6 +36,21 @@ class T(unittest.TestCase):
         self.assertTrue(required, reason)
         self.assertTrue(nix_changed.path_requires_nix(probe))
 
+    def test_signature_probe_is_executed_inside_nix_job(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/heim-pc-nix.yml").read_text(encoding="utf-8")
+        detect_section, delimiter, nix_section = workflow.partition("\n  nix:\n")
+        self.assertTrue(delimiter, "heavy Nix job must exist")
+        invocation = (
+            "- name: Prove untrusted signatures are rejected by substitution\n"
+            "        run: bash scripts/ci/check_nix_cache_signature_rejection.sh"
+        )
+        self.assertEqual(nix_section.count(invocation), 1)
+        self.assertNotIn(invocation, detect_section)
+        self.assertTrue((root / "scripts/ci/check_nix_cache_signature_rejection.sh").is_file())
+
     def test_unrelated_paths_skip_heavy_nix_ci(self):
         for path in (
             "README.md",
