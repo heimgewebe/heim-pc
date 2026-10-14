@@ -7502,7 +7502,7 @@ def test_physical_uefi_root_owned_efivar_missing_or_symlink_denied(monkeypatch, 
         prod._read_boot_trust_efivar("SecureBoot")
     path = tmp_path / f"SecureBoot-{prod.EFI_GLOBAL_GUID}"
     destination = tmp_path / "spoofed-uefi-state"
-    destination.write_bytes((6).to_bytes(4, "little") + b"\\x01")
+    destination.write_bytes((6).to_bytes(4, "little") + bytes([1]))
     path.symlink_to(destination)
     with pytest.raises(prod.ProductionInstallError, match="unavailable"):
         prod._read_boot_trust_efivar("SecureBoot")
@@ -7578,14 +7578,13 @@ def test_physical_efi_leaf_bind_mount_is_rejected(monkeypatch, tmp_path):
             prod._read_boot_trust_efivar("SecureBoot")
 
 
-def test_physical_kernel_fd_mount_id_actual_statx_smoke(monkeypatch, tmp_path):
-    # A genuine statx(AT_EMPTY_PATH) read against this kernel, without /proc
-    # metadata. Even a spoofed /proc fdinfo path does not change the outcome.
+def test_physical_kernel_fd_mount_id_actual_statx_smoke(tmp_path):
+    # A genuine statx(AT_EMPTY_PATH) read against this kernel, independent
+    # of any separately bind-mountable /proc fdinfo path.
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         real_mount_id = prod._kernel_fd_mount_id(fd)
         assert type(real_mount_id) is int and real_mount_id > 0
-        monkeypatch.setattr(prod, "PROC_FDINFO_ROOT", tmp_path / "fake-fdinfo", raising=False)
         assert prod._kernel_fd_mount_id(fd) == real_mount_id
     finally:
         os.close(fd)
@@ -7623,6 +7622,8 @@ def test_physical_cli_apply_denied_before_any_persistent_reservation(
 ):
     # The --apply CLI itself must not create a receipt, lock, or other durable
     # file even when firmware reports enabled: this is only a denial PR.
+    # load_install_artifact is also forbidden so removing the early gate
+    # cannot falsely pass by failing on the synthetic nonexistent artifact.
     calls = []
     def unexpected(*_args, **_kwargs):
         calls.append("persistent-or-source-effect")
@@ -7637,6 +7638,7 @@ def test_physical_cli_apply_denied_before_any_persistent_reservation(
     for name in (
         "acquire_production_apply_lock", "reserve_private_receipt",
         "execute_plan", "verify_source", "prepare_recovery_key_destination",
+        "load_install_artifact",
     ):
         monkeypatch.setattr(prod, name, unexpected)
     result = prod.main([
