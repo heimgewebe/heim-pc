@@ -3,7 +3,8 @@
 
 In particular, an `sbverify --list` exit status of zero does NOT prove the
 presence of a signature table, much less Secure Boot trust. This deliberately
-limited parser never invokes sbverify, reads firmware, modifies EFI variables,
+limited parser consumes only caller-preopened stdin/fd. It never opens
+pathnames or devices, invokes sbverify, reads firmware, modifies EFI variables,
 enrolls TPM keys, writes an ESP, or authorizes a physical NixOS installation.
 
 Even a structurally present WIN_CERTIFICATE is UNAUTHENTICATED: it is not
@@ -17,7 +18,6 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import stat
 import struct
 import sys
@@ -26,11 +26,11 @@ from typing import Any
 MAX_IMAGE_BYTES = 256 * 1024 * 1024
 MAX_CERTIFICATE_TABLE_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_COUNT = 16
-MAX_INPUTS = 16
 READ_CHUNK_BYTES = 1024 * 1024
 
 _NON_CLAIMS = [
     "certificate_table_is_not_cryptographic_verification",
+    "preopened_fd_source_and_execution_authority_not_established",
     "firmware_pk_kek_db_dbx_policy_not_verified",
     "whole_loader_kernel_initrd_cmdline_not_authenticated",
     "unchanged_popos_fallback_bootability_not_proven",
@@ -93,6 +93,25 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     section_headers_end = optional_end + sections * 40
     if optional_end > len(data) or section_headers_end > len(data):
         raise PEFormatError("pe_header_truncated")
+
+    # PE/COFF section-table raw ranges are FILE OFFSETS. Security-directory
+    # certificate bytes must never be accepted as a section's own raw data,
+    # even when the certificate lies past every section HEADER.
+    section_raw_ranges: list[tuple[int, int]] = []
+    for index in range(sections):
+        section_header = optional_end + index * 40
+        raw_size = _u32(data, section_header + 16)
+        raw_offset = _u32(data, section_header + 20)
+        if raw_size == 0:
+            continue
+        if (
+            raw_offset < section_headers_end
+            or raw_offset > len(data)
+            or raw_size > len(data) - raw_offset
+        ):
+            raise PEFormatError("section_raw_range_invalid")
+        section_raw_ranges.append((raw_offset, raw_offset + raw_size))
+
     magic = _u16(data, optional)
     if magic == 0x20B:  # PE32+
         directory_count_offset, directory_start = 108, 112
@@ -126,6 +145,12 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         or certificate_bytes > len(data) - certificate_start
     ):
         raise PEFormatError("certificate_table_out_of_bounds")
+    certificate_end = certificate_start + certificate_bytes
+    if any(
+        raw_start < certificate_end and certificate_start < raw_end
+        for raw_start, raw_end in section_raw_ranges
+    ):
+        raise PEFormatError("certificate_overlaps_section_data")
 
     cursor = certificate_start
     end = certificate_start + certificate_bytes
@@ -156,22 +181,34 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     return _result(signature_table="structurally_present", certificate_count=count)
 
 
-def inspect_file(path: Path) -> dict[str, Any]:
-    """Bind a bounded historical image read to its bytes, not to path eternity."""
-    fd = -1
+
+def inspect_fd(fd: int) -> dict[str, Any]:
+    """Read only an EXISTING fd whose type is checked before any read.
+
+    Crucially this function never opens a pathname or device. The caller
+    owns the pre-opened descriptor; its provenance is NOT authenticated
+    here. A regular descriptor must be at offset zero and single-linked.
+    An already-open pipe may supply an ephemeral, untrusted byte snapshot.
+    """
+    if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0:
+        raise PEFormatError("unsafe_input")
     try:
-        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
-        if not hasattr(os, "O_NOFOLLOW"):
-            raise PEFormatError("unsafe_input")
-        fd = os.open(path, flags | os.O_NOFOLLOW)
         before = os.fstat(fd)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_size < 0x40
-            or before.st_size > MAX_IMAGE_BYTES
-        ):
+        regular = stat.S_ISREG(before.st_mode)
+        pipe = stat.S_ISFIFO(before.st_mode)
+        # Fail BEFORE any os.read if a caller supplied a device/TTY/socket,
+        # directory or other non-regular/non-pipe FD.
+        if not regular and not pipe:
             raise PEFormatError("unsafe_input")
+        if regular:
+            if (
+                before.st_nlink != 1
+                or before.st_size < 0x40
+                or before.st_size > MAX_IMAGE_BYTES
+            ):
+                raise PEFormatError("unsafe_input")
+            if os.lseek(fd, 0, os.SEEK_CUR) != 0:
+                raise PEFormatError("input_offset")
         chunks: list[bytes] = []
         total = 0
         while total <= MAX_IMAGE_BYTES:
@@ -181,10 +218,12 @@ def inspect_file(path: Path) -> dict[str, Any]:
             total += len(part)
             chunks.append(part)
         after = os.fstat(fd)
-        keys = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+        keys = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink")
+        if regular:
+            keys += ("st_mtime_ns", "st_ctime_ns")
         if (
             any(getattr(before, name) != getattr(after, name) for name in keys)
-            or total != before.st_size
+            or (regular and total != before.st_size)
             or total > MAX_IMAGE_BYTES
         ):
             raise PEFormatError("input_drift")
@@ -195,36 +234,27 @@ def inspect_file(path: Path) -> dict[str, Any]:
         return finding
     except OSError as exc:
         raise PEFormatError("unsafe_input") from exc
-    finally:
-        if fd >= 0:
-            os.close(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--pe-image", action="append", type=Path, required=True,
-        help="existing PE image to inspect (read-only; file names omitted from JSON)",
+        "--stdin", action="store_true", required=True,
+        help="inspect already-open standard input (regular file or pipe; NO path opening)",
     )
-    args = parser.parse_args(argv)
-    if not 1 <= len(args.pe_image) <= MAX_INPUTS:
-        parser.error("between 1 and 16 PE images required")
-    findings: list[dict[str, Any]] = []
-    for index, path in enumerate(args.pe_image):
-        try:
-            item = inspect_file(path)
-        except PEFormatError as exc:
-            item = {
-                **_result(signature_table="not_proven", certificate_count=0),
-                "status": "unavailable" if str(exc) == "unsafe_input" else "malformed",
-                "reason_code": str(exc),
-            }
-        findings.append({"input_index": index, **item})
-
+    parser.parse_args(argv)
+    try:
+        item = inspect_fd(0)
+    except PEFormatError as exc:
+        item = {
+            **_result(signature_table="not_proven", certificate_count=0),
+            "status": "unavailable" if str(exc) == "unsafe_input" else "malformed",
+            "reason_code": str(exc),
+        }
     report = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_pe_signature_table_diagnostic_report",
-        "findings": findings,
+        "findings": [{"input_index": 0, **item}],
         "cryptographic_signature_verified": False,
         "firmware_key_policy_verified": False,
         "full_bootchain_authenticated": False,
@@ -233,8 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     json.dump(report, sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
-    # Deliberately nonzero EVEN when some PE tables look structurally present.
-    # The caller may consume the JSON as a *diagnostic*, never as boot authority.
+    # Deliberately nonzero even when a WIN_CERTIFICATE table is present.
+    # This diagnostic must never become a successful Secure Boot admission.
     return 2
 
 
