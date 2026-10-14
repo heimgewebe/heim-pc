@@ -41,6 +41,43 @@
       hostModules = [ nixer.nixosModules.default ./modules/nixer.nix ./hosts/heim-pc ];
       physicalHostModules = hostModules ++ [ ./modules/storage-layout.nix ];
 
+      # Issue #202: evaluation-only signed-boot feasibility on the *real* storage
+      # target configuration, without altering the production installer profile.
+      # Kept private to let; not exposed as a selectable host configuration.
+      # NO signing-key creation/enrollment or EFI writes.
+      # A successful evaluation does not certify the signed physical boot chain.
+      limineStorageTargetProof = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcProfile = {
+            physical = true;
+            nvidia = true;
+            nvidiaOpen = false;
+            desktop = true;
+            physicalGates = false;
+          };
+        };
+        modules = physicalHostModules ++ [
+          ({ lib, ... }: {
+            boot.loader.systemd-boot.enable = lib.mkForce false;
+            boot.loader.limine = {
+              enable = true;
+              secureBoot.enable = true;
+              secureBoot.autoGenerateKeys = false;
+              secureBoot.autoEnrollKeys.enable = false;
+              enableEditor = false;
+              validateChecksums = true;
+              panicOnChecksumMismatch = true;
+              enrollConfig = true;
+              efiInstallAsRemovable = true;
+              biosSupport = false;
+            };
+            boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
+          })
+        ];
+      };
+
       proofConfig = self.nixosConfigurations.heim-pc-vm.config;
       proofVmConfig = proofConfig.virtualisation.vmVariant;
 
@@ -90,43 +127,6 @@
           };
         };
         modules = physicalHostModules;
-      };
-
-      # Issue #202: evaluation-only signed-boot feasibility on the *real* storage
-      # target configuration, without altering the production installer profile.
-      # This deliberately creates NO keys, enrolls NO firmware variables, and
-      # cannot be selected by the guarded production installer.
-      # A successful evaluation does not certify the signed physical boot chain.
-      nixosConfigurations.heim-pc-storage-limine-proof = nixpkgs.lib.nixosSystem {
-        inherit system;
-        specialArgs = {
-          inherit self;
-          heimPcProfile = {
-            physical = true;
-            nvidia = true;
-            nvidiaOpen = false;
-            desktop = true;
-            physicalGates = false;
-          };
-        };
-        modules = physicalHostModules ++ [
-          ({ lib, ... }: {
-            boot.loader.systemd-boot.enable = lib.mkForce false;
-            boot.loader.limine = {
-              enable = true;
-              secureBoot.enable = true;
-              secureBoot.autoGenerateKeys = false;
-              secureBoot.autoEnrollKeys.enable = false;
-              enableEditor = false;
-              validateChecksums = true;
-              panicOnChecksumMismatch = true;
-              enrollConfig = true;
-              efiInstallAsRemovable = true;
-              biosSupport = false;
-            };
-            boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
-          })
-        ];
       };
 
       # Build-only physical Gate-A/B/D variants of the same storage candidate.
@@ -319,6 +319,27 @@
       };
 
       checks.${system} = {
+        # Evaluate the real storage-backed Limine configuration without
+        # exposing an activatable NixOS system.
+        limine-storage-target-proof =
+          let cfg = limineStorageTargetProof.config;
+          in
+          assert !(builtins.hasAttr "heim-pc-storage-limine-proof" self.nixosConfigurations);
+          assert cfg.system.boot.loader.id == "limine";
+          assert !cfg.boot.loader.systemd-boot.enable;
+          assert cfg.boot.loader.limine.enable && cfg.boot.loader.limine.secureBoot.enable;
+          assert cfg.boot.loader.limine.validateChecksums;
+          assert cfg.boot.loader.limine.panicOnChecksumMismatch;
+          assert cfg.boot.loader.limine.enrollConfig;
+          assert !cfg.boot.loader.limine.enableEditor;
+          assert cfg.boot.loader.limine.efiInstallAsRemovable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !cfg.boot.loader.limine.secureBoot.autoGenerateKeys;
+          assert !cfg.boot.loader.limine.secureBoot.autoEnrollKeys.enable;
+          assert builtins.isString cfg.system.build.toplevel.drvPath;
+          pkgs.runCommand "heim-pc-limine-storage-evaluation-proof" { } ''
+            mkdir -p "$out"
+          '';
         # These assertions force real NixOS module evaluation, not text matching.
         profile-contract =
           let
