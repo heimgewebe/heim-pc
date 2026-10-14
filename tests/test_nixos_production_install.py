@@ -7422,7 +7422,15 @@ _REAL_SECURE_BOOT_FIRMWARE = prod.verify_secure_boot_firmware
 _REAL_TARGET_BOOTCHAIN_GATE = prod.reject_unattested_target_bootchain
 
 
-@pytest.mark.parametrize("value", [b"", b"\\x06\\x00\\x00\\x00", b"\\x06\\x00\\x00\\x00\\x02", b"\\x00\\x00\\x00\\x00\\x01", b"\\x06\\x00\\x00\\x00\\x01\\x00"])
+@pytest.mark.parametrize(
+    "value", [
+        b"",
+        bytes([6, 0, 0, 0]),
+        bytes([6, 0, 0, 0, 2]),
+        bytes([0, 0, 0, 0, 1]),
+        bytes([6, 0, 0, 0, 1, 0]),
+    ],
+)
 def test_physical_uefi_boolean_malformed_fails_closed(value):
     with pytest.raises(prod.ProductionInstallError):
         prod._parse_uefi_boolean(value, "SecureBoot")
