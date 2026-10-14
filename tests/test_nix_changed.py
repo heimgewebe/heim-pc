@@ -29,6 +29,13 @@ class T(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(nix_changed.path_requires_nix(path))
 
+    def test_signed_cache_probe_change_requires_heavy_nix_ci(self):
+        probe = "scripts/ci/check_nix_cache_signature_rejection.sh"
+        with mock.patch.object(nix_changed, "_changed_paths", return_value=[probe]):
+            required, reason = nix_changed.detect("pull_request", "a" * 40, "b" * 40)
+        self.assertTrue(required, reason)
+        self.assertTrue(nix_changed.path_requires_nix(probe))
+
     def test_unrelated_paths_skip_heavy_nix_ci(self):
         for path in (
             "README.md",
