@@ -41,6 +41,45 @@
       hostModules = [ nixer.nixosModules.default ./modules/nixer.nix ./hosts/heim-pc ];
       physicalHostModules = hostModules ++ [ ./modules/storage-layout.nix ];
 
+      # Issue #202: Limine module OPTION compatibility, evaluated over the
+      # existing storage topology. This is NOT a bootable signed NixOS target.
+      # The current systemd-boot-specific hook supplies private rd.luks
+      # arguments only after bootloader installation; disabling it
+      # drops them. Actual target boot-chain signing/injection remains
+      # unimplemented and cannot be inferred from this evaluation.
+      # Keep private to let: no selectable host/package, no key/EFI actions.
+      limineStorageTargetProof = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcProfile = {
+            physical = true;
+            nvidia = true;
+            nvidiaOpen = false;
+            desktop = true;
+            physicalGates = false;
+          };
+        };
+        modules = physicalHostModules ++ [
+          ({ lib, ... }: {
+            boot.loader.systemd-boot.enable = lib.mkForce false;
+            boot.loader.limine = {
+              enable = true;
+              secureBoot.enable = true;
+              secureBoot.autoGenerateKeys = false;
+              secureBoot.autoEnrollKeys.enable = false;
+              enableEditor = false;
+              validateChecksums = true;
+              panicOnChecksumMismatch = true;
+              enrollConfig = true;
+              efiInstallAsRemovable = true;
+              biosSupport = false;
+            };
+            boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
+          })
+        ];
+      };
+
       proofConfig = self.nixosConfigurations.heim-pc-vm.config;
       proofVmConfig = proofConfig.virtualisation.vmVariant;
 
@@ -282,6 +321,38 @@
       };
 
       checks.${system} = {
+        # Check *module option compatibility only*. This explicitly does not
+        # prove a bootable LUKS-root target: private rd.luks kernel parameters
+        # still rely on the separate systemd-boot post-install entry hook.
+        # The check is evaluation-only and never exposes an activatable host.
+        limine-secureboot-module-options-eval =
+          let
+            cfg = limineStorageTargetProof.config;
+            prod = self.nixosConfigurations.heim-pc-storage-target.config;
+          in
+          assert !(builtins.hasAttr "heim-pc-storage-limine-proof" self.nixosConfigurations);
+          assert cfg.system.boot.loader.id == "limine";
+          assert !cfg.boot.loader.systemd-boot.enable;
+          assert cfg.boot.loader.limine.enable && cfg.boot.loader.limine.secureBoot.enable;
+          assert cfg.boot.loader.limine.validateChecksums;
+          assert cfg.boot.loader.limine.panicOnChecksumMismatch;
+          assert cfg.boot.loader.limine.enrollConfig;
+          assert !cfg.boot.loader.limine.enableEditor;
+          assert cfg.boot.loader.limine.efiInstallAsRemovable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !cfg.boot.loader.limine.secureBoot.autoGenerateKeys;
+          assert !cfg.boot.loader.limine.secureBoot.autoEnrollKeys.enable;
+          assert cfg.boot.loader.limine.efiSupport;
+          # Explicit negative evidence for the unresolved physical LUKS boot
+          # chain. New private parameters need independently reviewed signing
+          # integration, not a silent upgrade of this option-only proof.
+          assert prod.boot.loader.systemd-boot.enable;
+          assert cfg.boot.initrd.luks.devices == {};
+          assert !(builtins.any (param: nixpkgs.lib.hasPrefix "rd.luks." param) cfg.boot.kernelParams);
+          assert builtins.isString cfg.system.build.toplevel.drvPath;
+          pkgs.runCommand "heim-pc-limine-module-options-only" { } ''
+            mkdir -p "$out"
+          '';
         # These assertions force real NixOS module evaluation, not text matching.
         profile-contract =
           let
