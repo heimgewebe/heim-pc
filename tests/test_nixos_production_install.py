@@ -7492,6 +7492,12 @@ def test_physical_secure_boot_denial_precedes_first_storage_effect(monkeypatch,t
 
 def test_physical_uefi_root_owned_efivar_missing_or_symlink_denied(monkeypatch, tmp_path):
     monkeypatch.setattr(prod, "EFI_VARIABLE_ROOT", tmp_path)
+    # Isolate leaf O_NOFOLLOW validation. The parent superblock is verified in
+    # separate tests; ordinary tmpfs should otherwise fail before reaching it.
+    monkeypatch.setattr(
+        prod, "_open_verified_efivarfs",
+        lambda: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC),
+    )
     with pytest.raises(prod.ProductionInstallError, match="unavailable"):
         prod._read_boot_trust_efivar("SecureBoot")
     path = tmp_path / f"SecureBoot-{prod.EFI_GLOBAL_GUID}"
@@ -7540,3 +7546,82 @@ def test_physical_secure_boot_jit_policy_drift_blocks_before_sgdisk(monkeypatch,
     assert len(firmware_reads) == 2
     assert "efi-freeze" in events and "efi-thaw" in events
     assert compiled["commands"][0]["argv"] not in effects
+
+
+def test_physical_secure_boot_rejects_root_owned_ordinary_mount(monkeypatch, tmp_path):
+    # A root-controlled bind mount or a synthetic regular tree is not firmware.
+    fake = tmp_path / "efivars"
+    fake.mkdir()
+    (fake / f"SecureBoot-{prod.EFI_GLOBAL_GUID}").write_bytes(
+        (6).to_bytes(4, "little") + bytes([1])
+    )
+    monkeypatch.setattr(prod, "EFI_VARIABLE_ROOT", fake)
+    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+    with pytest.raises(prod.ProductionInstallError, match="not on efivarfs|identity is unsafe"):
+        prod._read_boot_trust_efivar("SecureBoot")
+
+
+@pytest.mark.parametrize("state", ["disabled", "enabled-but-unproven"])
+def test_physical_cli_apply_denied_before_any_persistent_reservation(
+    monkeypatch, tmp_path, state,
+):
+    # The --apply CLI itself must not create a receipt, lock, or other durable
+    # file even when firmware reports enabled: this is only a denial PR.
+    calls = []
+    def unexpected(*_args, **_kwargs):
+        calls.append("persistent-or-source-effect")
+        raise AssertionError("storage or private-state effect reached")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", _REAL_TARGET_BOOTCHAIN_GATE)
+    if state == "disabled":
+        def firmware():
+            raise prod.ProductionInstallError("physical Secure Boot is disabled")
+        monkeypatch.setattr(prod, "verify_secure_boot_firmware", firmware)
+    else:
+        monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "enabled-policy")
+    for name in (
+        "acquire_production_apply_lock", "reserve_private_receipt",
+        "execute_plan", "verify_source", "prepare_recovery_key_destination",
+    ):
+        monkeypatch.setattr(prod, name, unexpected)
+    result = prod.main([
+        "--apply",
+        "--install-artifact", str(tmp_path / "does-not-exist.json"),
+        "--identity-contract", str(tmp_path / "no-identity.json"),
+        "--write-receipt", str(tmp_path / "forbidden-receipt.json"),
+        "--credential-hash-file", str(tmp_path / "no-credentials"),
+    ])
+    assert result == 2
+    assert calls == []
+    assert not (tmp_path / "forbidden-receipt.json").exists()
+    assert not (tmp_path / "production-apply-locks").exists()
+
+
+def test_physical_efi_superblock_magic_is_enforced_before_leaf_reads(monkeypatch, tmp_path):
+    path = tmp_path / "root-owned-simulation"
+    path.mkdir()
+    original_stat = os.stat
+    original_fstat = os.fstat
+
+    def simulated_root_owned(info):
+        # Preserve actual inode/device/mode while simulating the most
+        # favorable owner identity an attacker could arrange as host root.
+        fields = list(info)
+        fields[stat.ST_UID] = 0
+        fields[stat.ST_GID] = 0
+        return os.stat_result(fields)
+
+    def stat_as_root(location, *args, **kwargs):
+        info = original_stat(location, *args, **kwargs)
+        return simulated_root_owned(info) if str(location) == str(path) else info
+
+    def fstat_as_root(fd):
+        info = original_fstat(fd)
+        return simulated_root_owned(info) if stat.S_ISDIR(info.st_mode) else info
+
+    with monkeypatch.context() as local:
+        local.setattr(prod, "EFI_VARIABLE_ROOT", path)
+        local.setattr(prod.os, "stat", stat_as_root)
+        local.setattr(prod.os, "fstat", fstat_as_root)
+        local.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+        with pytest.raises(prod.ProductionInstallError, match="not on efivarfs"):
+            prod._open_verified_efivarfs()

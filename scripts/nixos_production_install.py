@@ -9,6 +9,7 @@ target by-id plus target-derived stable by-id partition paths.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -128,6 +129,9 @@ EFI_BOOT_TRUST_VARIABLES = {
     "db": EFI_IMAGE_SECURITY_GUID, "dbx": EFI_IMAGE_SECURITY_GUID,
 }
 EFI_BOOT_TRUST_MAX_BYTES = 4 * 1024 * 1024
+# Linux include/uapi/linux/magic.h: only efivarfs, not a root-owned fake tree,
+# may supply UEFI variable bytes to physical TPM2 PCR7 admission.
+EFIVARFS_SUPER_MAGIC = 0xDE5E81E4
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
@@ -1574,34 +1578,85 @@ def _command_bootstrap_argv(
     return list(argv), ()
 
 
+def _filesystem_magic(fd: int) -> int:
+    """Kernel fstatfs(2) on an already opened descriptor, not a parsed mount label."""
+    # The production installer targets Linux x86_64. The first field of the
+    # kernel struct statfs is the native-long filesystem magic number.
+    buffer = ctypes.create_string_buffer(256)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.fstatfs
+        call.argtypes = (ctypes.c_int, ctypes.c_void_p)
+        call.restype = ctypes.c_int
+        if call(fd, ctypes.byref(buffer)) != 0:
+            raise ProductionInstallError("physical EFI variables filesystem is unreadable")
+        return int(ctypes.c_long.from_buffer_copy(buffer).value)
+    except (AttributeError, OSError) as exc:
+        raise ProductionInstallError("physical EFI variables filesystem cannot be identified") from exc
+
+
+def _open_verified_efivarfs() -> int:
+    """Anchor all UEFI-variable reads to the real kernel efivarfs superblock."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(EFI_VARIABLE_ROOT, flags)
+    except OSError as exc:
+        raise ProductionInstallError("physical EFI variables directory is unavailable") from exc
+    try:
+        opened = os.fstat(directory_fd)
+        current = os.stat(EFI_VARIABLE_ROOT, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or opened.st_uid != 0
+            or opened.st_gid != 0
+            or current.st_uid != 0
+            or current.st_gid != 0
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ProductionInstallError("physical EFI variables directory identity is unsafe")
+        if _filesystem_magic(directory_fd) != EFIVARFS_SUPER_MAGIC:
+            raise ProductionInstallError("physical EFI variables are not on efivarfs")
+        return directory_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
 def _read_boot_trust_efivar(name: str) -> bytes:
-    """Bounded, no-symlink read of root-owned efivarfs; never print certificate bytes."""
+    """Read bounded root-owned firmware data under an open, kernel-verified efivarfs."""
     guid = EFI_BOOT_TRUST_VARIABLES.get(name)
     if guid is None:
         raise ProductionInstallError("unrecognized physical Secure Boot variable")
+    directory_fd = _open_verified_efivarfs()
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(EFI_VARIABLE_ROOT / f"{name}-{guid}", flags)
-    except OSError as exc:
-        raise ProductionInstallError("physical Secure Boot variable is unavailable") from exc
-    try:
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-                or info.st_gid != 0 or info.st_nlink != 1):
-            raise ProductionInstallError("physical Secure Boot variable ownership is unsafe")
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            blob = stream.read(EFI_BOOT_TRUST_MAX_BYTES + 1)
-        if not (5 <= len(blob) <= EFI_BOOT_TRUST_MAX_BYTES):
-            raise ProductionInstallError("physical Secure Boot variable length is invalid")
-        if (int.from_bytes(blob[:4], "little") & 0x6) != 0x6:
-            raise ProductionInstallError("physical Secure Boot variable attributes are invalid")
-        return blob
-    except OSError as exc:
-        raise ProductionInstallError("physical Secure Boot variable cannot be read") from exc
+        try:
+            fd = os.open(f"{name}-{guid}", flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise ProductionInstallError("physical Secure Boot variable is unavailable") from exc
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or info.st_gid != 0 or info.st_nlink != 1):
+                raise ProductionInstallError("physical Secure Boot variable ownership is unsafe")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                blob = stream.read(EFI_BOOT_TRUST_MAX_BYTES + 1)
+            if not (5 <= len(blob) <= EFI_BOOT_TRUST_MAX_BYTES):
+                raise ProductionInstallError("physical Secure Boot variable length is invalid")
+            if (int.from_bytes(blob[:4], "little") & 0x6) != 0x6:
+                raise ProductionInstallError("physical Secure Boot variable attributes are invalid")
+            return blob
+        except OSError as exc:
+            raise ProductionInstallError("physical Secure Boot variable cannot be read") from exc
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(directory_fd)
 
 
 def _parse_uefi_boolean(blob: bytes, name: str) -> int:
@@ -6674,6 +6729,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.apply:
+            # #202: physical apply is an explicit closed gate, not just an
+            # execute_plan check.  Deny before receipt/lock reservations and
+            # even before managed-artifact or source verification can write
+            # ancillary disk state. The no-apply planner remains unchanged.
+            verify_secure_boot_firmware()
+            try:
+                public_boot_policy = json.loads(
+                    CONTRACT_PATH.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ProductionInstallError(
+                    "physical signed boot-chain policy cannot be read"
+                ) from exc
+            reject_unattested_target_bootchain(public_boot_policy)
         artifact_path = args.install_artifact.resolve()
         artifact = load_install_artifact(artifact_path)
         verify_source(args.flake_source, artifact["source_revision"])
