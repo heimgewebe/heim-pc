@@ -1,0 +1,282 @@
+"""Negative controls for the diagnostic-only PE/COFF certificate-table reader.
+
+A PE certificate table (even if syntactically present) never authenticates
+the kernel, initrd, command line, firmware db/dbx, or Pop!_OS fallback.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+
+import pytest
+
+from scripts import nixos_pe_signature_diagnostic as pe
+
+
+def fixture_pe(*, present: bool = False, pe32: bool = False) -> bytes:
+    """Build small synthetic PE headers; no real signing keys or authentic PE."""
+    image = bytearray(0x200 + (0x10 if present else 0))
+    image[:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, 0x80)
+    image[0x80:0x84] = b"PE\0\0"
+    coff = 0x84
+    struct.pack_into("<H", image, coff, 0x014C if pe32 else 0x8664)
+    struct.pack_into("<H", image, coff + 2, 0)  # zero sections
+    optional = coff + 20
+    struct.pack_into("<H", image, coff + 16, 0xE0 if pe32 else 0xF0)
+    struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
+    struct.pack_into("<I", image, optional + (92 if pe32 else 108), 16)
+    directory = optional + (96 if pe32 else 112) + 4 * 8
+    if present:
+        struct.pack_into("<II", image, directory, 0x200, 0x10)
+        struct.pack_into("<IHH", image, 0x200, 0x10, 0x200, 0x0002)
+        image[0x208:0x210] = b"NOTPKCS7"
+    return bytes(image)
+
+
+@pytest.mark.parametrize("pe32", [True, False])
+def test_unsigned_image_detected_even_when_pe_headers_are_valid(pe32):
+    finding = pe.inspect_bytes(fixture_pe(pe32=pe32))
+    assert finding["signature_table"] == "absent"
+    assert finding["status"] == "unsigned"
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["full_bootchain_authenticated"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [True, False])
+def test_structurally_present_table_is_never_cryptographic_or_boot_trust(pe32):
+    finding = pe.inspect_bytes(fixture_pe(present=True, pe32=pe32))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["certificate_count"] == 1
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["firmware_key_policy_verified"] is False
+    assert finding["full_bootchain_authenticated"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+def test_synthetic_certificate_payload_is_not_mislabelled_as_signed_bootchain():
+    finding = pe.inspect_bytes(fixture_pe(present=True))
+    # The fabricated payload is explicitly NOT DER/PKCS#7; this function
+    # diagnoses only table framing, never Authenticode verification.
+    assert finding["signature_table"] == "structurally_present"
+    assert "certificate_table_is_not_cryptographic_verification" in finding["does_not_establish"]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda b: b.__setitem__(slice(0, 2), b"NO"),
+        lambda b: b.__setitem__(slice(0x80, 0x84), b"JUNK"),
+        lambda b: struct.pack_into("<I", b, 0x3C, len(b) + 200),
+        lambda b: struct.pack_into("<I", b, 0x98 + 144, 0x1FF),  # misaligned certificate
+        lambda b: struct.pack_into("<I", b, 0x98 + 148, 0x4000),  # outside input
+        lambda b: struct.pack_into("<I", b, 0x200, 0),  # zero-length WIN_CERTIFICATE
+        lambda b: struct.pack_into("<H", b, 0x206, 1),  # unknown certificate type
+        lambda b: struct.pack_into("<H", b, 0x204, 1),  # unsupported WIN_CERT revision
+        lambda b: struct.pack_into("<H", b, 0x84 + 16, 30),  # truncated optional header
+    ],
+)
+def test_malformed_headers_never_become_positive_signature_evidence(edit):
+    data = bytearray(fixture_pe(present=True))
+    edit(data)
+    with pytest.raises(pe.PEFormatError):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_truncated_certificate_directory_is_not_unsigned_success():
+    data = bytearray(fixture_pe(present=True))
+    struct.pack_into("<I", data, 0x98 + 148, 0)
+    with pytest.raises(pe.PEFormatError, match="certificate_table_inconsistent"):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_certificate_padding_cannot_hide_payload_bytes():
+    data = bytearray(fixture_pe(present=True))
+    struct.pack_into("<I", data, 0x200, 10)  # 8-byte header + 2 data bytes
+    with pytest.raises(pe.PEFormatError, match="certificate_padding_invalid"):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_certificate_table_must_not_overlap_pe_headers():
+    data = bytearray(fixture_pe(present=True))
+    struct.pack_into("<I", data, 0x98 + 144, 0x100)
+    with pytest.raises(pe.PEFormatError, match="certificate_table_out_of_bounds"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [True, False])
+def test_certificate_table_overlaps_raw_section_rejected(pe32):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    # The raw section occupies file bytes [0x1c0, 0x210), while the fake
+    # WIN_CERTIFICATE occupies [0x200, 0x210). A parser checking ONLY the
+    # end of section headers would erroneously admit this certificate.
+    struct.pack_into("<H", data, 0x84 + 2, 1)  # NumberOfSections
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", data, section + 16, 0x50, 0x1C0)
+    with pytest.raises(pe.PEFormatError, match="certificate_overlaps_section_data"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [True, False])
+def test_certificate_table_after_section_raw_data_remains_diagnostic_only(pe32):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", data, 0x84 + 2, 1)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", data, section + 16, 0x30, 0x1C0)
+    finding = pe.inspect_bytes(bytes(data))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["full_bootchain_authenticated"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [True, False])
+def test_invalid_raw_section_extent_is_never_accepted(pe32):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", data, 0x84 + 2, 1)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", data, section + 16, 0x50, 0x200)
+    with pytest.raises(pe.PEFormatError, match="section_raw_range_invalid"):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_certificate_directory_count_less_than_five_means_unsigned():
+    data = bytearray(fixture_pe(present=True))
+    struct.pack_into("<I", data, 0x98 + 108, 4)
+    report = pe.inspect_bytes(bytes(data))
+    assert report["status"] == "unsigned"
+    assert report["physical_install_authorized"] is False
+
+
+def test_multiple_hardlinked_names_fail_closed(tmp_path):
+    image = tmp_path / "loader.efi"
+    alias = tmp_path / "alias.efi"
+    image.write_bytes(fixture_pe(present=True))
+    os.link(image, alias)
+    # The diagnostic NEVER opens the path; the test harness supplies an fd.
+    with image.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+            pe.inspect_fd(opened.fileno())
+
+
+def test_preopened_regular_fd_binds_exact_byte_digest(tmp_path):
+    image = tmp_path / "image.efi"
+    content = fixture_pe()
+    image.write_bytes(content)
+    with image.open("rb") as opened:
+        finding = pe.inspect_fd(opened.fileno())
+    assert finding["status"] == "unsigned"
+    assert finding["input_sha256"] == pe.hashlib.sha256(content).hexdigest()
+    assert finding["input_size"] == len(content)
+    assert finding["physical_install_authorized"] is False
+
+
+def test_preopened_regular_file_must_start_at_zero(tmp_path):
+    image = tmp_path / "offset.efi"
+    image.write_bytes(fixture_pe())
+    with image.open("rb") as opened:
+        opened.read(2)
+        with pytest.raises(pe.PEFormatError, match="input_offset"):
+            pe.inspect_fd(opened.fileno())
+
+
+def test_preopened_directory_fd_rejected_before_any_data_read(tmp_path, monkeypatch):
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
+                AssertionError("never read a non-regular fd")
+            ))
+            with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+                pe.inspect_fd(fd)
+    finally:
+        os.close(fd)
+
+
+def test_preopened_character_device_fd_cannot_be_read(monkeypatch):
+    # /dev/null is harmless to open in this TEST; the diagnostic itself
+    # must only inspect the passed descriptor and never read/open devices.
+    fd = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
+                AssertionError("device read would be unsafe")
+            ))
+            scoped.setattr(pe.os, "open", lambda *_: (_ for _ in ()).throw(
+                AssertionError("diagnostic must never open paths")
+            ))
+            with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+                pe.inspect_fd(fd)
+    finally:
+        os.close(fd)
+
+
+def test_preopened_pipe_contains_only_untrusted_bytes(monkeypatch):
+    payload = fixture_pe(present=True)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, payload)
+        os.close(write_fd)
+        write_fd = -1
+        with monkeypatch.context() as scoped:
+            scoped.setattr(pe.os, "open", lambda *_: (_ for _ in ()).throw(
+                AssertionError("diagnostic must never open paths")
+            ))
+            finding = pe.inspect_fd(read_fd)
+        assert finding["signature_table"] == "structurally_present"
+        assert finding["physical_install_authorized"] is False
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_cli_stdin_never_returns_success_as_uefi_or_disk_authority(present):
+    command = [
+        sys.executable, "-B", "-m", "scripts.nixos_pe_signature_diagnostic",
+        "--stdin",
+    ]
+    done = subprocess.run(
+        command, input=fixture_pe(present=present), check=False,
+        capture_output=True, timeout=15,
+    )
+    assert done.returncode == 2, done.stderr
+    result = json.loads(done.stdout)
+    assert result["schema_version"] == 1
+    assert result["physical_install_authorized"] is False
+    assert result["full_bootchain_authenticated"] is False
+    assert result["findings"][0]["signature_table"] == (
+        "structurally_present" if present else "absent"
+    )
+    assert b"/dev/" not in done.stdout
+
+
+def test_cli_refuses_path_arguments_before_opening_anything(tmp_path):
+    image = tmp_path / "image.efi"
+    image.write_bytes(fixture_pe(present=True))
+    done = subprocess.run(
+        [
+            sys.executable, "-B", "-m", "scripts.nixos_pe_signature_diagnostic",
+            "--pe-image", str(image),
+        ],
+        check=False, capture_output=True, timeout=15,
+    )
+    assert done.returncode == 2
+    assert done.stdout == b""
+
+
+def test_cli_empty_stdin_fails_closed_without_path_reads():
+    done = subprocess.run(
+        [sys.executable, "-B", "-m", "scripts.nixos_pe_signature_diagnostic", "--stdin"],
+        input=b"", check=False, capture_output=True, timeout=15,
+    )
+    assert done.returncode == 2
+    report = json.loads(done.stdout)
+    assert report["findings"][0]["status"] == "unavailable"
+    assert report["physical_install_authorized"] is False
