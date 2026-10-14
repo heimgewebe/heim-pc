@@ -7578,24 +7578,28 @@ def test_physical_efi_leaf_bind_mount_is_rejected(monkeypatch, tmp_path):
             prod._read_boot_trust_efivar("SecureBoot")
 
 
-def test_physical_kernel_fd_mount_id_actual_procfs_smoke():
-    # A real kernel fdinfo read on the test host, not just a mocked value.
-    fd = os.open("/proc/self/fdinfo", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+def test_physical_kernel_fd_mount_id_actual_statx_smoke(monkeypatch, tmp_path):
+    # A genuine statx(AT_EMPTY_PATH) read against this kernel, without /proc
+    # metadata. Even a spoofed /proc fdinfo path does not change the outcome.
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        mount_id = prod._kernel_fd_mount_id(fd)
-        assert type(mount_id) is int and mount_id > 0
-        assert prod._kernel_fd_mount_id(fd) == mount_id
+        real_mount_id = prod._kernel_fd_mount_id(fd)
+        assert type(real_mount_id) is int and real_mount_id > 0
+        monkeypatch.setattr(prod, "PROC_FDINFO_ROOT", tmp_path / "fake-fdinfo", raising=False)
+        assert prod._kernel_fd_mount_id(fd) == real_mount_id
     finally:
         os.close(fd)
 
 
-def test_physical_efi_fdinfo_mount_id_parser_rejects_untrusted_procfs(monkeypatch, tmp_path):
-    monkeypatch.setattr(prod, "PROC_FDINFO_ROOT", tmp_path)
-    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+def test_physical_kernel_statx_missing_api_fails_closed(monkeypatch, tmp_path):
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with pytest.raises(prod.ProductionInstallError, match="not on procfs"):
-            prod._kernel_fd_mount_id(fd)
+        class NoStatx:
+            pass
+        with monkeypatch.context() as local:
+            local.setattr(prod.ctypes, "CDLL", lambda *_args, **_kwargs: NoStatx())
+            with pytest.raises(prod.ProductionInstallError, match="unavailable"):
+                prod._kernel_fd_mount_id(fd)
     finally:
         os.close(fd)
 

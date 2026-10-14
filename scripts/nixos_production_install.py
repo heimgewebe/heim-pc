@@ -132,9 +132,13 @@ EFI_BOOT_TRUST_MAX_BYTES = 4 * 1024 * 1024
 # Linux include/uapi/linux/magic.h: only efivarfs, not a root-owned fake tree,
 # may supply UEFI variable bytes to physical TPM2 PCR7 admission.
 EFIVARFS_SUPER_MAGIC = 0xDE5E81E4
-# Linux procfs reports the immutable kernel mount ID for each open fd.
-PROC_SUPER_MAGIC = 0x9FA0
-PROC_FDINFO_ROOT = Path("/proc/self/fdinfo")
+# Linux 6.18 UAPI include/uapi/linux/stat.h and fcntl.h:
+# statx() returns mount ID at byte 0x90 in the 0x100-byte struct.
+# AT_EMPTY_PATH lets the kernel query an already-open file descriptor.
+STATX_MNT_ID = 0x00001000
+STATX_AT_EMPTY_PATH = 0x00001000
+STATX_STRUCT_BYTES = 0x100
+STATX_MNT_ID_OFFSET = 0x90
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
@@ -1599,41 +1603,36 @@ def _filesystem_magic(fd: int) -> int:
 
 
 def _kernel_fd_mount_id(fd: int) -> int:
-    """Require an exact kernel procfs mount identity, not path/mountinfo text."""
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    """Query mount identity directly from the open fd using kernel statx(2).
+
+    Never trust /proc/self/fdinfo or another pathname, which can themselves
+    be bind-mounted in a privileged mount namespace to provide substituted
+    metadata about different descriptors.
+    """
+    buffer = ctypes.create_string_buffer(STATX_STRUCT_BYTES)
     try:
-        proc_fd = os.open(PROC_FDINFO_ROOT, flags)
-    except OSError as exc:
-        raise ProductionInstallError("kernel fd mount identity is unavailable") from exc
-    try:
-        if _filesystem_magic(proc_fd) != PROC_SUPER_MAGIC:
-            raise ProductionInstallError("kernel fd mount identity is not on procfs")
-        try:
-            fdinfo = os.open(str(fd), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=proc_fd)
-        except OSError as exc:
-            raise ProductionInstallError("kernel fd mount identity cannot be opened") from exc
-        try:
-            with os.fdopen(fdinfo, "rb", closefd=False) as stream:
-                blob = stream.read(4097)
-        finally:
-            os.close(fdinfo)
-        if not blob or len(blob) > 4096:
-            raise ProductionInstallError("kernel fd mount identity is invalid")
-        try:
-            lines = blob.decode("ascii", "strict").splitlines()
-        except UnicodeDecodeError as exc:
-            raise ProductionInstallError("kernel fd mount identity cannot be parsed") from exc
-        matches = [line[7:].strip() for line in lines if line.startswith("mnt_id:")]
-        if len(matches) != 1 or not matches[0].isdigit():
-            raise ProductionInstallError("kernel fd mount ID is missing or malformed")
-        mount_id = int(matches[0], 10)
-        if not (0 < mount_id < 2**63):
-            raise ProductionInstallError("kernel fd mount ID is invalid")
-        return mount_id
-    finally:
-        os.close(proc_fd)
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.statx
+        call.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+            ctypes.c_uint, ctypes.c_void_p,
+        )
+        call.restype = ctypes.c_int
+        rc = call(fd, b"", STATX_AT_EMPTY_PATH, STATX_MNT_ID, ctypes.byref(buffer))
+    except (AttributeError, OSError) as exc:
+        raise ProductionInstallError("kernel statx mount identity is unavailable") from exc
+    if rc != 0:
+        raise ProductionInstallError("kernel statx mount identity query failed")
+    data = buffer.raw
+    result_mask = int.from_bytes(data[:4], sys.byteorder)
+    if (result_mask & STATX_MNT_ID) != STATX_MNT_ID:
+        raise ProductionInstallError("kernel statx mount identity is unsupported")
+    mount_id = int.from_bytes(
+        data[STATX_MNT_ID_OFFSET:STATX_MNT_ID_OFFSET + 8], sys.byteorder,
+    )
+    if not (0 < mount_id < 2**63):
+        raise ProductionInstallError("kernel statx mount ID is invalid")
+    return mount_id
 
 
 def _open_verified_efivarfs() -> int:
