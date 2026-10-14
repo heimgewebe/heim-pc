@@ -92,6 +92,43 @@
         modules = physicalHostModules;
       };
 
+      # Issue #202: evaluation-only signed-boot feasibility on the *real* storage
+      # target configuration, without altering the production installer profile.
+      # This deliberately creates NO keys, enrolls NO firmware variables, and
+      # cannot be selected by the guarded production installer.
+      # A successful evaluation does not certify the signed physical boot chain.
+      nixosConfigurations.heim-pc-storage-limine-proof = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcProfile = {
+            physical = true;
+            nvidia = true;
+            nvidiaOpen = false;
+            desktop = true;
+            physicalGates = false;
+          };
+        };
+        modules = physicalHostModules ++ [
+          ({ lib, ... }: {
+            boot.loader.systemd-boot.enable = lib.mkForce false;
+            boot.loader.limine = {
+              enable = true;
+              secureBoot.enable = true;
+              secureBoot.autoGenerateKeys = false;
+              secureBoot.autoEnrollKeys.enable = false;
+              enableEditor = false;
+              validateChecksums = true;
+              panicOnChecksumMismatch = true;
+              enrollConfig = true;
+              efiInstallAsRemovable = true;
+              biosSupport = false;
+            };
+            boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
+          })
+        ];
+      };
+
       # Build-only physical Gate-A/B/D variants of the same storage candidate.
       # Gates add proof tooling; the paired variants differ only in the NVIDIA
       # kernel-module choice. Neither authorizes physical installation or boot.
