@@ -236,6 +236,46 @@ def test_preopened_pipe_contains_only_untrusted_bytes(monkeypatch):
             os.close(write_fd)
 
 
+@pytest.mark.parametrize(
+    "help_args",
+    [
+        ["-h"],
+        ["--help"],
+        ["--stdin", "-h"],
+        ["--stdin", "--help"],
+    ],
+)
+def test_cli_help_never_exits_successfully(help_args):
+    # A health/admission wrapper treating exit 0 as authorization must NEVER
+    # succeed when argparse handles -h before running the diagnostic.
+    done = subprocess.run(
+        [sys.executable, "-B", "-m", "scripts.nixos_pe_signature_diagnostic", *help_args],
+        capture_output=True, timeout=15, check=False,
+    )
+    assert done.returncode == 2, done.stdout.decode(errors="replace")
+    assert b"physical_install_authorized" not in done.stdout
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_unclosed_pipe_writer_times_out_without_success(monkeypatch, partial):
+    # Keep a writer open throughout. A bounded byte count alone would hang
+    # forever; the pipe should abort on an independent monotonic deadline.
+    import time
+
+    fd, writer = os.pipe()
+    try:
+        if partial:
+            os.write(writer, fixture_pe(present=True))
+        monkeypatch.setattr(pe, "PIPE_READ_TIMEOUT_SECONDS", 0.08)
+        started = time.monotonic()
+        with pytest.raises(pe.PEFormatError, match="input_timeout"):
+            pe.inspect_fd(fd)
+        assert time.monotonic() - started < 2.0
+    finally:
+        os.close(fd)
+        os.close(writer)
+
+
 @pytest.mark.parametrize("present", [False, True])
 def test_cli_stdin_never_returns_success_as_uefi_or_disk_authority(present):
     command = [

@@ -18,7 +18,9 @@ import argparse
 import hashlib
 import json
 import os
+import select
 import stat
+import time
 import struct
 import sys
 from typing import Any
@@ -27,6 +29,7 @@ MAX_IMAGE_BYTES = 256 * 1024 * 1024
 MAX_CERTIFICATE_TABLE_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_COUNT = 16
 READ_CHUNK_BYTES = 1024 * 1024
+PIPE_READ_TIMEOUT_SECONDS = 10.0
 
 _NON_CLAIMS = [
     "certificate_table_is_not_cryptographic_verification",
@@ -211,7 +214,24 @@ def inspect_fd(fd: int) -> dict[str, Any]:
                 raise PEFormatError("input_offset")
         chunks: list[bytes] = []
         total = 0
+        # A pipe with a live writer can remain readable once and then never
+        # reach EOF. Never turn a bounded *byte* budget into an unbounded
+        # temporal gate; do not mutate the caller-owned fd's O_NONBLOCK flag.
+        poller = select.poll() if pipe else None
+        deadline = time.monotonic() + PIPE_READ_TIMEOUT_SECONDS if pipe else None
+        if poller is not None:
+            poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL)
         while total <= MAX_IMAGE_BYTES:
+            if poller is not None:
+                assert deadline is not None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PEFormatError("input_timeout")
+                events = poller.poll(max(1, min(1000, int(remaining * 1000))))
+                if not events:
+                    continue
+                if events[0][1] & (select.POLLERR | select.POLLNVAL):
+                    raise PEFormatError("unsafe_input")
             part = os.read(fd, min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
             if not part:
                 break
@@ -237,7 +257,9 @@ def inspect_fd(fd: int) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # argparse's default --help exits 0 BEFORE main() can return 2, which
+    # could be mistaken for admission by wrappers that check only exit status.
+    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument(
         "--stdin", action="store_true", required=True,
         help="inspect already-open standard input (regular file or pipe; NO path opening)",
