@@ -82,6 +82,10 @@ def _isolated_production_apply_lock(monkeypatch, tmp_path):
         requirements, max_age, skew, _policy = original_policy(contract)
         return requirements, max_age, skew, dict(TEST_ATTESTATION_POLICY)
 
+    # Unrelated installer tests use synthetic boot evidence; dedicated #202
+    # regressions below exercise the real validators without these stubs.
+    monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "synthetic-efi-policy")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", lambda _c: None)
     monkeypatch.setattr(prod.pre_cutover_readiness, "_recovery_policy", test_policy)
     monkeypatch.setattr(
         prod.pre_cutover_readiness,
@@ -7411,3 +7415,271 @@ def test_guard_failure_before_first_effect_is_not_a_post_mutation_alarm(monkeypa
     assert not isinstance(exc.value, prod.PostMutationInstallError)
     assert "blocked before mutation" in str(exc.value)
     assert compiled["commands"][0]["argv"] not in effects
+
+
+# Issue #202 root-trust firmware and signed NixOS target gate regressions.
+_REAL_SECURE_BOOT_FIRMWARE = prod.verify_secure_boot_firmware
+_REAL_TARGET_BOOTCHAIN_GATE = prod.reject_unattested_target_bootchain
+
+
+@pytest.mark.parametrize(
+    "value", [
+        b"",
+        bytes([6, 0, 0, 0]),
+        bytes([6, 0, 0, 0, 2]),
+        bytes([0, 0, 0, 0, 1]),
+        bytes([6, 0, 0, 0, 1, 0]),
+    ],
+)
+def test_physical_uefi_boolean_malformed_fails_closed(value):
+    with pytest.raises(prod.ProductionInstallError):
+        prod._parse_uefi_boolean(value, "SecureBoot")
+
+
+@pytest.mark.parametrize("enabled,setup", [(0,0),(1,1),(0,1)])
+def test_physical_secure_boot_disabled_or_setup_denied(monkeypatch, enabled, setup):
+    vals = {
+        "SecureBoot": (6).to_bytes(4, "little") + bytes([enabled]),
+        "SetupMode": (6).to_bytes(4, "little") + bytes([setup]),
+        **{name:(6).to_bytes(4, "little")+name.encode()
+           for name in ("PK", "KEK", "db", "dbx")}
+    }
+    monkeypatch.setattr(prod,"_read_boot_trust_efivar",lambda name: vals[name])
+    with pytest.raises(prod.ProductionInstallError):
+        _REAL_SECURE_BOOT_FIRMWARE()
+
+
+def test_physical_secure_boot_policy_drift_or_unreadability(monkeypatch):
+    vals = {
+        "SecureBoot": (6).to_bytes(4, "little") + bytes([1]),
+        "SetupMode": (6).to_bytes(4, "little") + bytes([0]),
+        **{name:(6).to_bytes(4, "little")+name.encode()
+           for name in ("PK", "KEK", "db", "dbx")}
+    }
+    def read(name):
+        if name not in vals:
+            raise prod.ProductionInstallError("unavailable")
+        return vals[name]
+    monkeypatch.setattr(prod,"_read_boot_trust_efivar",read)
+    first = _REAL_SECURE_BOOT_FIRMWARE()
+    vals["dbx"] += b"changed"
+    assert _REAL_SECURE_BOOT_FIRMWARE()!=first
+    vals.pop("db")
+    with pytest.raises(prod.ProductionInstallError):
+        _REAL_SECURE_BOOT_FIRMWARE()
+
+
+def test_physical_signed_target_chain_unproven_even_when_firmware_enabled():
+    c=json.loads(prod.CONTRACT_PATH.read_text())
+    with pytest.raises(prod.ProductionInstallError,match="not independently admitted"):
+        _REAL_TARGET_BOOTCHAIN_GATE(c)
+    c["boot"]["authenticated_boot"]["signed_target_bootchain_state"]="verified"
+    with pytest.raises(prod.ProductionInstallError,match="unrecognized"):
+        _REAL_TARGET_BOOTCHAIN_GATE(c)
+
+
+def test_physical_secure_boot_denial_precedes_first_storage_effect(monkeypatch,tmp_path):
+    monkeypatch.setattr(prod,"validate_confirmation",lambda *_: None)
+    monkeypatch.setattr(prod.os,"geteuid",lambda:0)
+    def denied():
+        raise prod.ProductionInstallError("physical Secure Boot is disabled")
+    monkeypatch.setattr(prod,"verify_secure_boot_firmware",denied)
+    monkeypatch.setattr(prod,"_run",lambda *_a,**_k: (_ for _ in ()).throw(AssertionError("effect reached")))
+    with pytest.raises(prod.ProductionInstallError,match="Secure Boot is disabled"):
+        prod.execute_plan({"contract_sha256":"cannot authorize"},contract={"boot":{}},
+                          confirmation="unused",credential_hash_file=tmp_path/"unused")
+
+
+def test_physical_uefi_root_owned_efivar_missing_or_symlink_denied(monkeypatch, tmp_path):
+    monkeypatch.setattr(prod, "EFI_VARIABLE_ROOT", tmp_path)
+    # Isolate leaf O_NOFOLLOW validation. The parent superblock is verified in
+    # separate tests; ordinary tmpfs should otherwise fail before reaching it.
+    monkeypatch.setattr(
+        prod, "_open_verified_efivarfs",
+        lambda: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC),
+    )
+    with pytest.raises(prod.ProductionInstallError, match="unavailable"):
+        prod._read_boot_trust_efivar("SecureBoot")
+    path = tmp_path / f"SecureBoot-{prod.EFI_GLOBAL_GUID}"
+    destination = tmp_path / "spoofed-uefi-state"
+    destination.write_bytes((6).to_bytes(4, "little") + bytes([1]))
+    path.symlink_to(destination)
+    with pytest.raises(prod.ProductionInstallError, match="unavailable"):
+        prod._read_boot_trust_efivar("SecureBoot")
+
+
+def test_physical_authenticated_chain_denial_precedes_any_storage_effect(monkeypatch, tmp_path):
+    monkeypatch.setattr(prod, "validate_confirmation", lambda *_args: None)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "enabled-and-stable")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", _REAL_TARGET_BOOTCHAIN_GATE)
+    monkeypatch.setattr(prod, "_run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("unexpected effect")))
+    with pytest.raises(prod.ProductionInstallError, match="not independently admitted"):
+        prod.execute_plan({"contract_sha256": "no-apply-authority"},
+                          contract=CONTRACT, confirmation="unused",
+                          credential_hash_file=tmp_path / "unused")
+
+
+def test_physical_secure_boot_jit_policy_drift_blocks_before_sgdisk(monkeypatch, tmp_path):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    events = _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_args: None)
+    expected_nvram = compiled["preflight"]["protected"]["firmware_bootability"]["efi_nvram_sha256"]
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: expected_nvram)
+    firmware_reads = []
+    def read_firmware():
+        firmware_reads.append(len(firmware_reads))
+        return "original-key-policy" if len(firmware_reads) == 1 else "drifted-key-policy"
+    monkeypatch.setattr(prod, "verify_secure_boot_firmware", read_firmware)
+    effects = []
+    class Completed:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+    monkeypatch.setattr(prod, "_run", lambda argv, **_kwargs: effects.append(argv) or Completed())
+    with pytest.raises(prod.PreMutationReadinessError, match="pre-cutover source/readiness changed"):
+        prod.execute_plan(
+            compiled, contract=CONTRACT, confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert len(firmware_reads) == 2
+    assert "efi-freeze" in events and "efi-thaw" in events
+    assert compiled["commands"][0]["argv"] not in effects
+
+
+def test_physical_efi_leaf_bind_mount_is_rejected(monkeypatch, tmp_path):
+    # Simulate a file bind-mounted over an existing efivarfs variable name:
+    # O_NOFOLLOW sees a plain regular file; filesystem and parent ownership
+    # alone are not a complete same-mount proof.
+    leaf = tmp_path / f"SecureBoot-{prod.EFI_GLOBAL_GUID}"
+    leaf.write_bytes((6).to_bytes(4, "little") + bytes([1]))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    monkeypatch.setattr(prod, "_open_verified_efivarfs", lambda: os.open(tmp_path, flags))
+    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: prod.EFIVARFS_SUPER_MAGIC)
+    monkeypatch.setattr(
+        prod, "_kernel_fd_mount_id",
+        lambda fd: 11 if stat.S_ISDIR(os.fstat(fd).st_mode) else 12,
+    )
+    real_fstat = os.fstat
+
+    def pretend_root_owned(fd):
+        info = real_fstat(fd)
+        if stat.S_ISREG(info.st_mode):
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            fields[stat.ST_GID] = 0
+            return os.stat_result(fields)
+        return info
+
+    with monkeypatch.context() as local:
+        local.setattr(prod.os, "fstat", pretend_root_owned)
+        with pytest.raises(prod.ProductionInstallError, match="not on the verified efivarfs mount"):
+            prod._read_boot_trust_efivar("SecureBoot")
+
+
+def test_physical_kernel_fd_mount_id_actual_statx_smoke(tmp_path):
+    # A genuine statx(AT_EMPTY_PATH) read against this kernel, independent
+    # of any separately bind-mountable /proc fdinfo path.
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        real_mount_id = prod._kernel_fd_mount_id(fd)
+        assert type(real_mount_id) is int and real_mount_id > 0
+        assert prod._kernel_fd_mount_id(fd) == real_mount_id
+    finally:
+        os.close(fd)
+
+
+def test_physical_kernel_statx_missing_api_fails_closed(monkeypatch, tmp_path):
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        class NoStatx:
+            pass
+        with monkeypatch.context() as local:
+            local.setattr(prod.ctypes, "CDLL", lambda *_args, **_kwargs: NoStatx())
+            with pytest.raises(prod.ProductionInstallError, match="unavailable"):
+                prod._kernel_fd_mount_id(fd)
+    finally:
+        os.close(fd)
+
+
+def test_physical_secure_boot_rejects_root_owned_ordinary_mount(monkeypatch, tmp_path):
+    # A root-controlled bind mount or a synthetic regular tree is not firmware.
+    fake = tmp_path / "efivars"
+    fake.mkdir()
+    (fake / f"SecureBoot-{prod.EFI_GLOBAL_GUID}").write_bytes(
+        (6).to_bytes(4, "little") + bytes([1])
+    )
+    monkeypatch.setattr(prod, "EFI_VARIABLE_ROOT", fake)
+    monkeypatch.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+    with pytest.raises(prod.ProductionInstallError, match="not on efivarfs|identity is unsafe"):
+        prod._read_boot_trust_efivar("SecureBoot")
+
+
+@pytest.mark.parametrize("state", ["disabled", "enabled-but-unproven"])
+def test_physical_cli_apply_denied_before_any_persistent_reservation(
+    monkeypatch, tmp_path, state,
+):
+    # The --apply CLI itself must not create a receipt, lock, or other durable
+    # file even when firmware reports enabled: this is only a denial PR.
+    # load_install_artifact is also forbidden so removing the early gate
+    # cannot falsely pass by failing on the synthetic nonexistent artifact.
+    calls = []
+    def unexpected(*_args, **_kwargs):
+        calls.append("persistent-or-source-effect")
+        raise AssertionError("storage or private-state effect reached")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", _REAL_TARGET_BOOTCHAIN_GATE)
+    if state == "disabled":
+        def firmware():
+            raise prod.ProductionInstallError("physical Secure Boot is disabled")
+        monkeypatch.setattr(prod, "verify_secure_boot_firmware", firmware)
+    else:
+        monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "enabled-policy")
+    for name in (
+        "acquire_production_apply_lock", "reserve_private_receipt",
+        "execute_plan", "verify_source", "prepare_recovery_key_destination",
+        "load_install_artifact",
+    ):
+        monkeypatch.setattr(prod, name, unexpected)
+    result = prod.main([
+        "--apply",
+        "--install-artifact", str(tmp_path / "does-not-exist.json"),
+        "--identity-contract", str(tmp_path / "no-identity.json"),
+        "--write-receipt", str(tmp_path / "forbidden-receipt.json"),
+        "--credential-hash-file", str(tmp_path / "no-credentials"),
+    ])
+    assert result == 2
+    assert calls == []
+    assert not (tmp_path / "forbidden-receipt.json").exists()
+    assert not (tmp_path / "production-apply-locks").exists()
+
+
+def test_physical_efi_superblock_magic_is_enforced_before_leaf_reads(monkeypatch, tmp_path):
+    path = tmp_path / "root-owned-simulation"
+    path.mkdir()
+    original_stat = os.stat
+    original_fstat = os.fstat
+
+    def simulated_root_owned(info):
+        # Preserve actual inode/device/mode while simulating the most
+        # favorable owner identity an attacker could arrange as host root.
+        fields = list(info)
+        fields[stat.ST_UID] = 0
+        fields[stat.ST_GID] = 0
+        return os.stat_result(fields)
+
+    def stat_as_root(location, *args, **kwargs):
+        info = original_stat(location, *args, **kwargs)
+        return simulated_root_owned(info) if str(location) == str(path) else info
+
+    def fstat_as_root(fd):
+        info = original_fstat(fd)
+        return simulated_root_owned(info) if stat.S_ISDIR(info.st_mode) else info
+
+    with monkeypatch.context() as local:
+        local.setattr(prod, "EFI_VARIABLE_ROOT", path)
+        local.setattr(prod.os, "stat", stat_as_root)
+        local.setattr(prod.os, "fstat", fstat_as_root)
+        local.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
+        with pytest.raises(prod.ProductionInstallError, match="not on efivarfs"):
+            prod._open_verified_efivarfs()

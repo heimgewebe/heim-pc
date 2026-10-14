@@ -9,6 +9,7 @@ target by-id plus target-derived stable by-id partition paths.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -118,6 +119,26 @@ RECOVERY_TOKEN_TYPE = "systemd-recovery"
 TPM2_BOOT_OPTIONS = "tpm2-device=auto,headless=yes"
 RECOVERY_KEY_RE = re.compile(r"^[A-Za-z0-9]{8}(?:-[A-Za-z0-9]{8}){7}\n$")
 PROTECTED_EFI_MOUNTPOINT = Path("/boot/efi")
+# Bind the *whole* physical Secure Boot key policy, not just the enabled bit.
+EFI_VARIABLE_ROOT = Path("/sys/firmware/efi/efivars")
+EFI_GLOBAL_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+EFI_IMAGE_SECURITY_GUID = "d719b2cb-3d3a-4596-a3bc-dad00e67656f"
+EFI_BOOT_TRUST_VARIABLES = {
+    "SecureBoot": EFI_GLOBAL_GUID, "SetupMode": EFI_GLOBAL_GUID,
+    "PK": EFI_GLOBAL_GUID, "KEK": EFI_GLOBAL_GUID,
+    "db": EFI_IMAGE_SECURITY_GUID, "dbx": EFI_IMAGE_SECURITY_GUID,
+}
+EFI_BOOT_TRUST_MAX_BYTES = 4 * 1024 * 1024
+# Linux include/uapi/linux/magic.h: only efivarfs, not a root-owned fake tree,
+# may supply UEFI variable bytes to physical TPM2 PCR7 admission.
+EFIVARFS_SUPER_MAGIC = 0xDE5E81E4
+# Linux 6.18 UAPI include/uapi/linux/stat.h and fcntl.h:
+# statx() returns mount ID at byte 0x90 in the 0x100-byte struct.
+# AT_EMPTY_PATH lets the kernel query an already-open file descriptor.
+STATX_MNT_ID = 0x00001000
+STATX_AT_EMPTY_PATH = 0x00001000
+STATX_STRUCT_BYTES = 0x100
+STATX_MNT_ID_OFFSET = 0x90
 # Linux _IOWR('X', 119/120, int), verified against /usr/include/linux/fs.h.
 PROTECTED_EFI_FIFREEZE_IOCTL = 0xC0045877
 PROTECTED_EFI_FITHAW_IOCTL = 0xC0045878
@@ -1562,6 +1583,178 @@ def _command_bootstrap_argv(
     if occurrences:
         raise ProductionInstallError("unexpected LUKS bootstrap placeholder")
     return list(argv), ()
+
+
+def _filesystem_magic(fd: int) -> int:
+    """Kernel fstatfs(2) on an already opened descriptor, not a parsed mount label."""
+    # The production installer targets Linux x86_64. The first field of the
+    # kernel struct statfs is the native-long filesystem magic number.
+    buffer = ctypes.create_string_buffer(256)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.fstatfs
+        call.argtypes = (ctypes.c_int, ctypes.c_void_p)
+        call.restype = ctypes.c_int
+        if call(fd, ctypes.byref(buffer)) != 0:
+            raise ProductionInstallError("physical EFI variables filesystem is unreadable")
+        return int(ctypes.c_long.from_buffer_copy(buffer).value)
+    except (AttributeError, OSError) as exc:
+        raise ProductionInstallError("physical EFI variables filesystem cannot be identified") from exc
+
+
+def _kernel_fd_mount_id(fd: int) -> int:
+    """Query mount identity directly from the open fd using kernel statx(2).
+
+    Never trust /proc/self/fdinfo or another pathname, which can themselves
+    be bind-mounted in a privileged mount namespace to provide substituted
+    metadata about different descriptors.
+    """
+    buffer = ctypes.create_string_buffer(STATX_STRUCT_BYTES)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.statx
+        call.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+            ctypes.c_uint, ctypes.c_void_p,
+        )
+        call.restype = ctypes.c_int
+        rc = call(fd, b"", STATX_AT_EMPTY_PATH, STATX_MNT_ID, ctypes.byref(buffer))
+    except (AttributeError, OSError) as exc:
+        raise ProductionInstallError("kernel statx mount identity is unavailable") from exc
+    if rc != 0:
+        raise ProductionInstallError("kernel statx mount identity query failed")
+    data = buffer.raw
+    result_mask = int.from_bytes(data[:4], sys.byteorder)
+    if (result_mask & STATX_MNT_ID) != STATX_MNT_ID:
+        raise ProductionInstallError("kernel statx mount identity is unsupported")
+    mount_id = int.from_bytes(
+        data[STATX_MNT_ID_OFFSET:STATX_MNT_ID_OFFSET + 8], sys.byteorder,
+    )
+    if not (0 < mount_id < 2**63):
+        raise ProductionInstallError("kernel statx mount ID is invalid")
+    return mount_id
+
+
+def _open_verified_efivarfs() -> int:
+    """Anchor all UEFI-variable reads to the real kernel efivarfs superblock."""
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(EFI_VARIABLE_ROOT, flags)
+    except OSError as exc:
+        raise ProductionInstallError("physical EFI variables directory is unavailable") from exc
+    try:
+        opened = os.fstat(directory_fd)
+        current = os.stat(EFI_VARIABLE_ROOT, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or opened.st_uid != 0
+            or opened.st_gid != 0
+            or current.st_uid != 0
+            or current.st_gid != 0
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ProductionInstallError("physical EFI variables directory identity is unsafe")
+        if _filesystem_magic(directory_fd) != EFIVARFS_SUPER_MAGIC:
+            raise ProductionInstallError("physical EFI variables are not on efivarfs")
+        # Fail before opening any leaf if the kernel cannot identify the
+        # actual mounted instance, needed to exclude per-file bind mounts.
+        _kernel_fd_mount_id(directory_fd)
+        return directory_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _read_boot_trust_efivar(name: str) -> bytes:
+    """Read bounded root-owned firmware data under an open, kernel-verified efivarfs."""
+    guid = EFI_BOOT_TRUST_VARIABLES.get(name)
+    if guid is None:
+        raise ProductionInstallError("unrecognized physical Secure Boot variable")
+    directory_fd = _open_verified_efivarfs()
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        try:
+            fd = os.open(f"{name}-{guid}", flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise ProductionInstallError("physical Secure Boot variable is unavailable") from exc
+        try:
+            info = os.fstat(fd)
+            mounted_parent = os.fstat(directory_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or info.st_gid != 0 or info.st_nlink != 1):
+                raise ProductionInstallError("physical Secure Boot variable ownership is unsafe")
+            if (
+                info.st_dev != mounted_parent.st_dev
+                or _filesystem_magic(fd) != EFIVARFS_SUPER_MAGIC
+                or _kernel_fd_mount_id(fd) != _kernel_fd_mount_id(directory_fd)
+            ):
+                raise ProductionInstallError("physical EFI variable leaf is not on the verified efivarfs mount")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                blob = stream.read(EFI_BOOT_TRUST_MAX_BYTES + 1)
+            if not (5 <= len(blob) <= EFI_BOOT_TRUST_MAX_BYTES):
+                raise ProductionInstallError("physical Secure Boot variable length is invalid")
+            if (int.from_bytes(blob[:4], "little") & 0x6) != 0x6:
+                raise ProductionInstallError("physical Secure Boot variable attributes are invalid")
+            return blob
+        except OSError as exc:
+            raise ProductionInstallError("physical Secure Boot variable cannot be read") from exc
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _parse_uefi_boolean(blob: bytes, name: str) -> int:
+    if (not isinstance(blob, bytes) or len(blob) != 5
+            or (int.from_bytes(blob[:4], "little") & 0x6) != 0x6
+            or blob[4] not in (0, 1)):
+        raise ProductionInstallError(f"physical {name} Secure Boot state is invalid")
+    return blob[4]
+
+
+def verify_secure_boot_firmware() -> str:
+    """Require SecureBoot=1, SetupMode=0 and bind PK/KEK/db/dbx to JIT recheck."""
+    blobs = {name: _read_boot_trust_efivar(name) for name in EFI_BOOT_TRUST_VARIABLES}
+    if _parse_uefi_boolean(blobs["SecureBoot"], "SecureBoot") != 1:
+        raise ProductionInstallError("physical Secure Boot is disabled")
+    if _parse_uefi_boolean(blobs["SetupMode"], "SetupMode") != 0:
+        raise ProductionInstallError("physical Secure Boot is in Setup Mode")
+    for name in ("PK", "KEK", "db", "dbx"):
+        if len(blobs[name]) <= 4:
+            raise ProductionInstallError("physical Secure Boot certificate policy is empty")
+    digest = hashlib.sha256(b"heim-pc-physical-secureboot-firmware-v1")
+    for name, blob in blobs.items():
+        digest.update(name.encode("ascii") + b":")
+        digest.update(len(blob).to_bytes(8, "big"))
+        digest.update(blob)
+    return digest.hexdigest()
+
+
+def reject_unattested_target_bootchain(contract: dict[str, Any]) -> None:
+    """Hold physical install until the TARGET loader/kernel/initrd/cmdline are signed.
+
+    Active firmware state and signed EFI application alone cannot prove that
+    the systemd-boot menu, external initrd and private LUKS options are trusted.
+    """
+    boot = contract.get("boot")
+    policy = boot.get("authenticated_boot") if isinstance(boot, dict) else None
+    if not isinstance(policy, dict) or policy != {
+        "schema_version": 1,
+        "required_before_tpm2_pcr7_enrollment": True,
+        "signed_target_bootchain_state": "unproven",
+        "target_loader": "systemd-boot",
+        "status": "blocked-until-reviewed-signed-chain",
+    }:
+        raise ProductionInstallError("physical signed target boot-chain policy is unrecognized")
+    raise ProductionInstallError(
+        "physical TPM2-PCR7 install blocked: signed NixOS loader/kernel/initrd/"
+        "command-line chain and firmware key policy not independently admitted"
+    )
 
 
 def verify_tpm2_device_available(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -6086,6 +6279,10 @@ def execute_plan(
         raise ProductionInstallError("apply signal deferral handoff must start empty")
     if os.geteuid() != 0:
         raise ProductionInstallError("production apply requires root")
+    # Pre-effect firmware and signed-target trust gate. Still blocked until #202
+    # has the independently verified physical boot chain, NOT only SB=1.
+    secure_boot_firmware_digest = verify_secure_boot_firmware()
+    reject_unattested_target_bootchain(contract)
     if sha256_json(contract) != plan.get("contract_sha256"):
         raise ProductionInstallError("storage contract no longer matches the reviewed plan")
     if contract.get("identity_binding", {}).get("identity_contract_sha256") != plan.get("identity_contract_sha256"):
@@ -6285,6 +6482,11 @@ def execute_plan(
                             raise ProductionInstallError(
                                 "source revision changed before storage mutation"
                             )
+                        if verify_secure_boot_firmware() != secure_boot_firmware_digest:
+                            raise ProductionInstallError(
+                                "Secure Boot key/state policy changed before storage mutation"
+                            )
+                        reject_unattested_target_bootchain(contract)
                         if readiness_snapshot is not None:
                             pre_cutover_readiness.revalidate_readiness(
                                 readiness_snapshot,
@@ -6307,6 +6509,19 @@ def execute_plan(
                             "pre-cutover source/readiness changed before storage mutation"
                         ) from exc
                     readiness_jit_complete = True
+                if command["effect"] == "luks-tpm2-enroll":
+                    # Firmware keys may drift after initial partitioning: never
+                    # enroll a PCR7 token against a changed Secure Boot policy.
+                    try:
+                        if verify_secure_boot_firmware() != secure_boot_firmware_digest:
+                            raise ProductionInstallError(
+                                "Secure Boot key/state policy drifted before TPM2 enrollment"
+                            )
+                        reject_unattested_target_bootchain(contract)
+                    except ProductionInstallError as exc:
+                        raise post_mutation_alarm(
+                            "physical-boot-trust-not-valid-before-tpm2-enrollment"
+                        ) from exc
                 if command["effect"] == "nixos-install":
                     stage_private_storage_identity(mount_root=MOUNT_ROOT, contract=contract)
                     private_storage_identity_staged = True
@@ -6564,6 +6779,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.apply:
+            # #202: physical apply is an explicit closed gate, not just an
+            # execute_plan check.  Deny before receipt/lock reservations and
+            # even before managed-artifact or source verification can write
+            # ancillary disk state. The no-apply planner remains unchanged.
+            verify_secure_boot_firmware()
+            try:
+                public_boot_policy = json.loads(
+                    CONTRACT_PATH.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ProductionInstallError(
+                    "physical signed boot-chain policy cannot be read"
+                ) from exc
+            reject_unattested_target_bootchain(public_boot_policy)
         artifact_path = args.install_artifact.resolve()
         artifact = load_install_artifact(artifact_path)
         verify_source(args.flake_source, artifact["source_revision"])

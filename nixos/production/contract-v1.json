@@ -135,7 +135,14 @@
     "shared_esp_forbidden": true,
     "firmware_boot_selection": "motherboard-uefi",
     "touch_efi_variables": false,
-    "fallback_os_role": "popos-fallback"
+    "fallback_os_role": "popos-fallback",
+    "authenticated_boot": {
+      "schema_version": 1,
+      "required_before_tpm2_pcr7_enrollment": true,
+      "signed_target_bootchain_state": "unproven",
+      "target_loader": "systemd-boot",
+      "status": "blocked-until-reviewed-signed-chain"
+    }
   },
   "mutation_policy": {
     "target_by_id_only": true,
