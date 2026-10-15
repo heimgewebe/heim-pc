@@ -257,7 +257,8 @@ def test_consumer_distinguishes_nix_cache_protocol_from_http_health():
     # A 200 from health.txt alone says nothing about the Nix binary-cache
     # protocol or whether any signed output is present.
     assert '"$CI_NIX_CACHE_URL/nix-cache-info"' in report
-    assert 'grep -Fxq "StoreDir: /nix/store"' in report
+    assert "awk " in report
+    assert "StoreDir: /nix/store" in report
     assert "--max-filesize 4096" in report
     assert "CI_NIX_CACHE_PROTOCOL=available" in report
     assert "CI_NIX_CACHE_PROTOCOL=unavailable" in report
@@ -275,7 +276,10 @@ def test_consumer_distinguishes_nix_cache_protocol_from_http_health():
     [
         ("not_found", "unavailable"),
         ("wrong_store_dir", "unavailable"),
+        ("missing_store_dir", "unavailable"),
         ("valid_protocol", "available"),
+        ("conflicting_store_dirs", "unavailable"),
+        ("duplicated_store_dir", "unavailable"),
     ],
 )
 def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
@@ -322,7 +326,10 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
         "case \"$PROBE_MODE\" in\n"
         "  not_found) exit 22 ;;\n"
         "  wrong_store_dir) printf 'StoreDir: /tmp/invalid\\n'; exit 0 ;;\n"
+        "  missing_store_dir) printf 'WantMassQuery: 1\\n'; exit 0 ;;\n"
         "  valid_protocol) printf 'StoreDir: /nix/store\\nWantMassQuery: 1\\n'; exit 0 ;;\n"
+        "  conflicting_store_dirs) printf 'StoreDir: /nix/store\\nStoreDir: /tmp/invalid\\n'; exit 0 ;;\n"
+        "  duplicated_store_dir) printf 'StoreDir: /nix/store\\nStoreDir: /nix/store\\n'; exit 0 ;;\n"
         "  *) exit 42 ;;\n"
         "esac\n",
         encoding="utf-8",
