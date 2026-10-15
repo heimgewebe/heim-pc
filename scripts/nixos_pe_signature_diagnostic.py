@@ -124,6 +124,12 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         raise PEFormatError("optional_magic_unsupported")
     if optional_bytes < directory_start:
         raise PEFormatError("pe_header_truncated")
+    # SizeOfHeaders describes the full on-disk PE header region, including
+    # alignment padding after section headers. A certificate table must never
+    # be structurally positive while any of its bytes fall inside that range.
+    declared_headers_end = _u32(data, optional + 60)
+    if not (section_headers_end <= declared_headers_end <= len(data)):
+        raise PEFormatError("declared_headers_invalid")
     directory_count = _u32(data, optional + directory_count_offset)
     if directory_count <= 4:
         return _result(signature_table="absent", certificate_count=0)
@@ -148,6 +154,8 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         or certificate_bytes > len(data) - certificate_start
     ):
         raise PEFormatError("certificate_table_out_of_bounds")
+    if certificate_start < declared_headers_end:
+        raise PEFormatError("certificate_overlaps_declared_headers")
     certificate_end = certificate_start + certificate_bytes
     if any(
         raw_start < certificate_end and certificate_start < raw_end

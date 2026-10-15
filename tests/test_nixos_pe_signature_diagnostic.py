@@ -32,6 +32,7 @@ def fixture_pe(*, present: bool = False, pe32: bool = False) -> bytes:
     struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
     struct.pack_into("<I", image, optional + (92 if pe32 else 108), 16)
     directory = optional + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<I", image, optional + 60, 0x200)  # SizeOfHeaders
     if present:
         struct.pack_into("<II", image, directory, 0x200, 0x10)
         struct.pack_into("<IHH", image, 0x200, 0x10, 0x200, 0x0002)
@@ -100,6 +101,25 @@ def test_certificate_padding_cannot_hide_payload_bytes():
     data = bytearray(fixture_pe(present=True))
     struct.pack_into("<I", data, 0x200, 10)  # 8-byte header + 2 data bytes
     with pytest.raises(pe.PEFormatError, match="certificate_padding_invalid"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("headers_size", [0x208, 0x210])
+def test_certificate_inside_declared_size_of_headers_is_invalid(pe32, headers_size):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    # WIN_CERTIFICATE occupies [0x200, 0x210); SizeOfHeaders includes it.
+    struct.pack_into("<I", data, 0x98 + 60, headers_size)
+    with pytest.raises(pe.PEFormatError, match="certificate_overlaps_declared_headers"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("headers_size", [0, 0x80, 0x218])
+def test_malformed_size_of_headers_never_positive(pe32, headers_size):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", data, 0x98 + 60, headers_size)
+    with pytest.raises(pe.PEFormatError, match="declared_headers_invalid"):
         pe.inspect_bytes(bytes(data))
 
 
