@@ -774,17 +774,154 @@ def test_cli_empty_stdin_fails_closed_without_path_reads():
     report = json.loads(done.stdout)
     assert report["findings"][0]["status"] == "unavailable"
     assert report["physical_install_authorized"] is False
+@pytest.mark.parametrize("replacement", ["forged", "removed"])
+def test_worker_never_executes_module_reopened_from_mutable_path(
+    tmp_path, monkeypatch, replacement,
+):
+    """Worker must execute the parent's already loaded code, not __file__."""
+    image = tmp_path / "input.efi"
+    data = fixture_pe(present=True)
+    image.write_bytes(data)
+    replaced_source = tmp_path / "replacement-worker.py"
+    if replacement == "forged":
+        replaced_source.write_text(
+            "class PEFormatError(Exception): pass\n"
+            "def _inspect_fd_raw(_fd):\n"
+            "    return {'signature_table': 'forged',"
+            " 'physical_install_authorized': True}\n",
+            encoding="utf-8",
+        )
+    # Also cover the original source path having disappeared entirely.
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            pe, "__file__",
+            str(replaced_source if replacement == "forged" else tmp_path / "removed.py"),
+        )
+        with image.open("rb") as opened:
+            finding = pe.inspect_fd(opened.fileno())
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["input_sha256"] == pe.hashlib.sha256(data).hexdigest()
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
+
+
 def test_stalled_regular_backend_cannot_wedge_caller(tmp_path, monkeypatch):
-    """An actually sleeping worker must be killed without awaiting its I/O."""
+    """A sleeping child models the parent deadline, not blocked kernel pread."""
     import time
 
     image = tmp_path / "timeout.efi"
     image.write_bytes(fixture_pe(present=True))
     # Simulate a child stuck inside a single blocking pread; no FUSE needed.
-    monkeypatch.setattr(pe, "_WORKER_CODE", "import time; time.sleep(60)", raising=False)
+    monkeypatch.setattr(pe, "_WORKER_CODE", "import time; time.sleep(60)")
     monkeypatch.setattr(pe, "WORKER_DEADLINE_SECONDS", 0.15, raising=False)
     started = time.monotonic()
     with image.open("rb") as opened:
         with pytest.raises(pe.PEFormatError, match="read_deadline_exceeded"):
             pe.inspect_fd(opened.fileno())
     assert time.monotonic() - started < 2.5
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("gap", ["before_certificate", "after_section", "between_sections"])
+@pytest.mark.parametrize("payload", [b"ATTACK", bytes(6)])
+def test_unmapped_gaps_before_certificate_fail_closed(pe32, gap, payload):
+    """Even zero-filled unmapped gaps are unparsed, not certificate evidence."""
+    if gap == "before_certificate":
+        image = bytearray(fixture_pe(present=True, pe32=pe32))
+        old_certificate = bytes(image[0x200:0x210])
+        image[0x200:0x206] = payload
+        image.extend(bytes(0x1F0))
+        image.extend(old_certificate)
+        certificate_offset = 0x400
+    elif gap == "after_section":
+        image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+        old_certificate = bytes(image[0x400:0x410])
+        image[0x400:0x406] = payload
+        image.extend(bytes(0x600 - len(image)))
+        image.extend(old_certificate)
+        certificate_offset = 0x600
+    else:
+        image = bytearray(fixture_pe_two_sections(pe32=pe32, overlapping=False))
+        old_certificate = bytes(image[0x600:0x610])
+        image[0x400:0x406] = payload
+        image.extend(bytes(0x810 - len(image)))
+        image[0x800:0x810] = old_certificate
+        section = 0x98 + (0xE0 if pe32 else 0xF0)
+        struct.pack_into("<I", image, section + 40 + 20, 0x600)
+        certificate_offset = 0x800
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", image, directory, certificate_offset, 0x10)
+    with pytest.raises(pe.PEFormatError, match="unverified_certificate_gap"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("kind", ["forged_authority", "private_error"])
+def test_worker_output_must_be_revalidated_by_non_authorizing_parent(
+    tmp_path, monkeypatch, kind,
+):
+    image = tmp_path / "untrusted-child.efi"
+    image.write_bytes(fixture_pe(present=True))
+    if kind == "forged_authority":
+        code = (
+            'import json; print(json.dumps({"kind":"ok","finding":'
+            '{"signature_table":"structurally_present",'
+            '"physical_install_authorized":True,'
+            '"full_bootchain_authenticated":True,'
+            '"cryptographic_signature_verified":True}}))'
+        )
+    else:
+        code = (
+            'import json; print(json.dumps({"kind":"error",'
+            '"code":"/dev/disk/by-id/PRIVATE_SERIAL"}))'
+        )
+    monkeypatch.setattr(pe, "_WORKER_CODE", code)
+    with image.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+            pe.inspect_fd(opened.fileno())
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_excessive_section_count_is_rejected_before_quadratic_validation(pe32):
+    count = 97
+    image = bytearray(fixture_pe(present=False, pe32=pe32))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    headers_end = ((section + count * 40 + 0x1FF) // 0x200) * 0x200
+    image.extend(bytes(headers_end - len(image)))
+    struct.pack_into("<H", image, 0x84 + 2, count)
+    struct.pack_into("<I", image, 0x98 + 60, headers_end)
+    first_rva = ((headers_end + 0xFFF) // 0x1000) * 0x1000
+    struct.pack_into("<I", image, 0x98 + 56, first_rva + count * 0x1000)
+    for index in range(count):
+        struct.pack_into(
+            "<II", image, section + index * 40 + 8,
+            1, first_rva + index * 0x1000,
+        )
+    with pytest.raises(pe.PEFormatError, match="section_count_unbounded"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("machine", [0, 0xAA64, 0x014C, 0x8664])
+def test_only_matching_x86_pe32_and_amd64_pe32plus_profile_admitted(pe32, machine):
+    correct = 0x014C if pe32 else 0x8664
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", image, 0x84, machine)
+    if machine == correct:
+        finding = pe.inspect_bytes(bytes(image))
+        assert finding["signature_table"] == "structurally_present"
+    else:
+        with pytest.raises(pe.PEFormatError, match="machine_unsupported"):
+            pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("reason", ["read_deadline_exceeded", "input_drift", "input_offset"])
+def test_cli_distinguishes_unavailable_io_from_malformed_pe(monkeypatch, capsys, reason):
+    def fail(_fd):
+        raise pe.PEFormatError(reason)
+    monkeypatch.setattr(pe, "inspect_fd", fail)
+    assert pe.main(["--stdin"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    finding = report["findings"][0]
+    assert finding["reason_code"] == reason
+    assert finding["status"] == "unavailable"
+    assert finding["physical_install_authorized"] is False

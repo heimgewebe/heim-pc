@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import marshal
 import os
 import stat
 import struct
@@ -27,26 +28,62 @@ from typing import Any
 MAX_IMAGE_BYTES = 256 * 1024 * 1024
 MAX_CERTIFICATE_TABLE_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_COUNT = 16
+MAX_SECTION_COUNT = 96
 READ_CHUNK_BYTES = 1024 * 1024
 # Bounded caller wait. A blocked kernel I/O child might not be immediately
 # killable: this limits the caller, not resource cleanup in D-state.
 WORKER_DEADLINE_SECONDS = 5.0
 
-# Re-exec this reviewed module in an isolated interpreter, with only a
-# preopened descriptor passed through. Never take a user-supplied input path.
+# Code objects are captured ONCE after this module has loaded.  The worker
+# receives only these already-loaded bytes on a private pipe; no pathname to
+# this module is reopened between the parent snapshot and child execution.
+# Marshal is used exclusively with trusted same-interpreter code, never with
+# untrusted image data or a network/CLI payload.
 _WORKER_CODE = """
-import importlib.util
+import hashlib
 import json
+import marshal
+import os
+import stat
+import struct
 import sys
+import types
 
 try:
-    spec = importlib.util.spec_from_file_location("_pe_diagnostic_worker", sys.argv[1])
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    source = sys.stdin.buffer.read(262145)
+    if len(source) > 262144 or hashlib.sha256(source).hexdigest() != sys.argv[1]:
+        raise ValueError("worker_payload_invalid")
+    payload = marshal.loads(source)
+    codes = payload["codes"]
+    constants = payload["constants"]
+    expected_codes = {"_u16", "_u32", "_result", "inspect_bytes", "_inspect_fd_raw"}
+    expected_constants = {
+        "MAX_IMAGE_BYTES", "MAX_CERTIFICATE_TABLE_BYTES",
+        "MAX_CERTIFICATE_COUNT", "MAX_SECTION_COUNT", "READ_CHUNK_BYTES", "_NON_CLAIMS",
+    }
+    if (
+        set(codes) != expected_codes or set(constants) != expected_constants
+        or not all(isinstance(code, types.CodeType) for code in codes.values())
+    ):
+        raise ValueError("worker_payload_invalid")
+    scope = {
+        "__name__": "_pe_pinned_worker",
+        "__builtins__": __builtins__,
+        "os": os,
+        "stat": stat,
+        "struct": struct,
+        "hashlib": hashlib,
+        **constants,
+    }
+    class PEFormatError(ValueError):
+        pass
+    scope["PEFormatError"] = PEFormatError
+    for name, code in codes.items():
+        scope[name] = types.FunctionType(code, scope, name)
     try:
-        report = module._inspect_fd_raw(int(sys.argv[2]))
+        report = scope["_inspect_fd_raw"](int(sys.argv[2]))
         print(json.dumps({"kind": "ok", "finding": report}, sort_keys=True))
-    except module.PEFormatError as exc:
+    except PEFormatError as exc:
         print(json.dumps({"kind": "error", "code": str(exc)}))
 except BaseException:
     print('{"kind":"error","code":"unsafe_input"}')
@@ -60,6 +97,46 @@ _NON_CLAIMS = [
     "unchanged_popos_fallback_bootability_not_proven",
     "physical_seagate_apply_and_tpm2_enrollment_not_authorized",
 ]
+
+# Never forward arbitrary, potentially path-bearing subprocess error strings.
+_WORKER_ERROR_CODES = frozenset((
+    "certificate_count_unbounded",
+    "certificate_format_unsupported",
+    "certificate_header_truncated",
+    "certificate_length_invalid",
+    "certificate_length_out_of_bounds",
+    "certificate_overlaps_declared_headers",
+    "certificate_overlaps_section_data",
+    "certificate_padding_invalid",
+    "certificate_precedes_section_data",
+    "certificate_table_inconsistent",
+    "certificate_table_out_of_bounds",
+    "declared_headers_invalid",
+    "dos_magic_invalid",
+    "file_alignment_invalid",
+    "input_drift",
+    "input_offset",
+    "machine_unsupported",
+    "optional_magic_unsupported",
+    "pe_header_truncated",
+    "pe_magic_invalid",
+    "pipe_input_unsupported",
+    "read_deadline_exceeded",
+    "section_alignment_invalid",
+    "section_count_unbounded",
+    "section_low_alignment_rva_mismatch",
+    "section_raw_alignment_invalid",
+    "section_raw_order_invalid",
+    "section_raw_overlap",
+    "section_raw_range_invalid",
+    "section_virtual_order_invalid",
+    "section_virtual_overlap",
+    "section_virtual_range_invalid",
+    "size_of_image_invalid",
+    "unsafe_input",
+    "unverified_certificate_gap",
+    "unverified_certificate_overlay",
+))
 
 
 class PEFormatError(ValueError):
@@ -111,6 +188,8 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
 
     coff = pe_start + 4
     sections = _u16(data, coff + 2)
+    if sections > MAX_SECTION_COUNT:
+        raise PEFormatError("section_count_unbounded")
     optional_bytes = _u16(data, coff + 16)
     optional = coff + 20
     optional_end = optional + optional_bytes
@@ -224,9 +303,13 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         section_raw_ranges.append((raw_offset, previous_raw_end))
 
     magic = _u16(data, optional)
-    if magic == 0x20B:  # PE32+
+    if magic == 0x20B:  # PE32+ (AMD64 only in this reviewed subset)
+        if _u16(data, coff) != 0x8664:
+            raise PEFormatError("machine_unsupported")
         directory_count_offset, directory_start = 108, 112
-    elif magic == 0x10B:  # PE32
+    elif magic == 0x10B:  # PE32 (i386 only in this reviewed subset)
+        if _u16(data, coff) != 0x014C:
+            raise PEFormatError("machine_unsupported")
         directory_count_offset, directory_start = 92, 96
     else:
         raise PEFormatError("optional_magic_unsupported")
@@ -276,6 +359,16 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         raw_end for _, raw_end in section_raw_ranges
     ):
         raise PEFormatError("certificate_precedes_section_data")
+    # Without a parser that establishes ownership for nonmapped data, any
+    # gap from the on-disk headers through mapped raw sections to the final
+    # certificate is unverified overlay (including all-zero padding).
+    covered_end = declared_headers_end
+    for raw_start, raw_end in section_raw_ranges:
+        if raw_start != covered_end:
+            raise PEFormatError("unverified_certificate_gap")
+        covered_end = raw_end
+    if certificate_start != covered_end:
+        raise PEFormatError("unverified_certificate_gap")
     # Without a reviewed nonmapped debug-directory parser, every byte after
     # the declared attribute-certificate table is unverified overlay data.
     # Never label unknown overlay as positive PE certificate structure.
@@ -395,12 +488,12 @@ def inspect_fd(fd: int) -> dict[str, Any]:
         raise PEFormatError("unsafe_input") from exc
     proc: subprocess.Popen[bytes] | None = None
     try:
-        # -I ignores PYTHONPATH/site imports and -B prevents bytecode writes.
-        # The script is our own reviewed source, never a path from argv/stdin.
+        # -I ignores PYTHONPATH/site imports; -B prevents bytecode writes.
+        # No mutable module pathname is passed to or opened by the child.
         proc = subprocess.Popen(
             [
                 sys.executable, "-I", "-B", "-c", _WORKER_CODE,
-                os.path.abspath(__file__), str(pinned_fd),
+                hashlib.sha256(_PINNED_WORKER_PAYLOAD).hexdigest(), str(pinned_fd),
             ],
             pass_fds=(pinned_fd,),
             stdin=subprocess.PIPE,
@@ -411,7 +504,7 @@ def inspect_fd(fd: int) -> dict[str, Any]:
         )
         try:
             output, _stderr = proc.communicate(
-                input=b"", timeout=WORKER_DEADLINE_SECONDS
+                input=_PINNED_WORKER_PAYLOAD, timeout=WORKER_DEADLINE_SECONDS
             )
         except subprocess.TimeoutExpired as exc:
             # Do NOT use an unbounded wait() after kill; D-state may persist.
@@ -425,11 +518,51 @@ def inspect_fd(fd: int) -> dict[str, Any]:
             raise PEFormatError("unsafe_input") from exc
         if not isinstance(message, dict):
             raise PEFormatError("unsafe_input")
-        if message.get("kind") == "error" and isinstance(message.get("code"), str):
-            raise PEFormatError(message["code"])
-        if message.get("kind") != "ok" or not isinstance(message.get("finding"), dict):
+        if message.get("kind") == "error":
+            reason = message.get("code")
+            if (
+                set(message) != {"kind", "code"}
+                or not isinstance(reason, str)
+                or reason not in _WORKER_ERROR_CODES
+            ):
+                raise PEFormatError("unsafe_input")
+            raise PEFormatError(reason)
+        if (
+            set(message) != {"kind", "finding"}
+            or message.get("kind") != "ok"
+            or not isinstance(message["finding"], dict)
+        ):
             raise PEFormatError("unsafe_input")
-        return message["finding"]
+        # Reconstruct all authority and trust fields in the already-loaded
+        # parent. Never return an arbitrary worker dictionary as an admission
+        # claim even if the child process itself is corrupted.
+        finding = message["finding"]
+        signature = finding.get("signature_table")
+        count = finding.get("certificate_count")
+        if (
+            signature not in {"absent", "structurally_present"}
+            or type(count) is not int
+            or not (0 <= count <= MAX_CERTIFICATE_COUNT)
+            or ((count == 0) != (signature == "absent"))
+        ):
+            raise PEFormatError("unsafe_input")
+        expected = _result(signature_table=signature, certificate_count=count)
+        input_digest = finding.get("input_sha256")
+        input_size = finding.get("input_size")
+        if (
+            set(finding) != set(expected) | {"input_sha256", "input_size"}
+            or any(
+                type(finding[key]) is not type(value) or finding[key] != value
+                for key, value in expected.items()
+            )
+            or type(input_size) is not int
+            or not (0x40 <= input_size <= MAX_IMAGE_BYTES)
+            or not isinstance(input_digest, str)
+            or len(input_digest) != 64
+            or any(char not in "0123456789abcdef" for char in input_digest)
+        ):
+            raise PEFormatError("unsafe_input")
+        return {**expected, "input_sha256": input_digest, "input_size": input_size}
     except OSError as exc:
         raise PEFormatError("unsafe_input") from exc
     finally:
@@ -471,7 +604,10 @@ def main(argv: list[str] | None = None) -> int:
             **_result(signature_table="not_proven", certificate_count=0),
             "status": (
                 "unavailable"
-                if str(exc) in {"unsafe_input", "pipe_input_unsupported"}
+                if str(exc) in {
+                    "unsafe_input", "pipe_input_unsupported",
+                    "read_deadline_exceeded", "input_drift", "input_offset",
+                }
                 else "malformed"
             ),
             "reason_code": str(exc),
@@ -491,6 +627,27 @@ def main(argv: list[str] | None = None) -> int:
     # Deliberately nonzero even when a WIN_CERTIFICATE table is present.
     # This diagnostic must never become a successful Secure Boot admission.
     return 2
+
+
+# Snapshot the executable function *objects* at module load, not source read
+# again from __file__. A same-UID source rename or replacement after import
+# cannot alter what the independent read worker executes.
+_PINNED_WORKER_PAYLOAD = marshal.dumps({
+    "codes": {
+        name: globals()[name].__code__
+        for name in ("_u16", "_u32", "_result", "inspect_bytes", "_inspect_fd_raw")
+    },
+    "constants": {
+        "MAX_IMAGE_BYTES": MAX_IMAGE_BYTES,
+        "MAX_CERTIFICATE_TABLE_BYTES": MAX_CERTIFICATE_TABLE_BYTES,
+        "MAX_CERTIFICATE_COUNT": MAX_CERTIFICATE_COUNT,
+        "MAX_SECTION_COUNT": MAX_SECTION_COUNT,
+        "READ_CHUNK_BYTES": READ_CHUNK_BYTES,
+        "_NON_CLAIMS": tuple(_NON_CLAIMS),
+    },
+})
+if len(_PINNED_WORKER_PAYLOAD) > 262144:
+    raise RuntimeError("PE worker code payload too large")
 
 
 if __name__ == "__main__":
