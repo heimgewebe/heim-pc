@@ -164,6 +164,10 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     # even when the certificate lies past every section HEADER.
     section_raw_ranges: list[tuple[int, int]] = []
     section_virtual_ranges: list[tuple[int, int]] = []
+    # PE image section headers must describe adjacent ascending RVAs.
+    # Initialized section data must follow that same order in the file.
+    expected_virtual_address = minimum_image_size
+    previous_raw_end = 0
     for index in range(sections):
         section_header = optional_end + index * 40
         virtual_size = _u32(data, section_header + 8)
@@ -196,11 +200,17 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
             for prior_start, prior_end in section_virtual_ranges
         ):
             raise PEFormatError("section_virtual_overlap")
+        if raw_size and section_alignment < 0x1000 and raw_offset != virtual_address:
+            raise PEFormatError("section_low_alignment_rva_mismatch")
+        if virtual_address != expected_virtual_address:
+            raise PEFormatError("section_virtual_order_invalid")
+        expected_virtual_address = (
+            (virtual_address + virtual_span + section_alignment - 1)
+            // section_alignment
+        ) * section_alignment
         section_virtual_ranges.append((virtual_address, virtual_address + virtual_span))
         if not raw_size:
             continue
-        if section_alignment < 0x1000 and raw_offset != virtual_address:
-            raise PEFormatError("section_low_alignment_rva_mismatch")
         # Reject ambiguous overlapping mapped file bytes even when both
         # sections individually precede a correctly placed certificate.
         if any(
@@ -208,7 +218,10 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
             for earlier_start, earlier_end in section_raw_ranges
         ):
             raise PEFormatError("section_raw_overlap")
-        section_raw_ranges.append((raw_offset, raw_offset + raw_size))
+        if raw_offset < previous_raw_end:
+            raise PEFormatError("section_raw_order_invalid")
+        previous_raw_end = raw_offset + raw_size
+        section_raw_ranges.append((raw_offset, previous_raw_end))
 
     magic = _u16(data, optional)
     if magic == 0x20B:  # PE32+

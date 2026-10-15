@@ -253,6 +253,35 @@ def test_two_nonoverlapping_raw_sections_remain_diagnostic_only(pe32):
 
 
 @pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("layout", ["reversed_virtual_headers", "virtual_gap", "first_virtual_gap"])
+def test_pe_sections_must_be_adjacent_and_ascending(pe32, layout):
+    image = bytearray(fixture_pe_two_sections(pe32=pe32, overlapping=False))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    if layout == "reversed_virtual_headers":
+        struct.pack_into("<I", image, section + 12, 0x2000)
+        struct.pack_into("<I", image, section + 40 + 12, 0x1000)
+    elif layout == "virtual_gap":
+        struct.pack_into("<I", image, section + 40 + 12, 0x3000)
+        struct.pack_into("<I", image, 0x98 + 56, 0x4000)
+    else:
+        struct.pack_into("<I", image, section + 12, 0x2000)
+        struct.pack_into("<I", image, section + 40 + 12, 0x3000)
+        struct.pack_into("<I", image, 0x98 + 56, 0x4000)
+    with pytest.raises(pe.PEFormatError, match="section_virtual_order_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_nonoverlapping_section_raw_data_must_follow_rva_order(pe32):
+    image = bytearray(fixture_pe_two_sections(pe32=pe32, overlapping=False))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<I", image, section + 20, 0x400)
+    struct.pack_into("<I", image, section + 40 + 20, 0x200)
+    with pytest.raises(pe.PEFormatError, match="section_raw_order_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
 @pytest.mark.parametrize("virtual_address", [0, 0x200, 0x1100])
 def test_invalid_section_virtual_address_never_positive(pe32, virtual_address):
     image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
