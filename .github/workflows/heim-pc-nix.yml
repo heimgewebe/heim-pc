@@ -139,10 +139,17 @@ jobs:
           set -euo pipefail
           nix --version
           nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback) ='
-          if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "$CI_NIX_CACHE_URL/health.txt" >/dev/null; then
-            printf 'CI_NIX_CACHE_HEALTH=available\n'
+          # An HTTP health.txt 200 does not establish a valid Nix binary cache.
+          # Do not conflate protocol metadata with trusted NAR signatures or
+          # availability of the expensive Ollama/CUDA derivations.
+          cache_info="$(mktemp "$RUNNER_TEMP/heim-pc-ci-cache-info.XXXXXX")"
+          trap 'rm -f "$cache_info"' EXIT
+          if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+              --max-filesize 4096 "$CI_NIX_CACHE_URL/nix-cache-info" > "$cache_info" \
+              && grep -Fxq "StoreDir: /nix/store" "$cache_info"; then
+            printf 'CI_NIX_CACHE_PROTOCOL=available; signed-output availability is not established\n'
           else
-            printf 'CI_NIX_CACHE_HEALTH=unavailable; fallback=true keeps the local build path authoritative\n'
+            printf 'CI_NIX_CACHE_PROTOCOL=unavailable; fallback=true keeps the local build path authoritative\n'
           fi
 
       - name: Evaluate complete flake without building checks

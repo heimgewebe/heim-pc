@@ -242,3 +242,104 @@ def test_publisher_recovers_entire_signed_closure_from_fresh_empty_cache():
     assert "nix-store --delete" not in tail
     assert "--no-check-sigs" not in tail
     assert "require-sigs = false" not in tail
+
+
+def test_consumer_distinguishes_nix_cache_protocol_from_http_health():
+    workflow = CONSUMER.read_text(encoding="utf-8")
+    _, marker, remainder = workflow.partition(
+        "      - name: Report CI-only signed-cache trust\n"
+    )
+    assert marker, "missing signed-cache readiness step"
+    report, end, _ = remainder.partition(
+        "      - name: Evaluate complete flake without building checks\n"
+    )
+    assert end, "readiness step must precede normal Nix evaluation"
+    # A 200 from health.txt alone says nothing about the Nix binary-cache
+    # protocol or whether any signed output is present.
+    assert '"$CI_NIX_CACHE_URL/nix-cache-info"' in report
+    assert 'grep -Fxq "StoreDir: /nix/store"' in report
+    assert "--max-filesize 4096" in report
+    assert "CI_NIX_CACHE_PROTOCOL=available" in report
+    assert "CI_NIX_CACHE_PROTOCOL=unavailable" in report
+    assert 'curl --fail' in report
+    assert '"$CI_NIX_CACHE_URL/health.txt"' not in report
+    assert "CI_NIX_CACHE_HEALTH=available" not in report
+    # This diagnostic is never an admission gate or an unsigned-cache bypass.
+    assert "require-sigs = false" not in report
+    assert "--no-check-sigs" not in report
+    assert "fallback=true" in report
+
+
+@pytest.mark.parametrize(
+    ("probe_mode", "expected"),
+    [
+        ("not_found", "unavailable"),
+        ("wrong_store_dir", "unavailable"),
+        ("valid_protocol", "available"),
+    ],
+)
+def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
+    """Exercise the actual Actions run fragment without reaching a network."""
+    import os
+
+    workflow = CONSUMER.read_text(encoding="utf-8")
+    _, marker, tail = workflow.partition(
+        "      - name: Report CI-only signed-cache trust\n"
+    )
+    assert marker
+    body, end, _ = tail.partition(
+        "      - name: Evaluate complete flake without building checks\n"
+    )
+    assert end and body.startswith("        run: |\n")
+    script = "\n".join(
+        line[10:] if line.strip() else ""
+        for line in body.split("        run: |\n", 1)[1].splitlines()
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    nix = bin_dir / "nix"
+    nix.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--version\" ]; then echo 'nix 2.35.2'; exit 0; fi\n"
+        "if [ \"$1\" = \"config\" ] && [ \"$2\" = \"show\" ]; then\n"
+        "  echo 'require-sigs = true'\n"
+        "  echo 'fallback = true'\n"
+        "  echo 'substituters = https://cache.nixos.org/'\n"
+        "  echo 'trusted-public-keys = cache.nixos.org-1:test'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 31\n",
+        encoding="utf-8",
+    )
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "case \" $* \" in\n"
+        "  *'/nix-cache-info'*) ;;\n"
+        "  *) exit 41 ;;\n"
+        "esac\n"
+        "case \"$PROBE_MODE\" in\n"
+        "  not_found) exit 22 ;;\n"
+        "  wrong_store_dir) printf 'StoreDir: /tmp/invalid\\n'; exit 0 ;;\n"
+        "  valid_protocol) printf 'StoreDir: /nix/store\\nWantMassQuery: 1\\n'; exit 0 ;;\n"
+        "  *) exit 42 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    nix.chmod(0o700)
+    curl.chmod(0o700)
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        CI_NIX_CACHE_URL="https://example.invalid/nix-cache",
+        RUNNER_TEMP=str(tmp_path),
+        PROBE_MODE=probe_mode,
+    )
+    run = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    assert f"CI_NIX_CACHE_PROTOCOL={expected}" in run.stdout
+    assert not list(tmp_path.glob("heim-pc-ci-cache-info.*"))
