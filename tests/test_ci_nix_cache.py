@@ -140,6 +140,63 @@ def test_consumer_keeps_all_existing_nix_gates_and_invalid_signature_probe():
     assert 'grep -Eiq "signature|trusted key|trusted public key|not signed"' not in probe
 
 
+def test_heavy_nix_installables_form_single_required_union():
+    # Issue #167: one Nix solver invocation sees all 14 installables and can
+    # schedule/deduplicate shared dependencies without skipping a former step.
+    # Preserve the same exact-head Nix job and its early evaluation gates.
+    workflow = CONSUMER.read_text(encoding="utf-8")
+    _, separator, nix_job = workflow.partition("\n  nix:\n")
+    assert separator, "required nix job is missing"
+    label = "      - name: Build all mandatory Nix closures and VM checks in one union"
+    _, found, after_label = nix_job.partition(label + "\n")
+    assert found, "all mandatory expensive derivations must run in one union"
+    union, proof_marker, _ = after_label.partition(
+        "\n      - name: Prove untrusted signatures are rejected by substitution"
+    )
+    assert proof_marker, "the final signed-cache negative probe must still execute"
+    assert union.startswith(
+        "        run: >-\n"
+        "          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs"
+    )
+    assert union.count("nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs") == 1
+    assert "|| true" not in union and "continue-on-error:" not in union
+    installables = (
+        ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+        ".#nixosConfigurations.heim-pc-vm.config.system.build.toplevel",
+        ".#packages.x86_64-linux.physical-gate-proprietary-system",
+        ".#packages.x86_64-linux.physical-gate-open-system",
+        ".#packages.x86_64-linux.physical-gate-live-proprietary-iso",
+        ".#packages.x86_64-linux.physical-gate-live-open-iso",
+        ".#packages.x86_64-linux.physical-gate-live-inventory-iso",
+        ".#packages.x86_64-linux.agent-microvm",
+        ".#packages.x86_64-linux.agent-vsock-proof-microvm",
+        ".#packages.x86_64-linux.trust-zone-host-system",
+        ".#checks.x86_64-linux.integration",
+        ".#checks.x86_64-linux.host-protection",
+        ".#checks.x86_64-linux.firstboot-credentials",
+        ".#checks.x86_64-linux.trust-zones",
+    )
+    assert len(installables) == 14
+    for installable in installables:
+        assert union.count(installable) == 1, installable
+    assert union.count(".#") == len(installables)
+    for old_step in (
+        "Build storage, VM and physical-gate closures",
+        "Build live-gate and inventory ISOs",
+        "Build no-IP agent-zone closures",
+        "Run scoped VM checks",
+    ):
+        assert f"- name: {old_step}" not in nix_job
+    before_union = nix_job.split(label, 1)[0]
+    assert "- name: Verify source identity" in before_union
+    assert "- name: Evaluate complete flake without building checks" in before_union
+    assert "- name: Prove evaluated Heim-PC contracts" in before_union
+    assert "- name: Record heavy-derivation substitution plan" in before_union
+    assert "timeout-minutes: 90" in before_union
+    assert "runs-on: ubuntu-latest" in before_union
+    assert "require-sigs = true" in before_union
+
+
 def test_publisher_rejects_mismatched_signing_secret_before_copy_or_upload():
     workflow = PUBLISHER.read_text(encoding="utf-8")
     assert f"CI_NIX_CACHE_PUBLIC_KEY: {CACHE_KEY}" in workflow
