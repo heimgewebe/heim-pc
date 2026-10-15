@@ -30,6 +30,8 @@ def fixture_pe(*, present: bool = False, pe32: bool = False) -> bytes:
     optional = coff + 20
     struct.pack_into("<H", image, coff + 16, 0xE0 if pe32 else 0xF0)
     struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
+    struct.pack_into("<I", image, optional + 32, 0x1000)  # SectionAlignment
+    struct.pack_into("<I", image, optional + 36, 0x200)   # FileAlignment
     struct.pack_into("<I", image, optional + (92 if pe32 else 108), 16)
     directory = optional + (96 if pe32 else 112) + 4 * 8
     struct.pack_into("<I", image, optional + 60, 0x200)  # SizeOfHeaders
@@ -143,31 +145,69 @@ def test_section_bytes_inside_declared_header_padding_are_invalid(pe32, raw_offs
         pe.inspect_bytes(bytes(data))
 
 
+def fixture_pe_section_and_later_certificate(
+    *, pe32: bool, raw_offset: int = 0x200, raw_size: int = 0x200,
+) -> bytes:
+    """Synthetic section followed by certificate at file offset 0x400."""
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    certificate = bytes(data[0x200:0x210])
+    data.extend(bytes(0x200))  # end at 0x410
+    data[0x200:0x210] = bytes(0x10)
+    data[0x400:0x410] = certificate
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", data, directory, 0x400, 0x10)
+    struct.pack_into("<H", data, 0x84 + 2, 1)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", data, section + 16, raw_size, raw_offset)
+    return bytes(data)
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("raw_offset,raw_size", [(0x210, 0x10), (0x200, 0x30)])
+def test_file_alignment_violations_never_positive(pe32, raw_offset, raw_size):
+    image = fixture_pe_section_and_later_certificate(
+        pe32=pe32, raw_offset=raw_offset, raw_size=raw_size,
+    )
+    with pytest.raises(pe.PEFormatError, match="section_raw_alignment_invalid"):
+        pe.inspect_bytes(image)
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_file_aligned_raw_section_before_certificate_is_diagnostic_only(pe32):
+    finding = pe.inspect_bytes(
+        fixture_pe_section_and_later_certificate(pe32=pe32)
+    )
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["physical_install_authorized"] is False
+    assert finding["full_bootchain_authenticated"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("alignment", [0, 0x180, 0x100, 0x20000])
+def test_invalid_file_alignment_never_positive(pe32, alignment):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 36, alignment)
+    with pytest.raises(pe.PEFormatError, match="file_alignment_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
 @pytest.mark.parametrize("pe32", [True, False])
 def test_certificate_table_overlaps_raw_section_rejected(pe32):
     data = bytearray(fixture_pe(present=True, pe32=pe32))
-    # The raw section occupies file bytes [0x200, 0x210), and the fake
-    # WIN_CERTIFICATE occupies exactly the same range. This remains invalid
-    # even though the range is outside SizeOfHeaders.
-    struct.pack_into("<H", data, 0x84 + 2, 1)  # NumberOfSections
+    # Aligned raw section [0x200,0x400) overlaps certificate [0x200,0x210).
+    data.extend(bytes(0x1F0))
+    struct.pack_into("<H", data, 0x84 + 2, 1)
     section = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", data, section + 16, 0x10, 0x200)
+    struct.pack_into("<II", data, section + 16, 0x200, 0x200)
     with pytest.raises(pe.PEFormatError, match="certificate_overlaps_section_data"):
         pe.inspect_bytes(bytes(data))
 
 
 @pytest.mark.parametrize("pe32", [True, False])
 def test_certificate_table_after_section_raw_data_remains_diagnostic_only(pe32):
-    data = bytearray(fixture_pe(present=True, pe32=pe32))
-    certificate = data[0x200:0x210]
-    data.extend(bytes(0x100))
-    data[0x300:0x310] = certificate
-    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
-    struct.pack_into("<II", data, directory, 0x300, 0x10)
-    struct.pack_into("<H", data, 0x84 + 2, 1)
-    section = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", data, section + 16, 0x30, 0x200)
-    finding = pe.inspect_bytes(bytes(data))
+    finding = pe.inspect_bytes(
+        fixture_pe_section_and_later_certificate(pe32=pe32)
+    )
     assert finding["signature_table"] == "structurally_present"
     assert finding["cryptographic_signature_verified"] is False
     assert finding["full_bootchain_authenticated"] is False
@@ -177,12 +217,11 @@ def test_certificate_table_after_section_raw_data_remains_diagnostic_only(pe32):
 @pytest.mark.parametrize("pe32", [False, True])
 def test_certificate_before_later_raw_section_is_invalid(pe32):
     image = bytearray(fixture_pe(present=True, pe32=pe32))
-    # Certificate occupies [0x200, 0x210), section data starts *later*
-    # at [0x400, 0x500). Ranges do not overlap; old code claimed present.
-    image.extend(bytes(0x520 - len(image)))
+    # Certificate [0x200,0x210) precedes aligned raw section [0x400,0x600).
+    image.extend(bytes(0x620 - len(image)))
     struct.pack_into("<H", image, 0x84 + 2, 1)
     header = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", image, header + 16, 0x100, 0x400)
+    struct.pack_into("<II", image, header + 16, 0x200, 0x400)
     with pytest.raises(pe.PEFormatError, match="certificate_precedes_section_data"):
         pe.inspect_bytes(bytes(image))
 

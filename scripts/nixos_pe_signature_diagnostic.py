@@ -98,6 +98,15 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     # for on-disk headers. Validate this bound BEFORE reading section ranges.
     if optional_bytes < 64:
         raise PEFormatError("pe_header_truncated")
+    # This bounded diagnostic accepts conventional executable PE FileAlignment
+    # (power-of-two, 512..65536). Unusual low-alignment images require their
+    # own reviewed layout policy; a structural positive must fail closed.
+    file_alignment = _u32(data, optional + 36)
+    if (
+        not 0x200 <= file_alignment <= 0x10000
+        or file_alignment & (file_alignment - 1)
+    ):
+        raise PEFormatError("file_alignment_invalid")
     declared_headers_end = _u32(data, optional + 60)
     if not (section_headers_end <= declared_headers_end <= len(data)):
         raise PEFormatError("declared_headers_invalid")
@@ -118,6 +127,11 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
             or raw_size > len(data) - raw_offset
         ):
             raise PEFormatError("section_raw_range_invalid")
+        # The mapped section's file offset AND declared raw size must be
+        # multiples of FileAlignment. Merely non-overlapping certificate
+        # bytes do not make an inconsistent PE layout structurally valid.
+        if raw_offset % file_alignment or raw_size % file_alignment:
+            raise PEFormatError("section_raw_alignment_invalid")
         section_raw_ranges.append((raw_offset, raw_offset + raw_size))
 
     magic = _u16(data, optional)
