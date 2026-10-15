@@ -96,6 +96,14 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     section_headers_end = optional_end + sections * 40
     if optional_end > len(data) or section_headers_end > len(data):
         raise PEFormatError("pe_header_truncated")
+    # PE32 and PE32+ locate SizeOfHeaders at optional + 60. Unlike the
+    # section table's end, it also includes the alignment/padding reserved
+    # for on-disk headers. Validate this bound BEFORE reading section ranges.
+    if optional_bytes < 64:
+        raise PEFormatError("pe_header_truncated")
+    declared_headers_end = _u32(data, optional + 60)
+    if not (section_headers_end <= declared_headers_end <= len(data)):
+        raise PEFormatError("declared_headers_invalid")
 
     # PE/COFF section-table raw ranges are FILE OFFSETS. Security-directory
     # certificate bytes must never be accepted as a section's own raw data,
@@ -108,7 +116,7 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         if raw_size == 0:
             continue
         if (
-            raw_offset < section_headers_end
+            raw_offset < declared_headers_end
             or raw_offset > len(data)
             or raw_size > len(data) - raw_offset
         ):
@@ -124,12 +132,6 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         raise PEFormatError("optional_magic_unsupported")
     if optional_bytes < directory_start:
         raise PEFormatError("pe_header_truncated")
-    # SizeOfHeaders describes the full on-disk PE header region, including
-    # alignment padding after section headers. A certificate table must never
-    # be structurally positive while any of its bytes fall inside that range.
-    declared_headers_end = _u32(data, optional + 60)
-    if not (section_headers_end <= declared_headers_end <= len(data)):
-        raise PEFormatError("declared_headers_invalid")
     directory_count = _u32(data, optional + directory_count_offset)
     if directory_count <= 4:
         return _result(signature_table="absent", certificate_count=0)

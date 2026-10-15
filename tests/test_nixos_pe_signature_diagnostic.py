@@ -131,14 +131,27 @@ def test_certificate_table_must_not_overlap_pe_headers():
 
 
 @pytest.mark.parametrize("pe32", [True, False])
+@pytest.mark.parametrize("raw_offset", [0x1C0, 0x1F0])
+def test_section_bytes_inside_declared_header_padding_are_invalid(pe32, raw_offset):
+    # Section headers finish before 0x1c0, but SizeOfHeaders still reserves
+    # the entire [0, 0x200) file range. Certificate at 0x200 is separate.
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", data, 0x84 + 2, 1)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", data, section + 16, 0x10, raw_offset)
+    with pytest.raises(pe.PEFormatError, match="section_raw_range_invalid"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [True, False])
 def test_certificate_table_overlaps_raw_section_rejected(pe32):
     data = bytearray(fixture_pe(present=True, pe32=pe32))
-    # The raw section occupies file bytes [0x1c0, 0x210), while the fake
-    # WIN_CERTIFICATE occupies [0x200, 0x210). A parser checking ONLY the
-    # end of section headers would erroneously admit this certificate.
+    # The raw section occupies file bytes [0x200, 0x210), and the fake
+    # WIN_CERTIFICATE occupies exactly the same range. This remains invalid
+    # even though the range is outside SizeOfHeaders.
     struct.pack_into("<H", data, 0x84 + 2, 1)  # NumberOfSections
     section = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", data, section + 16, 0x50, 0x1C0)
+    struct.pack_into("<II", data, section + 16, 0x10, 0x200)
     with pytest.raises(pe.PEFormatError, match="certificate_overlaps_section_data"):
         pe.inspect_bytes(bytes(data))
 
@@ -146,9 +159,14 @@ def test_certificate_table_overlaps_raw_section_rejected(pe32):
 @pytest.mark.parametrize("pe32", [True, False])
 def test_certificate_table_after_section_raw_data_remains_diagnostic_only(pe32):
     data = bytearray(fixture_pe(present=True, pe32=pe32))
+    certificate = data[0x200:0x210]
+    data.extend(bytes(0x100))
+    data[0x300:0x310] = certificate
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", data, directory, 0x300, 0x10)
     struct.pack_into("<H", data, 0x84 + 2, 1)
     section = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", data, section + 16, 0x30, 0x1C0)
+    struct.pack_into("<II", data, section + 16, 0x30, 0x200)
     finding = pe.inspect_bytes(bytes(data))
     assert finding["signature_table"] == "structurally_present"
     assert finding["cryptographic_signature_verified"] is False
@@ -176,9 +194,6 @@ def test_unverified_trailing_debug_after_certificate_fails_closed(pe32):
     # debug-directory entries, so even zero padding after cert is unknown.
     image = bytearray(fixture_pe(present=True, pe32=pe32))
     image.extend(bytes(32))
-    struct.pack_into("<H", image, 0x84 + 2, 1)
-    header = 0x98 + (0xE0 if pe32 else 0xF0)
-    struct.pack_into("<II", image, header + 16, 0x30, 0x1C0)
     with pytest.raises(pe.PEFormatError, match="unverified_certificate_overlay"):
         pe.inspect_bytes(bytes(image))
 
