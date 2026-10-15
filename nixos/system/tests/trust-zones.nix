@@ -41,8 +41,9 @@ pkgs.testers.runNixOSTest {
     # Model the worst case inside the agent compartment: attacker has guest root.
     agent.succeed("test $(id -u) -eq 0")
 
-    # Only the deliberately exposed broker protocol is reachable.
-    agent.succeed("curl --fail --silent --max-time 3 http://control:18444/ | grep -q broker-ok")
+    # Control-side open_port does not prove agent-side network readiness.
+    # Give the positive broker proof a strict deadline; keep denials immediate.
+    agent.wait_until_succeeds("curl --fail --silent --max-time 3 http://control:18444/ | grep -xq broker-ok", timeout=30)
     agent.fail("curl --fail --silent --max-time 2 http://control:22/")
 
     # Guest root has no filesystem view of the control-plane secret.
