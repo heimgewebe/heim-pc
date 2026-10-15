@@ -32,6 +32,7 @@ def fixture_pe(*, present: bool = False, pe32: bool = False) -> bytes:
     struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
     struct.pack_into("<I", image, optional + 32, 0x1000)  # SectionAlignment
     struct.pack_into("<I", image, optional + 36, 0x200)   # FileAlignment
+    struct.pack_into("<I", image, optional + 56, 0x1000)  # SizeOfImage
     struct.pack_into("<I", image, optional + (92 if pe32 else 108), 16)
     directory = optional + (96 if pe32 else 112) + 4 * 8
     struct.pack_into("<I", image, optional + 60, 0x200)  # SizeOfHeaders
@@ -107,10 +108,11 @@ def test_certificate_padding_cannot_hide_payload_bytes():
 
 
 @pytest.mark.parametrize("pe32", [False, True])
-@pytest.mark.parametrize("headers_size", [0x208, 0x210])
+@pytest.mark.parametrize("headers_size", [0x400, 0x600])
 def test_certificate_inside_declared_size_of_headers_is_invalid(pe32, headers_size):
     data = bytearray(fixture_pe(present=True, pe32=pe32))
-    # WIN_CERTIFICATE occupies [0x200, 0x210); SizeOfHeaders includes it.
+    # Keep SizeOfHeaders file-aligned; the certificate still lies inside it.
+    data.extend(bytes(headers_size - len(data)))
     struct.pack_into("<I", data, 0x98 + 60, headers_size)
     with pytest.raises(pe.PEFormatError, match="certificate_overlaps_declared_headers"):
         pe.inspect_bytes(bytes(data))
@@ -123,6 +125,58 @@ def test_malformed_size_of_headers_never_positive(pe32, headers_size):
     struct.pack_into("<I", data, 0x98 + 60, headers_size)
     with pytest.raises(pe.PEFormatError, match="declared_headers_invalid"):
         pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("section_alignment", [0, 0x100, 0x180, 0x800])
+def test_invalid_section_alignment_cannot_be_cert_positive_or_unsigned(
+    pe32, present, section_alignment,
+):
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 32, section_alignment)
+    with pytest.raises(pe.PEFormatError, match="section_alignment_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_low_section_alignment_equal_to_file_alignment_is_admitted(pe32):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 32, 0x200)
+    finding = pe.inspect_bytes(bytes(image))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["full_bootchain_authenticated"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_size_of_headers_must_be_file_aligned(pe32, present):
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    # Larger than all actual PE header bytes but not rounded to FileAlignment.
+    struct.pack_into("<I", image, 0x98 + 60, 0x1C8)
+    with pytest.raises(pe.PEFormatError, match="declared_headers_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("image_size", [0, 0x180, 0x1001])
+def test_invalid_size_of_image_cannot_be_positive(pe32, present, image_size):
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 56, image_size)
+    with pytest.raises(pe.PEFormatError, match="size_of_image_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+def reject_every_data_read(scoped):
+    """Enforce no read/readv/pread on unsupported descriptor classes."""
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("no data-read primitive may touch this descriptor")
+
+    for name in ("read", "readv", "pread"):
+        if hasattr(pe.os, name):
+            scoped.setattr(pe.os, name, forbid)
 
 
 def test_certificate_table_must_not_overlap_pe_headers():
@@ -159,7 +213,77 @@ def fixture_pe_section_and_later_certificate(
     struct.pack_into("<H", data, 0x84 + 2, 1)
     section = 0x98 + (0xE0 if pe32 else 0xF0)
     struct.pack_into("<II", data, section + 16, raw_size, raw_offset)
+    struct.pack_into("<II", data, section + 8, 0x200, 0x1000)
+    struct.pack_into("<I", data, 0x98 + 56, 0x2000)  # mapped section end
     return bytes(data)
+
+
+def fixture_pe_two_sections(*, pe32: bool, overlapping: bool) -> bytes:
+    """Two 0x200-aligned section ranges, followed by a synthetic certificate."""
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    certificate = bytes(image[0x200:0x210])
+    image.extend(bytes(0x610 - len(image)))
+    image[0x200:0x210] = bytes(0x10)
+    image[0x600:0x610] = certificate
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", image, directory, 0x600, 0x10)
+    struct.pack_into("<H", image, 0x84 + 2, 2)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<II", image, section + 16,
+                     0x400 if overlapping else 0x200, 0x200)
+    struct.pack_into("<II", image, section + 40 + 16, 0x200, 0x400)
+    struct.pack_into("<II", image, section + 8, 0x200, 0x1000)
+    struct.pack_into("<II", image, section + 40 + 8, 0x200, 0x2000)
+    struct.pack_into("<I", image, 0x98 + 56, 0x3000)
+    return bytes(image)
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_overlapping_raw_sections_never_positive(pe32):
+    with pytest.raises(pe.PEFormatError, match="section_raw_overlap"):
+        pe.inspect_bytes(fixture_pe_two_sections(pe32=pe32, overlapping=True))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_two_nonoverlapping_raw_sections_remain_diagnostic_only(pe32):
+    finding = pe.inspect_bytes(fixture_pe_two_sections(pe32=pe32, overlapping=False))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("virtual_address", [0, 0x200, 0x1100])
+def test_invalid_section_virtual_address_never_positive(pe32, virtual_address):
+    image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<I", image, section + 12, virtual_address)
+    with pytest.raises(pe.PEFormatError, match="section_virtual_range_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("overrun", ["mapped_end", "virtual_size"])
+def test_section_virtual_span_cannot_escape_size_of_image(pe32, overrun):
+    image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    if overrun == "mapped_end":
+        struct.pack_into("<I", image, 0x98 + 56, 0x1000)
+    else:
+        struct.pack_into("<I", image, section + 8, 0x2000)
+    with pytest.raises(pe.PEFormatError, match="section_virtual_range_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_low_alignment_matching_raw_offset_and_rva_stays_diagnostic(pe32):
+    image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 32, 0x200)
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<I", image, section + 12, 0x200)
+    finding = pe.inspect_bytes(bytes(image))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["physical_install_authorized"] is False
 
 
 @pytest.mark.parametrize("pe32", [False, True])
@@ -183,6 +307,14 @@ def test_file_aligned_raw_section_before_certificate_is_diagnostic_only(pe32):
 
 
 @pytest.mark.parametrize("pe32", [False, True])
+def test_low_alignment_section_rva_must_match_disk_position(pe32):
+    image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+    struct.pack_into("<I", image, 0x98 + 32, 0x200)
+    with pytest.raises(pe.PEFormatError, match="section_low_alignment_rva_mismatch"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
 @pytest.mark.parametrize("alignment", [0, 0x180, 0x100, 0x20000])
 def test_invalid_file_alignment_never_positive(pe32, alignment):
     image = bytearray(fixture_pe(present=True, pe32=pe32))
@@ -199,6 +331,8 @@ def test_certificate_table_overlaps_raw_section_rejected(pe32):
     struct.pack_into("<H", data, 0x84 + 2, 1)
     section = 0x98 + (0xE0 if pe32 else 0xF0)
     struct.pack_into("<II", data, section + 16, 0x200, 0x200)
+    struct.pack_into("<II", data, section + 8, 0x200, 0x1000)
+    struct.pack_into("<I", data, 0x98 + 56, 0x2000)
     with pytest.raises(pe.PEFormatError, match="certificate_overlaps_section_data"):
         pe.inspect_bytes(bytes(data))
 
@@ -222,6 +356,8 @@ def test_certificate_before_later_raw_section_is_invalid(pe32):
     struct.pack_into("<H", image, 0x84 + 2, 1)
     header = 0x98 + (0xE0 if pe32 else 0xF0)
     struct.pack_into("<II", image, header + 16, 0x200, 0x400)
+    struct.pack_into("<II", image, header + 8, 0x200, 0x1000)
+    struct.pack_into("<I", image, 0x98 + 56, 0x2000)
     with pytest.raises(pe.PEFormatError, match="certificate_precedes_section_data"):
         pe.inspect_bytes(bytes(image))
 
@@ -276,11 +412,9 @@ def test_nonblocking_pipe_must_be_rejected_before_read_despite_shared_flags(monk
         os.set_blocking(fd, False)
         os.write(writer, fixture_pe(present=True))
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("untrusted pipe data must never be read")
-            ))
+            reject_every_data_read(scoped)
             with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
-                pe.inspect_fd(fd)
+                pe._inspect_fd_raw(fd)
     finally:
         os.close(peer)
         os.close(fd)
@@ -328,8 +462,9 @@ def test_borrowed_fd_swapped_to_device_after_initial_fstat_is_not_read(tmp_path,
     caller_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
     harmless_device = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
     original_fstat = os.fstat
-    original_read = os.read
+    original_pread = os.pread
     swapped = False
+    pread_seen = False
 
     def swap_borrowed_after_stat(fd):
         nonlocal swapped
@@ -339,19 +474,20 @@ def test_borrowed_fd_swapped_to_device_after_initial_fstat_is_not_read(tmp_path,
             os.dup2(harmless_device, caller_fd)
         return info
 
-    def prohibit_device_read(fd, amount):
-        if not stat.S_ISREG(original_fstat(fd).st_mode) and not stat.S_ISFIFO(
-            original_fstat(fd).st_mode
-        ):
-            raise AssertionError("diagnostic read a swapped-to-device descriptor")
-        return original_read(fd, amount)
+    def prohibit_device_pread(fd, amount, offset):
+        nonlocal pread_seen
+        pread_seen = True
+        if not stat.S_ISREG(original_fstat(fd).st_mode):
+            raise AssertionError("diagnostic used pread on a swapped-to-device fd")
+        return original_pread(fd, amount, offset)
 
     try:
         with monkeypatch.context() as local:
             local.setattr(pe.os, "fstat", swap_borrowed_after_stat)
-            local.setattr(pe.os, "read", prohibit_device_read)
-            finding = pe.inspect_fd(caller_fd)
+            local.setattr(pe.os, "pread", prohibit_device_pread)
+            finding = pe._inspect_fd_raw(caller_fd)
         assert swapped
+        assert pread_seen
         assert finding["input_sha256"] == pe.hashlib.sha256(data).hexdigest()
         assert finding["physical_install_authorized"] is False
     finally:
@@ -365,16 +501,21 @@ def test_shared_regular_file_description_offset_drift_cannot_swap_snapshot(tmp_p
     image.write_bytes(data)
     caller_fd = os.open(image, os.O_RDONLY | os.O_CLOEXEC)
     other_fd = os.dup(caller_fd)
-    original_read = os.read
+    original_pread = os.pread
+    pread_calls = 0
 
-    def shift_shared_offset_before_read(fd, amount):
+    def shift_shared_offset_before_pread(fd, amount, offset):
+        nonlocal pread_calls
+        pread_calls += 1
         os.lseek(other_fd, 23, os.SEEK_SET)
-        return original_read(fd, amount)
+        return original_pread(fd, amount, offset)
 
     try:
         with monkeypatch.context() as local:
-            local.setattr(pe.os, "read", shift_shared_offset_before_read)
-            finding = pe.inspect_fd(caller_fd)
+            local.setattr(pe.os, "pread", shift_shared_offset_before_pread)
+            finding = pe._inspect_fd_raw(caller_fd)
+        assert pread_calls > 0
+        assert os.lseek(other_fd, 0, os.SEEK_CUR) == 23
         assert finding["input_sha256"] == pe.hashlib.sha256(data).hexdigest()
         assert finding["input_size"] == len(data)
         assert finding["physical_install_authorized"] is False
@@ -408,11 +549,9 @@ def test_preopened_directory_fd_rejected_before_any_data_read(tmp_path, monkeypa
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("never read a non-regular fd")
-            ))
+            reject_every_data_read(scoped)
             with pytest.raises(pe.PEFormatError, match="unsafe_input"):
-                pe.inspect_fd(fd)
+                pe._inspect_fd_raw(fd)
     finally:
         os.close(fd)
 
@@ -423,14 +562,12 @@ def test_preopened_character_device_fd_cannot_be_read(monkeypatch):
     fd = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
     try:
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("device read would be unsafe")
-            ))
+            reject_every_data_read(scoped)
             scoped.setattr(pe.os, "open", lambda *_: (_ for _ in ()).throw(
                 AssertionError("diagnostic must never open paths")
             ))
             with pytest.raises(pe.PEFormatError, match="unsafe_input"):
-                pe.inspect_fd(fd)
+                pe._inspect_fd_raw(fd)
     finally:
         os.close(fd)
 
@@ -447,11 +584,9 @@ def test_preopened_pipe_is_rejected_before_any_read(monkeypatch):
             scoped.setattr(pe.os, "open", lambda *_: (_ for _ in ()).throw(
                 AssertionError("diagnostic must never open paths")
             ))
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("diagnostic must never read FIFO data")
-            ))
+            reject_every_data_read(scoped)
             with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
-                pe.inspect_fd(read_fd)
+                pe._inspect_fd_raw(read_fd)
     finally:
         os.close(read_fd)
         if write_fd >= 0:
@@ -503,11 +638,9 @@ def test_blocking_pipe_is_refused_before_any_read(monkeypatch):
     try:
         os.write(writer, b"MZ")
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("blocking pipe read was reached")
-            ))
+            reject_every_data_read(scoped)
             with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
-                pe.inspect_fd(pipe_fd)
+                pe._inspect_fd_raw(pipe_fd)
     finally:
         os.close(pipe_fd)
         os.close(writer)
@@ -523,11 +656,9 @@ def test_shared_pipe_open_description_cannot_change_input_admission(monkeypatch)
         os.set_blocking(other_fd, True)
         assert os.get_blocking(fd)
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
-                AssertionError("FIFO must fail before any data read")
-            ))
+            reject_every_data_read(scoped)
             with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
-                pe.inspect_fd(fd)
+                pe._inspect_fd_raw(fd)
     finally:
         os.close(other_fd)
         os.close(fd)
@@ -614,3 +745,17 @@ def test_cli_empty_stdin_fails_closed_without_path_reads():
     report = json.loads(done.stdout)
     assert report["findings"][0]["status"] == "unavailable"
     assert report["physical_install_authorized"] is False
+def test_stalled_regular_backend_cannot_wedge_caller(tmp_path, monkeypatch):
+    """An actually sleeping worker must be killed without awaiting its I/O."""
+    import time
+
+    image = tmp_path / "timeout.efi"
+    image.write_bytes(fixture_pe(present=True))
+    # Simulate a child stuck inside a single blocking pread; no FUSE needed.
+    monkeypatch.setattr(pe, "_WORKER_CODE", "import time; time.sleep(60)", raising=False)
+    monkeypatch.setattr(pe, "WORKER_DEADLINE_SECONDS", 0.15, raising=False)
+    started = time.monotonic()
+    with image.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="read_deadline_exceeded"):
+            pe.inspect_fd(opened.fileno())
+    assert time.monotonic() - started < 2.5

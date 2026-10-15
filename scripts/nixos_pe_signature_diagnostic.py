@@ -20,6 +20,7 @@ import json
 import os
 import stat
 import struct
+import subprocess
 import sys
 from typing import Any
 
@@ -27,6 +28,29 @@ MAX_IMAGE_BYTES = 256 * 1024 * 1024
 MAX_CERTIFICATE_TABLE_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_COUNT = 16
 READ_CHUNK_BYTES = 1024 * 1024
+# Bounded caller wait. A blocked kernel I/O child might not be immediately
+# killable: this limits the caller, not resource cleanup in D-state.
+WORKER_DEADLINE_SECONDS = 5.0
+
+# Re-exec this reviewed module in an isolated interpreter, with only a
+# preopened descriptor passed through. Never take a user-supplied input path.
+_WORKER_CODE = """
+import importlib.util
+import json
+import sys
+
+try:
+    spec = importlib.util.spec_from_file_location("_pe_diagnostic_worker", sys.argv[1])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        report = module._inspect_fd_raw(int(sys.argv[2]))
+        print(json.dumps({"kind": "ok", "finding": report}, sort_keys=True))
+    except module.PEFormatError as exc:
+        print(json.dumps({"kind": "error", "code": str(exc)}))
+except BaseException:
+    print('{"kind":"error","code":"unsafe_input"}')
+"""
 
 _NON_CLAIMS = [
     "certificate_table_is_not_cryptographic_verification",
@@ -107,31 +131,83 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         or file_alignment & (file_alignment - 1)
     ):
         raise PEFormatError("file_alignment_invalid")
+    # For this x86/x64 diagnostic profile, PE/COFF requires a power-of-two
+    # SectionAlignment >= FileAlignment. Below the 4 KiB page boundary the
+    # two alignments must be equal; raw file positions then match their RVAs.
+    section_alignment = _u32(data, optional + 32)
+    if (
+        section_alignment < file_alignment
+        or section_alignment & (section_alignment - 1)
+        or (section_alignment < 0x1000 and section_alignment != file_alignment)
+    ):
+        raise PEFormatError("section_alignment_invalid")
     declared_headers_end = _u32(data, optional + 60)
-    if not (section_headers_end <= declared_headers_end <= len(data)):
+    if (
+        not (section_headers_end <= declared_headers_end <= len(data))
+        or declared_headers_end % file_alignment
+    ):
         raise PEFormatError("declared_headers_invalid")
+    # SizeOfImage covers at least the aligned in-memory headers, and PE/COFF
+    # requires it to be a multiple of the virtual SectionAlignment.
+    size_of_image = _u32(data, optional + 56)
+    minimum_image_size = (
+        (declared_headers_end + section_alignment - 1) // section_alignment
+    ) * section_alignment
+    if (
+        size_of_image < minimum_image_size
+        or size_of_image % section_alignment
+    ):
+        raise PEFormatError("size_of_image_invalid")
 
     # PE/COFF section-table raw ranges are FILE OFFSETS. Security-directory
     # certificate bytes must never be accepted as a section's own raw data,
     # even when the certificate lies past every section HEADER.
     section_raw_ranges: list[tuple[int, int]] = []
+    section_virtual_ranges: list[tuple[int, int]] = []
     for index in range(sections):
         section_header = optional_end + index * 40
+        virtual_size = _u32(data, section_header + 8)
+        virtual_address = _u32(data, section_header + 12)
         raw_size = _u32(data, section_header + 16)
         raw_offset = _u32(data, section_header + 20)
-        if raw_size == 0:
-            continue
+        if raw_size:
+            if (
+                raw_offset < declared_headers_end
+                or raw_offset > len(data)
+                or raw_size > len(data) - raw_offset
+            ):
+                raise PEFormatError("section_raw_range_invalid")
+            if raw_offset % file_alignment or raw_size % file_alignment:
+                raise PEFormatError("section_raw_alignment_invalid")
+        # PE image sections live on SectionAlignment boundaries after the
+        # in-memory headers. VirtualSize may exceed the file-backed portion,
+        # while SizeOfRawData may be padded beyond VirtualSize.
+        virtual_span = max(virtual_size, raw_size)
         if (
-            raw_offset < declared_headers_end
-            or raw_offset > len(data)
-            or raw_size > len(data) - raw_offset
+            not virtual_span
+            or virtual_address < minimum_image_size
+            or virtual_address % section_alignment
+            or virtual_address > size_of_image
+            or virtual_span > size_of_image - virtual_address
         ):
-            raise PEFormatError("section_raw_range_invalid")
-        # The mapped section's file offset AND declared raw size must be
-        # multiples of FileAlignment. Merely non-overlapping certificate
-        # bytes do not make an inconsistent PE layout structurally valid.
-        if raw_offset % file_alignment or raw_size % file_alignment:
-            raise PEFormatError("section_raw_alignment_invalid")
+            raise PEFormatError("section_virtual_range_invalid")
+        if any(
+            virtual_address < prior_end and prior_start < virtual_address + virtual_span
+            for prior_start, prior_end in section_virtual_ranges
+        ):
+            raise PEFormatError("section_virtual_overlap")
+        section_virtual_ranges.append((virtual_address, virtual_address + virtual_span))
+        if not raw_size:
+            continue
+        if section_alignment < 0x1000 and raw_offset != virtual_address:
+            raise PEFormatError("section_low_alignment_rva_mismatch")
+        # Reject ambiguous overlapping mapped file bytes even when both
+        # sections individually precede a correctly placed certificate.
+        if any(
+            raw_offset < earlier_end and earlier_start < raw_offset + raw_size
+            for earlier_start, earlier_end in section_raw_ranges
+        ):
+            raise PEFormatError("section_raw_overlap")
         section_raw_ranges.append((raw_offset, raw_offset + raw_size))
 
     magic = _u16(data, optional)
@@ -223,8 +299,8 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
 
 
 
-def inspect_fd(fd: int) -> dict[str, Any]:
-    """Inspect only a caller-preopened single-linked regular file.
+def _inspect_fd_raw(fd: int) -> dict[str, Any]:
+    """Worker-internal raw pread path for a preopened single-linked file.
 
     The borrowed descriptor may be reassigned by another thread, so dup()
     first and validate the private descriptor before any read. A dup shares
@@ -285,6 +361,74 @@ def inspect_fd(fd: int) -> dict[str, Any]:
     finally:
         if pinned_fd >= 0:
             os.close(pinned_fd)
+
+
+def inspect_fd(fd: int) -> dict[str, Any]:
+    """Inspect a caller-preopened FD with a bounded *parent* wait.
+
+    The actual fstat/pread runs only in an exec-isolated disposable child.
+    Even a stalled FUSE/NFS read cannot hold the calling process indefinitely.
+    SIGKILL does not guarantee immediate cleanup of an uninterruptible kernel
+    wait (D-state), so no unconditional worker-reaping claim is made. Neither
+    the worker nor its report authorizes boot, firmware, keys or installation.
+    """
+    if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0:
+        raise PEFormatError("unsafe_input")
+
+    # Pin the caller's descriptor number before handing it to the child.
+    try:
+        pinned_fd = os.dup(fd)
+    except OSError as exc:
+        raise PEFormatError("unsafe_input") from exc
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        # -I ignores PYTHONPATH/site imports and -B prevents bytecode writes.
+        # The script is our own reviewed source, never a path from argv/stdin.
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-I", "-B", "-c", _WORKER_CODE,
+                os.path.abspath(__file__), str(pinned_fd),
+            ],
+            pass_fds=(pinned_fd,),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            env={"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        try:
+            output, _stderr = proc.communicate(
+                input=b"", timeout=WORKER_DEADLINE_SECONDS
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Do NOT use an unbounded wait() after kill; D-state may persist.
+            proc.kill()
+            raise PEFormatError("read_deadline_exceeded") from exc
+        if proc.returncode != 0 or len(output) > 65536:
+            raise PEFormatError("unsafe_input")
+        try:
+            message = json.loads(output)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise PEFormatError("unsafe_input") from exc
+        if not isinstance(message, dict):
+            raise PEFormatError("unsafe_input")
+        if message.get("kind") == "error" and isinstance(message.get("code"), str):
+            raise PEFormatError(message["code"])
+        if message.get("kind") != "ok" or not isinstance(message.get("finding"), dict):
+            raise PEFormatError("unsafe_input")
+        return message["finding"]
+    except OSError as exc:
+        raise PEFormatError("unsafe_input") from exc
+    finally:
+        os.close(pinned_fd)
+        # Only bounded, nonblocking cleanup: an uninterruptible child can
+        # outlive SIGKILL and must be managed by the outer task/cgroup policy.
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 class _RedactedArgumentParser(argparse.ArgumentParser):
