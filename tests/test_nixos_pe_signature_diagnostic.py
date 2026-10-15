@@ -216,6 +216,38 @@ def test_invalid_raw_section_extent_is_never_accepted(pe32):
         pe.inspect_bytes(bytes(data))
 
 
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_claimed_directory_count_cannot_outgrow_optional_header(pe32, present):
+    data = bytearray(fixture_pe(present=present, pe32=pe32))
+    # Only security-entry index 4 fits, but the header falsely declares 16.
+    # Checking only entry 4 used to return present (or absent) on bad PE.
+    directory_start = 96 if pe32 else 112
+    struct.pack_into("<H", data, 0x84 + 16, directory_start + 5 * 8)
+    with pytest.raises(pe.PEFormatError, match="pe_header_truncated"):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_nonblocking_pipe_must_be_rejected_before_read_despite_shared_flags(monkeypatch):
+    # A separate fd referring to the same open description can clear
+    # O_NONBLOCK after poll() and cause an unbounded blocking read.
+    fd, writer = os.pipe()
+    peer = os.dup(fd)
+    try:
+        os.set_blocking(fd, False)
+        os.write(writer, fixture_pe(present=True))
+        with monkeypatch.context() as scoped:
+            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
+                AssertionError("untrusted pipe data must never be read")
+            ))
+            with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
+                pe.inspect_fd(fd)
+    finally:
+        os.close(peer)
+        os.close(fd)
+        os.close(writer)
+
+
 def test_certificate_directory_count_less_than_five_means_unsigned():
     data = bytearray(fixture_pe(present=True))
     struct.pack_into("<I", data, 0x98 + 108, 4)
@@ -364,11 +396,11 @@ def test_preopened_character_device_fd_cannot_be_read(monkeypatch):
         os.close(fd)
 
 
-def test_preopened_pipe_contains_only_untrusted_bytes(monkeypatch):
+def test_preopened_pipe_is_rejected_before_any_read(monkeypatch):
     payload = fixture_pe(present=True)
     read_fd, write_fd = os.pipe()
     try:
-        os.set_blocking(read_fd, False)  # caller opt-in; diagnostic never mutates fd flags
+        os.set_blocking(read_fd, False)
         os.write(write_fd, payload)
         os.close(write_fd)
         write_fd = -1
@@ -376,9 +408,11 @@ def test_preopened_pipe_contains_only_untrusted_bytes(monkeypatch):
             scoped.setattr(pe.os, "open", lambda *_: (_ for _ in ()).throw(
                 AssertionError("diagnostic must never open paths")
             ))
-            finding = pe.inspect_fd(read_fd)
-        assert finding["signature_table"] == "structurally_present"
-        assert finding["physical_install_authorized"] is False
+            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
+                AssertionError("diagnostic must never read FIFO data")
+            ))
+            with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
+                pe.inspect_fd(read_fd)
     finally:
         os.close(read_fd)
         if write_fd >= 0:
@@ -406,19 +440,18 @@ def test_cli_help_never_exits_successfully(help_args):
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_unclosed_pipe_writer_times_out_without_success(monkeypatch, partial):
-    # Keep a writer open throughout. A bounded byte count alone would hang
-    # forever; the pipe should abort on an independent monotonic deadline.
+def test_unclosed_pipe_writer_rejected_immediately(monkeypatch, partial):
+    # An unclosed pipe can outlive any readiness poll. Reject all FIFOs
+    # regardless of whether they already contain untrusted PE bytes.
     import time
 
     fd, writer = os.pipe()
     try:
-        os.set_blocking(fd, False)  # nonblocking is required before any diagnostic read
+        os.set_blocking(fd, False)
         if partial:
             os.write(writer, fixture_pe(present=True))
-        monkeypatch.setattr(pe, "PIPE_READ_TIMEOUT_SECONDS", 0.08)
         started = time.monotonic()
-        with pytest.raises(pe.PEFormatError, match="input_timeout"):
+        with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
             pe.inspect_fd(fd)
         assert time.monotonic() - started < 2.0
     finally:
@@ -434,40 +467,30 @@ def test_blocking_pipe_is_refused_before_any_read(monkeypatch):
             scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
                 AssertionError("blocking pipe read was reached")
             ))
-            with pytest.raises(pe.PEFormatError, match="blocking_pipe_unsupported"):
+            with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
                 pe.inspect_fd(pipe_fd)
     finally:
         os.close(pipe_fd)
         os.close(writer)
 
 
-def test_nonblocking_pipe_after_spurious_poll_cannot_block(monkeypatch):
-    import time
-
+def test_shared_pipe_open_description_cannot_change_input_admission(monkeypatch):
     fd, writer = os.pipe()
-    os.set_blocking(fd, False)
-    os.write(writer, b"MZ")
-    underlying_read = os.read
-    first = True
-
-    def other_reader_consumes_available_data(actual_fd, count):
-        nonlocal first
-        if first:
-            first = False
-            assert underlying_read(fd, 2) == b"MZ"
-        # The nonblocking read now raises EAGAIN rather than hanging with
-        # the writer still open; the monotonic deadline then expires.
-        return underlying_read(actual_fd, count)
-
+    other_fd = os.dup(fd)
     try:
+        os.set_blocking(fd, False)
+        assert not os.get_blocking(other_fd)
+        # Same file description: another fd can remove O_NONBLOCK.
+        os.set_blocking(other_fd, True)
+        assert os.get_blocking(fd)
         with monkeypatch.context() as scoped:
-            scoped.setattr(pe, "PIPE_READ_TIMEOUT_SECONDS", 0.06)
-            scoped.setattr(pe.os, "read", other_reader_consumes_available_data)
-            started = time.monotonic()
-            with pytest.raises(pe.PEFormatError, match="input_timeout"):
+            scoped.setattr(pe.os, "read", lambda *_: (_ for _ in ()).throw(
+                AssertionError("FIFO must fail before any data read")
+            ))
+            with pytest.raises(pe.PEFormatError, match="pipe_input_unsupported"):
                 pe.inspect_fd(fd)
-            assert time.monotonic() - started < 2.0
     finally:
+        os.close(other_fd)
         os.close(fd)
         os.close(writer)
 
@@ -481,7 +504,7 @@ def test_cli_blocking_stdin_pipe_is_explicitly_unavailable():
     result = json.loads(done.stdout)
     finding = result["findings"][0]
     assert finding["status"] == "unavailable"
-    assert finding["reason_code"] == "blocking_pipe_unsupported"
+    assert finding["reason_code"] == "pipe_input_unsupported"
     assert result["physical_install_authorized"] is False
 
 
