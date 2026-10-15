@@ -155,12 +155,18 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     ):
         raise PEFormatError("certificate_overlaps_section_data")
     # Attribute certificates must occur *after* mapped section raw data.
-    # They need not be the final bytes of the file: PE files may also carry
-    # trailing non-mapped debug material after the certificate directory.
+    # PE files may carry trailing nonmapped debug material, but this parser
+    # deliberately does not parse or authenticate debug-directory entries:
+    # such images are outside its fail-closed structural-positive subset.
     if section_raw_ranges and certificate_start < max(
         raw_end for _, raw_end in section_raw_ranges
     ):
         raise PEFormatError("certificate_precedes_section_data")
+    # Without a reviewed nonmapped debug-directory parser, every byte after
+    # the declared attribute-certificate table is unverified overlay data.
+    # Never label unknown overlay as positive PE certificate structure.
+    if certificate_end != len(data):
+        raise PEFormatError("unverified_certificate_overlay")
 
     cursor = certificate_start
     end = certificate_start + certificate_bytes
@@ -290,10 +296,21 @@ def inspect_fd(fd: int) -> dict[str, Any]:
             os.close(pinned_fd)
 
 
+class _RedactedArgumentParser(argparse.ArgumentParser):
+    """Fail closed on any unsupported CLI shape without echoing private argv."""
+
+    def error(self, message: str) -> None:
+        # Default argparse interpolates every rejected argument into stderr,
+        # including private /dev/disk/by-id or EFI paths. Never log them.
+        del message
+        print("invalid PE diagnostic arguments", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
-    # argparse's default --help exits 0 BEFORE main() can return 2, which
-    # could be mistaken for admission by wrappers that check only exit status.
-    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
+    # The default --help action exits 0; arbitrary/rejected CLI arguments can
+    # also leak secrets through argparse.error. Both paths must fail nonzero.
+    parser = _RedactedArgumentParser(description=__doc__, add_help=False)
     parser.add_argument(
         "--stdin", action="store_true", required=True,
         help="inspect already-open standard input (regular file or pipe; NO path opening)",

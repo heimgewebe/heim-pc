@@ -150,16 +150,25 @@ def test_certificate_before_later_raw_section_is_invalid(pe32):
 
 
 @pytest.mark.parametrize("pe32", [False, True])
-def test_trailing_debug_bytes_do_not_force_certificate_to_eof(pe32):
+def test_unverified_trailing_debug_after_certificate_fails_closed(pe32):
+    # A valid PE can carry separately declared trailing debug information.
+    # This deliberately narrow parser does NOT authenticate/parse those
+    # debug-directory entries, so even zero padding after cert is unknown.
     image = bytearray(fixture_pe(present=True, pe32=pe32))
     image.extend(bytes(32))
     struct.pack_into("<H", image, 0x84 + 2, 1)
     header = 0x98 + (0xE0 if pe32 else 0xF0)
     struct.pack_into("<II", image, header + 16, 0x30, 0x1C0)
-    result = pe.inspect_bytes(bytes(image))
-    assert result["signature_table"] == "structurally_present"
-    assert result["full_bootchain_authenticated"] is False
-    assert result["physical_install_authorized"] is False
+    with pytest.raises(pe.PEFormatError, match="unverified_certificate_overlay"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("overlay", [b"ATTACK", bytes(1), bytes(16)])
+def test_undeclared_overlay_after_certificate_rejected(pe32, overlay):
+    image = fixture_pe(present=True, pe32=pe32) + overlay
+    with pytest.raises(pe.PEFormatError, match="unverified_certificate_overlay"):
+        pe.inspect_bytes(image)
 
 
 @pytest.mark.parametrize("pe32", [True, False])
@@ -465,6 +474,24 @@ def test_cli_stdin_never_returns_success_as_uefi_or_disk_authority(tmp_path, pre
         "structurally_present" if present else "absent"
     )
     assert b"/dev/" not in done.stdout
+
+
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        ["--stdin", "--pe-image", "/dev/disk/by-id/nvme-PRIVATE_SERIAL"],
+        ["--pe-image", "/dev/disk/by-id/nvme-PRIVATE_SERIAL"],
+        ["--stdin", "--unknown=/dev/disk/by-id/nvme-PRIVATE_SERIAL"],
+    ],
+)
+def test_rejected_private_path_never_echoed_to_any_log(bad_args):
+    done = subprocess.run(
+        [sys.executable, "-B", "-m", "scripts.nixos_pe_signature_diagnostic", *bad_args],
+        input=b"", capture_output=True, timeout=10, check=False,
+    )
+    assert done.returncode == 2
+    assert b"PRIVATE_SERIAL" not in done.stdout + done.stderr
+    assert b"/dev/disk/by-id/" not in done.stdout + done.stderr
 
 
 def test_cli_refuses_path_arguments_before_opening_anything(tmp_path):
