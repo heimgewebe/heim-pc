@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "528834fbabfc0cc5d4540a484cd9f1c22b3edc8c96a4dc3c73c38cb24664c728"
+SOURCE_SNAPSHOT_SHA256 = "fec60e2dcd160536cd68d608fb85a7b31a640b42ca7969c4173804c2a91f3641"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -232,6 +232,30 @@ class T(unittest.TestCase):
         self.assertIn("boot.loader.systemd-boot.enable = lib.mkForce false", flake)
         self.assertNotIn("nixosConfigurations.heim-pc-storage-limine-proof =", flake)
         self.assertIn('pkgs.runCommand "heim-pc-limine-module-options-only"', flake)
+
+    def test_trust_zones_vm_broker_reachability_is_bounded_and_fail_closed(self):
+        proof = (SOURCE / "tests/trust-zones.nix").read_text()
+        self.assertIn('control.wait_for_unit("grabowski-broker-boundary.service")', proof)
+        self.assertIn('control.wait_for_open_port(18444)', proof)
+        # The control-VM listener does not prove that the agent network is ready.
+        self.assertIn(
+            'agent.wait_until_succeeds("curl --fail --silent --max-time 3 http://control:18444/ | grep -xq broker-ok", timeout=30)',
+            proof,
+        )
+        self.assertNotIn(
+            'agent.succeed("curl --fail --silent --max-time 3 http://control:18444/',
+            proof,
+        )
+        # Keep negative cross-zone reachability and secret-exposure assertions.
+        self.assertIn(
+            'agent.fail("curl --fail --silent --max-time 2 http://control:22/")',
+            proof,
+        )
+        self.assertIn('agent.fail("test -e /etc/control-plane-secret")', proof)
+        self.assertIn(
+            'control.succeed("test $(systemctl show grabowski-broker-boundary.service -p NoNewPrivileges --value) = yes")',
+            proof,
+        )
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()
