@@ -156,8 +156,10 @@ def test_heavy_nix_installables_form_single_required_union():
     assert proof_marker, "the final signed-cache negative probe must still execute"
     assert union.startswith(
         "        run: >-\n"
-        "          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs"
+        "          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs --max-jobs 2 --option cores 2\n"
     )
+    assert union.count("--max-jobs 2 --option cores 2") == 1
+    assert "--max-jobs 0" not in union and "--keep-going" not in union
     assert union.count("nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs") == 1
     assert "|| true" not in union and "continue-on-error:" not in union
     installables = (

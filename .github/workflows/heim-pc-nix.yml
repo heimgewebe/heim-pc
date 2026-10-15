@@ -171,7 +171,7 @@ jobs:
       # still a mandatory input. Early evaluation and contracts stay separate.
       - name: Build all mandatory Nix closures and VM checks in one union
         run: >-
-          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs --max-jobs 2 --option cores 2
           .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel
           .#nixosConfigurations.heim-pc-vm.config.system.build.toplevel
           .#packages.x86_64-linux.physical-gate-proprietary-system
