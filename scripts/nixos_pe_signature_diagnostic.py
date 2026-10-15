@@ -186,21 +186,27 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
 
 
 def inspect_fd(fd: int) -> dict[str, Any]:
-    """Read only an EXISTING fd whose type is checked before any read.
+    """Inspect a caller-provided regular/pipe fd without opening any path.
 
-    Crucially this function never opens a pathname or device. The caller
-    owns the pre-opened descriptor; its provenance is NOT authenticated
-    here. A regular descriptor must be at offset zero and single-linked.
-    An already-open pipe may supply an ephemeral, untrusted byte snapshot.
+    The descriptor number received from a caller is not stable when other
+    threads may close/reassign it. A private duplicate pins one open file
+    description BEFORE validation; subsequent fstat/poll/read use that dup.
+
+    A dup shares regular-file offsets with the caller, so read with pread()
+    at explicit offsets. This also leaves the caller's offset unchanged.
+    The caller/source and malicious same-process FD-table manipulation
+    remain outside this non-authoritative structural diagnostic.
     """
     if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0:
         raise PEFormatError("unsafe_input")
+    pinned_fd = -1
     try:
-        before = os.fstat(fd)
+        pinned_fd = os.dup(fd)
+        before = os.fstat(pinned_fd)
         regular = stat.S_ISREG(before.st_mode)
         pipe = stat.S_ISFIFO(before.st_mode)
-        # Fail BEFORE any os.read if a caller supplied a device/TTY/socket,
-        # directory or other non-regular/non-pipe FD.
+        # A borrowed fd may have been replaced BEFORE dup(); reject every
+        # unapproved inode type before the first data-read system call.
         if not regular and not pipe:
             raise PEFormatError("unsafe_input")
         if regular:
@@ -210,17 +216,19 @@ def inspect_fd(fd: int) -> dict[str, Any]:
                 or before.st_size > MAX_IMAGE_BYTES
             ):
                 raise PEFormatError("unsafe_input")
-            if os.lseek(fd, 0, os.SEEK_CUR) != 0:
+            if os.lseek(pinned_fd, 0, os.SEEK_CUR) != 0:
                 raise PEFormatError("input_offset")
         chunks: list[bytes] = []
         total = 0
-        # A pipe with a live writer can remain readable once and then never
-        # reach EOF. Never turn a bounded *byte* budget into an unbounded
-        # temporal gate; do not mutate the caller-owned fd's O_NONBLOCK flag.
+        # A pipe with a live writer may never reach EOF. Time-bounded
+        # polling is retained; the caller's O_NONBLOCK mode is untouched.
         poller = select.poll() if pipe else None
         deadline = time.monotonic() + PIPE_READ_TIMEOUT_SECONDS if pipe else None
         if poller is not None:
-            poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL)
+            poller.register(
+                pinned_fd,
+                select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL,
+            )
         while total <= MAX_IMAGE_BYTES:
             if poller is not None:
                 assert deadline is not None
@@ -232,12 +240,16 @@ def inspect_fd(fd: int) -> dict[str, Any]:
                     continue
                 if events[0][1] & (select.POLLERR | select.POLLNVAL):
                     raise PEFormatError("unsafe_input")
-            part = os.read(fd, min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
+            count = min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total)
+            if regular:
+                part = os.pread(pinned_fd, count, total)
+            else:
+                part = os.read(pinned_fd, count)
             if not part:
                 break
             total += len(part)
             chunks.append(part)
-        after = os.fstat(fd)
+        after = os.fstat(pinned_fd)
         keys = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink")
         if regular:
             keys += ("st_mtime_ns", "st_ctime_ns")
@@ -254,6 +266,9 @@ def inspect_fd(fd: int) -> dict[str, Any]:
         return finding
     except OSError as exc:
         raise PEFormatError("unsafe_input") from exc
+    finally:
+        if pinned_fd >= 0:
+            os.close(pinned_fd)
 
 
 def main(argv: list[str] | None = None) -> int:

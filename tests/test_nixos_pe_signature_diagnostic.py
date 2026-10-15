@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import struct
 import subprocess
 import sys
@@ -174,6 +175,83 @@ def test_preopened_regular_fd_binds_exact_byte_digest(tmp_path):
     assert finding["input_sha256"] == pe.hashlib.sha256(content).hexdigest()
     assert finding["input_size"] == len(content)
     assert finding["physical_install_authorized"] is False
+
+
+def test_borrowed_fd_swapped_to_device_after_initial_fstat_is_not_read(tmp_path, monkeypatch):
+    # Simulate another thread replacing the BORROWED descriptor number just
+    # after the first file-identity read, before the diagnostic consumes bytes.
+    # A private dup must stay pinned to the original regular file.
+    data = fixture_pe(present=True)
+    source = tmp_path / "image.efi"
+    source.write_bytes(data)
+    caller_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+    harmless_device = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+    original_fstat = os.fstat
+    original_read = os.read
+    swapped = False
+
+    def swap_borrowed_after_stat(fd):
+        nonlocal swapped
+        info = original_fstat(fd)
+        if not swapped:
+            swapped = True
+            os.dup2(harmless_device, caller_fd)
+        return info
+
+    def prohibit_device_read(fd, amount):
+        if not stat.S_ISREG(original_fstat(fd).st_mode) and not stat.S_ISFIFO(
+            original_fstat(fd).st_mode
+        ):
+            raise AssertionError("diagnostic read a swapped-to-device descriptor")
+        return original_read(fd, amount)
+
+    try:
+        with monkeypatch.context() as local:
+            local.setattr(pe.os, "fstat", swap_borrowed_after_stat)
+            local.setattr(pe.os, "read", prohibit_device_read)
+            finding = pe.inspect_fd(caller_fd)
+        assert swapped
+        assert finding["input_sha256"] == pe.hashlib.sha256(data).hexdigest()
+        assert finding["physical_install_authorized"] is False
+    finally:
+        os.close(caller_fd)
+        os.close(harmless_device)
+
+
+def test_shared_regular_file_description_offset_drift_cannot_swap_snapshot(tmp_path, monkeypatch):
+    data = fixture_pe(present=True)
+    image = tmp_path / "offset-race.efi"
+    image.write_bytes(data)
+    caller_fd = os.open(image, os.O_RDONLY | os.O_CLOEXEC)
+    other_fd = os.dup(caller_fd)
+    original_read = os.read
+
+    def shift_shared_offset_before_read(fd, amount):
+        os.lseek(other_fd, 23, os.SEEK_SET)
+        return original_read(fd, amount)
+
+    try:
+        with monkeypatch.context() as local:
+            local.setattr(pe.os, "read", shift_shared_offset_before_read)
+            finding = pe.inspect_fd(caller_fd)
+        assert finding["input_sha256"] == pe.hashlib.sha256(data).hexdigest()
+        assert finding["input_size"] == len(data)
+        assert finding["physical_install_authorized"] is False
+    finally:
+        os.close(other_fd)
+        os.close(caller_fd)
+
+
+def test_regular_input_is_positional_and_does_not_change_borrowed_offset(tmp_path):
+    image = tmp_path / "offset-stability.efi"
+    image.write_bytes(fixture_pe())
+    fd = os.open(image, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 0
+        pe.inspect_fd(fd)
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 0
+    finally:
+        os.close(fd)
 
 
 def test_preopened_regular_file_must_start_at_zero(tmp_path):
