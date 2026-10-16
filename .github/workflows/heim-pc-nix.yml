@@ -98,7 +98,7 @@ jobs:
             esac
           fi
 
-  nix:
+  nix-heavy:
     needs: detect
     if: >-
       always() &&
@@ -173,6 +173,47 @@ jobs:
           .#packages.x86_64-linux.physical-gate-proprietary-system
           .#packages.x86_64-linux.physical-gate-open-system
 
+      - name: Prove untrusted signatures are rejected by substitution
+        run: bash scripts/ci/check_nix_cache_signature_rejection.sh
+
+  # Independent ISO, agent and VM targets can run on another fresh
+  # signed-Nix runner in parallel with the costly CUDA physical-gate closure.
+  nix-proofs:
+    needs: detect
+    if: >-
+      always() &&
+      (needs.detect.result != 'success' ||
+       needs.detect.outputs.control_changed != 'false' ||
+       needs.detect.outputs.nix_changed != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Fresh derivations: the CI evaluator cache retained an unrealized drv
+      # after flake check --no-build (run 34050033409). No gate is weakened.
+      NIX_CONFIG: "eval-cache = false"
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_REVISION=%s\n' "$EXPECTED_SOURCE_REVISION"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            require-sigs = true
+            fallback = true
+            extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+            extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+
       - name: Build live-gate and inventory ISOs
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
@@ -195,5 +236,26 @@ jobs:
           .#checks.x86_64-linux.firstboot-credentials
           .#checks.x86_64-linux.trust-zones
 
-      - name: Prove untrusted signatures are rejected by substitution
-        run: bash scripts/ci/check_nix_cache_signature_rejection.sh
+
+  # The protected required check name remains nix. Both mandatory exact-head
+  # phases must pass; a failed or skipped dependency fails this aggregate.
+  nix:
+    needs: [detect, nix-heavy, nix-proofs]
+    if: >-
+      always() &&
+      (needs.detect.result != 'success' ||
+       needs.detect.outputs.control_changed != 'false' ||
+       needs.detect.outputs.nix_changed != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all exact-head Nix gates
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          HEAVY_RESULT: ${{ needs['nix-heavy'].result }}
+          PROOFS_RESULT: ${{ needs['nix-proofs'].result }}
+        run: |
+          set -euo pipefail
+          test "$DETECT_RESULT" = success
+          test "$HEAVY_RESULT" = success
+          test "$PROOFS_RESULT" = success

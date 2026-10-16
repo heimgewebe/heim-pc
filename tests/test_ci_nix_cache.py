@@ -242,3 +242,81 @@ def test_publisher_recovers_entire_signed_closure_from_fresh_empty_cache():
     assert "nix-store --delete" not in tail
     assert "--no-check-sigs" not in tail
     assert "require-sigs = false" not in tail
+
+
+def test_parallel_nix_proofs_keep_required_aggregate_fail_closed():
+    # Exact-head, trust and must-pass targets remain mandatory on both jobs.
+    import yaml
+    data=yaml.safe_load(CONSUMER.read_text(encoding="utf-8"))
+    jobs=data["jobs"]
+    heavy,proofs,aggregate=jobs["nix-heavy"],jobs["nix-proofs"],jobs["nix"]
+    assert heavy["needs"]==proofs["needs"]=="detect"
+    assert heavy["if"]==proofs["if"]==aggregate["if"]
+    assert "always()" in aggregate["if"]
+    assert set(aggregate["needs"])=={"detect","nix-heavy","nix-proofs"}
+    assert len(aggregate["steps"])==1
+    action=aggregate["steps"][0]
+    assert action["name"]=="Require all exact-head Nix gates"
+    env=action["env"]
+    assert env=={
+        "DETECT_RESULT":"${{ needs.detect.result }}",
+        "HEAVY_RESULT":"${{ needs['nix-heavy'].result }}",
+        "PROOFS_RESULT":"${{ needs['nix-proofs'].result }}",
+    }
+    for name in ("DETECT_RESULT","HEAVY_RESULT","PROOFS_RESULT"):
+        assert ('test "' + '$' + name + '" = success') in action["run"]
+    assert "continue-on-error" not in str(aggregate)
+    for phase in (heavy,proofs):
+        assert phase["runs-on"]=="ubuntu-latest"
+        assert phase["needs"]=="detect"
+        assert phase["env"]["EXPECTED_SOURCE_REVISION"]=="${{ github.event.pull_request.head.sha || github.sha }}"
+        steps=phase["steps"]
+        assert [step["name"] for step in steps[:3]]==[
+            "Checkout exact source revision","Verify source identity","Install Nix"
+        ]
+        assert steps[0]["with"]["persist-credentials"] is False
+        assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"' in steps[1]["run"]
+        config=steps[2]["with"]["extra-conf"]
+        assert "require-sigs = true" in config
+        assert "fallback = true" in config
+        assert f"extra-substituters = {CACHE_URL}" in config
+        assert f"extra-trusted-public-keys = {CACHE_KEY}" in config
+        assert "continue-on-error" not in str(phase)
+    htext="\n".join(step.get("run","") for step in heavy["steps"])
+    ptext="\n".join(step.get("run","") for step in proofs["steps"])
+    mandatory=(
+        ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+        ".#nixosConfigurations.heim-pc-vm.config.system.build.toplevel",
+        ".#packages.x86_64-linux.physical-gate-proprietary-system",
+        ".#packages.x86_64-linux.physical-gate-open-system",
+        ".#packages.x86_64-linux.physical-gate-live-proprietary-iso",
+        ".#packages.x86_64-linux.physical-gate-live-open-iso",
+        ".#packages.x86_64-linux.physical-gate-live-inventory-iso",
+        ".#packages.x86_64-linux.agent-microvm",
+        ".#packages.x86_64-linux.agent-vsock-proof-microvm",
+        ".#packages.x86_64-linux.trust-zone-host-system",
+        ".#checks.x86_64-linux.integration",
+        ".#checks.x86_64-linux.host-protection",
+        ".#checks.x86_64-linux.firstboot-credentials",
+        ".#checks.x86_64-linux.trust-zones",
+    )
+    assert len(mandatory)==14
+    required_steps = [
+        step["run"]
+        for phase in (heavy, proofs)
+        for step in phase["steps"]
+        if step["name"] in {
+            "Build storage, VM and physical-gate closures",
+            "Build live-gate and inventory ISOs",
+            "Build no-IP agent-zone closures",
+            "Run scoped VM checks",
+        }
+    ]
+    assert len(required_steps) == 4
+    required_tokens = " ".join(required_steps).split()
+    for name in mandatory:
+        assert required_tokens.count(name) == 1, name
+    assert sum(token.startswith(".#") for token in required_tokens) == 14
+    assert htext.count("bash scripts/ci/check_nix_cache_signature_rejection.sh")==1
+    assert "Run scoped VM checks" in [s["name"] for s in proofs["steps"]]
+    assert "Evaluate complete flake without building checks" in [s["name"] for s in heavy["steps"]]
