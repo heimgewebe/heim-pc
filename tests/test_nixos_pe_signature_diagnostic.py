@@ -327,6 +327,52 @@ def test_file_alignment_violations_never_positive(pe32, raw_offset, raw_size):
         pe.inspect_bytes(image)
 
 
+def fixture_pe_uninitialized_section(
+    *, pe32: bool, present: bool, raw_offset: int,
+) -> bytes:
+    """One BSS-only section: no raw payload regardless of pointer value."""
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into("<H", image, 0x84 + 2, 1)
+    struct.pack_into("<II", image, section + 8, 0x200, 0x1000)
+    struct.pack_into("<II", image, section + 16, 0, raw_offset)
+    struct.pack_into("<I", image, 0x98 + 56, 0x2000)
+    return bytes(image)
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_uninitialized_section_with_zero_raw_pointer_remains_diagnostic_only(
+    pe32, present,
+):
+    finding = pe.inspect_bytes(
+        fixture_pe_uninitialized_section(
+            pe32=pe32, present=present, raw_offset=0,
+        )
+    )
+    assert finding["signature_table"] == (
+        "structurally_present" if present else "absent"
+    )
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["full_bootchain_authenticated"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("raw_offset", [1, 0x200, 0x400, 0xFFFFFFFF])
+def test_uninitialized_section_nonzero_raw_pointer_never_positive(
+    pe32, present, raw_offset,
+):
+    # With SizeOfRawData=0, even a pointer into the certificate table or far
+    # beyond EOF must not create a structural-positive PE diagnosis.
+    image = fixture_pe_uninitialized_section(
+        pe32=pe32, present=present, raw_offset=raw_offset,
+    )
+    with pytest.raises(pe.PEFormatError, match="section_empty_raw_pointer_invalid"):
+        pe.inspect_bytes(image)
+
+
 @pytest.mark.parametrize("pe32", [False, True])
 def test_file_aligned_raw_section_before_certificate_is_diagnostic_only(pe32):
     finding = pe.inspect_bytes(

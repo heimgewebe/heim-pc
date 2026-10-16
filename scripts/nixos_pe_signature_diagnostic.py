@@ -273,6 +273,11 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
                 raise PEFormatError("section_raw_range_invalid")
             if raw_offset % file_alignment or raw_size % file_alignment:
                 raise PEFormatError("section_raw_alignment_invalid")
+        elif raw_offset:
+            # A section with no file-backed bytes has no meaningful raw
+            # pointer. Require the canonical zero value even when a nonzero
+            # pointer happens to be file-aligned or inside the certificate.
+            raise PEFormatError("section_empty_raw_pointer_invalid")
         # PE image sections live on SectionAlignment boundaries after the
         # in-memory headers. VirtualSize may exceed the file-backed portion,
         # while SizeOfRawData may be padded beyond VirtualSize.
