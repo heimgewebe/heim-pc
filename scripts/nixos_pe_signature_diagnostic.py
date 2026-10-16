@@ -132,7 +132,9 @@ _WORKER_ERROR_CODES = frozenset((
     "input_offset",
     "machine_unsupported",
     "optional_magic_unsupported",
+    "optional_reserved_field_nonzero",
     "pe_header_truncated",
+    "pe_header_offset_unaligned",
     "pe_magic_invalid",
     "pipe_input_unsupported",
     "read_deadline_exceeded",
@@ -199,6 +201,10 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     pe_start = _u32(data, 0x3C)
     if pe_start < 0x40 or pe_start + 24 > len(data):
         raise PEFormatError("pe_header_truncated")
+    # PE/COFF requires e_lfanew to select an eight-byte-aligned PE signature.
+    # A shifted valid image remains malformed despite a plausible certificate.
+    if pe_start & 7:
+        raise PEFormatError("pe_header_offset_unaligned")
     if data[pe_start:pe_start + 4] != b"PE\x00\x00":
         raise PEFormatError("pe_magic_invalid")
 
@@ -363,6 +369,10 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         raise PEFormatError("optional_magic_unsupported")
     if optional_bytes < directory_start:
         raise PEFormatError("pe_header_truncated")
+    # Win32VersionValue and LoaderFlags are reserved and must be zero in
+    # both PE32 and PE32+ executable images (different LoaderFlags offsets).
+    if _u32(data, optional + 52) or _u32(data, optional + (88 if magic == 0x10B else 104)):
+        raise PEFormatError("optional_reserved_field_nonzero")
     directory_count = _u32(data, optional + directory_count_offset)
     # All declared directories must fit inside SizeOfOptionalHeader, not
     # merely the security entry at index 4. Reject malformed absent too.

@@ -1548,3 +1548,80 @@ def test_two_exactly_aligned_certificate_entries_are_still_structural_only(pe32)
     assert finding["certificate_count"] == 2
     assert finding["cryptographic_signature_verified"] is False
     assert finding["physical_install_authorized"] is False
+
+
+def _relocate_pe_header_to_unaligned_offset(image: bytearray, pe32: bool, new_offset: int) -> None:
+    """Move the otherwise valid PE+COFF+optional header, not just e_lfanew."""
+    assert new_offset in (0x81, 0x87)
+    header_bytes = 24 + (0xE0 if pe32 else 0xF0)
+    original = bytes(image[0x80:0x80 + header_bytes])
+    image[new_offset:new_offset + header_bytes] = original
+    image[0x80] = 0
+    struct.pack_into("<I", image, 0x3C, new_offset)
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("new_offset", [0x81, 0x87])
+def test_pe_header_e_lfanew_must_be_eight_byte_aligned(
+    pe32, present, new_offset,
+):
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    _relocate_pe_header_to_unaligned_offset(image, pe32, new_offset)
+    with pytest.raises(pe.PEFormatError, match="^pe_header_offset_unaligned$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("field", ["win32_version_value", "loader_flags"])
+@pytest.mark.parametrize("value", [1, 0xFFFFFFFF])
+def test_pe_optional_reserved_fields_must_be_zero(pe32, present, field, value):
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    offset = 0x98 + (52 if field == "win32_version_value" else (88 if pe32 else 104))
+    struct.pack_into("<I", image, offset, value)
+    with pytest.raises(pe.PEFormatError, match="^optional_reserved_field_nonzero$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("mutation", ["e_lfanew", "win32_version_value", "loader_flags"])
+def test_new_invalid_pe_headers_reach_worker_and_cli(tmp_path, pe32, mutation):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    if mutation == "e_lfanew":
+        _relocate_pe_header_to_unaligned_offset(image, pe32, 0x81)
+        reason = "pe_header_offset_unaligned"
+    else:
+        offset = 0x98 + (52 if mutation == "win32_version_value" else (88 if pe32 else 104))
+        struct.pack_into("<I", image, offset, 1)
+        reason = "optional_reserved_field_nonzero"
+    target = tmp_path / "invalid-pe-header.efi"
+    target.write_bytes(bytes(image))
+    with target.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="^" + reason + "$"):
+            pe.inspect_fd(opened.fileno())
+    with target.open("rb") as opened:
+        completed = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+    assert completed.returncode == 2
+    finding = json.loads(completed.stdout)["findings"][0]
+    assert finding["status"] == "malformed"
+    assert finding["reason_code"] == reason
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_aligned_pe_header_and_zero_reserved_fields_remain_valid_structure(
+    pe32, present,
+):
+    finding = pe.inspect_bytes(fixture_pe(present=present, pe32=pe32))
+    assert finding["signature_table"] == (
+        "structurally_present" if present else "absent"
+    )
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
