@@ -125,6 +125,8 @@ _WORKER_ERROR_CODES = frozenset((
     "declared_headers_invalid",
     "dos_magic_invalid",
     "file_alignment_invalid",
+    "image_coff_symbols_invalid",
+    "image_executable_characteristic_missing",
     "input_drift",
     "input_offset",
     "machine_unsupported",
@@ -203,6 +205,14 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     sections = _u16(data, coff + 2)
     if sections > MAX_SECTION_COUNT:
         raise PEFormatError("section_count_unbounded")
+    # The COFF executable-image bit is mandatory for this PE-only diagnostic:
+    # never report a certificate-table structural positive for an object file.
+    if not (_u16(data, coff + 18) & 0x0002):
+        raise PEFormatError("image_executable_characteristic_missing")
+    # Both legacy COFF symbol-table fields must be zero for executable images.
+    # A forged pointer must not claim any certificate bytes as COFF symbols.
+    if _u32(data, coff + 8) or _u32(data, coff + 12):
+        raise PEFormatError("image_coff_symbols_invalid")
     optional_bytes = _u16(data, coff + 16)
     optional = coff + 20
     optional_end = optional + optional_bytes

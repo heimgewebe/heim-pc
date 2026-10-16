@@ -27,6 +27,7 @@ def fixture_pe(*, present: bool = False, pe32: bool = False) -> bytes:
     coff = 0x84
     struct.pack_into("<H", image, coff, 0x014C if pe32 else 0x8664)
     struct.pack_into("<H", image, coff + 2, 0)  # zero sections
+    struct.pack_into("<H", image, coff + 18, 0x0002)  # executable PE image
     optional = coff + 20
     struct.pack_into("<H", image, coff + 16, 0xE0 if pe32 else 0xF0)
     struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
@@ -1412,3 +1413,87 @@ def test_size_of_headers_requires_exact_file_aligned_header_end(
     struct.pack_into("<I", image, 0x98 + 60, oversized_headers)
     with pytest.raises(pe.PEFormatError, match="^declared_headers_invalid$"):
         pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_pe_executable_image_characteristic_is_mandatory(pe32, present):
+    """A syntactically parseable COFF object cannot be called a PE image."""
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    # Remove the required image bit from an otherwise valid PE fixture.
+    struct.pack_into("<H", image, 0x84 + 18, 0)
+    with pytest.raises(
+        pe.PEFormatError, match="^image_executable_characteristic_missing$",
+    ):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize(
+    "field_offset,value",
+    [(8, 1), (8, 0x200), (8, 0xFFFFFFFF),
+     (12, 1), (12, 0x200), (12, 0xFFFFFFFF)],
+)
+def test_pe_image_coff_symbol_table_fields_are_absent(
+    pe32, present, field_offset, value,
+):
+    """No symbol field may claim the same bytes as attribute certificates."""
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    # Exercise symbol-table checks independently of the executable bit.
+    struct.pack_into("<H", image, 0x84 + 18, 0x0002)
+    struct.pack_into("<I", image, 0x84 + field_offset, value)
+    with pytest.raises(pe.PEFormatError, match="^image_coff_symbols_invalid$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [
+        ("not_executable", "image_executable_characteristic_missing"),
+        ("symbol_pointer", "image_coff_symbols_invalid"),
+        ("symbol_count", "image_coff_symbols_invalid"),
+    ],
+)
+def test_invalid_image_coff_header_reaches_real_worker_and_cli(
+    tmp_path, pe32, mutation, reason,
+):
+    """Both isolated worker and CLI must retain the malformed reason."""
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", image, 0x84 + 18, 0x0002)
+    if mutation == "not_executable":
+        struct.pack_into("<H", image, 0x84 + 18, 0)
+    elif mutation == "symbol_pointer":
+        struct.pack_into("<I", image, 0x84 + 8, 0x200)
+    else:
+        struct.pack_into("<I", image, 0x84 + 12, 1)
+    target = tmp_path / "invalid-coff-image.efi"
+    target.write_bytes(bytes(image))
+    with target.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="^" + reason + "$"):
+            pe.inspect_fd(opened.fileno())
+    with target.open("rb") as opened:
+        completed = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+    assert completed.returncode == 2
+    finding = json.loads(completed.stdout)["findings"][0]
+    assert finding["status"] == "malformed"
+    assert finding["reason_code"] == reason
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("extra_characteristics", [0x0000, 0x0020, 0x2000])
+def test_executable_bit_with_other_valid_image_flags_stays_structural_only(
+    pe32, extra_characteristics,
+):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<H", image, 0x84 + 18, 0x0002 | extra_characteristics)
+    result = pe.inspect_bytes(bytes(image))
+    assert result["signature_table"] == "structurally_present"
+    assert result["cryptographic_signature_verified"] is False
+    assert result["physical_install_authorized"] is False
