@@ -135,6 +135,7 @@ _WORKER_ERROR_CODES = frozenset((
     "read_deadline_exceeded",
     "section_alignment_invalid",
     "section_count_unbounded",
+    "section_coff_only_fields_invalid",
     "section_low_alignment_rva_mismatch",
     "section_empty_raw_pointer_invalid",
     "section_raw_alignment_invalid",
@@ -265,6 +266,16 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         virtual_address = _u32(data, section_header + 12)
         raw_size = _u32(data, section_header + 16)
         raw_offset = _u32(data, section_header + 20)
+        # COFF object-file relocation/line tables are never part of a PE
+        # executable image section. Reject all four nonzero fields even when
+        # a bogus pointer is aligned or falls in the certificate table.
+        if (
+            _u32(data, section_header + 24)  # PointerToRelocations
+            or _u32(data, section_header + 28)  # PointerToLinenumbers
+            or _u16(data, section_header + 32)  # NumberOfRelocations
+            or _u16(data, section_header + 34)  # NumberOfLinenumbers
+        ):
+            raise PEFormatError("section_coff_only_fields_invalid")
         if raw_size:
             if (
                 raw_offset < declared_headers_end

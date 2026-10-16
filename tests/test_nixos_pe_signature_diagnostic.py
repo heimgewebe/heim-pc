@@ -430,6 +430,62 @@ def test_empty_section_with_zero_raw_pointer_remains_valid_through_real_worker(
     assert finding["physical_install_authorized"] is False
 
 
+# Executable images never use these COFF-object-only section header
+# fields. A nonzero relocation pointer may even point into certificates.
+@pytest.mark.parametrize(
+    "field_offset,fmt,value",
+    [
+        (24, "<I", 1),
+        (24, "<I", 0x200),
+        (28, "<I", 0x200),
+        (32, "<H", 1),
+        (34, "<H", 1),
+    ],
+)
+@pytest.mark.parametrize("layout", ["bss_unsigned", "bss_present", "raw_present"])
+@pytest.mark.parametrize("pe32", [False, True])
+def test_executable_section_coff_only_fields_must_be_zero(
+    pe32, layout, field_offset, fmt, value,
+):
+    image = bytearray(
+        fixture_pe_section_and_later_certificate(pe32=pe32)
+        if layout == "raw_present"
+        else fixture_pe_uninitialized_section(
+            pe32=pe32, present=layout == "bss_present", raw_offset=0,
+        )
+    )
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into(fmt, image, section + field_offset, value)
+    with pytest.raises(pe.PEFormatError, match="section_coff_only_fields_invalid"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("field_offset,fmt", [(24, "<I"), (28, "<I"), (32, "<H"), (34, "<H")])
+def test_coff_only_image_fields_malformed_reaches_real_worker_and_cli(
+    tmp_path, pe32, field_offset, fmt,
+):
+    image = bytearray(fixture_pe_section_and_later_certificate(pe32=pe32))
+    section = 0x98 + (0xE0 if pe32 else 0xF0)
+    struct.pack_into(fmt, image, section + field_offset, 1)
+    source = tmp_path / "coff-only-section.efi"
+    source.write_bytes(image)
+    with source.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="^section_coff_only_fields_invalid$"):
+            pe.inspect_fd(opened.fileno())
+    with source.open("rb") as opened:
+        result = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+    assert result.returncode == 2
+    finding = json.loads(result.stdout)["findings"][0]
+    assert finding["status"] == "malformed"
+    assert finding["reason_code"] == "section_coff_only_fields_invalid"
+    assert finding["physical_install_authorized"] is False
+
+
 @pytest.mark.parametrize("pe32", [False, True])
 def test_file_aligned_raw_section_before_certificate_is_diagnostic_only(pe32):
     finding = pe.inspect_bytes(
