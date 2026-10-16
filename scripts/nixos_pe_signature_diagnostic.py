@@ -15,6 +15,7 @@ so it cannot accidentally become a successful admission gate.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import marshal
@@ -40,6 +41,7 @@ WORKER_DEADLINE_SECONDS = 5.0
 # Marshal is used exclusively with trusted same-interpreter code, never with
 # untrusted image data or a network/CLI payload.
 _WORKER_CODE = """
+import base64
 import hashlib
 import json
 import marshal
@@ -50,7 +52,9 @@ import sys
 import types
 
 try:
-    source = sys.stdin.buffer.read(262145)
+    # Worker bytes are nonsecret reviewed code, not image data. Sending them
+    # in argv instead of stdin preserves borrowed descriptor 0 unchanged.
+    source = base64.b64decode(sys.argv[3], validate=True)
     if len(source) > 262144 or hashlib.sha256(source).hexdigest() != sys.argv[1]:
         raise ValueError("worker_payload_invalid")
     payload = marshal.loads(source)
@@ -92,6 +96,7 @@ except BaseException:
 _NON_CLAIMS = [
     "certificate_table_is_not_cryptographic_verification",
     "preopened_fd_source_and_execution_authority_not_established",
+    "hard_end_to_end_deadline_or_fuse_nfs_support_not_established",
     "firmware_pk_kek_db_dbx_policy_not_verified",
     "whole_loader_kernel_initrd_cmdline_not_authenticated",
     "unchanged_popos_fallback_bootability_not_proven",
@@ -302,6 +307,12 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         previous_raw_end = raw_offset + raw_size
         section_raw_ranges.append((raw_offset, previous_raw_end))
 
+    # An aligned SizeOfImage larger than the last actually mapped virtual
+    # section (or the aligned headers when no sections exist) is not covered
+    # by the conservative structural-positive image profile.
+    if size_of_image != expected_virtual_address:
+        raise PEFormatError("size_of_image_invalid")
+
     magic = _u16(data, optional)
     if magic == 0x20B:  # PE32+ (AMD64 only in this reviewed subset)
         if _u16(data, coff) != 0x8664:
@@ -470,22 +481,21 @@ def _inspect_fd_raw(fd: int) -> dict[str, Any]:
 
 
 def inspect_fd(fd: int) -> dict[str, Any]:
-    """Inspect a caller-preopened FD with a bounded *parent* wait.
+    """Inspect a caller-preopened FD using a bounded worker communicate wait.
 
-    The actual fstat/pread runs only in an exec-isolated disposable child.
-    Even a stalled FUSE/NFS read cannot hold the calling process indefinitely.
-    SIGKILL does not guarantee immediate cleanup of an uninterruptible kernel
-    wait (D-state), so no unconditional worker-reaping claim is made. Neither
-    the worker nor its report authorizes boot, firmware, keys or installation.
+    This is NOT an end-to-end deadline: Popen/exec and filesystem operations
+    outside the child read wait may block. In particular no bounded FUSE/NFS
+    operation is supported or guaranteed. The caller must supply an already
+    opened regular local-file FD and supervise the task/cgroup lifecycle.
+    A child stuck in uninterruptible kernel I/O can outlive SIGKILL. The
+    worker only produces non-authoritative certificate-table diagnostics.
     """
-    if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0:
+    if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0 or fd in (1, 2):
         raise PEFormatError("unsafe_input")
 
-    # Pin the caller's descriptor number before handing it to the child.
-    try:
-        pinned_fd = os.dup(fd)
-    except OSError as exc:
-        raise PEFormatError("unsafe_input") from exc
+    # Inherit the borrowed FD directly. Do not dup or close any image FD
+    # in the parent: close(2) on FUSE/NFS can invoke a blocking flush.
+    # The child privately duplicates, checks and closes its own descriptor.
     proc: subprocess.Popen[bytes] | None = None
     try:
         # -I ignores PYTHONPATH/site imports; -B prevents bytecode writes.
@@ -493,22 +503,25 @@ def inspect_fd(fd: int) -> dict[str, Any]:
         proc = subprocess.Popen(
             [
                 sys.executable, "-I", "-B", "-c", _WORKER_CODE,
-                hashlib.sha256(_PINNED_WORKER_PAYLOAD).hexdigest(), str(pinned_fd),
+                hashlib.sha256(_PINNED_WORKER_PAYLOAD).hexdigest(), str(fd),
+                base64.b64encode(_PINNED_WORKER_PAYLOAD).decode("ascii"),
             ],
-            pass_fds=(pinned_fd,),
-            stdin=subprocess.PIPE,
+            pass_fds=(fd,),
+            stdin=None,  # FD 0 may be the borrowed PE image, never replace it
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            bufsize=0,  # raw pipe FileIO.close has no buffered flush
             close_fds=True,
             env={"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
         )
         try:
-            output, _stderr = proc.communicate(
-                input=_PINNED_WORKER_PAYLOAD, timeout=WORKER_DEADLINE_SECONDS
-            )
+            output, _stderr = proc.communicate(timeout=WORKER_DEADLINE_SECONDS)
         except subprocess.TimeoutExpired as exc:
             # Do NOT use an unbounded wait() after kill; D-state may persist.
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # Child exited between timeout and kill.
             raise PEFormatError("read_deadline_exceeded") from exc
         if proc.returncode != 0 or len(output) > 65536:
             raise PEFormatError("unsafe_input")
@@ -566,15 +579,29 @@ def inspect_fd(fd: int) -> dict[str, Any]:
     except OSError as exc:
         raise PEFormatError("unsafe_input") from exc
     finally:
-        os.close(pinned_fd)
-        # Only bounded, nonblocking cleanup: an uninterruptible child can
-        # outlive SIGKILL and must be managed by the outer task/cgroup policy.
-        if proc is not None and proc.poll() is None:
-            proc.kill()
-            try:
-                proc.wait(timeout=0.1)
-            except subprocess.TimeoutExpired:
-                pass
+        # Only pipes created by Popen belong to this parent. Close even on
+        # timeout/invalid output to avoid accumulating descriptors. Unbuffered
+        # pipes avoid a potentially blocking Python buffered-writer flush.
+        # Never close the borrowed image FD in this process.
+        if proc is not None:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            # D-state children may stay unreaped: the supervising task/cgroup
+            # owns final cleanup, not a possibly unbounded wait in this caller.
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
 
 
 class _RedactedArgumentParser(argparse.ArgumentParser):
@@ -646,7 +673,9 @@ _PINNED_WORKER_PAYLOAD = marshal.dumps({
         "_NON_CLAIMS": tuple(_NON_CLAIMS),
     },
 })
-if len(_PINNED_WORKER_PAYLOAD) > 262144:
+if len(_PINNED_WORKER_PAYLOAD) > 65536:
+    # Linux execve limits each argv string to 128 KiB. The base64-encoded
+    # payload must fit below that limit without falling back to FD0/stdio.
     raise RuntimeError("PE worker code payload too large")
 
 

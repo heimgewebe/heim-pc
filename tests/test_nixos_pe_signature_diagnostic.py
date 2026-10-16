@@ -143,6 +143,7 @@ def test_invalid_section_alignment_cannot_be_cert_positive_or_unsigned(
 def test_low_section_alignment_equal_to_file_alignment_is_admitted(pe32):
     image = bytearray(fixture_pe(present=True, pe32=pe32))
     struct.pack_into("<I", image, 0x98 + 32, 0x200)
+    struct.pack_into("<I", image, 0x98 + 56, 0x200)  # aligned headers only
     finding = pe.inspect_bytes(bytes(image))
     assert finding["signature_table"] == "structurally_present"
     assert finding["full_bootchain_authenticated"] is False
@@ -310,6 +311,7 @@ def test_low_alignment_matching_raw_offset_and_rva_stays_diagnostic(pe32):
     struct.pack_into("<I", image, 0x98 + 32, 0x200)
     section = 0x98 + (0xE0 if pe32 else 0xF0)
     struct.pack_into("<I", image, section + 12, 0x200)
+    struct.pack_into("<I", image, 0x98 + 56, 0x400)  # exact aligned end
     finding = pe.inspect_bytes(bytes(image))
     assert finding["signature_table"] == "structurally_present"
     assert finding["physical_install_authorized"] is False
@@ -878,6 +880,216 @@ def test_worker_output_must_be_revalidated_by_non_authorizing_parent(
     with image.open("rb") as opened:
         with pytest.raises(pe.PEFormatError, match="unsafe_input"):
             pe.inspect_fd(opened.fileno())
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("sections", [0, 1])
+def test_size_of_image_cannot_exceed_exact_virtual_end(pe32, sections):
+    """Extra section-aligned virtual slack is not a valid reviewed PE layout."""
+    data = bytearray(
+        fixture_pe_section_and_later_certificate(pe32=pe32)
+        if sections else fixture_pe(present=True, pe32=pe32)
+    )
+    offset = 0x98 + 56
+    correct = struct.unpack_from("<I", data, offset)[0]
+    struct.pack_into("<I", data, offset, correct + 0x1000)
+    with pytest.raises(pe.PEFormatError, match="size_of_image_invalid"):
+        pe.inspect_bytes(bytes(data))
+
+
+def test_parent_never_duplicates_untrusted_image_fd(tmp_path, monkeypatch):
+    """FD duplication and its matching close belong in the disposable worker."""
+    image = tmp_path / "image.efi"
+    image.write_bytes(fixture_pe(present=True))
+    with image.open("rb") as source:
+        original_dup = os.dup
+
+        def guarded_dup(fd):
+            if fd == source.fileno():
+                raise AssertionError("parent must not duplicate untrusted storage FD")
+            return original_dup(fd)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(pe.os, "dup", guarded_dup)
+            result = pe.inspect_fd(source.fileno())
+        assert result["signature_table"] == "structurally_present"
+
+
+def test_parent_does_not_close_untrusted_image_fd_on_timeout(
+    tmp_path, monkeypatch,
+):
+    """A FUSE-like close/flush must not be entered by the caller."""
+    image = tmp_path / "image.efi"
+    image.write_bytes(fixture_pe(present=True))
+    original_close = os.close
+    with image.open("rb") as source:
+        identity = os.fstat(source.fileno())
+
+        def guarded_close(fd):
+            try:
+                current = os.fstat(fd)
+            except OSError:
+                current = None
+            if current is not None and (
+                current.st_dev, current.st_ino
+            ) == (identity.st_dev, identity.st_ino):
+                raise AssertionError("parent entered untrusted image close/flush")
+            return original_close(fd)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(pe.os, "close", guarded_close)
+            patched.setattr(pe, "_WORKER_CODE", "import time; time.sleep(60)")
+            patched.setattr(pe, "WORKER_DEADLINE_SECONDS", 0.1)
+            with pytest.raises(pe.PEFormatError, match="read_deadline_exceeded"):
+                pe.inspect_fd(source.fileno())
+
+
+def test_repeated_worker_timeouts_close_pipes_and_reap_killable_children(
+    tmp_path, monkeypatch,
+):
+    """Repeated timeouts must not accumulate parent-owned pipe handles."""
+    image = tmp_path / "image.efi"
+    image.write_bytes(fixture_pe(present=True))
+    original_popen = pe.subprocess.Popen
+    children = []
+
+    def recorded_popen(*args, **kwargs):
+        proc = original_popen(*args, **kwargs)
+        children.append(proc)
+        return proc
+
+    with monkeypatch.context() as patched:
+        patched.setattr(pe.subprocess, "Popen", recorded_popen)
+        patched.setattr(pe, "_WORKER_CODE", "import time; time.sleep(60)")
+        patched.setattr(pe, "WORKER_DEADLINE_SECONDS", 0.1)
+        with image.open("rb") as source:
+            for _ in range(3):
+                with pytest.raises(pe.PEFormatError, match="read_deadline_exceeded"):
+                    pe.inspect_fd(source.fileno())
+    assert len(children) == 3
+    for proc in children:
+        assert proc.poll() is not None, "killable child must be reaped"
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            assert stream is None or stream.closed, "parent pipe leaked"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "digest_mismatch", "invalid_marshal", "non_dict_payload",
+        "missing_worker_code", "bad_code_type", "extra_constant",
+        "missing_constant",
+    ],
+)
+def test_actual_worker_fails_closed_on_tampered_marshaled_payload(
+    tmp_path, kind,
+):
+    """Execute the real pinned worker with malformed payloads, not mocks."""
+    base = pe.marshal.loads(pe._PINNED_WORKER_PAYLOAD)
+    payload = {"codes": dict(base["codes"]), "constants": dict(base["constants"])}
+    if kind == "invalid_marshal":
+        source = b"not marshal"
+    elif kind == "non_dict_payload":
+        source = pe.marshal.dumps([1, 2, 3])
+    else:
+        if kind == "missing_worker_code":
+            del payload["codes"]["_inspect_fd_raw"]
+        elif kind == "bad_code_type":
+            payload["codes"]["_inspect_fd_raw"] = True
+        elif kind == "extra_constant":
+            payload["constants"]["trust_granted"] = True
+        elif kind == "missing_constant":
+            del payload["constants"]["MAX_IMAGE_BYTES"]
+        source = pe.marshal.dumps(payload)
+    expected_digest = (
+        "0" * 64 if kind == "digest_mismatch"
+        else pe.hashlib.sha256(source).hexdigest()
+    )
+    image = tmp_path / "image.efi"
+    image.write_bytes(fixture_pe(present=True))
+    with image.open("rb") as fd:
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", pe._WORKER_CODE,
+             expected_digest, str(fd.fileno()),
+             pe.base64.b64encode(source).decode("ascii")],
+            capture_output=True, timeout=10,
+            pass_fds=(fd.fileno(),), check=False,
+        )
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {"kind": "error", "code": "unsafe_input"}
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "non_json", "nonzero_exit", "unknown_top_level_field",
+        "unknown_finding_field", "bool_certificate_count",
+        "int_for_bool_authority", "bad_input_digest", "missing_nonclaim",
+        "changed_nonclaim", "unknown_error_code", "bool_input_size",
+    ],
+)
+def test_parent_rejects_adversarial_worker_protocol(tmp_path, monkeypatch, kind):
+    data = fixture_pe(present=True)
+    image = tmp_path / "image.efi"
+    image.write_bytes(data)
+    finding = {
+        **pe._result(signature_table="structurally_present", certificate_count=1),
+        "input_sha256": pe.hashlib.sha256(data).hexdigest(),
+        "input_size": len(data),
+    }
+    wire = {"kind": "ok", "finding": finding}
+    if kind == "non_json":
+        code = 'print("not JSON")'
+    elif kind == "nonzero_exit":
+        code = "import sys; sys.exit(17)"
+    else:
+        if kind == "unknown_top_level_field":
+            wire["authorized"] = True
+        elif kind == "unknown_finding_field":
+            finding["authorized"] = True
+        elif kind == "bool_certificate_count":
+            finding["certificate_count"] = True
+        elif kind == "int_for_bool_authority":
+            finding["physical_install_authorized"] = 0
+        elif kind == "bad_input_digest":
+            finding["input_sha256"] = "NOT-A-DIGEST"
+        elif kind == "missing_nonclaim":
+            del finding["does_not_establish"]
+        elif kind == "changed_nonclaim":
+            finding["does_not_establish"] = []
+        elif kind == "unknown_error_code":
+            wire = {"kind": "error", "code": "unexpected_private_path"}
+        elif kind == "bool_input_size":
+            finding["input_size"] = True
+        code = "print(" + repr(json.dumps(wire)) + ")"
+    monkeypatch.setattr(pe, "_WORKER_CODE", code)
+    with image.open("rb") as source:
+        with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+            pe.inspect_fd(source.fileno())
+
+
+def test_plausibly_forged_worker_finding_never_grants_any_authority(
+    tmp_path, monkeypatch,
+):
+    """A structurally plausible child result remains only a diagnostic."""
+    data = fixture_pe(present=False)
+    image = tmp_path / "unsigned.efi"
+    image.write_bytes(data)
+    forged = {
+        **pe._result(signature_table="structurally_present", certificate_count=1),
+        "input_sha256": "a" * 64, "input_size": len(data),
+    }
+    monkeypatch.setattr(
+        pe, "_WORKER_CODE",
+        "print(" + repr(json.dumps({"kind": "ok", "finding": forged})) + ")",
+    )
+    with image.open("rb") as source:
+        received = pe.inspect_fd(source.fileno())
+    assert received["signature_table"] == "structurally_present"
+    assert received["cryptographic_signature_verified"] is False
+    assert received["firmware_key_policy_verified"] is False
+    assert received["full_bootchain_authenticated"] is False
+    assert received["physical_install_authorized"] is False
 
 
 @pytest.mark.parametrize("pe32", [False, True])
