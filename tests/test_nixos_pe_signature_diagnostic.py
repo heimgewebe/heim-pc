@@ -109,12 +109,26 @@ def test_certificate_padding_cannot_hide_payload_bytes():
 
 @pytest.mark.parametrize("pe32", [False, True])
 @pytest.mark.parametrize("headers_size", [0x400, 0x600])
-def test_certificate_inside_declared_size_of_headers_is_invalid(pe32, headers_size):
+def test_oversized_declared_headers_cannot_mask_cert_inside_claimed_headers(
+    pe32, headers_size,
+):
     data = bytearray(fixture_pe(present=True, pe32=pe32))
-    # Keep SizeOfHeaders file-aligned; the certificate still lies inside it.
+    # This surplus aligned SizeOfHeaders is itself malformed; do not accept
+    # "header padding" to conceal what is really non-header file content.
     data.extend(bytes(headers_size - len(data)))
     struct.pack_into("<I", data, 0x98 + 60, headers_size)
-    with pytest.raises(pe.PEFormatError, match="certificate_overlaps_declared_headers"):
+    with pytest.raises(pe.PEFormatError, match="^declared_headers_invalid$"):
+        pe.inspect_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_certificate_inside_actual_exact_headers_is_invalid(pe32):
+    data = bytearray(fixture_pe(present=True, pe32=pe32))
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    # 0x1f0 is after both PE32/PE32+ section-header ends, inside the
+    # exactly-sized [0, 0x200) file headers, and is eight-byte aligned.
+    struct.pack_into("<II", data, directory, 0x1F0, 0x10)
+    with pytest.raises(pe.PEFormatError, match="^certificate_overlaps_declared_headers$"):
         pe.inspect_bytes(bytes(data))
 
 
@@ -1377,3 +1391,24 @@ def test_cli_distinguishes_unavailable_io_from_malformed_pe(monkeypatch, capsys,
     assert finding["reason_code"] == reason
     assert finding["status"] == "unavailable"
     assert finding["physical_install_authorized"] is False
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("oversized_headers", [0x400, 0x600])
+def test_size_of_headers_requires_exact_file_aligned_header_end(
+    pe32, present, oversized_headers,
+):
+    """Oversized apparent header padding must not hide unknown file bytes."""
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    if present:
+        certificate = bytes(image[0x200:0x210])
+        image[0x200:0x210] = bytes(0x10)
+        image.extend(bytes(oversized_headers + 0x10 - len(image)))
+        image[oversized_headers:oversized_headers + 0x10] = certificate
+        directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+        struct.pack_into("<II", image, directory, oversized_headers, 0x10)
+    else:
+        image.extend(bytes(oversized_headers - len(image)))
+    struct.pack_into("<I", image, 0x98 + 60, oversized_headers)
+    with pytest.raises(pe.PEFormatError, match="^declared_headers_invalid$"):
+        pe.inspect_bytes(bytes(image))

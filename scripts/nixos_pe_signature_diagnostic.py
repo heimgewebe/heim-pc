@@ -234,10 +234,13 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     ):
         raise PEFormatError("section_alignment_invalid")
     declared_headers_end = _u32(data, optional + 60)
-    if (
-        not (section_headers_end <= declared_headers_end <= len(data))
-        or declared_headers_end % file_alignment
-    ):
+    # SizeOfHeaders must describe exactly the DOS, PE, optional and section
+    # headers rounded once to FileAlignment, not attacker-controlled extra
+    # "header" bytes that could conceal unverified data before certificates.
+    exact_headers_end = (
+        (section_headers_end + file_alignment - 1) // file_alignment
+    ) * file_alignment
+    if declared_headers_end != exact_headers_end or declared_headers_end > len(data):
         raise PEFormatError("declared_headers_invalid")
     # SizeOfImage covers at least the aligned in-memory headers, and PE/COFF
     # requires it to be a multiple of the virtual SectionAlignment.
