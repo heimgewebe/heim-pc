@@ -138,6 +138,7 @@ _WORKER_ERROR_CODES = frozenset((
     "pe_magic_invalid",
     "pipe_input_unsupported",
     "read_deadline_exceeded",
+    "reserved_directory_nonzero",
     "section_alignment_invalid",
     "section_count_unbounded",
     "section_coff_only_fields_invalid",
@@ -378,6 +379,14 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
     # merely the security entry at index 4. Reject malformed absent too.
     if directory_count > (optional_bytes - directory_start) // 8:
         raise PEFormatError("pe_header_truncated")
+    # Optional-header directory 7 (Architecture) and 15 (Reserved) must
+    # contain no address or size whenever they are declared. Validate both
+    # PE32 and PE32+ before an absent/unsigned or structural-positive return.
+    for reserved_index in (7, 15):
+        if directory_count > reserved_index:
+            reserved_entry = optional + directory_start + reserved_index * 8
+            if _u32(data, reserved_entry) or _u32(data, reserved_entry + 4):
+                raise PEFormatError("reserved_directory_nonzero")
     if directory_count <= 4:
         return _result(signature_table="absent", certificate_count=0)
 

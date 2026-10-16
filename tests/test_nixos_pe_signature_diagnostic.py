@@ -1625,3 +1625,61 @@ def test_aligned_pe_header_and_zero_reserved_fields_remain_valid_structure(
     )
     assert finding["cryptographic_signature_verified"] is False
     assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("directory_index", [7, 15])
+@pytest.mark.parametrize("field_offset", [0, 4])
+@pytest.mark.parametrize("value", [1, 0xFFFFFFFF])
+def test_reserved_pe_data_directories_cannot_be_structural_positive_or_unsigned(
+    pe32, present, directory_index, field_offset, value,
+):
+    """Reserved Architecture (7) and Reserved (15) entries must be zero."""
+    image = bytearray(fixture_pe(present=present, pe32=pe32))
+    entry = 0x98 + (96 if pe32 else 112) + directory_index * 8 + field_offset
+    struct.pack_into("<I", image, entry, value)
+    with pytest.raises(pe.PEFormatError, match="^reserved_directory_nonzero$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("directory_index", [7, 15])
+@pytest.mark.parametrize("field_offset", [0, 4])
+def test_reserved_pe_directories_reach_real_worker_and_cli(
+    tmp_path, pe32, directory_index, field_offset,
+):
+    """The parent must preserve a malformed reason without granting boot trust."""
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    entry = 0x98 + (96 if pe32 else 112) + directory_index * 8 + field_offset
+    struct.pack_into("<I", image, entry, 1)
+    target = tmp_path / "reserved-pe-directory.efi"
+    target.write_bytes(bytes(image))
+    with target.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="^reserved_directory_nonzero$"):
+            pe.inspect_fd(opened.fileno())
+    with target.open("rb") as opened:
+        done = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+    assert done.returncode == 2
+    report = json.loads(done.stdout)["findings"][0]
+    assert report["status"] == "malformed"
+    assert report["reason_code"] == "reserved_directory_nonzero"
+    assert report["cryptographic_signature_verified"] is False
+    assert report["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_zero_reserved_pe_directories_preserve_structural_only_classification(
+    pe32, present,
+):
+    report = pe.inspect_bytes(fixture_pe(present=present, pe32=pe32))
+    assert report["signature_table"] == (
+        "structurally_present" if present else "absent"
+    )
+    assert report["full_bootchain_authenticated"] is False
+    assert report["physical_install_authorized"] is False
