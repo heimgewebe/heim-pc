@@ -101,10 +101,10 @@ def test_truncated_certificate_directory_is_not_unsigned_success():
         pe.inspect_bytes(bytes(data))
 
 
-def test_certificate_padding_cannot_hide_payload_bytes():
+def test_unfinalized_certificate_length_cannot_hide_payload_bytes():
     data = bytearray(fixture_pe(present=True))
-    struct.pack_into("<I", data, 0x200, 10)  # 8-byte header + 2 data bytes
-    with pytest.raises(pe.PEFormatError, match="certificate_padding_invalid"):
+    struct.pack_into("<I", data, 0x200, 10)  # not padded to a finalized 8-byte length
+    with pytest.raises(pe.PEFormatError, match="certificate_length_unaligned"):
         pe.inspect_bytes(bytes(data))
 
 
@@ -1497,3 +1497,54 @@ def test_executable_bit_with_other_valid_image_flags_stays_structural_only(
     assert result["signature_table"] == "structurally_present"
     assert result["cryptographic_signature_verified"] is False
     assert result["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("length", [9, 10, 11, 12, 13, 14, 15])
+def test_attribute_certificate_dwlength_must_include_quadword_padding(pe32, length):
+    """dwLength must encode the complete finalized eight-byte-aligned entry."""
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x200, length)
+    with pytest.raises(pe.PEFormatError, match="^certificate_length_unaligned$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("length", [9, 10, 15])
+def test_attribute_certificate_unaligned_length_reaches_real_worker_and_cli(
+    tmp_path, pe32, length,
+):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x200, length)
+    target = tmp_path / "unaligned-certificate.efi"
+    target.write_bytes(bytes(image))
+    with target.open("rb") as opened:
+        with pytest.raises(pe.PEFormatError, match="^certificate_length_unaligned$"):
+            pe.inspect_fd(opened.fileno())
+    with target.open("rb") as opened:
+        done = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, check=False,
+        )
+    assert done.returncode == 2
+    finding = json.loads(done.stdout)["findings"][0]
+    assert finding["status"] == "malformed"
+    assert finding["reason_code"] == "certificate_length_unaligned"
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_two_exactly_aligned_certificate_entries_are_still_structural_only(pe32):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    image.extend(bytes(0x10))
+    struct.pack_into("<IHH", image, 0x210, 0x10, 0x200, 0x0002)
+    image[0x218:0x220] = b"NOTPKCS7"
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", image, directory, 0x200, 0x20)
+    finding = pe.inspect_bytes(bytes(image))
+    assert finding["signature_table"] == "structurally_present"
+    assert finding["certificate_count"] == 2
+    assert finding["cryptographic_signature_verified"] is False
+    assert finding["physical_install_authorized"] is False
