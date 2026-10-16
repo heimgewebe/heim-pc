@@ -136,6 +136,7 @@ _WORKER_ERROR_CODES = frozenset((
     "section_alignment_invalid",
     "section_count_unbounded",
     "section_low_alignment_rva_mismatch",
+    "section_empty_raw_pointer_invalid",
     "section_raw_alignment_invalid",
     "section_raw_order_invalid",
     "section_raw_overlap",

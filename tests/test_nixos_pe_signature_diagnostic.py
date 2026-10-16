@@ -374,6 +374,63 @@ def test_uninitialized_section_nonzero_raw_pointer_never_positive(
 
 
 @pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("raw_offset", [1, 0x200, 0xFFFFFFFF])
+def test_empty_section_raw_pointer_reason_survives_real_worker_and_cli(
+    tmp_path, pe32, present, raw_offset,
+):
+    """The untrusted-PE error must survive the real child protocol unchanged."""
+    image = tmp_path / "malformed-empty-section.efi"
+    image.write_bytes(
+        fixture_pe_uninitialized_section(
+            pe32=pe32, present=present, raw_offset=raw_offset,
+        )
+    )
+    with image.open("rb") as opened:
+        with pytest.raises(
+            pe.PEFormatError, match="^section_empty_raw_pointer_invalid$",
+        ):
+            pe.inspect_fd(opened.fileno())
+
+    # Do not fake inspect_fd for the CLI: let the actual -I -S -B worker
+    # communicate its bounded error across the inherited regular-file FD.
+    with image.open("rb") as opened:
+        completed = subprocess.run(
+            [sys.executable, str(Path(pe.__file__).resolve()), "--stdin"],
+            stdin=opened,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+    assert completed.returncode == 2
+    report = json.loads(completed.stdout)
+    finding = report["findings"][0]
+    assert finding["status"] == "malformed"
+    assert finding["reason_code"] == "section_empty_raw_pointer_invalid"
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_empty_section_with_zero_raw_pointer_remains_valid_through_real_worker(
+    tmp_path, pe32, present,
+):
+    image = tmp_path / "valid-empty-section.efi"
+    image.write_bytes(
+        fixture_pe_uninitialized_section(
+            pe32=pe32, present=present, raw_offset=0,
+        )
+    )
+    with image.open("rb") as opened:
+        finding = pe.inspect_fd(opened.fileno())
+    assert finding["signature_table"] == (
+        "structurally_present" if present else "absent"
+    )
+    assert finding["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
 def test_file_aligned_raw_section_before_certificate_is_diagnostic_only(pe32):
     finding = pe.inspect_bytes(
         fixture_pe_section_and_later_certificate(pe32=pe32)
