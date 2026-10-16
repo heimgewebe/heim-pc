@@ -1009,7 +1009,7 @@ def test_actual_worker_fails_closed_on_tampered_marshaled_payload(
     image.write_bytes(fixture_pe(present=True))
     with image.open("rb") as fd:
         result = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", pe._WORKER_CODE,
+            [sys.executable, "-I", "-S", "-B", "-c", pe._WORKER_CODE,
              expected_digest, str(fd.fileno()),
              pe.base64.b64encode(source).decode("ascii")],
             capture_output=True, timeout=10,
@@ -1090,6 +1090,87 @@ def test_plausibly_forged_worker_finding_never_grants_any_authority(
     assert received["firmware_key_policy_verified"] is False
     assert received["full_bootchain_authenticated"] is False
     assert received["physical_install_authorized"] is False
+
+
+def test_worker_startup_disables_site_before_receiving_image_fd(
+    tmp_path, monkeypatch,
+):
+    """-I alone still imports site; worker startup must be -I -S."""
+    image = tmp_path / "startup.efi"
+    image.write_bytes(fixture_pe(present=True))
+    original = pe.subprocess.Popen
+
+    def require_no_site(argv, **kwargs):
+        assert "-S" in argv[:6], "site/.pth code can precede pinned worker"
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(pe.subprocess, "Popen", require_no_site)
+    with image.open("rb") as source:
+        finding = pe.inspect_fd(source.fileno())
+    assert finding["physical_install_authorized"] is False
+
+
+def test_malicious_worker_deep_json_nesting_remains_structured_failure(
+    tmp_path, monkeypatch,
+):
+    """RecursionError in json.loads must not escape as a traceback."""
+    image = tmp_path / "deep.efi"
+    image.write_bytes(fixture_pe(present=True))
+    monkeypatch.setattr(pe, "_WORKER_CODE", "print('[' * 60000)")
+    with image.open("rb") as source:
+        with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+            pe.inspect_fd(source.fileno())
+
+
+def test_untrusted_worker_stdout_cannot_use_unbounded_communicate(
+    tmp_path, monkeypatch,
+):
+    """Actual 256-KiB child output must be rejected during bounded reading."""
+    image = tmp_path / "flood.efi"
+    image.write_bytes(fixture_pe(present=True))
+    children = []
+    original = pe.subprocess.Popen
+
+    def guarded_spawn(*args, **kwargs):
+        proc = original(*args, **kwargs)
+        children.append(proc)
+
+        def forbid_unbounded_communicate(*_args, **_kwargs):
+            proc.kill()
+            raise AssertionError("uncapped communicate buffers entire worker stdout")
+
+        proc.communicate = forbid_unbounded_communicate
+        return proc
+
+    monkeypatch.setattr(pe.subprocess, "Popen", guarded_spawn)
+    monkeypatch.setattr(
+        pe, "_WORKER_CODE", "import os; os.write(1, b'x' * 262144)"
+    )
+    with image.open("rb") as source:
+        with pytest.raises(pe.PEFormatError, match="unsafe_input"):
+            pe.inspect_fd(source.fileno())
+    assert len(children) == 1
+    proc = children[0]
+    assert proc.poll() is not None
+    assert proc.stdout is None or proc.stdout.closed
+
+
+def test_malicious_worker_stderr_is_not_buffered_by_parent(
+    tmp_path, monkeypatch,
+):
+    """Bound stderr via the same capped stdout pipe; no second buffer."""
+    image = tmp_path / "stderr.efi"
+    image.write_bytes(fixture_pe(present=True))
+    original = pe.subprocess.Popen
+
+    def guard_stderr(*args, **kwargs):
+        assert kwargs.get("stderr") == subprocess.STDOUT  # bounded shared pipe
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pe.subprocess, "Popen", guard_stderr)
+    with image.open("rb") as source:
+        finding = pe.inspect_fd(source.fileno())
+    assert finding["physical_install_authorized"] is False
 
 
 @pytest.mark.parametrize("pe32", [False, True])

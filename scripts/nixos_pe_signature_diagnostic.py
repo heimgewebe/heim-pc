@@ -3,8 +3,9 @@
 
 In particular, an `sbverify --list` exit status of zero does NOT prove the
 presence of a signature table, much less Secure Boot trust. This deliberately
-limited parser consumes only caller-preopened stdin/fd. It never opens
-pathnames or devices, invokes sbverify, reads firmware, modifies EFI variables,
+limited parser consumes only caller-preopened stdin/fd. It never opens PE
+input pathnames or block devices, invokes sbverify, reads firmware,
+modifies EFI variables,
 enrolls TPM keys, writes an ESP, or authorizes a physical NixOS installation.
 
 Even a structurally present WIN_CERTIFICATE is UNAUTHENTICATED: it is not
@@ -20,10 +21,12 @@ import hashlib
 import json
 import marshal
 import os
+import selectors
 import stat
 import struct
 import subprocess
 import sys
+import time
 from typing import Any
 
 MAX_IMAGE_BYTES = 256 * 1024 * 1024
@@ -31,13 +34,15 @@ MAX_CERTIFICATE_TABLE_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_COUNT = 16
 MAX_SECTION_COUNT = 96
 READ_CHUNK_BYTES = 1024 * 1024
-# Bounded caller wait. A blocked kernel I/O child might not be immediately
+# Bounded child-pipe read phase, not an end-to-end caller deadline.
+# A blocked kernel I/O child might not be immediately
 # killable: this limits the caller, not resource cleanup in D-state.
 WORKER_DEADLINE_SECONDS = 5.0
 
 # Code objects are captured ONCE after this module has loaded.  The worker
-# receives only these already-loaded bytes on a private pipe; no pathname to
+# receives these already-loaded bytes as bounded argv data; no pathname to
 # this module is reopened between the parent snapshot and child execution.
+# Interpreter/stdlib identity must be protected by the enclosing environment.
 # Marshal is used exclusively with trusted same-interpreter code, never with
 # untrusted image data or a network/CLI payload.
 _WORKER_CODE = """
@@ -97,6 +102,7 @@ _NON_CLAIMS = [
     "certificate_table_is_not_cryptographic_verification",
     "preopened_fd_source_and_execution_authority_not_established",
     "hard_end_to_end_deadline_or_fuse_nfs_support_not_established",
+    "worker_interpreter_and_stdlib_provenance_not_established",
     "firmware_pk_kek_db_dbx_policy_not_verified",
     "whole_loader_kernel_initrd_cmdline_not_authenticated",
     "unchanged_popos_fallback_bootability_not_proven",
@@ -480,15 +486,49 @@ def _inspect_fd_raw(fd: int) -> dict[str, Any]:
             os.close(pinned_fd)
 
 
+def _read_worker_output_bounded(proc: subprocess.Popen[bytes]) -> bytes:
+    """Bound child-pipe memory and the worker read phase, not Popen/exec.
+
+    The only read is on a local child stdout PIPE. Stderr shares that pipe;
+    neither can allocate unbounded parent buffers. The supplied image FD
+    is not accessed or closed here. Kernel D-state lifecycle is supervised
+    externally and unsupported FUSE/NFS has no end-to-end deadline.
+    """
+    if proc.stdout is None:
+        raise PEFormatError("unsafe_input")
+    deadline = time.monotonic() + WORKER_DEADLINE_SECONDS
+    payload = bytearray()
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise PEFormatError("read_deadline_exceeded")
+            chunk = os.read(
+                proc.stdout.fileno(), min(READ_CHUNK_BYTES, 65537 - len(payload))
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > 65536:
+                raise PEFormatError("unsafe_input")
+    try:
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        raise PEFormatError("read_deadline_exceeded") from exc
+    return bytes(payload)
+
+
 def inspect_fd(fd: int) -> dict[str, Any]:
-    """Inspect a caller-preopened FD using a bounded worker communicate wait.
+    """Inspect a caller-preopened FD using a bounded child pipe-read phase.
 
     This is NOT an end-to-end deadline: Popen/exec and filesystem operations
     outside the child read wait may block. In particular no bounded FUSE/NFS
     operation is supported or guaranteed. The caller must supply an already
     opened regular local-file FD and supervise the task/cgroup lifecycle.
-    A child stuck in uninterruptible kernel I/O can outlive SIGKILL. The
-    worker only produces non-authoritative certificate-table diagnostics.
+    A child stuck in uninterruptible kernel I/O can outlive SIGKILL.
+    Interpreter and stdlib are trusted externally, not pinned by this module.
+    The worker only produces non-authoritative certificate-table diagnostics.
     """
     if isinstance(fd, bool) or not isinstance(fd, int) or fd < 0 or fd in (1, 2):
         raise PEFormatError("unsafe_input")
@@ -498,36 +538,29 @@ def inspect_fd(fd: int) -> dict[str, Any]:
     # The child privately duplicates, checks and closes its own descriptor.
     proc: subprocess.Popen[bytes] | None = None
     try:
-        # -I ignores PYTHONPATH/site imports; -B prevents bytecode writes.
-        # No mutable module pathname is passed to or opened by the child.
+        # -I isolates environment/path, -S suppresses site/.pth hooks,
+        # -B prevents bytecode writes. Interpreter+stdlib remain trusted
+        # environmental dependencies, not cryptographically source-pinned.
         proc = subprocess.Popen(
             [
-                sys.executable, "-I", "-B", "-c", _WORKER_CODE,
+                sys.executable, "-I", "-S", "-B", "-c", _WORKER_CODE,
                 hashlib.sha256(_PINNED_WORKER_PAYLOAD).hexdigest(), str(fd),
                 base64.b64encode(_PINNED_WORKER_PAYLOAD).decode("ascii"),
             ],
             pass_fds=(fd,),
             stdin=None,  # FD 0 may be the borrowed PE image, never replace it
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # same bounded local stdout pipe
             bufsize=0,  # raw pipe FileIO.close has no buffered flush
             close_fds=True,
             env={"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
         )
-        try:
-            output, _stderr = proc.communicate(timeout=WORKER_DEADLINE_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            # Do NOT use an unbounded wait() after kill; D-state may persist.
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass  # Child exited between timeout and kill.
-            raise PEFormatError("read_deadline_exceeded") from exc
-        if proc.returncode != 0 or len(output) > 65536:
+        output = _read_worker_output_bounded(proc)
+        if proc.returncode != 0:
             raise PEFormatError("unsafe_input")
         try:
             message = json.loads(output)
-        except (ValueError, UnicodeDecodeError) as exc:
+        except (ValueError, UnicodeDecodeError, RecursionError) as exc:
             raise PEFormatError("unsafe_input") from exc
         if not isinstance(message, dict):
             raise PEFormatError("unsafe_input")
@@ -656,9 +689,9 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-# Snapshot the executable function *objects* at module load, not source read
-# again from __file__. A same-UID source rename or replacement after import
-# cannot alter what the independent read worker executes.
+# Snapshot the PE function code objects at module load without re-reading
+# this module from __file__. This binds only these code objects, not Python,
+# the standard library, interpreter launch, or arbitrary same-UID processes.
 _PINNED_WORKER_PAYLOAD = marshal.dumps({
     "codes": {
         name: globals()[name].__code__
