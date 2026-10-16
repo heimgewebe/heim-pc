@@ -101,10 +101,10 @@ def test_truncated_certificate_directory_is_not_unsigned_success():
         pe.inspect_bytes(bytes(data))
 
 
-def test_unfinalized_certificate_length_cannot_hide_payload_bytes():
+def test_nonzero_certificate_padding_cannot_hide_payload_bytes():
     data = bytearray(fixture_pe(present=True))
-    struct.pack_into("<I", data, 0x200, 10)  # not padded to a finalized 8-byte length
-    with pytest.raises(pe.PEFormatError, match="certificate_length_unaligned"):
+    struct.pack_into("<I", data, 0x200, 10)  # six subsequent nonzero fixture bytes masquerade as padding
+    with pytest.raises(pe.PEFormatError, match="certificate_padding_invalid"):
         pe.inspect_bytes(bytes(data))
 
 
@@ -1501,17 +1501,17 @@ def test_executable_bit_with_other_valid_image_flags_stays_structural_only(
 
 @pytest.mark.parametrize("pe32", [False, True])
 @pytest.mark.parametrize("length", [9, 10, 11, 12, 13, 14, 15])
-def test_attribute_certificate_dwlength_must_include_quadword_padding(pe32, length):
-    """dwLength must encode the complete finalized eight-byte-aligned entry."""
+def test_attribute_certificate_nonzero_padding_must_fail_closed(pe32, length):
+    """Actual nonzero bytes beyond unrounded length cannot become accepted padding."""
     image = bytearray(fixture_pe(present=True, pe32=pe32))
     struct.pack_into("<I", image, 0x200, length)
-    with pytest.raises(pe.PEFormatError, match="^certificate_length_unaligned$"):
+    with pytest.raises(pe.PEFormatError, match="^certificate_padding_invalid$"):
         pe.inspect_bytes(bytes(image))
 
 
 @pytest.mark.parametrize("pe32", [False, True])
 @pytest.mark.parametrize("length", [9, 10, 15])
-def test_attribute_certificate_unaligned_length_reaches_real_worker_and_cli(
+def test_attribute_certificate_nonzero_padding_reaches_real_worker_and_cli(
     tmp_path, pe32, length,
 ):
     image = bytearray(fixture_pe(present=True, pe32=pe32))
@@ -1519,7 +1519,7 @@ def test_attribute_certificate_unaligned_length_reaches_real_worker_and_cli(
     target = tmp_path / "unaligned-certificate.efi"
     target.write_bytes(bytes(image))
     with target.open("rb") as opened:
-        with pytest.raises(pe.PEFormatError, match="^certificate_length_unaligned$"):
+        with pytest.raises(pe.PEFormatError, match="^certificate_padding_invalid$"):
             pe.inspect_fd(opened.fileno())
     with target.open("rb") as opened:
         done = subprocess.run(
@@ -1530,7 +1530,7 @@ def test_attribute_certificate_unaligned_length_reaches_real_worker_and_cli(
     assert done.returncode == 2
     finding = json.loads(done.stdout)["findings"][0]
     assert finding["status"] == "malformed"
-    assert finding["reason_code"] == "certificate_length_unaligned"
+    assert finding["reason_code"] == "certificate_padding_invalid"
     assert finding["cryptographic_signature_verified"] is False
     assert finding["physical_install_authorized"] is False
 
@@ -1682,4 +1682,49 @@ def test_zero_reserved_pe_directories_preserve_structural_only_classification(
         "structurally_present" if present else "absent"
     )
     assert report["full_bootchain_authenticated"] is False
+    assert report["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("length", [9, 10, 15])
+def test_sbsign_separately_padded_certificate_is_structural_only(pe32, length):
+    """systemd-sbsign writes unrounded dwLength, zero-pads to the rounded table size."""
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x200, length)
+    image[0x208:0x210] = b"D" * (length - 8) + bytes(16 - length)
+    report = pe.inspect_bytes(bytes(image))
+    assert report["signature_table"] == "structurally_present"
+    assert report["certificate_count"] == 1
+    assert report["cryptographic_signature_verified"] is False
+    assert report["full_bootchain_authenticated"] is False
+    assert report["physical_install_authorized"] is False
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+@pytest.mark.parametrize("length", [9, 10, 15])
+def test_sbsign_separately_padded_certificate_rejects_nonzero_padding(
+    pe32, length,
+):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x200, length)
+    image[0x208:0x210] = b"D" * (length - 8) + bytes(16 - length)
+    image[0x200 + length] = 0x7A
+    with pytest.raises(pe.PEFormatError, match="^certificate_padding_invalid$"):
+        pe.inspect_bytes(bytes(image))
+
+
+@pytest.mark.parametrize("pe32", [False, True])
+def test_sbsign_separately_padded_record_preserves_two_entry_cursor(pe32):
+    image = bytearray(fixture_pe(present=True, pe32=pe32))
+    struct.pack_into("<I", image, 0x200, 9)
+    image[0x208:0x210] = b"D" + bytes(7)
+    image.extend(bytes(16))
+    struct.pack_into("<IHH", image, 0x210, 0x10, 0x0200, 0x0002)
+    image[0x218:0x220] = b"NOTPKCS7"
+    directory = 0x98 + (96 if pe32 else 112) + 4 * 8
+    struct.pack_into("<II", image, directory, 0x200, 0x20)
+    report = pe.inspect_bytes(bytes(image))
+    assert report["certificate_count"] == 2
+    assert report["signature_table"] == "structurally_present"
+    assert report["cryptographic_signature_verified"] is False
     assert report["physical_install_authorized"] is False

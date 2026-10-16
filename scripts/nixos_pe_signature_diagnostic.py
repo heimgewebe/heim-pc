@@ -116,7 +116,6 @@ _WORKER_ERROR_CODES = frozenset((
     "certificate_header_truncated",
     "certificate_length_invalid",
     "certificate_length_out_of_bounds",
-    "certificate_length_unaligned",
     "certificate_overlaps_declared_headers",
     "certificate_overlaps_section_data",
     "certificate_padding_invalid",
@@ -455,11 +454,11 @@ def inspect_bytes(data: bytes) -> dict[str, Any]:
         # still contain completely fabricated or untrusted signature bytes.
         if length < 9:
             raise PEFormatError("certificate_length_invalid")
-        # WIN_CERTIFICATE dwLength describes the finalized record including
-        # its own zero padding. Reject non-quadword lengths instead of quietly
-        # rounding an untrusted truncated declaration into a positive entry.
-        if length & 7:
-            raise PEFormatError("certificate_length_unaligned")
+        # Some signed UKIs (including systemd-sbsign) encode the header
+        # plus unpadded DER size in dwLength and store zero quadword padding
+        # separately. The rounded length advances to the next entry; the
+        # padding bytes are still checked below before any structural result.
+        # This diagnoses framing only, not an authentic digital signature.
         if revision != 0x0200 or kind != 0x0002:
             raise PEFormatError("certificate_format_unsupported")
         aligned = (length + 7) & ~7
