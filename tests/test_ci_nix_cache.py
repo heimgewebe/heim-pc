@@ -258,7 +258,9 @@ def test_consumer_distinguishes_nix_cache_protocol_from_http_health():
     # protocol or whether any signed output is present.
     assert '"$CI_NIX_CACHE_URL/nix-cache-info"' in report
     assert "awk " in report
-    assert "StoreDir: /nix/store" in report
+    # Test the normalized Nix cache-info StoreDir parser, not a raw whole-line literal.
+    assert '== "StoreDir"' in report
+    assert 'v != "/nix/store"' in report
     assert "--max-filesize 4096" in report
     assert "CI_NIX_CACHE_PROTOCOL=available" in report
     assert "CI_NIX_CACHE_PROTOCOL=unavailable" in report
@@ -278,8 +280,12 @@ def test_consumer_distinguishes_nix_cache_protocol_from_http_health():
         ("wrong_store_dir", "unavailable"),
         ("missing_store_dir", "unavailable"),
         ("valid_protocol", "available"),
+        ("valid_protocol_padded", "available"),
+        ("valid_protocol_tabbed", "available"),
         ("conflicting_store_dirs", "unavailable"),
+        ("conflicting_store_dirs_padded", "unavailable"),
         ("duplicated_store_dir", "unavailable"),
+        ("duplicated_store_dir_padded", "unavailable"),
     ],
 )
 def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
@@ -328,8 +334,12 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
         "  wrong_store_dir) printf 'StoreDir: /tmp/invalid\\n'; exit 0 ;;\n"
         "  missing_store_dir) printf 'WantMassQuery: 1\\n'; exit 0 ;;\n"
         "  valid_protocol) printf 'StoreDir: /nix/store\\nWantMassQuery: 1\\n'; exit 0 ;;\n"
+        "  valid_protocol_padded) printf 'StoreDir:  /nix/store  \\nWantMassQuery: 1\\n'; exit 0 ;;\n"
+        "  valid_protocol_tabbed) printf 'StoreDir:\t/nix/store\t\\nWantMassQuery: 1\\n'; exit 0 ;;\n"
         "  conflicting_store_dirs) printf 'StoreDir: /nix/store\\nStoreDir: /tmp/invalid\\n'; exit 0 ;;\n"
+        "  conflicting_store_dirs_padded) printf 'StoreDir:  /nix/store  \\nStoreDir:  /tmp/invalid  \\n'; exit 0 ;;\n"
         "  duplicated_store_dir) printf 'StoreDir: /nix/store\\nStoreDir: /nix/store\\n'; exit 0 ;;\n"
+        "  duplicated_store_dir_padded) printf 'StoreDir:  /nix/store  \\nStoreDir:  /nix/store  \\n'; exit 0 ;;\n"
         "  *) exit 42 ;;\n"
         "esac\n",
         encoding="utf-8",
