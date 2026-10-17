@@ -57,6 +57,9 @@ in
     fsType = "ext4";
   };
   boot.loader.systemd-boot.enable = true;
+  # The boot menu must never alter unverified LUKS/kernel arguments at runtime.
+  # Does not itself authenticate EFI, UKI, initrd, kernel or firmware policy.
+  boot.loader.systemd-boot.editor = false;
   # Bound retained boot entries so the dedicated 1 GiB ESP cannot grow without limit.
   boot.loader.systemd-boot.configurationLimit = 10;
   boot.loader.efi.canTouchEfiVariables = false;

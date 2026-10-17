@@ -445,6 +445,9 @@
           assert nixpkgs.lib.hasInfix "heim-pc-private-storage patch-loader-entries"
             target.boot.loader.systemd-boot.extraInstallCommands;
           assert target.boot.loader.systemd-boot.enable;
+          # The physical target may not expose an editable kernel command line.
+          # This defense-in-depth is not signed-bootchain authentication.
+          assert !target.boot.loader.systemd-boot.editor;
           # The private-storage hook selects NixOS entries by this exact sort key.
           assert target.boot.loader.systemd-boot.sortKey == "nixos";
           assert !target.boot.loader.efi.canTouchEfiVariables;
