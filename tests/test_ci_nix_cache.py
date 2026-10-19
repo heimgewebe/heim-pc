@@ -360,3 +360,143 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
     assert run.returncode == 0, run.stderr
     assert f"CI_NIX_CACHE_PROTOCOL={expected}" in run.stdout
     assert not list(tmp_path.glob("heim-pc-ci-cache-info.*"))
+
+
+def _cache_publisher_upload_script():
+    """Extract the actual publisher shell step, excluding secret declarations."""
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    _, marker, tail = workflow.partition(
+        "      - name: Upload cache through restricted publisher key\n"
+    )
+    assert marker
+    step, end, _ = tail.partition(
+        "      - name: Verify public signed-cache readback\n"
+    )
+    assert end
+    _, marker, script = step.partition("        run: |\n")
+    assert marker
+    return "\n".join(
+        line[10:] if line.strip() else ""
+        for line in script.splitlines()
+    )
+
+
+def test_cache_upload_publishes_nar_bytes_before_signed_narinfo():
+    """Signed narinfo must not become visible before its referenced NAR."""
+    script = _cache_publisher_upload_script()
+    payload = "rsync -r --ignore-existing --exclude='*.narinfo'"
+    metadata = "rsync -r --ignore-existing --include='*.narinfo' --exclude='*'"
+    assert script.count("rsync -r --ignore-existing") == 2
+    assert payload in script
+    assert metadata in script
+    assert script.index(payload) < script.index(metadata)
+    assert "StrictHostKeyChecking=yes" in script
+    assert "UserKnownHostsFile=$known_hosts" in script
+    assert "rsync -r --delete" not in script
+    assert "--inplace" not in script
+
+
+@pytest.mark.parametrize("fail_first", [True, False])
+def test_cache_upload_shell_never_publishes_metadata_after_failed_payload(
+    tmp_path, fail_first,
+):
+    """Run the actual Actions step with an isolated, non-network rsync stub."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    cache.mkdir()
+    (cache / "dummy.nar.xz").write_bytes(b"dummy NAR payload")
+    (cache / "dummy.narinfo").write_bytes(b"StorePath: /nix/store/dummy\n")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    rsync = binaries / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "if [ \"$FAIL_FIRST\" = 1 ] && [ \"$(wc -l < \"$RSYNC_ARGS_LOG\")\" -eq 1 ]; then\n"
+        "  exit 23\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    log = tmp_path / "rsync-args.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{binaries}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-ssh-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST-ONLY-NOT-REAL",
+        RSYNC_ARGS_LOG=str(log),
+        FAIL_FIRST="1" if fail_first else "0",
+    )
+    outcome = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert len(calls) == (1 if fail_first else 2)
+    assert "--exclude=*.narinfo" in calls[0]
+    if fail_first:
+        assert outcome.returncode != 0
+        assert not any("--include=*.narinfo" in call for call in calls)
+    else:
+        assert outcome.returncode == 0, outcome.stderr
+        assert "--include=*.narinfo" in calls[1]
+        assert "--exclude=*" in calls[1]
+    assert not (tmp_path / "ci-nix-cache-upload-key").exists()
+    assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync CLI unavailable")
+def test_cache_upload_real_rsync_filter_is_payload_first_and_append_only(tmp_path):
+    """Use the actual workflow filters against an entirely local fixture cache."""
+    import shlex
+
+    commands = [
+        line.strip().removesuffix("\\").strip()
+        for line in _cache_publisher_upload_script().splitlines()
+        if line.strip().startswith("rsync -r --ignore-existing")
+    ]
+    assert len(commands) == 2
+    argv = [shlex.split(command)[1:] for command in commands]
+
+    cache = tmp_path / "signed-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "test.nar.xz").write_bytes(b"archived NAR fixture")
+    narinfo = cache / "fixture.narinfo"
+    narinfo.write_bytes(b"Sig: test-key:signature-fixture\n")
+    (cache / "nix-cache-info").write_bytes(b"StoreDir: /nix/store\n")
+    destination = tmp_path / "remote"
+    destination.mkdir()
+
+    def transfer(filters):
+        subprocess.run(
+            ["rsync", *filters, str(cache) + "/", str(destination) + "/"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+
+    transfer(argv[0])
+    assert (destination / "nar" / "test.nar.xz").read_bytes() == (
+        b"archived NAR fixture"
+    )
+    assert (destination / "nix-cache-info").is_file()
+    assert not (destination / "fixture.narinfo").exists()
+
+    transfer(argv[1])
+    assert (destination / "fixture.narinfo").read_bytes() == (
+        b"Sig: test-key:signature-fixture\n"
+    )
+    narinfo.write_bytes(b"Sig: attacker-key:replacement\n")
+    (cache / "nar" / "test.nar.xz").write_bytes(b"changed NAR")
+    transfer(argv[0])
+    transfer(argv[1])
+    assert (destination / "nar" / "test.nar.xz").read_bytes() == (
+        b"archived NAR fixture"
+    )
+    assert (destination / "fixture.narinfo").read_bytes() == (
+        b"Sig: test-key:signature-fixture\n"
+    )

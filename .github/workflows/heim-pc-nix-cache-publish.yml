@@ -149,7 +149,21 @@ jobs:
           printf '%s %s\n' "$CI_NIX_CACHE_SSH_HOST" "$CI_NIX_CACHE_SSH_HOST_KEY" > "$known_hosts"
           chmod 600 "$known_hosts"
 
-          rsync -r --ignore-existing             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
+          # A successful signed narinfo advertises the associated NAR as
+          # fetchable. Publish *all* payloads first, never a dangling narinfo.
+          # rsync stages each file under a temporary name before renaming it;
+          # --ignore-existing forbids overwriting previously published bytes.
+          rsync -r --ignore-existing --exclude='*.narinfo' \
+            -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
+            "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
+
+          # A failed payload pass exits via set -e and MUST NOT publish even
+          # one new narinfo. This prevents incomplete NAR transfers from
+          # advertising cache availability. The second pass only adds signed
+          # metadata after every new payload has transferred successfully.
+          rsync -r --ignore-existing --include='*.narinfo' --exclude='*' \
+            -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
+            "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
 
       - name: Verify public signed-cache readback
         env:
