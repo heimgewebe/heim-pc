@@ -157,24 +157,39 @@ jobs:
             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
 
-          # --ignore-existing cannot repair or detect stale/partial NAR files
-          # already present on the append-only remote. Before advertising any
-          # signed narinfo, compare the complete remote payload byte checksums
-          # over the authenticated restricted SSH channel. Never use
-          # --ignore-existing for this read-only verification; it would skip
-          # precisely the pre-existing objects whose integrity matters.
-          # A refused remote read or any mismatch aborts before metadata upload.
-          remote_payload_changes="$(rsync -r --checksum --dry-run --itemize-changes --exclude='*.narinfo' \
-            -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
-            "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/")"
-          if [[ -n "$remote_payload_changes" ]]; then
-            printf 'remote NAR payload verification failed; refusing signed narinfo publication\n' >&2
+          # The restricted rrsync -no-overwrite receiver forces
+          # --ignore-existing even on a checksum dry-run. That makes a
+          # receiver-side rsync audit blind to stale or truncated NARs.
+          # Instead, read back every NAR through the existing HTTPS cache
+          # endpoint and compare *all bytes* to the freshly signed local
+          # payload before publishing any signed narinfo metadata.
+          # This never needs broader SSH publisher authority or remote writes.
+          shopt -s nullglob
+          nar_files=( "$cache_dir"/nar/* )
+          if (( ${#nar_files[@]} == 0 )); then
+            echo 'no generated NAR payloads; refusing narinfo publication' >&2
             exit 1
           fi
+          for nar_file in "${nar_files[@]}"; do
+            if [[ ! -f "$nar_file" || -L "$nar_file" ]]; then
+              echo 'unsafe NAR payload entry; refusing narinfo publication' >&2
+              exit 1
+            fi
+            nar_name="${nar_file##*/}"
+            if [[ ! "$nar_name" =~ ^[A-Za-z0-9_-]+\.nar(\.(xz|zst|gz|bz2|lz4))?$ ]]; then
+              echo 'unexpected NAR payload filename; refusing narinfo publication' >&2
+              exit 1
+            fi
+            if ! curl --fail --silent --show-error --connect-timeout 15 --max-time 900 --proto '=https' \
+              "$CI_NIX_CACHE_URL/nar/$nar_name" | cmp -s -- "$nar_file" -; then
+              echo 'remote NAR payload does not match signed local bytes; refusing narinfo publication' >&2
+              exit 1
+            fi
+          done
 
-          # A failed upload or payload-verification pass aborts before any
-          # narinfo publication. The final pass exposes metadata only after
-          # all local payload bytes match the authenticated remote copy.
+          # No signed narinfo is published on a failed upload, missing NAR,
+          # TLS/HTTP/readback error, or byte mismatch. The last pass adds
+          # signed metadata only after every NAR has been fetched and verified.
           rsync -r --ignore-existing --include='*.narinfo' --exclude='*' \
             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
