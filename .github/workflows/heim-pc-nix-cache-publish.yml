@@ -157,10 +157,24 @@ jobs:
             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
 
-          # A failed payload pass exits via set -e and MUST NOT publish even
-          # one new narinfo. This prevents incomplete NAR transfers from
-          # advertising cache availability. The second pass only adds signed
-          # metadata after every new payload has transferred successfully.
+          # --ignore-existing cannot repair or detect stale/partial NAR files
+          # already present on the append-only remote. Before advertising any
+          # signed narinfo, compare the complete remote payload byte checksums
+          # over the authenticated restricted SSH channel. Never use
+          # --ignore-existing for this read-only verification; it would skip
+          # precisely the pre-existing objects whose integrity matters.
+          # A refused remote read or any mismatch aborts before metadata upload.
+          remote_payload_changes="$(rsync -r --checksum --dry-run --itemize-changes --exclude='*.narinfo' \
+            -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
+            "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/")"
+          if [[ -n "$remote_payload_changes" ]]; then
+            printf 'remote NAR payload verification failed; refusing signed narinfo publication\n' >&2
+            exit 1
+          fi
+
+          # A failed upload or payload-verification pass aborts before any
+          # narinfo publication. The final pass exposes metadata only after
+          # all local payload bytes match the authenticated remote copy.
           rsync -r --ignore-existing --include='*.narinfo' --exclude='*' \
             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"

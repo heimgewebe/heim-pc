@@ -385,11 +385,14 @@ def test_cache_upload_publishes_nar_bytes_before_signed_narinfo():
     """Signed narinfo must not become visible before its referenced NAR."""
     script = _cache_publisher_upload_script()
     payload = "rsync -r --ignore-existing --exclude='*.narinfo'"
+    audit = "rsync -r --checksum --dry-run --itemize-changes --exclude='*.narinfo'"
     metadata = "rsync -r --ignore-existing --include='*.narinfo' --exclude='*'"
     assert script.count("rsync -r --ignore-existing") == 2
     assert payload in script
+    assert audit in script
     assert metadata in script
-    assert script.index(payload) < script.index(metadata)
+    assert script.index(payload) < script.index(audit) < script.index(metadata)
+    assert "--ignore-existing" not in script[script.index(audit):script.index(metadata)]
     assert "StrictHostKeyChecking=yes" in script
     assert "UserKnownHostsFile=$known_hosts" in script
     assert "rsync -r --delete" not in script
@@ -438,15 +441,17 @@ def test_cache_upload_shell_never_publishes_metadata_after_failed_payload(
         env=env, capture_output=True, text=True, timeout=10, check=False,
     )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-    assert len(calls) == (1 if fail_first else 2)
+    assert len(calls) == (1 if fail_first else 3)
     assert "--exclude=*.narinfo" in calls[0]
     if fail_first:
         assert outcome.returncode != 0
         assert not any("--include=*.narinfo" in call for call in calls)
     else:
         assert outcome.returncode == 0, outcome.stderr
-        assert "--include=*.narinfo" in calls[1]
-        assert "--exclude=*" in calls[1]
+        assert "--checksum" in calls[1] and "--dry-run" in calls[1]
+        assert "--ignore-existing" not in calls[1]
+        assert "--include=*.narinfo" in calls[2]
+        assert "--exclude=*" in calls[2]
     assert not (tmp_path / "ci-nix-cache-upload-key").exists()
     assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
 
@@ -500,3 +505,94 @@ def test_cache_upload_real_rsync_filter_is_payload_first_and_append_only(tmp_pat
     assert (destination / "fixture.narinfo").read_bytes() == (
         b"Sig: test-key:signature-fixture\n"
     )
+
+
+def test_cache_upload_rejects_preexisting_remote_nar_mismatch_before_narinfo(tmp_path):
+    """A successful append-only upload must not endorse stale remote bytes."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "sample.nar.xz").write_bytes(b"VALID NAR")
+    (cache / "sample.narinfo").write_text(
+        "URL: nar/sample.nar.xz\nFileHash: sha256:synthetic\n", encoding="utf-8"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "case \" $* \" in\n"
+        "  *' --checksum --dry-run '*)\n"
+        "    printf '>fcsT...... nar/sample.nar.xz\\n'\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    calls_path = tmp_path / "calls.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-ssh-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST-ONLY-NOT-REAL",
+        RSYNC_ARGS_LOG=str(calls_path),
+    )
+    outcome = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    assert outcome.returncode != 0, "mismatched remote NAR may not be published"
+    assert len(calls) == 2
+    assert "--exclude=*.narinfo" in calls[0]
+    assert "--checksum" in calls[1] and "--dry-run" in calls[1]
+    assert not any("--include=*.narinfo" in call for call in calls)
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync CLI unavailable")
+def test_cache_upload_remote_payload_checksum_detects_stale_existing_bytes(tmp_path):
+    """The actual rsync audit must detect stale NAR bytes even at identical size."""
+    script = _cache_publisher_upload_script()
+    assert "rsync -r --checksum --dry-run --itemize-changes" in script
+    source = tmp_path / "ci-nix-cache"
+    destination = tmp_path / "remote"
+    (source / "nar").mkdir(parents=True)
+    (destination / "nar").mkdir(parents=True)
+    local_bytes = b"verified NAR payload bytes"
+    (source / "nar" / "fixture.nar.xz").write_bytes(local_bytes)
+    remote_path = destination / "nar" / "fixture.nar.xz"
+    audit_argv = [
+        "rsync", "-r", "--checksum", "--dry-run", "--itemize-changes",
+        "--exclude=*.narinfo", str(source) + "/", str(destination) + "/",
+    ]
+    upload_argv = [
+        "rsync", "-r", "--ignore-existing", "--exclude=*.narinfo",
+        str(source) + "/", str(destination) + "/",
+    ]
+    for stale in (b"PARTIAL", b"X" * len(local_bytes)):
+        remote_path.write_bytes(stale)
+        # The first upload pass skips existing files even when they are wrong.
+        skipped = subprocess.run(
+            upload_argv, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert skipped.returncode == 0, skipped.stderr
+        assert remote_path.read_bytes() == stale
+        audit = subprocess.run(
+            audit_argv, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert audit.returncode == 0, audit.stderr
+        assert "nar/fixture.nar.xz" in audit.stdout
+        assert remote_path.read_bytes() == stale, "audit may not repair or mutate"
+    remote_path.write_bytes(local_bytes)
+    audit = subprocess.run(
+        audit_argv, capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert audit.returncode == 0, audit.stderr
+    assert audit.stdout == "", "verified remote bytes must not block publication"
