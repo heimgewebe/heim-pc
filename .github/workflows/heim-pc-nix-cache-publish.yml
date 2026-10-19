@@ -187,12 +187,69 @@ jobs:
             fi
           done
 
-          # No signed narinfo is published on a failed upload, missing NAR,
-          # TLS/HTTP/readback error, or byte mismatch. The last pass adds
-          # signed metadata only after every NAR has been fetched and verified.
+          # A signed narinfo can already exist in the append-only receiver.
+          # rrsync -no-overwrite silently retains that older metadata, even
+          # when this run produced a different but validly signed NAR. Do not
+          # mistake signature validity and equal store paths for equal bytes.
+          narinfo_files=( "$cache_dir"/*.narinfo )
+          if (( ${#narinfo_files[@]} == 0 )); then
+            echo 'no generated signed narinfo; refusing publication' >&2
+            exit 1
+          fi
+          narinfo_before="$(mktemp "$RUNNER_TEMP/ci-nix-cache-narinfo-before.XXXXXX")"
+          trap 'rm -f "$upload_key" "$known_hosts" "$narinfo_before"' EXIT
+          for narinfo_file in "${narinfo_files[@]}"; do
+            if [[ ! -f "$narinfo_file" || -L "$narinfo_file" ]]; then
+              echo 'unsafe narinfo entry; refusing publication' >&2
+              exit 1
+            fi
+            narinfo_name="${narinfo_file##*/}"
+            if [[ ! "$narinfo_name" =~ ^[A-Za-z0-9_-]+\.narinfo$ ]]; then
+              echo 'invalid narinfo filename; refusing publication' >&2
+              exit 1
+            fi
+            # Existing objects must match the exact signed local metadata.
+            # 404 is the only acceptable absence; redirects and server errors
+            # are not silently interpreted as a cache miss.
+            if ! status="$(curl --silent --show-error --connect-timeout 15 --max-time 900 --proto '=https' \
+              --output "$narinfo_before" --write-out '%{http_code}' \
+              "$CI_NIX_CACHE_URL/$narinfo_name")"; then
+              echo 'remote narinfo readback failed; refusing publication' >&2
+              exit 1
+            fi
+            case "$status" in
+              200)
+                if ! cmp -s -- "$narinfo_file" "$narinfo_before"; then
+                  echo 'pre-existing signed narinfo differs from local bytes; refusing publication' >&2
+                  exit 1
+                fi
+                ;;
+              404) ;; # Genuine new object: append-only upload may create it.
+              *)
+                echo 'unexpected remote narinfo HTTP status; refusing publication' >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          # All payloads match the consumer endpoint and no existing
+          # signed metadata conflicts. Only now publish missing metadata.
           rsync -r --ignore-existing --include='*.narinfo' --exclude='*' \
             -e "ssh -i $upload_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts" \
             "$cache_dir/" "alex@$CI_NIX_CACHE_SSH_HOST:/"
+
+          # Catch a concurrent creator racing between the 404 preflight and
+          # the forced --ignore-existing upload, as well as failed visibility.
+          # Later closure verification alone would accept an older, validly
+          # signed but different NAR under an identical store path.
+          for narinfo_file in "${narinfo_files[@]}"; do
+            narinfo_name="${narinfo_file##*/}"
+            if ! curl --fail --silent --show-error --connect-timeout 15 --max-time 900 --proto '=https' \
+              "$CI_NIX_CACHE_URL/$narinfo_name" | cmp -s -- "$narinfo_file" -; then
+              echo 'published signed narinfo differs from local bytes; refusing success' >&2
+              exit 1
+            fi
+          done
 
       - name: Verify public signed-cache readback
         env:

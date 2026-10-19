@@ -429,7 +429,12 @@ def test_cache_upload_shell_never_publishes_metadata_after_failed_payload(
     curl = binaries / "curl"
     curl.write_text(
         "#!/bin/sh\n"
-        "cat \"$RUNNER_TEMP/ci-nix-cache/nar/dummy.nar.xz\"\n",
+        "case \"$*\" in\n"
+        "  *'/nar/dummy.nar.xz'*) cat \"$RUNNER_TEMP/ci-nix-cache/nar/dummy.nar.xz\" ;;\n"
+        "  *'--write-out'*'/dummy.narinfo'*) printf '404' ;;\n"
+        "  *'/dummy.narinfo'*) cat \"$RUNNER_TEMP/ci-nix-cache/dummy.narinfo\" ;;\n"
+        "  *) exit 44 ;;\n"
+        "esac\n",
         encoding="utf-8",
     )
     curl.chmod(0o700)
@@ -696,6 +701,11 @@ def test_cache_upload_reads_all_nars_and_blocks_bad_second_response(tmp_path, se
         "      ok) printf 'NAR-B' ;;\n"
         "      *) exit 15 ;;\n"
         "    esac ;;\n"
+        "  *'/example.narinfo'*)\n"
+        "    case \"$*\" in\n"
+        "      *'--write-out'*) printf '404' ;;\n"
+        "      *) cat \"$RUNNER_TEMP/ci-nix-cache/example.narinfo\" ;;\n"
+        "    esac ;;\n"
         "  *) exit 17 ;;\n"
         "esac\n", encoding="utf-8",
     )
@@ -720,9 +730,11 @@ def test_cache_upload_reads_all_nars_and_blocks_bad_second_response(tmp_path, se
     )
     calls = rsync_log.read_text(encoding="utf-8").splitlines()
     gets = curl_log.read_text(encoding="utf-8").splitlines()
-    assert len(gets) == 2, gets
+    assert len(gets) == (4 if second_mode == "ok" else 2), gets
     assert "--proto =https" in gets[0] and "--proto =https" in gets[1]
     assert "/nar/a.nar.xz" in gets[0] and "/nar/b.nar.zst" in gets[1]
+    if second_mode == "ok":
+        assert "/example.narinfo" in gets[2] and "/example.narinfo" in gets[3]
     assert ("--include=*.narinfo" in "\n".join(calls)) == (second_mode == "ok")
     if second_mode == "ok":
         assert result.returncode == 0, result.stderr
@@ -730,3 +742,112 @@ def test_cache_upload_reads_all_nars_and_blocks_bad_second_response(tmp_path, se
     else:
         assert result.returncode != 0
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize("remote_mode", [
+    "mismatched", "present_same", "missing_then_published",
+    "http_error", "missing_after_upload", "race_other_metadata",
+])
+def test_cache_upload_authenticates_preexisting_and_new_signed_narinfo(
+    tmp_path, remote_mode,
+):
+    """A retained signed .narinfo must not be mistaken for this build's output.
+
+    Run the real Actions shell step. The SSH publisher is append-only, and
+    independent HTTPS reads simulate the cache consumer. No network is used.
+    """
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "sample.nar.xz").write_bytes(b"VALID NAR")
+    (cache / "sample.narinfo").write_bytes(b"NEW SIGNED METADATA\n")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "case \" $* \" in\n"
+        "  *' --include=*.narinfo '*) touch \"$METADATA_UPLOAD_MARKER\" ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "url = args[-1]\n"
+        "with open(os.environ['CURL_ARGS_LOG'], 'a') as log:\n"
+        "    log.write(url + '\\n')\n"
+        "if url.endswith('/nar/sample.nar.xz'):\n"
+        "    sys.stdout.buffer.write(b'VALID NAR')\n"
+        "elif url.endswith('/sample.narinfo'):\n"
+        "    mode = os.environ['REMOTE_MODE']\n"
+        "    if '--output' in args:\n"
+        "        dst = pathlib.Path(args[args.index('--output') + 1])\n"
+        "        if mode == 'http_error':\n"
+        "            dst.write_bytes(b'SERVER ERROR')\n"
+        "            sys.stdout.write('500')\n"
+        "        elif mode in ('missing_then_published', 'missing_after_upload', 'race_other_metadata'):\n"
+        "            dst.write_bytes(b'NOT FOUND')\n"
+        "            sys.stdout.write('404')\n"
+        "        elif mode == 'mismatched':\n"
+        "            dst.write_bytes(b'OLD SIGNED METADATA\\n')\n"
+        "            sys.stdout.write('200')\n"
+        "        else:\n"
+        "            dst.write_bytes(b'NEW SIGNED METADATA\\n')\n"
+        "            sys.stdout.write('200')\n"
+        "    elif mode == 'missing_after_upload':\n"
+        "        sys.exit(22)\n"
+        "    elif mode == 'race_other_metadata':\n"
+        "        sys.stdout.buffer.write(b'FOREIGN SIGNED METADATA\\n')\n"
+        "    else:\n"
+        "        sys.stdout.buffer.write(b'NEW SIGNED METADATA\\n')\n"
+        "else:\n"
+        "    sys.exit(41)\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o700)
+    rsync_log = tmp_path / "rsync.log"
+    curl_log = tmp_path / "curl.log"
+    marker = tmp_path / "metadata-uploaded"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(rsync_log),
+        CURL_ARGS_LOG=str(curl_log),
+        METADATA_UPLOAD_MARKER=str(marker),
+        REMOTE_MODE=remote_mode,
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert "/nar/sample.nar.xz" in "\n".join(calls)
+    assert "/sample.narinfo" in "\n".join(calls), (
+        "signed metadata must be read from the real consumer endpoint"
+    )
+    if remote_mode in ("mismatched", "http_error"):
+        assert result.returncode != 0, "conflicting or failed metadata lookup must deny"
+        assert not marker.exists(), "must deny before metadata upload"
+    elif remote_mode in ("missing_after_upload", "race_other_metadata"):
+        assert result.returncode != 0, "missing metadata after upload must deny"
+        assert marker.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert marker.exists(), "allowed metadata must still use append-only upload"
+    assert not (tmp_path / "ci-nix-cache-upload-key").exists()
+    assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
