@@ -80,6 +80,49 @@
         ];
       };
 
+      # Issue #202: evaluation-only companion for synthetic LUKS arguments.
+      # The baseline Limine options proof above intentionally contains NO
+      # rd.luks parameters. This second private configuration demonstrates that
+      # the NixOS module graph accepts an explicit systemd-initrd LUKS command
+      # line under Limine's Secure Boot options; no real PARTUUID is embedded.
+      # It does NOT sign/enroll the generated Limine config, build a bootable
+      # encrypted root, authenticate keys, or permit physical installation.
+      limineSyntheticLuksArgsProof = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit self;
+          heimPcProfile = {
+            physical = true;
+            nvidia = true;
+            nvidiaOpen = false;
+            desktop = true;
+            physicalGates = false;
+          };
+        };
+        modules = physicalHostModules ++ [
+          ({ lib, ... }: {
+            boot.loader.systemd-boot.enable = lib.mkForce false;
+            boot.loader.limine = {
+              enable = true;
+              secureBoot.enable = true;
+              secureBoot.autoGenerateKeys = false;
+              secureBoot.autoEnrollKeys.enable = false;
+              enableEditor = false;
+              validateChecksums = true;
+              panicOnChecksumMismatch = true;
+              enrollConfig = true;
+              efiInstallAsRemovable = true;
+              biosSupport = false;
+            };
+            boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
+            boot.kernelParams = [
+              "rd.luks.name=11111111-2222-4333-8444-555555555555=heimpc-nixos-crypt"
+              "rd.luks.options=11111111-2222-4333-8444-555555555555=tpm2-device=auto,headless=yes"
+            ];
+          })
+        ];
+      };
+
       proofConfig = self.nixosConfigurations.heim-pc-vm.config;
       proofVmConfig = proofConfig.virtualisation.vmVariant;
 
@@ -351,6 +394,38 @@
           assert !(builtins.any (param: nixpkgs.lib.hasPrefix "rd.luks." param) cfg.boot.kernelParams);
           assert builtins.isString cfg.system.build.toplevel.drvPath;
           pkgs.runCommand "heim-pc-limine-module-options-only" { } ''
+            mkdir -p "$out"
+          '';
+        # Evaluates synthetic LUKS arguments in a non-selectable Limine
+        # Secure Boot NixOS module graph. This does not establish that the
+        # resulting limine.conf has actually been signed or boots under OVMF.
+        limine-synthetic-luks-cmdline-eval =
+          let
+            cfg = limineSyntheticLuksArgsProof.config;
+            syntheticPartuuid = "11111111-2222-4333-8444-555555555555";
+            expectedArgs = [
+              "rd.luks.name=${syntheticPartuuid}=heimpc-nixos-crypt"
+              "rd.luks.options=${syntheticPartuuid}=tpm2-device=auto,headless=yes"
+            ];
+          in
+          assert !(builtins.hasAttr "heim-pc-storage-limine-luks-proof" self.nixosConfigurations);
+          assert !(builtins.hasAttr "limine-synthetic-luks-cmdline-proof" self.packages.${system});
+          assert cfg.system.boot.loader.id == "limine";
+          assert !cfg.boot.loader.systemd-boot.enable;
+          assert cfg.boot.loader.limine.secureBoot.enable;
+          assert cfg.boot.loader.limine.enrollConfig;
+          assert cfg.boot.loader.limine.validateChecksums;
+          assert cfg.boot.loader.limine.panicOnChecksumMismatch;
+          assert !cfg.boot.loader.limine.enableEditor;
+          assert !cfg.boot.loader.limine.secureBoot.autoGenerateKeys;
+          assert !cfg.boot.loader.limine.secureBoot.autoEnrollKeys.enable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert cfg.boot.initrd.systemd.enable;
+          assert cfg.boot.initrd.luks.devices == {};
+          assert (builtins.filter (arg: nixpkgs.lib.hasPrefix "rd.luks." arg)
+            cfg.boot.kernelParams) == expectedArgs;
+          assert builtins.isString cfg.system.build.toplevel.drvPath;
+          pkgs.runCommand "heim-pc-limine-synthetic-luks-options-only" { } ''
             mkdir -p "$out"
           '';
         # These assertions force real NixOS module evaluation, not text matching.
