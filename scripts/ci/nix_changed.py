@@ -18,6 +18,7 @@ NIX_EXACT_PATHS = frozenset(
         "config/storage-pressure.v1.json",
         "flake.nix",
         "flake.lock",
+        "scripts/ci/check_nix_cache_signature_rejection.sh",
         "scripts/ci/check_pinned_nix_find_contract.py",
         "scripts/ci/nix_changed.py",
         "scripts/grabowski_memory_guard.py",

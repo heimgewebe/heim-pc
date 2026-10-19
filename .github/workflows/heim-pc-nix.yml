@@ -166,3 +166,6 @@ jobs:
           .#checks.x86_64-linux.host-protection
           .#checks.x86_64-linux.firstboot-credentials
           .#checks.x86_64-linux.trust-zones
+
+      - name: Prove untrusted signatures are rejected by substitution
+        run: bash scripts/ci/check_nix_cache_signature_rejection.sh
