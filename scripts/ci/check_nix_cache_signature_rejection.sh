@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly NIX_IMAGE='nixos/nix@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c'
+# Fail closed when the canonical verifier contract or its pinned runtime drifts.
+# The probe must exercise the same immutable Nix image as production.
+NIX_IMAGE="$(
+  python3 -c 'from scripts.ci.check_pinned_nix_find_contract import verify_managed_nix_verifier_contract; print(verify_managed_nix_verifier_contract()["image_ref"])'
+)"
+readonly NIX_IMAGE
 probe_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/heim-pc-nix-signature-probe.XXXXXX")"
 server_pid=""
 

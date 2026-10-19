@@ -51,6 +51,18 @@ class T(unittest.TestCase):
             workflow,
         )
 
+    def test_signature_probe_binds_verifier_contract(self):
+        """The CI probe must use the exact validated production Nix image."""
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/ci/check_nix_cache_signature_rejection.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("verify_managed_nix_verifier_contract", script)
+        self.assertIn('["image_ref"]', script)
+        self.assertNotIn("readonly NIX_IMAGE='nixos/nix@sha256:", script)
+
     def test_unrelated_paths_skip_heavy_nix_ci(self):
         for path in (
             "README.md",
