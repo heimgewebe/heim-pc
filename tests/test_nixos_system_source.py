@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "04ab0c34552b79fefa581330bfac7652f8c42e77bcdbedaf1b0f37654bdfe5ef"
+SOURCE_SNAPSHOT_SHA256 = "4aeb11dc76daf7bca2593c395a7aafd740e34e562303761ee2e1d7865c575d5f"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -232,6 +232,38 @@ class T(unittest.TestCase):
         self.assertIn("boot.loader.systemd-boot.enable = lib.mkForce false", flake)
         self.assertNotIn("nixosConfigurations.heim-pc-storage-limine-proof =", flake)
         self.assertIn('pkgs.runCommand "heim-pc-limine-module-options-only"', flake)
+
+    def test_limine_synthetic_luks_cmdline_stays_private_and_non_admitting(self):
+        flake = (SOURCE / "flake.nix").read_text(encoding="utf-8")
+        production = json.loads(
+            (ROOT / "nixos" / "production" / "contract-v1.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("limineSyntheticLuksArgsProof = nixpkgs.lib.nixosSystem", flake)
+        self.assertIn("limine-synthetic-luks-cmdline-eval =", flake)
+        self.assertIn(
+            "rd.luks.name=11111111-2222-4333-8444-555555555555=heimpc-nixos-crypt",
+            flake,
+        )
+        self.assertIn(
+            "rd.luks.options=11111111-2222-4333-8444-555555555555=tpm2-device=auto,headless=yes",
+            flake,
+        )
+        self.assertNotIn("nixosConfigurations.heim-pc-storage-limine-luks-proof =", flake)
+        self.assertNotIn("limine-synthetic-luks-cmdline-proof =", flake)
+        self.assertIn(
+            'assert (builtins.filter (arg: nixpkgs.lib.hasPrefix "rd.luks." arg)',
+            flake,
+        )
+        self.assertIn("assert !cfg.boot.loader.efi.canTouchEfiVariables;", flake)
+        self.assertIn("assert cfg.boot.loader.limine.enrollConfig;", flake)
+        self.assertEqual(
+            production["boot"]["authenticated_boot"]["signed_target_bootchain_state"],
+            "unproven",
+        )
+        self.assertEqual(
+            production["boot"]["authenticated_boot"]["status"],
+            "blocked-until-reviewed-signed-chain",
+        )
 
     def test_trust_zones_vm_broker_reachability_is_bounded_and_fail_closed(self):
         proof = (SOURCE / "tests/trust-zones.nix").read_text()
