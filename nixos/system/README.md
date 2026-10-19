@@ -29,6 +29,24 @@ pre-mutation comparison. This is a protective hold, not a signed boot
 implementation, and it does not authorize any Seagate, WD, EFI or TPM write.
 No-apply planning and independent Day-1 work remain available.
 
+### Synthetic Limine/LUKS command-line module proof (non-installable)
+
+The private `limineSyntheticLuksArgsProof` adds two **synthetic** `rd.luks.*`
+kernel arguments (an explicitly fictional PARTUUID) to a distinct, non-selectable
+Limine Secure Boot module evaluation. The `limine-synthetic-luks-cmdline-eval`
+check confirms the systemd-initrd options, LUKS name/options pairing, Limine
+enrolled-config/checksum safety options and disabled EFI writes. The original
+`limine-secureboot-module-options-eval` negative baseline is unchanged.
+
+This is **not** evidence that any generated `limine.conf` actually contains
+or authenticates private physical PARTUUIDs. No EFI binary or config was
+signed, no LUKS disk was booted, no firmware/TPM keys were enrolled, and
+nothing was published as a selectable host or installable system. The
+production physical `--apply` hold and `signed_target_bootchain_state=unproven`
+remain binding. Next required proof: root-controlled, out-of-store private
+parameter injection before verified Limine config enrollment/signing, then
+signed-OVMF LUKS-root boot plus tamper/recovery negatives and independent review.
+
 ## Architecture thesis
 
 NixOS is being tested not merely as a desktop distribution, but as the declarative control substrate for an autonomous operator machine:
