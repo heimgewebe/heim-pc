@@ -227,7 +227,8 @@ def test_publisher_recovers_entire_signed_closure_from_fresh_empty_cache():
     assert '--to "file://$readback_cache_dir"' in tail
     assert '"$OLLAMA_PATH" "$LLAMA_CPP_PATH"' in tail
     assert 'nix path-info --recursive --store "file://$readback_cache_dir"' in tail
-    assert 'nix path-info --recursive "$OLLAMA_PATH" "$LLAMA_CPP_PATH"' in tail
+    assert 'closure_paths=( "$OLLAMA_PATH" "$LLAMA_CPP_PATH" )' in tail
+    assert 'nix path-info --recursive "${closure_paths[@]}"' in tail
     assert 'cmp -s "$expected_closure" "$remote_closure"' in tail
     # Copying between binary caches does not by itself enforce signatures.
     # Verify the full fetched closure under the exact trusted CI key.
@@ -851,3 +852,82 @@ def test_cache_upload_authenticates_preexisting_and_new_signed_narinfo(
         assert marker.exists(), "allowed metadata must still use append-only upload"
     assert not (tmp_path / "ci-nix-cache-upload-key").exists()
     assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
+
+
+def test_complete_system_closure_requires_separate_default_deny_opt_in():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    job = workflow.split("\njobs:\n  publish:\n", 1)[1]
+    assert (
+        "PUBLISH_SYSTEM_CLOSURE: "
+        + chr(36)
+        + "{{ vars.CI_NIX_CACHE_PUBLISH_SYSTEM_CLOSURE_ENABLED }}"
+    ) in job
+    assert "environment: ci-cache-publisher" in job
+    resolve = job.split("- name: Resolve exact heavy derivations from Main graph", 1)[1].split(
+        "- name: Create signed append-only cache payload", 1
+    )[0]
+    assert 'case "$PUBLISH_SYSTEM_CLOSURE" in' in resolve
+    assert '""|false)' in resolve
+    assert 'true)' in resolve
+    assert '*)' in resolve
+    assert "refusing system closure publication" in resolve
+    strict_system_pattern = "^/nix/store/[0-9a-z]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$"
+    assert strict_system_pattern in resolve
+    assert ".#packages.x86_64-linux.heim-pc-storage-target-system" in resolve
+    assert (
+        ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel.outPath"
+        in resolve
+    )
+    assert 'test "$system_path" = "$expected_system_path"' in resolve
+    assert 'printf \'system_path=%s\\n\' "$system_path" >> "$GITHUB_OUTPUT"' in resolve
+
+
+def test_complete_system_closure_follows_same_signed_append_only_readback():
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    signed = workflow.split("- name: Create signed append-only cache payload", 1)[1].split(
+        "- name: Upload cache through restricted publisher key", 1
+    )[0]
+    readback = workflow.split("- name: Verify public signed-cache readback", 1)[1]
+    for step in (signed, readback):
+        assert (
+            "SYSTEM_PATH: " + chr(36) + "{{ steps.heavy.outputs.system_path }}"
+        ) in step
+        assert 'case "$PUBLISH_SYSTEM_CLOSURE" in' in step
+        assert '""|false)' in step
+        assert 'true)' in step
+        assert '*)' in step
+        assert "^/nix/store/[0-9a-z]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$" in step
+    assert 'publication_paths=( "$OLLAMA_PATH" "$LLAMA_CPP_PATH" )' in signed
+    assert 'publication_paths+=( "$SYSTEM_PATH" )' in signed
+    assert '"${publication_paths[@]}"' in signed
+    assert signed.index("derived_public_key=") < signed.index("nix copy ")
+    assert 'closure_paths=( "$OLLAMA_PATH" "$LLAMA_CPP_PATH" )' in readback
+    assert 'closure_paths+=( "$SYSTEM_PATH" )' in readback
+    assert 'nix path-info --recursive "${closure_paths[@]}"' in readback
+    assert 'nix store verify --store "file://$readback_cache_dir" --recursive' in readback
+    assert 'cmp -s "$expected_closure" "$remote_closure"' in readback
+    assert '"${closure_paths[@]}"' in readback
+    assert 'fallback = false' in readback
+    assert "require-sigs = false" not in workflow
+
+
+def test_publisher_all_multiline_run_steps_parse_as_bash_without_execution():
+    lines = PUBLISHER.read_text(encoding="utf-8").splitlines()
+    scripts = []
+    for i, line in enumerate(lines):
+        if line != "        run: |":
+            continue
+        body = []
+        for part in lines[i + 1:]:
+            if part and not part.startswith("          "):
+                break
+            body.append(part[10:] if part else "")
+        scripts.append("\n".join(body) + "\n")
+    assert len(scripts) >= 5
+    for index, script in enumerate(scripts):
+        result = subprocess.run(
+            ["bash", "-n"], input=script, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"publisher step {index} invalid Bash: {result.stderr}"
+        )
