@@ -2931,6 +2931,7 @@ def compile_plan(
         "pre_cutover_readiness_required": (
             artifact["source_authority"] == "merged-main" and readiness_required
         ),
+        "final_physical_restore_required": artifact["source_authority"] == "merged-main",
         "recovery_admission_scope": recovery_admission_scope,
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
@@ -2969,6 +2970,7 @@ def plan_summary(_plan: dict[str, Any]) -> dict[str, Any]:
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
         "pre_cutover_readiness_validated": validated,
+        "final_physical_restore_required": _plan.get("final_physical_restore_required") is True,
         "readiness_bundle_authorizes_production": False,
         "readiness_bundle_sha256": readiness.get("bundle_sha256") if validated else None,
         "recovery_contract_sha256": readiness.get("recovery_contract_sha256") if validated else None,
@@ -6305,8 +6307,16 @@ def execute_plan(
     )
     if plan.get("pre_cutover_readiness_required") is not expected_readiness_required:
         raise ProductionInstallError("production plan readiness policy no longer matches storage contract")
-    if expected_readiness_required and not isinstance(readiness_snapshot, dict):
-        raise ProductionInstallError("production apply lacks validated pre-cutover readiness")
+    # The isolated dual-OS exemption covers nonproductive planning/rehearsal,
+    # never a final physical target-write apply. Exact source/restore evidence
+    # is mandatory independently of a retained WD fallback and of the public
+    # storage contract's narrower destructive-source-cutover definition.
+    if plan.get("final_physical_restore_required") is not True:
+        raise ProductionInstallError("physical cutover recovery gate metadata is missing")
+    if not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError(
+            "physical NixOS cutover requires independently validated pre-cutover readiness"
+        )
     if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("production readiness evidence is malformed")
     if plan.get("readiness_bundle_authorizes_production") is not False:
@@ -6794,6 +6804,10 @@ def main(argv: list[str] | None = None) -> int:
                     "physical signed boot-chain policy cannot be read"
                 ) from exc
             reject_unattested_target_bootchain(public_boot_policy)
+            if args.pre_cutover_readiness is None:
+                raise ProductionInstallError(
+                    "physical NixOS cutover requires --pre-cutover-readiness"
+                )
         artifact_path = args.install_artifact.resolve()
         artifact = load_install_artifact(artifact_path)
         verify_source(args.flake_source, artifact["source_revision"])

@@ -1841,6 +1841,7 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
         "pre_cutover_readiness_validated": False,
+        "final_physical_restore_required": False,
         "readiness_bundle_authorizes_production": False,
         "readiness_bundle_sha256": None,
         "recovery_contract_sha256": None,
@@ -1907,6 +1908,7 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -1966,6 +1968,7 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2107,6 +2110,7 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2260,6 +2264,7 @@ def test_main_persistent_receipt_fstat_error_retains_apply_lock(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2389,6 +2394,7 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2699,6 +2705,7 @@ def test_main_post_unmask_establishment_failure_redelivers_sigterm_after_cleanup
             assert prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(receipt_path),
@@ -2967,6 +2974,7 @@ def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(tmp_path / "receipt.json"),
@@ -3063,6 +3071,7 @@ def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(tmp_path / "receipt.json"),
@@ -3627,6 +3636,7 @@ def test_main_pre_thaw_fd_reuse_retains_global_apply_lock(
         assert prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(receipt_path),
@@ -3820,6 +3830,7 @@ def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_p
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -3851,6 +3862,7 @@ def test_main_pre_mutation_failure_discards_receipt_reservation(monkeypatch, tmp
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -3916,6 +3928,7 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4013,6 +4026,7 @@ def test_main_failure_receipt_construction_interrupt_persists_bound_fallback(mon
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4115,6 +4129,7 @@ def test_main_rewrite_interrupt_invalidates_success_before_thaw_alarm(monkeypatc
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4169,6 +4184,7 @@ def test_main_thaw_failure_receipt_construction_interrupt_invalidates_success(mo
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4220,6 +4236,7 @@ def test_main_emergency_receipt_then_thaw_replacement_interrupt_invalidates_rece
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4254,6 +4271,7 @@ def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, t
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4314,6 +4332,7 @@ def test_main_release_identity_failure_rewrites_success_as_failure(monkeypatch, 
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4386,6 +4405,7 @@ def test_main_thaw_failure_rewrites_persisted_success_as_failure(monkeypatch, tm
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4455,6 +4475,7 @@ def test_main_receipt_failure_cannot_mask_thaw_failure(monkeypatch, tmp_path, ca
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4503,6 +4524,7 @@ def test_main_missing_success_freeze_handoff_fails_closed(monkeypatch, tmp_path,
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4550,6 +4572,7 @@ def test_main_pre_mutation_cleanup_attempts_thaw_before_receipt_discard(monkeypa
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -6624,6 +6647,109 @@ def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_att
     assert compiled["pre_cutover_readiness"] is None
     assert compiled["managed_build_attestation_required"] is True
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
+
+
+
+def test_final_physical_apply_demands_restore_even_when_dual_os_plan_skips_it(
+    monkeypatch, tmp_path,
+):
+    receipt = managed_receipt(MERGED_ARTIFACT)
+    compiled = prod.compile_plan(
+        observation(),
+        install_artifact=MERGED_ARTIFACT,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt,
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
+        flake_source=str(prod.FLAKE_SOURCE),
+        contract=CONTRACT,
+        managed_build_attestation_verification=managed_attestation_verification(
+            MERGED_ARTIFACT, receipt,
+        ),
+    )
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["pre_cutover_readiness"] is None
+    assert compiled["final_physical_restore_required"] is True
+    effects = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding", lambda *_a, **_k: receipt,
+    )
+    monkeypatch.setattr(
+        prod, "verify_promoted_main_revision", lambda *_a: effects.append("main"),
+    )
+    monkeypatch.setattr(prod, "_run", lambda *_a, **_k: effects.append("command"))
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical NixOS cutover requires independently validated pre-cutover readiness",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+    assert effects == []
+
+
+def test_final_physical_apply_rejects_downgraded_restore_flag(
+    monkeypatch, tmp_path,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    assert isinstance(compiled["pre_cutover_readiness"], dict)
+    compiled["final_physical_restore_required"] = False
+    material = {key: value for key, value in compiled.items() if key != "plan_sha256"}
+    compiled["plan_sha256"] = prod.sha256_json(material)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding",
+        lambda *_a, **_k: compiled["managed_build_receipt"],
+    )
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical cutover recovery gate metadata is missing",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+
+
+def test_final_physical_restore_required_is_not_proof_only_authority():
+    staged = plan(artifact=ARTIFACT)
+    approved = plan(artifact=MERGED_ARTIFACT)
+    assert staged["final_physical_restore_required"] is False
+    assert approved["final_physical_restore_required"] is True
+    assert prod.plan_summary(approved)["final_physical_restore_required"] is True
+    assert prod.plan_summary(staged)["final_physical_restore_required"] is False
+
+
+def test_physical_cli_apply_without_restore_is_pre_effect_denied(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "signed-policy")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", lambda _c: None)
+    effects = []
+
+    def forbidden(*_a, **_k):
+        effects.append("source-or-effect")
+        raise AssertionError("physical apply progressed without restore evidence")
+
+    for name in (
+        "load_install_artifact", "acquire_production_apply_lock",
+        "reserve_private_receipt", "verify_source", "execute_plan",
+    ):
+        monkeypatch.setattr(prod, name, forbidden)
+    assert prod.main([
+        "--apply",
+        "--install-artifact", str(tmp_path / "untrusted-artifact.json"),
+        "--identity-contract", str(tmp_path / "untrusted-identity.json"),
+        "--credential-hash-file", str(tmp_path / "forbidden-credential"),
+        "--write-receipt", str(tmp_path / "forbidden-receipt.json"),
+    ]) == 2
+    assert effects == []
+    assert not (tmp_path / "forbidden-receipt.json").exists()
 
 
 @pytest.mark.parametrize(
