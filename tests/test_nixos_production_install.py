@@ -521,6 +521,23 @@ def plan(
 
 def mock_trusted_build_gate(monkeypatch, compiled, events=None):
     log = events if events is not None else []
+    # Synthetic tests stub command execution. Preserve canonical source-root
+    # selection without making the mocked _run intercept git rev-parse; NEVER
+    # derive these trusted paths from mutable plan/readiness snapshot entries.
+    source_root = Path(compiled["flake_source"]).parent.parent
+    source_policy_root = source_root / "nixos" / "production"
+    trusted_source_contracts = tuple(
+        source_policy_root / filename
+        for filename in (
+            "recovery-contract-v1.json",
+            "nix-lifecycle-contract-v1.json",
+            "critical-user-data-contract-v1.json",
+        )
+    )
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source",
+        lambda _source: trusted_source_contracts,
+    )
     docker_state = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_docker_quiesce_state",
@@ -6752,6 +6769,179 @@ def test_physical_cli_apply_without_restore_is_pre_effect_denied(
     assert not (tmp_path / "forbidden-receipt.json").exists()
 
 
+
+@pytest.mark.parametrize(
+    "attacker_selected_field",
+    [
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    ],
+)
+def test_final_apply_recovery_trust_root_is_source_bound(
+    tmp_path, attacker_selected_field,
+):
+    # An internally self-consistent forged snapshot must never choose the
+    # trust policy or shrink the authoritative recovery-evidence obligations.
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    snapshot = dict(compiled["pre_cutover_readiness"])
+    snapshot[attacker_selected_field] = str(tmp_path / "attacker-policy.json")
+    assert snapshot[attacker_selected_field] != str(
+        prod.readiness_contract_paths_for_source(compiled["flake_source"])[
+            (
+                "recovery_contract_path",
+                "nix_lifecycle_contract_path",
+                "critical_user_data_contract_path",
+            ).index(attacker_selected_field)
+        ]
+    )
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery contract path is not source-bound",
+    ):
+        prod._trusted_physical_recovery_paths(
+            compiled["flake_source"], snapshot,
+        )
+
+
+
+@pytest.mark.parametrize(
+    "forged_field",
+    (
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    ),
+)
+def test_physical_apply_rejects_forged_recovery_trust_root_before_setup(
+    monkeypatch, tmp_path, forged_field,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    compiled["pre_cutover_readiness"][forged_field] = str(
+        tmp_path / "attacker-selected-policy.json"
+    )
+    compiled = _rehash_plan(compiled)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *_a, **_k: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    # Simulate an erroneously permissive external attestation verifier; source
+    # identity must reject the forged contract path before verifier invocation.
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness",
+        lambda *_a, **_k: compiled["pre_cutover_readiness"],
+    )
+    storage_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **_kwargs: storage_commands.append(argv) or Result(),
+    )
+    # Trusted-source checking now happens before even the installer setup
+    # effects. A forged snapshot must not reach the older JIT storage gate.
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery contract path is not source-bound",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert storage_commands == []
+
+
+@pytest.mark.parametrize("forged", ["scope", "readiness-bundle-digest"])
+def test_physical_apply_rejects_forged_policy_and_evidence_before_effects(
+    monkeypatch, tmp_path, forged,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    if forged == "scope":
+        compiled["recovery_admission_scope"] = {
+            **compiled["recovery_admission_scope"],
+            "unauthorized_policy": "self-attested",
+        }
+    else:
+        snapshot = dict(compiled["pre_cutover_readiness"])
+        snapshot["bundle_sha256"] = "0" * 64
+        compiled["pre_cutover_readiness"] = snapshot
+    compiled = _rehash_plan(compiled)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    effects = []
+    monkeypatch.setattr(
+        prod, "verify_install_artifact_environment",
+        lambda *_a: effects.append("environment"),
+    )
+    expected = (
+        "physical recovery policy is not bound to verified source"
+        if forged == "scope"
+        else "physical recovery evidence is not bound to verified source"
+    )
+    with pytest.raises(prod.ProductionInstallError, match=expected):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+    assert effects == []
+
+
+def test_physical_jit_rechecks_source_contract_paths_after_preflight(
+    monkeypatch, tmp_path,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *_a, **_k: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    selected = prod.readiness_contract_paths_for_source(compiled["flake_source"])
+    calls = []
+
+    def drift_between_preflight_and_mutation(_source):
+        calls.append(True)
+        if len(calls) == 1:
+            return selected
+        return (tmp_path / "untrusted-recovery-policy.json", *selected[1:])
+
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source",
+        drift_between_preflight_and_mutation,
+    )
+    storage_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **_k: storage_commands.append(argv) or Result(),
+    )
+    with pytest.raises(prod.PreMutationReadinessError) as error:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+            observer=lambda _contract: observation(),
+        )
+    assert error.value.mutation_attempted is False
+    assert len(calls) == 2
+    assert storage_commands == []
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value"),
     [
@@ -7380,7 +7570,12 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
         lambda argv, **kwargs: mutation_commands.append(argv) or Result(),
     )
 
-    with pytest.raises(prod.PreMutationReadinessError) as exc:
+    # Any mutable contract/receipt drift is rejected before host setup;
+    # ordinary source-reading Git invocations do not count as disk writes.
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery evidence is not bound to verified source",
+    ):
         prod.execute_plan(
             compiled,
             contract=CONTRACT,
@@ -7388,7 +7583,6 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
             credential_hash_file=tmp_path / "credential.hash",
             observer=lambda _contract: observation(),
         )
-    assert exc.value.mutation_attempted is False
     assert mutation_commands == []
 
 

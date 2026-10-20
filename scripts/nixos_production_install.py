@@ -810,6 +810,68 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, 
     )
 
 
+
+def _trusted_physical_recovery_paths(
+    flake_source: str, readiness_snapshot: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    """Rebind JIT restore policy to verified source, never the mutable plan.
+
+    A self-consistent snapshot may point at attacker-authored recovery policy.
+    The authoritative contracts are from the exact source whose revision was
+    verified at this gate, not from that snapshot's claimed path selection.
+    """
+    if not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("physical recovery snapshot is invalid")
+    trusted = readiness_contract_paths_for_source(flake_source)
+    fields = (
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    )
+    for field, expected in zip(fields, trusted, strict=True):
+        if readiness_snapshot.get(field) != str(expected):
+            raise ProductionInstallError(
+                "physical recovery contract path is not source-bound"
+            )
+    return trusted
+
+
+
+def _revalidate_physical_restore_from_source(
+    plan: dict[str, Any],
+    readiness_snapshot: dict[str, Any],
+    source_revision: str,
+) -> None:
+    """Fail closed on the exact-source recovery policy and signed evidence.
+
+    The plan and its embedded snapshot can be edited by the submitting UID.
+    Neither selects the policy, signer, receipt set or contract file paths.
+    """
+    recovery, lifecycle, critical = _trusted_physical_recovery_paths(
+        plan["flake_source"], readiness_snapshot,
+    )
+    try:
+        actual_scope = pre_cutover_readiness.validate_recovery_contract_scope(
+            recovery,
+        )
+        if actual_scope != plan.get("recovery_admission_scope"):
+            raise ProductionInstallError(
+                "physical recovery policy is not bound to verified source"
+            )
+        pre_cutover_readiness.revalidate_readiness(
+            readiness_snapshot,
+            source_revision=source_revision,
+            recovery_contract_path=recovery,
+            lifecycle_contract_path=lifecycle,
+            critical_user_data_contract_path=critical,
+        )
+    except pre_cutover_readiness.ReadinessError as exc:
+        raise ProductionInstallError(
+            "physical recovery evidence is not bound to verified source"
+        ) from exc
+
+
+
 def managed_policy_sha256_for_source(flake_source: str) -> str:
     result = _run_source_git(flake_source, ["rev-parse", "--show-toplevel"])
     try:
@@ -6344,6 +6406,9 @@ def execute_plan(
     if artifact["source_revision"] != plan.get("source_revision"):
         raise ProductionInstallError("install artifact revision no longer matches the reviewed plan")
     source_revision = verify_source(plan["flake_source"], artifact["source_revision"])
+    _revalidate_physical_restore_from_source(
+        plan, readiness_snapshot, source_revision,
+    )
     verify_install_artifact_environment(artifact, managed_build_receipt["store_root"])
     verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
@@ -6497,20 +6562,9 @@ def execute_plan(
                                 "Secure Boot key/state policy changed before storage mutation"
                             )
                         reject_unattested_target_bootchain(contract)
-                        if readiness_snapshot is not None:
-                            pre_cutover_readiness.revalidate_readiness(
-                                readiness_snapshot,
-                                source_revision=jit_source_revision,
-                                recovery_contract_path=Path(
-                                    readiness_snapshot["recovery_contract_path"]
-                                ),
-                                lifecycle_contract_path=Path(
-                                    readiness_snapshot["nix_lifecycle_contract_path"]
-                                ),
-                                critical_user_data_contract_path=Path(
-                                    readiness_snapshot["critical_user_data_contract_path"]
-                                ),
-                            )
+                        _revalidate_physical_restore_from_source(
+                            plan, readiness_snapshot, jit_source_revision,
+                        )
                     except (
                         ProductionInstallError,
                         pre_cutover_readiness.ReadinessError,
