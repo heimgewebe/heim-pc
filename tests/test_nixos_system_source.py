@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "00c072049f47bdfcf744fa789e1813456f66007adeff10f8b9f05b437efc6168"
+SOURCE_SNAPSHOT_SHA256 = "84146b1108adc90ebf9b4c02bf301987987ca0afac584015d1d1db0bfff79b27"
 ROOT_LOCK_SHA256 = "7405ecd7ae1d1850be024a2c451dcd56de5281006097d3e6abfcf4c65eccba93"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -636,6 +636,14 @@ class T(unittest.TestCase):
             trust["inputs"]["nixer"]["required_revision"],
             "712ea5b1e8f8cebeebb206e774023a8a4d842b4b",
         )
+        self.assertEqual(
+            trust["inputs"]["nixer"]["required_nar_hash"],
+            "sha256-zQCJ2ZI8ApEljh0U0+rrfBMK/DWkXHhzKIGHViyxG8A=",
+        )
+        self.assertEqual(
+            json.loads((ROOT / "flake.lock").read_text())["nodes"]["nixer"]["locked"]["narHash"],
+            trust["inputs"]["nixer"]["required_nar_hash"],
+        )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
         self.assertIn("trusted-users = lib.mkForce", trust_module)
@@ -660,6 +668,10 @@ class T(unittest.TestCase):
         )
         self.assertIn(
             "contract.inputs.nixer.runtime_nixpkgs_required_revision",
+            flake,
+        )
+        self.assertIn(
+            "nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;",
             flake,
         )
         from scripts.ci import check_pinned_nix_find_contract as verifier_check

@@ -676,6 +676,7 @@
           assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
           assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
           assert contract.inputs.nixer.owns_runtime_nixpkgs;
           assert nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node;
           assert nixerRuntimeNixpkgsNode.locked.rev
