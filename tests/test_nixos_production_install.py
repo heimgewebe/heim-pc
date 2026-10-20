@@ -538,6 +538,23 @@ def mock_trusted_build_gate(monkeypatch, compiled, events=None):
         prod, "readiness_contract_paths_for_source",
         lambda _source: trusted_source_contracts,
     )
+    # Deep physical-apply tests use a synthetic revision and mock executable
+    # commands. Preserve real contract content/FD reads, but stub the revision
+    # inventory to the reviewed bytes of these three real fixture contracts.
+    tracked = {}
+    for path in trusted_source_contracts:
+        relative = ("nixos/production/" + path.name).encode("ascii")
+        payload = path.read_bytes()
+        git_digest = hashlib.sha1(
+            b"blob " + str(len(payload)).encode("ascii") + bytes([0]) + payload,
+            usedforsecurity=False,
+        ).hexdigest().encode("ascii")
+        mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
+        tracked[relative] = mode, git_digest
+    monkeypatch.setattr(
+        prod, "_verify_open_root_source_git_state",
+        lambda _root_fd, _uid, _gid: (REVISION, tracked),
+    )
     docker_state = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_docker_quiesce_state",
@@ -8003,3 +8020,104 @@ def test_physical_efi_superblock_magic_is_enforced_before_leaf_reads(monkeypatch
         local.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
         with pytest.raises(prod.ProductionInstallError, match="not on efivarfs"):
             prod._open_verified_efivarfs()
+
+
+@pytest.mark.parametrize("attack", ("same_uid_directory_swap", "same_uid_contract_rewrite"))
+def test_physical_recovery_policy_is_pinned_to_reviewed_git_blobs_during_race(
+    monkeypatch, tmp_path, attack,
+):
+    # A synthetic unprivileged checkout models the submitted source; the root
+    # and all contract files have the same owner as the adversary.
+    root = tmp_path / "approved"
+    (root / ".git").mkdir(parents=True)
+    source = root / "nixos" / "system"
+    source.mkdir(parents=True)
+    production = root / "nixos" / "production"
+    production.mkdir(parents=True)
+    names = (
+        "recovery-contract-v1.json",
+        "nix-lifecycle-contract-v1.json",
+        "critical-user-data-contract-v1.json",
+    )
+    paths = tuple(production / name for name in names)
+    tracked = {}
+    for name, path in zip(names, paths, strict=True):
+        payload = json.dumps({"marker": "reviewed", "name": name}).encode()
+        path.write_bytes(payload)
+        path.chmod(0o644)
+        relative = ("nixos/production/" + name).encode()
+        digest = hashlib.sha1(
+            b"blob " + str(len(payload)).encode() + bytes([0]) + payload,
+            usedforsecurity=False,
+        ).hexdigest().encode()
+        tracked[relative] = (b"100644", digest)
+    monkeypatch.setattr(
+        prod, "_verify_open_root_source_git_state",
+        lambda _fd, _uid, _gid: (REVISION, tracked),
+    )
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source", lambda _source: paths,
+    )
+    snap = dict(zip(
+        (
+            "recovery_contract_path", "nix_lifecycle_contract_path",
+            "critical_user_data_contract_path",
+        ), map(str, paths), strict=True,
+    ))
+    expected_scope = {"marker": "reviewed"}
+    observed = []
+
+    def validate_scope(path, *, contract_loader):
+        if attack == "same_uid_directory_swap":
+            root.rename(tmp_path / "saved-original")
+            (root / "nixos" / "production").mkdir(parents=True)
+            (root / "nixos" / "system").mkdir(parents=True)
+            (root / ".git").mkdir()
+            for name in names:
+                (root / "nixos" / "production" / name).write_text(
+                    json.dumps({"marker": "attacker", "name": name}),
+                    encoding="utf-8",
+                )
+        else:
+            paths[0].write_text(
+                json.dumps({"marker": "attacker", "name": names[0]}),
+                encoding="utf-8",
+            )
+        data, _meta = contract_loader(path, label="recovery contract")
+        observed.append(data["marker"])
+        return {"marker": data["marker"]}
+
+    def revalidate(_snap, *, contract_loader, **kwargs):
+        for label, key in (
+            ("recovery contract", "recovery_contract_path"),
+            ("Nix lifecycle contract", "lifecycle_contract_path"),
+            ("critical-user-data contract", "critical_user_data_contract_path"),
+        ):
+            data, _meta = contract_loader(kwargs[key], label=label)
+            observed.append(data["marker"])
+        return {}
+
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "validate_recovery_contract_scope",
+        validate_scope,
+    )
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness", revalidate,
+    )
+    submitted_plan = {
+        "flake_source": str(source), "recovery_admission_scope": expected_scope,
+    }
+    if attack == "same_uid_contract_rewrite":
+        with pytest.raises(
+            prod.ProductionInstallError,
+            match="does not match verified Git source",
+        ):
+            prod._revalidate_physical_restore_from_source(
+                submitted_plan, snap, REVISION,
+            )
+        assert observed == []
+    else:
+        prod._revalidate_physical_restore_from_source(
+            submitted_plan, snap, REVISION,
+        )
+        assert observed == ["reviewed"] * 4
