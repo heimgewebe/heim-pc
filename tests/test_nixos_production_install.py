@@ -5375,6 +5375,12 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    # The synthetic mocked Git index/tree is intentionally not a real object
+    # database. The separate real-Git adversarial test authenticates objects.
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree",
+        lambda *_args: {b"tracked.txt": (b"100644", blob_oid.encode("ascii"))},
+    )
 
     assert prod.verify_source(str(flake_source), REVISION) == REVISION
     assert len(calls) == 4
@@ -5521,6 +5527,10 @@ def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree",
+        lambda *_args: {b"tracked.txt": (b"100644", blob_oid.encode("ascii"))},
+    )
 
     with pytest.raises(prod.ProductionInstallError, match="must be clean"):
         prod.verify_source(str(flake_source), REVISION)
@@ -5559,6 +5569,9 @@ def test_verify_source_root_rejects_untracked_file_outside_flake_source(monkeypa
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree", lambda *_args: {},
+    )
 
     with pytest.raises(prod.ProductionInstallError, match="must be clean"):
         prod.verify_source(str(flake_source), REVISION)
@@ -8121,3 +8134,214 @@ def test_physical_recovery_policy_is_pinned_to_reviewed_git_blobs_during_race(
             submitted_plan, snap, REVISION,
         )
         assert observed == ["reviewed"] * 4
+
+
+def test_real_root_git_object_chain_rejects_forged_loose_tree_before_restore(
+    monkeypatch, tmp_path,
+):
+    """A clean index and unchanged HEAD cannot authenticate swapped Git tree bytes."""
+    import zlib
+
+    checkout = tmp_path / "committed-source"
+    source = checkout / "nixos" / "system"
+    contract = checkout / "nixos" / "production" / "recovery-contract-v1.json"
+    source.mkdir(parents=True)
+    contract.parent.mkdir(parents=True)
+    (source / "flake.nix").write_text("{ }\n", encoding="utf-8")
+    original_contract = b'{"admission_scope":{"independent_restore":true}}\n'
+    contract.write_bytes(original_contract)
+
+    def git(*args, input_bytes=None):
+        completed = subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=True,
+        )
+        return completed.stdout
+
+    git("init", "-q")
+    git("config", "user.name", "Adversarial Source Fixture")
+    git("config", "user.email", "source-fixture@example.invalid")
+    git("add", "nixos")
+    git("commit", "-qm", "authenticated source")
+    head = git("rev-parse", "HEAD").decode("ascii").strip()
+
+    # The privileged root runner executes Git against an fd-pinned checkout
+    # with the checkout owner credentials. This unprivileged fixture executes
+    # the same actual Git binary under the SAME owner, without elevating UID.
+    # Only credential dropping is stubbed; object/index/tree reads stay real.
+    def owner_git_only(argv, **kwargs):
+        assert argv[0] == "git", "no storage/effect command may run in this test"
+        assert kwargs["run_as_uid"] == os.getuid()
+        assert kwargs["run_as_gid"] == os.getgid()
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            pass_fds=kwargs["pass_fds"],
+            env={"PATH": prod.TRUSTED_PATH, "HOME": "/", "LC_ALL": "C", "LANG": "C"},
+        )
+
+    monkeypatch.setattr(prod, "_run", owner_git_only)
+    opened_source, opened_root, uid, gid = prod._open_root_source_git_context(source)
+    try:
+        verified_head, indexed = prod._verify_open_root_source_git_state(
+            opened_root, uid, gid,
+        )
+        assert verified_head == head
+        assert b"nixos/production/recovery-contract-v1.json" in indexed
+    finally:
+        os.close(opened_root)
+        os.close(opened_source)
+
+    # A same-UID attacker rewrites a LOOSE CHILD TREE object at the original
+    # OID's filename. Git's ls-tree does not rehash the raw tree object.
+    old_tree = git("rev-parse", "HEAD:nixos/production").decode("ascii").strip()
+    old_blob = git(
+        "rev-parse", "HEAD:nixos/production/recovery-contract-v1.json"
+    ).decode("ascii").strip()
+    new_contract = b'{"admission_scope":{"independent_restore":false}}\n'
+    new_blob = git(
+        "hash-object", "-w", "--stdin", input_bytes=new_contract
+    ).decode("ascii").strip()
+    raw_tree = git("cat-file", "tree", old_tree)
+    before = b"recovery-contract-v1.json\x00" + bytes.fromhex(old_blob)
+    after = b"recovery-contract-v1.json\x00" + bytes.fromhex(new_blob)
+    assert raw_tree.count(before) == 1
+    tampered_tree = raw_tree.replace(before, after, 1)
+    forged_object = (
+        b"tree " + str(len(tampered_tree)).encode("ascii") + b"\x00" + tampered_tree
+    )
+    forged_oid = hashlib.sha1(
+        forged_object, usedforsecurity=False,
+    ).hexdigest()
+    assert forged_oid != old_tree
+    object_file = checkout / ".git" / "objects" / old_tree[:2] / old_tree[2:]
+    assert object_file.is_file()
+    replacement = object_file.with_name(object_file.name + ".untrusted")
+    replacement.write_bytes(zlib.compress(forged_object))
+    os.replace(replacement, object_file)
+    contract.write_bytes(new_contract)
+    git(
+        "update-index", "--cacheinfo", "100644", new_blob,
+        "nixos/production/recovery-contract-v1.json",
+    )
+
+    assert git("rev-parse", "HEAD").decode("ascii").strip() == head
+    assert git("status", "--porcelain") == b""
+    assert new_blob.encode("ascii") in git(
+        "--no-replace-objects", "ls-tree", "-r", "HEAD",
+    )
+
+    opened_source, opened_root, uid, gid = prod._open_root_source_git_context(source)
+    try:
+        with pytest.raises(prod.ProductionInstallError, match="Git object"):
+            prod._verify_open_root_source_git_state(opened_root, uid, gid)
+    finally:
+        os.close(opened_root)
+        os.close(opened_source)
+
+    # The actual pre-effect physical-restore gate must likewise reject.
+    with pytest.raises(prod.ProductionInstallError, match="Git object"):
+        prod._revalidate_physical_restore_from_source(
+            {"flake_source": str(source)}, {}, head,
+        )
+
+
+def test_physical_restore_real_readiness_validation_uses_only_pinned_git_contract_loader(
+    monkeypatch, tmp_path,
+):
+    """Real signed-receipt validator may not fall back to replaceable contract paths."""
+    spec = importlib.util.spec_from_file_location(
+        "nixos_real_readiness_fixture",
+        ROOT / "tests" / "test_nixos_pre_cutover_readiness.py",
+    )
+    assert spec is not None and spec.loader is not None
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+
+    outside_evidence = tmp_path / "outside-git-evidence"
+    outside_evidence.mkdir()
+    recovery, lifecycle, critical = fixtures._contracts(outside_evidence)
+    checkout = tmp_path / "committed-git"
+    source = checkout / "nixos" / "system"
+    production = checkout / "nixos" / "production"
+    source.mkdir(parents=True)
+    production.mkdir(parents=True)
+    (source / "flake.nix").write_text("{ }\n", encoding="utf-8")
+    verified_contracts = (
+        production / "recovery-contract-v1.json",
+        production / "nix-lifecycle-contract-v1.json",
+        production / "critical-user-data-contract-v1.json",
+    )
+    for original, target in zip(
+        (recovery, lifecycle, critical), verified_contracts, strict=True,
+    ):
+        target.write_bytes(original.read_bytes())
+        target.chmod(0o644)
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout
+
+    git("init", "-q")
+    git("config", "user.name", "Adversarial Readiness Fixture")
+    git("config", "user.email", "readiness-fixture@example.invalid")
+    git("add", "nixos")
+    git("commit", "-qm", "authenticated reviewed contracts")
+    head = git("rev-parse", "HEAD").decode("ascii").strip()
+    fixtures.REVISION = head
+    bundle_path, _r, _l, _receipts, _c = fixtures._fixture(outside_evidence)
+
+    snapshot = prod.pre_cutover_readiness.validate_readiness(
+        bundle_path,
+        source_revision=head,
+        recovery_contract_path=verified_contracts[0],
+        lifecycle_contract_path=verified_contracts[1],
+        critical_user_data_contract_path=verified_contracts[2],
+        now=fixtures.NOW,
+        attestation_verifier=fixtures._synthetic_attestation_verifier,
+    )
+    scope = prod.pre_cutover_readiness.validate_recovery_contract_scope(
+        verified_contracts[0],
+    )
+    assert git("status", "--porcelain") == b""
+
+    def owner_git_only(argv, **kwargs):
+        assert argv[0] == "git", "no storage/EFI/TPM effect may run"
+        # Pinned privileged Git calls specify owner-drop; ordinary non-root
+        # source-path discovery Git calls require no explicit credential drop.
+        assert kwargs.get("run_as_uid", os.getuid()) == os.getuid()
+        assert kwargs.get("run_as_gid", os.getgid()) == os.getgid()
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            pass_fds=kwargs.get("pass_fds", ()),
+            env={"PATH": prod.TRUSTED_PATH, "HOME": "/", "LANG": "C", "LC_ALL": "C"},
+        )
+
+    def never_read_mutable_contract_path(*_args, **_kwargs):
+        raise AssertionError("contract validator must use the pinned source FD loader")
+
+    real_revalidate = prod.pre_cutover_readiness.revalidate_readiness
+
+    def actual_revalidate(snapshot_value, **kwargs):
+        return real_revalidate(
+            snapshot_value, now=fixtures.NOW,
+            attestation_verifier=fixtures._synthetic_attestation_verifier,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(prod, "_run", owner_git_only)
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "_load_contract",
+        never_read_mutable_contract_path,
+    )
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness",
+        actual_revalidate,
+    )
+    assert prod._revalidate_physical_restore_from_source(
+        {"flake_source": str(source), "recovery_admission_scope": scope},
+        snapshot,
+        head,
+    ) is None

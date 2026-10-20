@@ -747,6 +747,83 @@ def _root_source_raw_blob_oid(
     return digest.hexdigest().encode("ascii")
 
 
+def _authenticated_root_source_git_tree(
+    checkout_fd: int, owner_uid: int, owner_gid: int, head: str,
+) -> dict[bytes, tuple[bytes, bytes]]:
+    """Authenticate the Git commit -> every tree -> tracked blob OID chain.
+
+    The submitting user controls the Git object database as well as the index.
+    Git ls-tree normally trusts loose-object filenames without recomputing the
+    tree's hash, so a forged tree and matching index can appear clean. Rehash
+    raw objects as they are read through the already pinned source checkout FD.
+    Worktree file bytes are separately checked against this authenticated tree.
+    """
+    max_object_bytes = 8 * 1024 * 1024
+    max_tree_count = 4096
+    max_tracked_count = 262144
+    seen_trees = 0
+    files: dict[bytes, tuple[bytes, bytes]] = {}
+
+    def authentic_object(object_type: str, oid: bytes) -> bytes:
+        if re.fullmatch(rb"[0-9a-f]{40}", oid) is None:
+            raise ProductionInstallError("flake source Git object identity is invalid")
+        raw = _run_root_source_git(
+            checkout_fd, owner_uid, owner_gid,
+            ["cat-file", object_type, oid.decode("ascii")],
+        ).stdout
+        if len(raw) > max_object_bytes:
+            raise ProductionInstallError("flake source Git object exceeds the safety bound")
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"{object_type} {len(raw)}\0".encode("ascii"))
+        digest.update(raw)
+        if digest.hexdigest().encode("ascii") != oid:
+            raise ProductionInstallError("flake source Git object hash does not match its OID")
+        return raw
+
+    commit = authentic_object("commit", head.encode("ascii"))
+    root_header = commit.split(b"\n", 1)[0]
+    match = re.fullmatch(rb"tree ([0-9a-f]{40})", root_header)
+    if match is None:
+        raise ProductionInstallError("flake source Git commit root tree is invalid")
+
+    def visit(tree_oid: bytes, prefix: bytes, depth: int) -> None:
+        nonlocal seen_trees
+        seen_trees += 1
+        if depth > 64 or seen_trees > max_tree_count:
+            raise ProductionInstallError("flake source Git tree traversal exceeds safety bounds")
+        raw = authentic_object("tree", tree_oid)
+        position = 0
+        directory_names: set[bytes] = set()
+        while position < len(raw):
+            space = raw.find(b" ", position)
+            nul = raw.find(b"\x00", position)
+            if space < 0 or nul < 0 or space <= position or nul <= space + 1:
+                raise ProductionInstallError("flake source Git tree entry is malformed")
+            mode = raw[position:space]
+            name = raw[space + 1:nul]
+            next_position = nul + 21  # NUL followed by a 20-byte SHA-1 object ID
+            if (
+                next_position > len(raw) or name in directory_names
+                or name in {b".", b".."} or b"/" in name
+            ):
+                raise ProductionInstallError("flake source Git tree entry is unsafe")
+            directory_names.add(name)
+            object_oid = raw[nul + 1:next_position].hex().encode("ascii")
+            relative = prefix + name
+            if mode == b"40000":
+                visit(object_oid, relative + b"/", depth + 1)
+            elif mode in _ROOT_SOURCE_GIT_TRACKED_MODES:
+                if relative in files or len(files) >= max_tracked_count:
+                    raise ProductionInstallError("flake source Git tree contains duplicate or excess paths")
+                files[relative] = (mode, object_oid)
+            else:
+                raise ProductionInstallError("flake source Git tree has unsupported tracked modes")
+            position = next_position
+
+    visit(match.group(1), b"", 0)
+    return files
+
+
 def _verify_open_root_source_git_state(
     checkout_fd: int, owner_uid: int, owner_gid: int,
 ) -> tuple[str, dict[bytes, tuple[bytes, bytes]]]:
@@ -761,6 +838,11 @@ def _verify_open_root_source_git_state(
             checkout_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", head]
         ).stdout
     )
+    authenticated_tree = _authenticated_root_source_git_tree(
+        checkout_fd, owner_uid, owner_gid, head,
+    )
+    if tree != authenticated_tree:
+        raise ProductionInstallError("flake source Git object traversal does not match the verified tree")
     index = _parse_root_source_index(
         _run_root_source_git(
             checkout_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
