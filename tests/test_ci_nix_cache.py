@@ -360,3 +360,494 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
     assert run.returncode == 0, run.stderr
     assert f"CI_NIX_CACHE_PROTOCOL={expected}" in run.stdout
     assert not list(tmp_path.glob("heim-pc-ci-cache-info.*"))
+
+
+def _cache_publisher_upload_script():
+    """Extract the actual publisher shell step, excluding secret declarations."""
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    _, marker, tail = workflow.partition(
+        "      - name: Upload cache through restricted publisher key\n"
+    )
+    assert marker
+    step, end, _ = tail.partition(
+        "      - name: Verify public signed-cache readback\n"
+    )
+    assert end
+    _, marker, script = step.partition("        run: |\n")
+    assert marker
+    return "\n".join(
+        line[10:] if line.strip() else ""
+        for line in script.splitlines()
+    )
+
+
+def test_cache_upload_publishes_nar_bytes_before_signed_narinfo():
+    """Signed narinfo must not become visible before its referenced NAR."""
+    script = _cache_publisher_upload_script()
+    payload = "rsync -r --ignore-existing --exclude='*.narinfo'"
+    readback = "curl --fail --silent --show-error"
+    metadata = "rsync -r --ignore-existing --include='*.narinfo' --exclude='*'"
+    assert script.count("rsync -r --ignore-existing") == 2
+    assert payload in script
+    assert readback in script
+    assert metadata in script
+    assert script.index(payload) < script.index(readback) < script.index(metadata)
+    assert "--proto '=https'" in script
+    assert "StrictHostKeyChecking=yes" in script
+    assert "UserKnownHostsFile=$known_hosts" in script
+    assert "rsync -r --delete" not in script
+    assert "--inplace" not in script
+
+
+@pytest.mark.parametrize("fail_first", [True, False])
+def test_cache_upload_shell_never_publishes_metadata_after_failed_payload(
+    tmp_path, fail_first,
+):
+    """Run the actual Actions step with an isolated, non-network rsync stub."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    cache.mkdir()
+    (cache / "nar").mkdir()
+    (cache / "nar" / "dummy.nar.xz").write_bytes(b"dummy NAR payload")
+    (cache / "dummy.narinfo").write_bytes(b"StorePath: /nix/store/dummy\n")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    rsync = binaries / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "if [ \"$FAIL_FIRST\" = 1 ] && [ \"$(wc -l < \"$RSYNC_ARGS_LOG\")\" -eq 1 ]; then\n"
+        "  exit 23\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = binaries / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *'/nar/dummy.nar.xz'*) cat \"$RUNNER_TEMP/ci-nix-cache/nar/dummy.nar.xz\" ;;\n"
+        "  *'--write-out'*'/dummy.narinfo'*) printf '404' ;;\n"
+        "  *'/dummy.narinfo'*) cat \"$RUNNER_TEMP/ci-nix-cache/dummy.narinfo\" ;;\n"
+        "  *) exit 44 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o700)
+    log = tmp_path / "rsync-args.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{binaries}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-ssh-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST-ONLY-NOT-REAL",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(log),
+        FAIL_FIRST="1" if fail_first else "0",
+    )
+    outcome = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert len(calls) == (1 if fail_first else 2)
+    assert "--exclude=*.narinfo" in calls[0]
+    if fail_first:
+        assert outcome.returncode != 0
+        assert not any("--include=*.narinfo" in call for call in calls)
+    else:
+        assert outcome.returncode == 0, outcome.stderr
+        assert "--include=*.narinfo" in calls[1]
+        assert "--exclude=*" in calls[1]
+    assert not (tmp_path / "ci-nix-cache-upload-key").exists()
+    assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync CLI unavailable")
+def test_cache_upload_real_rsync_filter_is_payload_first_and_append_only(tmp_path):
+    """Use the actual workflow filters against an entirely local fixture cache."""
+    import shlex
+
+    commands = [
+        line.strip().removesuffix("\\").strip()
+        for line in _cache_publisher_upload_script().splitlines()
+        if line.strip().startswith("rsync -r --ignore-existing")
+    ]
+    assert len(commands) == 2
+    argv = [shlex.split(command)[1:] for command in commands]
+
+    cache = tmp_path / "signed-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "test.nar.xz").write_bytes(b"archived NAR fixture")
+    narinfo = cache / "fixture.narinfo"
+    narinfo.write_bytes(b"Sig: test-key:signature-fixture\n")
+    (cache / "nix-cache-info").write_bytes(b"StoreDir: /nix/store\n")
+    destination = tmp_path / "remote"
+    destination.mkdir()
+
+    def transfer(filters):
+        subprocess.run(
+            ["rsync", *filters, str(cache) + "/", str(destination) + "/"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+
+    transfer(argv[0])
+    assert (destination / "nar" / "test.nar.xz").read_bytes() == (
+        b"archived NAR fixture"
+    )
+    assert (destination / "nix-cache-info").is_file()
+    assert not (destination / "fixture.narinfo").exists()
+
+    transfer(argv[1])
+    assert (destination / "fixture.narinfo").read_bytes() == (
+        b"Sig: test-key:signature-fixture\n"
+    )
+    narinfo.write_bytes(b"Sig: attacker-key:replacement\n")
+    (cache / "nar" / "test.nar.xz").write_bytes(b"changed NAR")
+    transfer(argv[0])
+    transfer(argv[1])
+    assert (destination / "nar" / "test.nar.xz").read_bytes() == (
+        b"archived NAR fixture"
+    )
+    assert (destination / "fixture.narinfo").read_bytes() == (
+        b"Sig: test-key:signature-fixture\n"
+    )
+
+
+def test_cache_upload_rejects_preexisting_remote_nar_mismatch_before_narinfo(tmp_path):
+    """A successful append-only upload must not endorse stale remote bytes."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "sample.nar.xz").write_bytes(b"VALID NAR")
+    (cache / "sample.narinfo").write_text(
+        "URL: nar/sample.nar.xz\nFileHash: sha256:synthetic\n", encoding="utf-8"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "case \" $* \" in\n"
+        "  *' --checksum --dry-run '*)\n"
+        "    printf '>fcsT...... nar/sample.nar.xz\\n'\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = bindir / "curl"
+    curl.write_text("#!/bin/sh\nprintf 'PARTIAL'\n", encoding="utf-8")
+    curl.chmod(0o700)
+    calls_path = tmp_path / "calls.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-ssh-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST-ONLY-NOT-REAL",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(calls_path),
+    )
+    outcome = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    assert outcome.returncode != 0, "mismatched remote NAR may not be published"
+    assert len(calls) == 1
+    assert "--exclude=*.narinfo" in calls[0]
+    assert not any("--include=*.narinfo" in call for call in calls)
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync CLI unavailable")
+def test_cache_upload_remote_payload_checksum_detects_stale_existing_bytes(tmp_path):
+    """Forced rrsync -no-overwrite hides stale receiver bytes even in dry-run."""
+    script = _cache_publisher_upload_script()
+    assert "curl --fail --silent --show-error" in script
+    source = tmp_path / "ci-nix-cache"
+    destination = tmp_path / "remote"
+    (source / "nar").mkdir(parents=True)
+    (destination / "nar").mkdir(parents=True)
+    local_bytes = b"verified NAR payload bytes"
+    (source / "nar" / "fixture.nar.xz").write_bytes(local_bytes)
+    remote_path = destination / "nar" / "fixture.nar.xz"
+    audit_argv = [
+        "rsync", "-r", "--checksum", "--dry-run", "--itemize-changes", "--ignore-existing",
+        "--exclude=*.narinfo", str(source) + "/", str(destination) + "/",
+    ]
+    upload_argv = [
+        "rsync", "-r", "--ignore-existing", "--exclude=*.narinfo",
+        str(source) + "/", str(destination) + "/",
+    ]
+    for stale in (b"PARTIAL", b"X" * len(local_bytes)):
+        remote_path.write_bytes(stale)
+        # The first upload pass skips existing files even when they are wrong.
+        skipped = subprocess.run(
+            upload_argv, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert skipped.returncode == 0, skipped.stderr
+        assert remote_path.read_bytes() == stale
+        audit = subprocess.run(
+            audit_argv, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert audit.returncode == 0, audit.stderr
+        assert audit.stdout == "", "receiver-side --ignore-existing hides the mismatch"
+        assert remote_path.read_bytes() == stale, "audit may not repair or mutate"
+    remote_path.write_bytes(local_bytes)
+    audit = subprocess.run(
+        audit_argv, capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert audit.returncode == 0, audit.stderr
+    assert audit.stdout == "", "verified remote bytes must not block publication"
+
+
+def test_cache_upload_refuses_remote_nar_mismatch_when_rrsync_skips_audit(tmp_path):
+    """Server-enforced --ignore-existing makes receiver-side dry-run blind."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "test.nar.xz").write_bytes(b"VALID FULL NAR")
+    (cache / "test.narinfo").write_bytes(b"StorePath: /nix/store/test\n")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "# Mimic forced rrsync -no-overwrite: existing remote NAR is skipped\n"
+        "# even for a receiver-side checksum dry-run.\n"
+        "exit 0\n", encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$CURL_ARGS_LOG\"\n"
+        "printf 'PARTIAL'\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o700)
+    rsync_log = tmp_path / "rsync-args.log"
+    curl_log = tmp_path / "curl-args.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-ssh-key").decode(),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(rsync_log),
+        CURL_ARGS_LOG=str(curl_log),
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = rsync_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode != 0, "stale published NAR must abort"
+    assert curl_log.is_file(), "must compare authenticated public NAR bytes"
+    assert "/nar/test.nar.xz" in curl_log.read_text(encoding="utf-8")
+    assert not any("--include=*.narinfo" in call for call in calls)
+
+
+@pytest.mark.parametrize("second_mode", ["ok", "stale", "http_error"])
+def test_cache_upload_reads_all_nars_and_blocks_bad_second_response(tmp_path, second_mode):
+    """Valid first NAR must not permit narinfo if a later readback is bad."""
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "a.nar.xz").write_bytes(b"NAR-A")
+    (cache / "nar" / "b.nar.zst").write_bytes(b"NAR-B")
+    (cache / "example.narinfo").write_bytes(b"Sig: fixture\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "exit 0\n", encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$CURL_ARGS_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'/nar/a.nar.xz'*) printf 'NAR-A' ;;\n"
+        "  *'/nar/b.nar.zst'*)\n"
+        "    case \"$SECOND_MODE\" in\n"
+        "      stale) printf 'WRONG' ;;\n"
+        "      http_error) printf 'NAR-B'; exit 22 ;;\n"
+        "      ok) printf 'NAR-B' ;;\n"
+        "      *) exit 15 ;;\n"
+        "    esac ;;\n"
+        "  *'/example.narinfo'*)\n"
+        "    case \"$*\" in\n"
+        "      *'--write-out'*) printf '404' ;;\n"
+        "      *) cat \"$RUNNER_TEMP/ci-nix-cache/example.narinfo\" ;;\n"
+        "    esac ;;\n"
+        "  *) exit 17 ;;\n"
+        "esac\n", encoding="utf-8",
+    )
+    curl.chmod(0o700)
+    rsync_log = tmp_path / "rsync-args.log"
+    curl_log = tmp_path / "curl-args.log"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-ssh-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST-ONLY-NOT-REAL",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(rsync_log),
+        CURL_ARGS_LOG=str(curl_log),
+        SECOND_MODE=second_mode,
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = rsync_log.read_text(encoding="utf-8").splitlines()
+    gets = curl_log.read_text(encoding="utf-8").splitlines()
+    assert len(gets) == (4 if second_mode == "ok" else 2), gets
+    assert "--proto =https" in gets[0] and "--proto =https" in gets[1]
+    assert "/nar/a.nar.xz" in gets[0] and "/nar/b.nar.zst" in gets[1]
+    if second_mode == "ok":
+        assert "/example.narinfo" in gets[2] and "/example.narinfo" in gets[3]
+    assert ("--include=*.narinfo" in "\n".join(calls)) == (second_mode == "ok")
+    if second_mode == "ok":
+        assert result.returncode == 0, result.stderr
+        assert len(calls) == 2
+    else:
+        assert result.returncode != 0
+        assert len(calls) == 1
+
+
+@pytest.mark.parametrize("remote_mode", [
+    "mismatched", "present_same", "missing_then_published",
+    "http_error", "missing_after_upload", "race_other_metadata",
+])
+def test_cache_upload_authenticates_preexisting_and_new_signed_narinfo(
+    tmp_path, remote_mode,
+):
+    """A retained signed .narinfo must not be mistaken for this build's output.
+
+    Run the real Actions shell step. The SSH publisher is append-only, and
+    independent HTTPS reads simulate the cache consumer. No network is used.
+    """
+    import base64
+    import os
+
+    script = _cache_publisher_upload_script()
+    cache = tmp_path / "ci-nix-cache"
+    (cache / "nar").mkdir(parents=True)
+    (cache / "nar" / "sample.nar.xz").write_bytes(b"VALID NAR")
+    (cache / "sample.narinfo").write_bytes(b"NEW SIGNED METADATA\n")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rsync = bindir / "rsync"
+    rsync.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$RSYNC_ARGS_LOG\"\n"
+        "case \" $* \" in\n"
+        "  *' --include=*.narinfo '*) touch \"$METADATA_UPLOAD_MARKER\" ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    rsync.chmod(0o700)
+    curl = bindir / "curl"
+    curl.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "url = args[-1]\n"
+        "with open(os.environ['CURL_ARGS_LOG'], 'a') as log:\n"
+        "    log.write(url + '\\n')\n"
+        "if url.endswith('/nar/sample.nar.xz'):\n"
+        "    sys.stdout.buffer.write(b'VALID NAR')\n"
+        "elif url.endswith('/sample.narinfo'):\n"
+        "    mode = os.environ['REMOTE_MODE']\n"
+        "    if '--output' in args:\n"
+        "        dst = pathlib.Path(args[args.index('--output') + 1])\n"
+        "        if mode == 'http_error':\n"
+        "            dst.write_bytes(b'SERVER ERROR')\n"
+        "            sys.stdout.write('500')\n"
+        "        elif mode in ('missing_then_published', 'missing_after_upload', 'race_other_metadata'):\n"
+        "            dst.write_bytes(b'NOT FOUND')\n"
+        "            sys.stdout.write('404')\n"
+        "        elif mode == 'mismatched':\n"
+        "            dst.write_bytes(b'OLD SIGNED METADATA\\n')\n"
+        "            sys.stdout.write('200')\n"
+        "        else:\n"
+        "            dst.write_bytes(b'NEW SIGNED METADATA\\n')\n"
+        "            sys.stdout.write('200')\n"
+        "    elif mode == 'missing_after_upload':\n"
+        "        sys.exit(22)\n"
+        "    elif mode == 'race_other_metadata':\n"
+        "        sys.stdout.buffer.write(b'FOREIGN SIGNED METADATA\\n')\n"
+        "    else:\n"
+        "        sys.stdout.buffer.write(b'NEW SIGNED METADATA\\n')\n"
+        "else:\n"
+        "    sys.exit(41)\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o700)
+    rsync_log = tmp_path / "rsync.log"
+    curl_log = tmp_path / "curl.log"
+    marker = tmp_path / "metadata-uploaded"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        RUNNER_TEMP=str(tmp_path),
+        UPLOAD_KEY_B64=base64.b64encode(b"test-only-key").decode("ascii"),
+        CI_NIX_CACHE_SSH_HOST="unreachable.example.invalid",
+        CI_NIX_CACHE_SSH_HOST_KEY="ssh-ed25519 TEST",
+        CI_NIX_CACHE_URL="https://cache.example.invalid/nix-cache",
+        RSYNC_ARGS_LOG=str(rsync_log),
+        CURL_ARGS_LOG=str(curl_log),
+        METADATA_UPLOAD_MARKER=str(marker),
+        REMOTE_MODE=remote_mode,
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert "/nar/sample.nar.xz" in "\n".join(calls)
+    assert "/sample.narinfo" in "\n".join(calls), (
+        "signed metadata must be read from the real consumer endpoint"
+    )
+    if remote_mode in ("mismatched", "http_error"):
+        assert result.returncode != 0, "conflicting or failed metadata lookup must deny"
+        assert not marker.exists(), "must deny before metadata upload"
+    elif remote_mode in ("missing_after_upload", "race_other_metadata"):
+        assert result.returncode != 0, "missing metadata after upload must deny"
+        assert marker.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert marker.exists(), "allowed metadata must still use append-only upload"
+    assert not (tmp_path / "ci-nix-cache-upload-key").exists()
+    assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
