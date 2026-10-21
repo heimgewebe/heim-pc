@@ -154,6 +154,56 @@ jobs:
             printf 'CI_NIX_CACHE_PROTOCOL=unavailable; fallback=true keeps the local build path authoritative\n'
           fi
 
+      # Nix flake.lock equality alone is not independent source=NAR evidence.
+      # Fetch the immutable upstream commit directly (not from this flake's
+      # lock) and recompute its NAR digest before any expensive closure builds.
+      - name: Independently rehash pinned Nixer GitHub source
+        run: |
+          set -euo pipefail
+          pins="$(python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          contract = json.loads(Path('nixos/production/trust-contract-v1.json').read_text())
+          lock = json.loads(Path('flake.lock').read_text())
+          pinned = contract['inputs']['nixer']
+          node = lock['nodes'][pinned['lock_node']]
+          revision = pinned['required_revision']
+          nar_hash = pinned['required_nar_hash']
+          if not re.fullmatch(r'[0-9a-f]{40}', revision):
+              raise SystemExit('invalid pinned Nixer revision')
+          if not re.fullmatch(r'sha256-[A-Za-z0-9+/]{43}=', nar_hash):
+              raise SystemExit('invalid pinned Nixer NAR digest')
+          source = {'type': 'github', 'owner': 'heimgewebe', 'repo': 'nixer', 'rev': revision}
+          locked = node['locked']
+          if node['original'] != source or any(locked.get(k) != v for k, v in source.items()):
+              raise SystemExit('Nixer lock origin/commit differs from reviewed source')
+          if locked.get('narHash') != nar_hash:
+              raise SystemExit('Nixer lock NAR differs from reviewed contract')
+          if lock['nodes']['root']['inputs'].get('nixer') != pinned['lock_node']:
+              raise SystemExit('root Nixer lock edge differs from reviewed contract')
+          runtime = pinned['runtime_nixpkgs_lock_node']
+          if node['inputs'].get('nixpkgs') != runtime:
+              raise SystemExit('Nixer transitive nixpkgs edge differs from reviewed contract')
+          if lock['nodes'][runtime]['locked']['rev'] != pinned['runtime_nixpkgs_required_revision']:
+              raise SystemExit('Nixer transitive nixpkgs revision differs from reviewed contract')
+          print(revision)
+          print(nar_hash)
+          PY
+          )"
+          mapfile -t pin_values <<< "$pins"
+          # No narHash= in the upstream reference: Nix obtains bytes by the
+          # exact GitHub commit and reports a freshly computed source hash.
+          fetched="$(timeout 180s nix flake prefetch --json --refresh --no-write-lock-file "github:heimgewebe/nixer/${pin_values[0]}")"
+          remote_fields="$(python3 -c 'import json,sys; value=json.load(sys.stdin); print(value["hash"]); print(value["storePath"])' <<< "$fetched")"
+          mapfile -t remote_values <<< "$remote_fields"
+          test "${remote_values[0]}" = "${pin_values[1]}"
+          case "${remote_values[1]}" in /nix/store/*-source) ;; *) exit 1;; esac
+          rehashed="$(nix hash path --type sha256 --sri "${remote_values[1]}")"
+          test "$rehashed" = "${pin_values[1]}"
+          printf 'NIXER_UPSTREAM_NAR_VERIFIED=%s\n' "${pin_values[1]}"
+
       - name: Evaluate complete flake without building checks
         run: nix flake check --no-build --no-update-lock-file --print-build-logs
 

@@ -36,6 +36,67 @@ class T(unittest.TestCase):
             nested,
         )
 
+    def test_nixer_upstream_nar_rehash_gate_rejects_manipulated_trust_edges(self):
+        workflow = (ROOT / '.github/workflows/heim-pc-nix.yml').read_text()
+        marker = "          pins=\"$(python3 - <<'PY'\n"
+        self.assertEqual(workflow.count(marker), 1)
+        preflight = textwrap.dedent(
+            workflow.split(marker, 1)[1].split('\n          PY\n', 1)[0]
+        )
+        self.assertIn('nix flake prefetch --json --refresh --no-write-lock-file', workflow)
+        self.assertIn('nix hash path --type sha256 --sri', workflow)
+        self.assertLess(
+            workflow.index('Independently rehash pinned Nixer GitHub source'),
+            workflow.index('Build storage, VM and physical-gate closures'),
+        )
+        trust = json.loads((ROOT / 'nixos/production/trust-contract-v1.json').read_text())
+        lock = json.loads((ROOT / 'flake.lock').read_text())
+
+        def run_preflight(contract, lock_data):
+            with tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary)
+                (target / 'nixos/production').mkdir(parents=True)
+                (target / 'nixos/production/trust-contract-v1.json').write_text(
+                    json.dumps(contract), encoding='utf-8'
+                )
+                (target / 'flake.lock').write_text(
+                    json.dumps(lock_data), encoding='utf-8'
+                )
+                return subprocess.run(
+                    ['python3', '-B', '-c', preflight],
+                    cwd=target, text=True, capture_output=True, check=False, timeout=10,
+                )
+
+        green = run_preflight(trust, lock)
+        self.assertEqual(green.returncode, 0, green.stderr)
+        self.assertEqual(green.stdout.splitlines(), [
+            '712ea5b1e8f8cebeebb206e774023a8a4d842b4b',
+            'sha256-zQCJ2ZI8ApEljh0U0+rrfBMK/DWkXHhzKIGHViyxG8A=',
+        ])
+        for attack in ('contract_nar', 'lock_nar', 'original_rev', 'owner',
+                       'upstream_edge', 'transitive_rev', 'root_nixer_edge'):
+            altered_trust = json.loads(json.dumps(trust))
+            altered_lock = json.loads(json.dumps(lock))
+            pin = altered_trust['inputs']['nixer']
+            node = altered_lock['nodes']['nixer']
+            if attack == 'contract_nar':
+                pin['required_nar_hash'] = 'sha256-' + 'A' * 43 + '='
+            elif attack == 'lock_nar':
+                node['locked']['narHash'] = 'sha256-' + 'A' * 43 + '='
+            elif attack == 'original_rev':
+                node['original']['rev'] = '0' * 40
+            elif attack == 'owner':
+                node['locked']['owner'] = 'unreviewed-owner'
+            elif attack == 'upstream_edge':
+                node['inputs']['nixpkgs'] = 'nixpkgs_2'
+            elif attack == 'transitive_rev':
+                pin['runtime_nixpkgs_required_revision'] = '0' * 40
+            elif attack == 'root_nixer_edge':
+                altered_lock['nodes']['root']['inputs']['nixer'] = 'microvm'
+            with self.subTest(forgery=attack):
+                red = run_preflight(altered_trust, altered_lock)
+                self.assertNotEqual(red.returncode, 0, red.stdout)
+
     def test_nixer_image_preparation_has_bounded_network_retry(self):
         module = (SOURCE / "modules/nixer.nix").read_text()
         self.assertIn("runtimeInputs = [ pkgs.coreutils pkgs.podman ];", module)
