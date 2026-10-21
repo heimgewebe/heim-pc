@@ -3,9 +3,10 @@
 ## Scope
 
 Issue #167 evaluates cross-run reuse of the current heavy CUDA Nix derivations in
-GitHub CI without changing production NixOS trust. The cache is a CI-only
-optimization. It does not authorize a NixOS deployment or production runtime
-cutover.
+GitHub CI without changing production NixOS trust. A separate, default-deny
+option can also publish the complete storage-target NixOS system closure through
+the same signed **CI-only** cache. Neither mode authorizes a NixOS deployment,
+production runtime cutover, boot-chain trust or physical storage changes.
 
 ## Trust domains
 
@@ -34,14 +35,26 @@ and whose branch is `main`. The job binds GitHub environment
 `ci-cache-publisher`, which is restricted to `main`.
 
 Publication is **off by default**, including after this PR reaches `main`.
-The job-level `if` additionally requires the **repository-level** GitHub
-Actions variable `CI_NIX_CACHE_PUBLISH_ENABLED` to equal the literal `true`.
-An unset value is empty and therefore skips the job before allocating a runner
-or accessing protected publisher secrets. This PR does not create or enable
-that variable. An owner may opt in only for a separately authorized Main-only
-signed publication trial; disable it again after the intended run. Activating
-it is not a cross-run success claim: the independent signed-substitution and
-wall-clock acceptance checks below remain mandatory.
+Two **independent repository-level** GitHub Actions variables delimit authority:
+
+- `CI_NIX_CACHE_PUBLISH_ENABLED=true` admits the Main-only publisher **job**
+  and its existing Ollama/llama.cpp heavy-closure publication. If unset or
+  `false`, the entire job is skipped before allocating a runner or accessing
+  protected publisher secrets.
+- `CI_NIX_CACHE_PUBLISH_SYSTEM_CLOSURE_ENABLED=true` is a **separate**
+  additional opt-in inside that job for the **complete**
+  `heim-pc-storage-target` NixOS system closure. If unset or `false`, the
+  job publishes **only** the existing Ollama/llama.cpp closures. Setting this
+  variable alone never starts the publisher job; enabling the heavy-closure
+  publisher never implicitly enables system-closure publication. Unexpected
+  values are rejected instead of broadening the publication scope.
+
+Neither variable is created or enabled by this source change. Each opt-in
+requires its own separately authorized, Main-only signed publication decision;
+disable it after the intended trial. Enabling either variable alone is not a
+cross-run success, recovery or NixOS release claim: independent
+signed-substitution, complete-closure readback and operational acceptance checks
+remain mandatory.
 
 Pull-request and fork workflows never receive the signing or upload credentials.
 The publisher checks the stable GitHub workflow ID 351684660 before handling
@@ -52,11 +65,19 @@ The upload SSH host and pinned host public key are configured in the existing
 protected GitHub environment ci-cache-publisher as CI_CACHE_UPLOAD_SSH_HOST
 and CI_CACHE_UPLOAD_SSH_HOST_KEY. They are not part of the public workflow;
 both environment values must be present and the SSH host key remains pinned.
-The publisher resolves the exact Ollama and llama.cpp derivations from the
-successful Main source graph, realizes those outputs, copies their closures
-recursively into a local `file://` binary cache signed with the dedicated Nix
+The publisher always resolves the exact Ollama and llama.cpp derivations from
+the successful Main source graph and realizes their outputs. **Only** when the
+second system-closure opt-in is literally `true`, it additionally evaluates
+`nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel.outPath`
+and builds `packages.x86_64-linux.heim-pc-storage-target-system` from that
+same source. The two Nix store paths must agree exactly and match the bounded
+`/nix/store/…-nixos-system-heim-pc-…` path contract; any mismatch aborts.
+The publisher copies the recursively complete closures of **all selected
+outputs** into a local `file://` binary cache signed with the dedicated Nix
 key, then uploads only those signed cache files. Recursive copy is required
-because a Nix binary-cache store must also contain the referenced closure paths.
+because a Nix binary-cache store must contain every referenced closure path.
+The separate system opt-in never changes the CI signing key, upload principal,
+append-only policy or the production NixOS trust contract.
 
 The SSH public key installed on `commonserver` is forced through:
 
@@ -95,13 +116,15 @@ the behavior of distinct same-name signing keys under a real Nix CLI.
 The invalid-signature probe tests Nix signature mechanics only. It is not
 evidence of cross-run reuse.
 
-After upload, this job copies the **complete** remote closure into a new,
-empty temporary binary cache with local builds and fallback disabled. Nix
-2.35.2 accepts untrusted signatures during cache-to-cache copy, so that step
-alone does not establish authenticity. The subsequent `nix store verify`
-checks both NAR contents and signatures for every transitive path under the
-exact trusted CI public key; only then may the job compare complete closure
-identities and publish its success receipt. The readback disables Nix's
+After upload, this job copies the **complete remote closure of every selected
+output**—including the system-closure path **only when separately enabled**—
+into a new, empty temporary binary cache with local builds and fallback
+disabled. Nix 2.35.2 accepts untrusted signatures during cache-to-cache copy,
+so that step alone does not establish authenticity. The subsequent
+`nix store verify` checks both NAR contents and signatures for every
+transitive path under the exact trusted CI public key; only then may the job
+compare complete closure identities and publish its success receipt.
+The readback disables Nix's
 negative narinfo lookup cache (TTL 0) so pre-upload misses cannot hide newly
 published paths. Production trust and the separate cross-run performance
 acceptance contract stay unchanged.
@@ -126,6 +149,14 @@ Continue only when two independent runs for the same derivations show:
    exact Ollama/llama.cpp outputs from the signed CI cache,
 3. invalid signatures are rejected,
 4. wall-clock reduction is material relative to observed run variance.
+
+When the **system-closure** opt-in is separately authorized, the successful
+publisher readback must additionally include the exact expected storage-target
+system path and **every transitive path**, with valid signatures in the fresh
+isolated consumer store. This is a CI-only signed-cache proof—not a complete
+installed-system attestation, boot-chain verification or external restore.
+Production signing, EFI/TPM/LUKS/storage changes and physical NixOS cutover
+remain subject to their independent fail-closed release and recovery gates.
 
 Otherwise remove the CI-only cache configuration and accept the original CI
 latency instead of expanding infrastructure complexity.

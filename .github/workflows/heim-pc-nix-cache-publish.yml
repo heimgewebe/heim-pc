@@ -33,6 +33,8 @@ jobs:
       SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
       SOURCE_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
       SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+      # Separate protected opt-in; default heavy-only publication is unchanged.
+      PUBLISH_SYSTEM_CLOSURE: ${{ vars.CI_NIX_CACHE_PUBLISH_SYSTEM_CLOSURE_ENABLED }}
     steps:
       - name: Checkout exact successful Main source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,11 +98,35 @@ jobs:
           printf 'ollama_path=%s\n' "$ollama_path" >> "$GITHUB_OUTPUT"
           printf 'llama_path=%s\n' "$llama_path" >> "$GITHUB_OUTPUT"
 
+          # Publishing the complete installation closure is not authorized by
+          # an existing heavy-cache opt-in alone.
+          case "$PUBLISH_SYSTEM_CLOSURE" in
+            ""|false) ;;
+            true)
+              expected_system_path="$(nix eval --raw --no-update-lock-file \
+                .#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel.outPath)"
+              system_path="$(nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs \
+                .#packages.x86_64-linux.heim-pc-storage-target-system)"
+              test "$system_path" = "$expected_system_path"
+              if [[ ! "$system_path" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$ ]]; then
+                echo 'refusing system closure publication: wrong system store path' >&2
+                exit 1
+              fi
+              test -d "$system_path"
+              printf 'system_path=%s\n' "$system_path" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo 'refusing system closure publication: unexpected opt-in value' >&2
+              exit 1
+              ;;
+          esac
+
       - name: Create signed append-only cache payload
         env:
           SIGNING_KEY_B64: ${{ secrets.CI_CACHE_NIX_SIGNING_KEY_B64 }}
           OLLAMA_PATH: ${{ steps.heavy.outputs.ollama_path }}
           LLAMA_CPP_PATH: ${{ steps.heavy.outputs.llama_path }}
+          SYSTEM_PATH: ${{ steps.heavy.outputs.system_path }}
         run: |
           set -euo pipefail
           cache_dir="$RUNNER_TEMP/ci-nix-cache"
@@ -117,12 +143,30 @@ jobs:
             exit 1
           fi
 
+          publication_paths=( "$OLLAMA_PATH" "$LLAMA_CPP_PATH" )
+          case "$PUBLISH_SYSTEM_CLOSURE" in
+            ""|false)
+              test -z "$SYSTEM_PATH"
+              ;;
+            true)
+              if [[ ! "$SYSTEM_PATH" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$ ]]; then
+                echo 'refusing system closure publication: unsigned or invalid system output' >&2
+                exit 1
+              fi
+              test -d "$SYSTEM_PATH"
+              publication_paths+=( "$SYSTEM_PATH" )
+              ;;
+            *)
+              echo 'refusing system closure publication: invalid opt-in mode' >&2
+              exit 1
+              ;;
+          esac
           nix copy \
             --to "file://$cache_dir?secret-key=$signing_key" \
-            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+            "${publication_paths[@]}"
 
           test -f "$cache_dir/nix-cache-info"
-          for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
+          for store_path in "${publication_paths[@]}"; do
             base="$(basename "$store_path")"
             hash="${base%%-*}"
             narinfo="$cache_dir/$hash.narinfo"
@@ -255,6 +299,7 @@ jobs:
         env:
           OLLAMA_PATH: ${{ steps.heavy.outputs.ollama_path }}
           LLAMA_CPP_PATH: ${{ steps.heavy.outputs.llama_path }}
+          SYSTEM_PATH: ${{ steps.heavy.outputs.system_path }}
         run: |
           set -euo pipefail
           curl --fail --silent --show-error "$CI_NIX_CACHE_URL/nix-cache-info" >/dev/null
@@ -270,34 +315,55 @@ jobs:
           narinfo-cache-negative-ttl = 0
           max-jobs = 0"
 
+          closure_paths=( "$OLLAMA_PATH" "$LLAMA_CPP_PATH" )
+          case "$PUBLISH_SYSTEM_CLOSURE" in
+            ""|false)
+              test -z "$SYSTEM_PATH"
+              ;;
+            true)
+              if [[ ! "$SYSTEM_PATH" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-heim-pc-[A-Za-z0-9._+-]+$ ]]; then
+                echo 'invalid system path at independent consumer readback' >&2
+                exit 1
+              fi
+              closure_paths+=( "$SYSTEM_PATH" )
+              ;;
+            *)
+              echo 'invalid system opt-in at independent consumer readback' >&2
+              exit 1
+              ;;
+          esac
+
           readback_cache_dir="$RUNNER_TEMP/ci-nix-cache-remote-readback"
           test ! -e "$readback_cache_dir"
           mkdir -m 0700 "$readback_cache_dir"
 
           expected_closure="$RUNNER_TEMP/ci-nix-cache-expected-closure.txt"
           remote_closure="$RUNNER_TEMP/ci-nix-cache-remote-closure.txt"
-          nix path-info --recursive "$OLLAMA_PATH" "$LLAMA_CPP_PATH" |
+          nix path-info --recursive "${closure_paths[@]}" |
             LC_ALL=C sort -u > "$expected_closure"
           test -s "$expected_closure"
 
           # --from is explicit: a local /nix/store hit cannot mask remote corruption.
           # --to starts empty: every closure NAR must be fetched and validated.
           nix copy --from "$CI_NIX_CACHE_URL" --to "file://$readback_cache_dir" \
-            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+            "${closure_paths[@]}"
 
           # Cache-to-cache copy alone accepts untrusted NAR signatures. Verify
           # both contents and trusted signing keys across every closure path.
           nix store verify --store "file://$readback_cache_dir" --recursive \
-            "$OLLAMA_PATH" "$LLAMA_CPP_PATH"
+            "${closure_paths[@]}"
 
           nix path-info --recursive --store "file://$readback_cache_dir" \
-            "$OLLAMA_PATH" "$LLAMA_CPP_PATH" |
+            "${closure_paths[@]}" |
             LC_ALL=C sort -u > "$remote_closure"
           test -s "$remote_closure"
           cmp -s "$expected_closure" "$remote_closure"
 
-          for store_path in "$OLLAMA_PATH" "$LLAMA_CPP_PATH"; do
+          for store_path in "${closure_paths[@]}"; do
             grep -Fqx -- "$store_path" "$remote_closure"
             printf 'PUBLISHED_TRUSTED_CLOSURE=%s\n' "$store_path"
           done
+          if [[ "$PUBLISH_SYSTEM_CLOSURE" == "true" ]]; then
+            printf 'PUBLISHED_TRUSTED_SYSTEM_CLOSURE=%s\n' "$SYSTEM_PATH"
+          fi
           printf 'PUBLISHED_TRUSTED_CLOSURE_PATHS=%s\n' "$(wc -l < "$remote_closure")"
