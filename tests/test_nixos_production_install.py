@@ -8345,3 +8345,49 @@ def test_physical_restore_real_readiness_validation_uses_only_pinned_git_contrac
         snapshot,
         head,
     ) is None
+
+
+def test_root_git_cat_file_stream_is_bounded_before_oid_verification(tmp_path):
+    """An oversized forged loose object must not be fully buffered by root."""
+    import zlib
+
+    checkout = tmp_path / "bounded-git-source"
+    checkout.mkdir()
+    (checkout / "tracked.txt").write_bytes(b"reviewed\n")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+
+    git("init", "-q")
+    git("add", "tracked.txt")
+    git("-c", "user.name=Read Only Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "bounded source fixture")
+    tree_oid = git("rev-parse", "HEAD^{tree}").decode().strip()
+
+    checkout_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        argv = prod._root_source_git_argv(
+            checkout_fd, ["cat-file", "tree", tree_oid],
+        )
+        assert prod._run(argv, pass_fds=(checkout_fd,)).stdout == git(
+            "cat-file", "tree", tree_oid,
+        )
+
+        # Filename still names the reviewed tree OID; Git's cat-file can
+        # stream untrusted, decompressed bytes before hash verification.
+        oversized = b"x" * (8 * 1024 * 1024 + 4096)
+        envelope = b"tree " + str(len(oversized)).encode() + b"\0" + oversized
+        loose = checkout / ".git" / "objects" / tree_oid[:2] / tree_oid[2:]
+        assert loose.is_file()
+        temp = loose.with_name(loose.name + ".untrusted")
+        temp.write_bytes(zlib.compress(envelope, level=1))
+        os.replace(temp, loose)
+
+        with pytest.raises(prod.ProductionInstallError, match="safety bound"):
+            prod._run(argv, pass_fds=(checkout_fd,))
+    finally:
+        os.close(checkout_fd)

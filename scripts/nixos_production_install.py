@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import select
 import signal
 import sqlite3
 import stat
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -4040,17 +4042,77 @@ def _run(
     fd_args: dict[str, Any] = {}
     if pass_fds:
         fd_args["pass_fds"] = pass_fds
-    result = subprocess.run(
-        argv,
-        input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        env=command_env,
-        close_fds=True,
-        **credential_args,
-        **fd_args,
+    # Git reads from the submitting user's object store. Every privileged
+    # source-Git stdout must be bounded *during* capture, before comparing its
+    # bytes with the reviewed OID; subprocess.run(stdout=PIPE) is unbounded.
+    is_root_source_git = (
+        len(argv) >= 3
+        and argv[:3] == ["git", "--no-replace-objects", "--no-optional-locks"]
     )
+    if is_root_source_git:
+        if input_bytes is not None:
+            raise ProductionInstallError("source Git output reader forbids stdin")
+        # Raw commit/tree objects have the tighter review-authentication bound.
+        object_read = len(argv) >= 3 and argv[-3] == "cat-file"
+        output_limit = (8 if object_read else 32) * 1024 * 1024
+        output = bytearray()
+        with subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=command_env,
+            close_fds=True,
+            **credential_args,
+            **fd_args,
+        ) as process:
+            deadline = time.monotonic() + 20
+            try:
+                assert process.stdout is not None
+                output_fd = process.stdout.fileno()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProductionInstallError("source Git output read timed out")
+                    if not select.select([output_fd], [], [], remaining)[0]:
+                        raise ProductionInstallError("source Git output read timed out")
+                    chunk = os.read(
+                        output_fd, min(65536, output_limit + 1 - len(output)),
+                    )
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > output_limit:
+                        raise ProductionInstallError(
+                            "flake source Git object exceeds the safety bound"
+                        )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProductionInstallError("source Git output read timed out")
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired as exc:
+                    raise ProductionInstallError("source Git output read timed out") from exc
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                raise
+        result = subprocess.CompletedProcess(
+            argv, process.returncode, bytes(output), b"",
+        )
+    else:
+        result = subprocess.run(
+            argv,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=command_env,
+            close_fds=True,
+            **credential_args,
+            **fd_args,
+        )
     if check and result.returncode != 0:
         if input_bytes is not None:
             raise ProductionInstallError(f"command failed ({argv[0]}) with sensitive stdin; stderr withheld")
