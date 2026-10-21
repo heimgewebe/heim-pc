@@ -17,7 +17,9 @@ import importlib.util
 import json
 import os
 import re
+import resource
 import secrets
+import select
 import signal
 import sqlite3
 import stat
@@ -25,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -747,44 +750,137 @@ def _root_source_raw_blob_oid(
     return digest.hexdigest().encode("ascii")
 
 
-def _verify_root_source_git_state(flake_source: str | Path) -> str:
-    source = _source_git_path(flake_source)
-    source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
-    try:
-        head = _run_root_source_git(
-            checkout_fd, owner_uid, owner_gid, ["rev-parse", "HEAD"]
-        ).stdout.decode("utf-8", "strict").strip()
-        if SOURCE_REVISION_RE.fullmatch(head) is None:
-            raise ProductionInstallError("flake source is not bound to an exact Git revision")
+def _authenticated_root_source_git_tree(
+    checkout_fd: int, owner_uid: int, owner_gid: int, head: str,
+) -> dict[bytes, tuple[bytes, bytes]]:
+    """Authenticate the Git commit -> every tree -> tracked blob OID chain.
 
-        tree = _parse_root_source_tree(
-            _run_root_source_git(
-                checkout_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", head]
-            ).stdout
-        )
-        index = _parse_root_source_index(
-            _run_root_source_git(
-                checkout_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
-            ).stdout
-        )
-        untracked = _run_root_source_git(
-            checkout_fd,
-            owner_uid,
-            owner_gid,
-            ["ls-files", "--others", "--exclude-standard", "-z"],
+    The submitting user controls the Git object database as well as the index.
+    Git ls-tree normally trusts loose-object filenames without recomputing the
+    tree's hash, so a forged tree and matching index can appear clean. Rehash
+    raw objects as they are read through the already pinned source checkout FD.
+    Worktree file bytes are separately checked against this authenticated tree.
+    """
+    max_object_bytes = 8 * 1024 * 1024
+    max_tree_count = 4096
+    max_tracked_count = 262144
+    seen_trees = 0
+    files: dict[bytes, tuple[bytes, bytes]] = {}
+
+    def authentic_object(object_type: str, oid: bytes) -> bytes:
+        if re.fullmatch(rb"[0-9a-f]{40}", oid) is None:
+            raise ProductionInstallError("flake source Git object identity is invalid")
+        raw = _run_root_source_git(
+            checkout_fd, owner_uid, owner_gid,
+            ["cat-file", object_type, oid.decode("ascii")],
         ).stdout
-        if tree != index or untracked:
-            raise ProductionInstallError("flake source must be clean before a production install")
+        if len(raw) > max_object_bytes:
+            raise ProductionInstallError("flake source Git object exceeds the safety bound")
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"{object_type} {len(raw)}\0".encode("ascii"))
+        digest.update(raw)
+        if digest.hexdigest().encode("ascii") != oid:
+            raise ProductionInstallError("flake source Git object hash does not match its OID")
+        return raw
 
-        for relative_path, (mode, oid) in index.items():
-            if _root_source_raw_blob_oid(checkout_fd, relative_path, mode) != oid:
-                raise ProductionInstallError(
-                    "flake source must be clean before a production install"
-                )
+    commit = authentic_object("commit", head.encode("ascii"))
+    root_header = commit.split(b"\n", 1)[0]
+    match = re.fullmatch(rb"tree ([0-9a-f]{40})", root_header)
+    if match is None:
+        raise ProductionInstallError("flake source Git commit root tree is invalid")
+
+    def visit(tree_oid: bytes, prefix: bytes, depth: int) -> None:
+        nonlocal seen_trees
+        seen_trees += 1
+        if depth > 64 or seen_trees > max_tree_count:
+            raise ProductionInstallError("flake source Git tree traversal exceeds safety bounds")
+        raw = authentic_object("tree", tree_oid)
+        position = 0
+        directory_names: set[bytes] = set()
+        while position < len(raw):
+            space = raw.find(b" ", position)
+            nul = raw.find(b"\x00", position)
+            if space < 0 or nul < 0 or space <= position or nul <= space + 1:
+                raise ProductionInstallError("flake source Git tree entry is malformed")
+            mode = raw[position:space]
+            name = raw[space + 1:nul]
+            next_position = nul + 21  # NUL followed by a 20-byte SHA-1 object ID
+            if (
+                next_position > len(raw) or name in directory_names
+                or name in {b".", b".."} or b"/" in name
+            ):
+                raise ProductionInstallError("flake source Git tree entry is unsafe")
+            directory_names.add(name)
+            object_oid = raw[nul + 1:next_position].hex().encode("ascii")
+            # Git objects may contain path components the host filesystem could
+            # never open. Cap both a component and the *entire* path before
+            # concatenating recursive prefixes in this privileged process.
+            if len(name) > 255 or len(prefix) + len(name) > 4095:
+                raise ProductionInstallError("flake source Git path exceeds safety bound")
+            relative = prefix + name
+            if mode == b"40000":
+                visit(object_oid, relative + b"/", depth + 1)
+            elif mode in _ROOT_SOURCE_GIT_TRACKED_MODES:
+                if relative in files or len(files) >= max_tracked_count:
+                    raise ProductionInstallError("flake source Git tree contains duplicate or excess paths")
+                files[relative] = (mode, object_oid)
+            else:
+                raise ProductionInstallError("flake source Git tree has unsupported tracked modes")
+            position = next_position
+
+    visit(match.group(1), b"", 0)
+    return files
+
+
+def _verify_open_root_source_git_state(
+    checkout_fd: int, owner_uid: int, owner_gid: int,
+) -> tuple[str, dict[bytes, tuple[bytes, bytes]]]:
+    """Check revision and each tracked blob against one pinned checkout FD."""
+    head = _run_root_source_git(
+        checkout_fd, owner_uid, owner_gid, ["rev-parse", "HEAD"]
+    ).stdout.decode("utf-8", "strict").strip()
+    if SOURCE_REVISION_RE.fullmatch(head) is None:
+        raise ProductionInstallError("flake source is not bound to an exact Git revision")
+    tree = _parse_root_source_tree(
+        _run_root_source_git(
+            checkout_fd, owner_uid, owner_gid, ["ls-tree", "-r", "-z", head]
+        ).stdout
+    )
+    authenticated_tree = _authenticated_root_source_git_tree(
+        checkout_fd, owner_uid, owner_gid, head,
+    )
+    if tree != authenticated_tree:
+        raise ProductionInstallError("flake source Git object traversal does not match the verified tree")
+    index = _parse_root_source_index(
+        _run_root_source_git(
+            checkout_fd, owner_uid, owner_gid, ["ls-files", "--stage", "-z"]
+        ).stdout
+    )
+    untracked = _run_root_source_git(
+        checkout_fd, owner_uid, owner_gid,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    ).stdout
+    if tree != index or untracked:
+        raise ProductionInstallError("flake source must be clean before a production install")
+    for relative_path, (mode, oid) in index.items():
+        if _root_source_raw_blob_oid(checkout_fd, relative_path, mode) != oid:
+            raise ProductionInstallError("flake source must be clean before a production install")
+    return head, index
+
+
+def _verify_root_source_git_state(flake_source: str | Path) -> str:
+    source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(
+        _source_git_path(flake_source)
+    )
+    try:
+        head, _index = _verify_open_root_source_git_state(
+            checkout_fd, owner_uid, owner_gid
+        )
         return head
     finally:
         os.close(checkout_fd)
         os.close(source_fd)
+
 
 def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, Path]:
     source = Path(flake_source)
@@ -808,6 +904,165 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, 
         production_root / "nix-lifecycle-contract-v1.json",
         production_root / "critical-user-data-contract-v1.json",
     )
+
+
+
+def _trusted_physical_recovery_paths(
+    flake_source: str, readiness_snapshot: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    """Rebind JIT restore policy to verified source, never the mutable plan.
+
+    A self-consistent snapshot may point at attacker-authored recovery policy.
+    The authoritative contracts are from the exact source whose revision was
+    verified at this gate, not from that snapshot's claimed path selection.
+    """
+    if not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("physical recovery snapshot is invalid")
+    trusted = readiness_contract_paths_for_source(flake_source)
+    fields = (
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    )
+    for field, expected in zip(fields, trusted, strict=True):
+        if readiness_snapshot.get(field) != str(expected):
+            raise ProductionInstallError(
+                "physical recovery contract path is not source-bound"
+            )
+    return trusted
+
+
+
+def _revalidate_physical_restore_from_source(
+    plan: dict[str, Any],
+    readiness_snapshot: dict[str, Any],
+    source_revision: str,
+) -> None:
+    """Authenticate contract contents beneath the *same open verified Git root*.
+
+    Pathname checks alone admit same-UID rename swaps after verify_source().
+    Keep checkout/root descriptors open through full policy and receipt
+    validation. The three contract bytes must match their reviewed Git blobs,
+    even if the submitting UID changes the checkout name or tracked files.
+    """
+    if not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError("physical recovery snapshot is invalid")
+    source = _source_git_path(plan["flake_source"])
+    source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
+    try:
+        pinned_revision, tracked = _verify_open_root_source_git_state(
+            checkout_fd, owner_uid, owner_gid,
+        )
+        if pinned_revision != source_revision:
+            raise ProductionInstallError("physical recovery source revision changed")
+        try:
+            actual_root = Path(os.readlink(f"/proc/self/fd/{checkout_fd}"))
+            actual_source = Path(os.readlink(f"/proc/self/fd/{source_fd}"))
+            source.relative_to(actual_root)
+        except (OSError, ValueError) as exc:
+            raise ProductionInstallError("physical recovery source root is unavailable") from exc
+        if (
+            not actual_root.is_absolute()
+            or os.path.normpath(str(actual_root)) != str(actual_root)
+            or actual_source != source
+        ):
+            raise ProductionInstallError("physical recovery source root identity changed")
+        production_root = actual_root / "nixos" / "production"
+        source_contracts = {
+            production_root / "recovery-contract-v1.json": b"nixos/production/recovery-contract-v1.json",
+            production_root / "nix-lifecycle-contract-v1.json": b"nixos/production/nix-lifecycle-contract-v1.json",
+            production_root / "critical-user-data-contract-v1.json": b"nixos/production/critical-user-data-contract-v1.json",
+        }
+        trusted_paths = _trusted_physical_recovery_paths(
+            str(source), readiness_snapshot,
+        )
+        if tuple(source_contracts) != trusted_paths:
+            raise ProductionInstallError("physical recovery contract root changed from pinned checkout")
+
+        def pinned_contract_loader(
+            path: Path, *, label: str,
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+            """Read a whitelisted reviewed Git blob, not a replaceable pathname."""
+            relative = source_contracts.get(path)
+            if relative is None or relative not in tracked:
+                raise ProductionInstallError("physical recovery contract is not tracked by verified source")
+            expected_mode, expected_oid = tracked[relative]
+            fd = _open_root_source_regular_file(checkout_fd, relative)
+            try:
+                before = os.fstat(fd)
+                mode = stat.S_IMODE(before.st_mode)
+                git_mode = b"100755" if mode & 0o111 else b"100644"
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_nlink != 1
+                    or before.st_uid != owner_uid
+                    or before.st_gid != owner_gid
+                    or mode & 0o022
+                    or git_mode != expected_mode
+                    or before.st_size <= 0
+                    or before.st_size > pre_cutover_readiness.MAX_CONTRACT_BYTES
+                ):
+                    raise ProductionInstallError("physical recovery contract source identity invalid")
+                remaining = before.st_size
+                chunks = []
+                while remaining:
+                    chunk = os.read(fd, min(65536, remaining))
+                    if not chunk:
+                        raise ProductionInstallError("physical recovery contract changed during read")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                if os.read(fd, 1):
+                    raise ProductionInstallError("physical recovery contract grew during read")
+                after = os.fstat(fd)
+                def identity(info):
+                    return (
+                        info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                        info.st_uid, info.st_gid, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns,
+                    )
+                if identity(before) != identity(after):
+                    raise ProductionInstallError("physical recovery contract changed during read")
+                payload = b"".join(chunks)
+                git_digest = hashlib.sha1(usedforsecurity=False)
+                git_digest.update(b"blob " + str(len(payload)).encode("ascii") + bytes([0]))
+                git_digest.update(payload)
+                if git_digest.hexdigest().encode("ascii") != expected_oid:
+                    raise ProductionInstallError("physical recovery contract does not match verified Git source")
+                meta = {
+                    "path": str(path), "sha256": hashlib.sha256(payload).hexdigest(),
+                    "device": before.st_dev, "inode": before.st_ino,
+                    "owner_uid": before.st_uid, "group_gid": before.st_gid,
+                    "mode": mode, "nlink": before.st_nlink, "size": before.st_size,
+                    "mtime_ns": before.st_mtime_ns, "ctime_ns": before.st_ctime_ns,
+                }
+                return pre_cutover_readiness._json(payload, label), meta
+            finally:
+                os.close(fd)
+
+        recovery, lifecycle, critical = trusted_paths
+        try:
+            actual_scope = pre_cutover_readiness.validate_recovery_contract_scope(
+                recovery, contract_loader=pinned_contract_loader,
+            )
+            if actual_scope != plan.get("recovery_admission_scope"):
+                raise ProductionInstallError(
+                    "physical recovery policy is not bound to verified source"
+                )
+            pre_cutover_readiness.revalidate_readiness(
+                readiness_snapshot,
+                source_revision=source_revision,
+                recovery_contract_path=recovery,
+                lifecycle_contract_path=lifecycle,
+                critical_user_data_contract_path=critical,
+                contract_loader=pinned_contract_loader,
+            )
+        except pre_cutover_readiness.ReadinessError as exc:
+            raise ProductionInstallError(
+                "physical recovery evidence is not bound to verified source"
+            ) from exc
+    finally:
+        os.close(checkout_fd)
+        os.close(source_fd)
 
 
 def managed_policy_sha256_for_source(flake_source: str) -> str:
@@ -2931,6 +3186,7 @@ def compile_plan(
         "pre_cutover_readiness_required": (
             artifact["source_authority"] == "merged-main" and readiness_required
         ),
+        "final_physical_restore_required": artifact["source_authority"] == "merged-main",
         "recovery_admission_scope": recovery_admission_scope,
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
@@ -2969,6 +3225,7 @@ def plan_summary(_plan: dict[str, Any]) -> dict[str, Any]:
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
         "pre_cutover_readiness_validated": validated,
+        "final_physical_restore_required": _plan.get("final_physical_restore_required") is True,
         "readiness_bundle_authorizes_production": False,
         "readiness_bundle_sha256": readiness.get("bundle_sha256") if validated else None,
         "recovery_contract_sha256": readiness.get("recovery_contract_sha256") if validated else None,
@@ -3745,6 +4002,17 @@ def verify_private_boot_binding(*, mount_root: str, contract: dict[str, Any]) ->
             )
 
 
+def _limit_source_git_address_space() -> None:
+    """Enforce an address-space ceiling in the child before executing Git."""
+    cap = 512 * 1024 * 1024
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if hard != resource.RLIM_INFINITY:
+        cap = min(cap, hard)
+    if soft != resource.RLIM_INFINITY:
+        cap = min(cap, soft)
+    resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
+
 def _run(
     argv: list[str],
     *,
@@ -3791,17 +4059,75 @@ def _run(
     fd_args: dict[str, Any] = {}
     if pass_fds:
         fd_args["pass_fds"] = pass_fds
-    result = subprocess.run(
-        argv,
-        input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        env=command_env,
-        close_fds=True,
-        **credential_args,
-        **fd_args,
-    )
+    # The FD-bound source runner owns the Git command identity. Do not depend
+    # on the exact position of Git options: -c and absolute executables must
+    # not disable the output/memory ceilings.
+    is_root_source_git = bool(pass_fds) and Path(argv[0]).name == "git"
+    if is_root_source_git:
+        if input_bytes is not None:
+            raise ProductionInstallError("source Git output reader forbids stdin")
+        # Raw commit/tree objects have the tighter review-authentication bound.
+        object_read = "cat-file" in argv
+        output_limit = (8 if object_read else 32) * 1024 * 1024
+        output = bytearray()
+        with subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=command_env,
+            close_fds=True,
+            preexec_fn=_limit_source_git_address_space,
+            **credential_args,
+            **fd_args,
+        ) as process:
+            deadline = time.monotonic() + 20
+            try:
+                assert process.stdout is not None
+                output_fd = process.stdout.fileno()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProductionInstallError("source Git output read timed out")
+                    if not select.select([output_fd], [], [], remaining)[0]:
+                        raise ProductionInstallError("source Git output read timed out")
+                    chunk = os.read(
+                        output_fd, min(65536, output_limit + 1 - len(output)),
+                    )
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > output_limit:
+                        raise ProductionInstallError(
+                            "flake source Git object exceeds the safety bound"
+                        )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProductionInstallError("source Git output read timed out")
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired as exc:
+                    raise ProductionInstallError("source Git output read timed out") from exc
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                raise
+        result = subprocess.CompletedProcess(
+            argv, process.returncode, bytes(output), b"",
+        )
+    else:
+        result = subprocess.run(
+            argv,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=command_env,
+            close_fds=True,
+            **credential_args,
+            **fd_args,
+        )
     if check and result.returncode != 0:
         if input_bytes is not None:
             raise ProductionInstallError(f"command failed ({argv[0]}) with sensitive stdin; stderr withheld")
@@ -6305,8 +6631,16 @@ def execute_plan(
     )
     if plan.get("pre_cutover_readiness_required") is not expected_readiness_required:
         raise ProductionInstallError("production plan readiness policy no longer matches storage contract")
-    if expected_readiness_required and not isinstance(readiness_snapshot, dict):
-        raise ProductionInstallError("production apply lacks validated pre-cutover readiness")
+    # The isolated dual-OS exemption covers nonproductive planning/rehearsal,
+    # never a final physical target-write apply. Exact source/restore evidence
+    # is mandatory independently of a retained WD fallback and of the public
+    # storage contract's narrower destructive-source-cutover definition.
+    if plan.get("final_physical_restore_required") is not True:
+        raise ProductionInstallError("physical cutover recovery gate metadata is missing")
+    if not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError(
+            "physical NixOS cutover requires independently validated pre-cutover readiness"
+        )
     if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("production readiness evidence is malformed")
     if plan.get("readiness_bundle_authorizes_production") is not False:
@@ -6334,6 +6668,9 @@ def execute_plan(
     if artifact["source_revision"] != plan.get("source_revision"):
         raise ProductionInstallError("install artifact revision no longer matches the reviewed plan")
     source_revision = verify_source(plan["flake_source"], artifact["source_revision"])
+    _revalidate_physical_restore_from_source(
+        plan, readiness_snapshot, source_revision,
+    )
     verify_install_artifact_environment(artifact, managed_build_receipt["store_root"])
     verify_host_tools_available(plan)
     verify_scratch_state(contract["topology"]["luks"]["mapper_name"])
@@ -6487,20 +6824,9 @@ def execute_plan(
                                 "Secure Boot key/state policy changed before storage mutation"
                             )
                         reject_unattested_target_bootchain(contract)
-                        if readiness_snapshot is not None:
-                            pre_cutover_readiness.revalidate_readiness(
-                                readiness_snapshot,
-                                source_revision=jit_source_revision,
-                                recovery_contract_path=Path(
-                                    readiness_snapshot["recovery_contract_path"]
-                                ),
-                                lifecycle_contract_path=Path(
-                                    readiness_snapshot["nix_lifecycle_contract_path"]
-                                ),
-                                critical_user_data_contract_path=Path(
-                                    readiness_snapshot["critical_user_data_contract_path"]
-                                ),
-                            )
+                        _revalidate_physical_restore_from_source(
+                            plan, readiness_snapshot, jit_source_revision,
+                        )
                     except (
                         ProductionInstallError,
                         pre_cutover_readiness.ReadinessError,
@@ -6794,6 +7120,10 @@ def main(argv: list[str] | None = None) -> int:
                     "physical signed boot-chain policy cannot be read"
                 ) from exc
             reject_unattested_target_bootchain(public_boot_policy)
+            if args.pre_cutover_readiness is None:
+                raise ProductionInstallError(
+                    "physical NixOS cutover requires --pre-cutover-readiness"
+                )
         artifact_path = args.install_artifact.resolve()
         artifact = load_install_artifact(artifact_path)
         verify_source(args.flake_source, artifact["source_revision"])
