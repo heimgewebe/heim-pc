@@ -154,6 +154,9 @@ jobs:
             printf 'CI_NIX_CACHE_PROTOCOL=unavailable; fallback=true keeps the local build path authoritative\n'
           fi
 
+      - name: Evaluate complete flake without building checks
+        run: nix flake check --no-build --no-update-lock-file --print-build-logs
+
       # Nix flake.lock equality alone is not independent source=NAR evidence.
       # Fetch the immutable upstream commit directly (not from this flake's
       # lock) and recompute its NAR digest before any expensive closure builds.
@@ -203,9 +206,6 @@ jobs:
           rehashed="$(nix hash path --type sha256 --sri "${remote_values[1]}")"
           test "$rehashed" = "${pin_values[1]}"
           printf 'NIXER_UPSTREAM_NAR_VERIFIED=%s\n' "${pin_values[1]}"
-
-      - name: Evaluate complete flake without building checks
-        run: nix flake check --no-build --no-update-lock-file --print-build-logs
 
       - name: Prove evaluated Heim-PC contracts
         run: >-
