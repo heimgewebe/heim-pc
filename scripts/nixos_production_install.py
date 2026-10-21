@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import resource
 import secrets
 import select
 import signal
@@ -811,6 +812,11 @@ def _authenticated_root_source_git_tree(
                 raise ProductionInstallError("flake source Git tree entry is unsafe")
             directory_names.add(name)
             object_oid = raw[nul + 1:next_position].hex().encode("ascii")
+            # Git objects may contain path components the host filesystem could
+            # never open. Cap both a component and the *entire* path before
+            # concatenating recursive prefixes in this privileged process.
+            if len(name) > 255 or len(prefix) + len(name) > 4095:
+                raise ProductionInstallError("flake source Git path exceeds safety bound")
             relative = prefix + name
             if mode == b"40000":
                 visit(object_oid, relative + b"/", depth + 1)
@@ -3996,6 +4002,17 @@ def verify_private_boot_binding(*, mount_root: str, contract: dict[str, Any]) ->
             )
 
 
+def _limit_source_git_address_space() -> None:
+    """Enforce an address-space ceiling in the child before executing Git."""
+    cap = 512 * 1024 * 1024
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if hard != resource.RLIM_INFINITY:
+        cap = min(cap, hard)
+    if soft != resource.RLIM_INFINITY:
+        cap = min(cap, soft)
+    resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
+
 def _run(
     argv: list[str],
     *,
@@ -4042,18 +4059,15 @@ def _run(
     fd_args: dict[str, Any] = {}
     if pass_fds:
         fd_args["pass_fds"] = pass_fds
-    # Git reads from the submitting user's object store. Every privileged
-    # source-Git stdout must be bounded *during* capture, before comparing its
-    # bytes with the reviewed OID; subprocess.run(stdout=PIPE) is unbounded.
-    is_root_source_git = (
-        len(argv) >= 3
-        and argv[:3] == ["git", "--no-replace-objects", "--no-optional-locks"]
-    )
+    # The FD-bound source runner owns the Git command identity. Do not depend
+    # on the exact position of Git options: -c and absolute executables must
+    # not disable the output/memory ceilings.
+    is_root_source_git = bool(pass_fds) and Path(argv[0]).name == "git"
     if is_root_source_git:
         if input_bytes is not None:
             raise ProductionInstallError("source Git output reader forbids stdin")
         # Raw commit/tree objects have the tighter review-authentication bound.
-        object_read = len(argv) >= 3 and argv[-3] == "cat-file"
+        object_read = "cat-file" in argv
         output_limit = (8 if object_read else 32) * 1024 * 1024
         output = bytearray()
         with subprocess.Popen(
@@ -4063,6 +4077,7 @@ def _run(
             stderr=subprocess.DEVNULL,
             env=command_env,
             close_fds=True,
+            preexec_fn=_limit_source_git_address_space,
             **credential_args,
             **fd_args,
         ) as process:

@@ -8391,3 +8391,76 @@ def test_root_git_cat_file_stream_is_bounded_before_oid_verification(tmp_path):
             prod._run(argv, pass_fds=(checkout_fd,))
     finally:
         os.close(checkout_fd)
+
+
+@pytest.mark.parametrize("directory_components", [(256,), (200,) * 30])
+def test_root_authenticated_git_tree_rejects_oversized_paths(
+    monkeypatch, directory_components,
+):
+    """Even OID-authentic Git trees cannot supply unbounded recursive names."""
+    objects = {}
+
+    def authentic_object(kind, raw):
+        header = kind.encode("ascii") + b" " + str(len(raw)).encode("ascii") + b"\0"
+        oid = hashlib.sha1(header + raw, usedforsecurity=False).hexdigest()
+        objects[(kind, oid)] = raw
+        return oid
+
+    blob = bytes.fromhex("0" * 40)
+    tree = authentic_object("tree", b"100644 leaf\0" + blob)
+    for length in reversed(directory_components):
+        tree = authentic_object(
+            "tree", b"40000 " + b"d" * length + b"\0" + bytes.fromhex(tree),
+        )
+    commit = authentic_object(
+        "commit",
+        b"tree " + tree.encode("ascii") + b"\nauthor Fixture <fixture@example.invalid> 0 +0000\n\nx\n",
+    )
+
+    def authenticated_git_reader(_fd, _uid, _gid, arguments):
+        kind, oid = arguments[1:3]
+        return subprocess.CompletedProcess(
+            arguments, 0, objects[(kind, oid)], b"",
+        )
+
+    monkeypatch.setattr(prod, "_run_root_source_git", authenticated_git_reader)
+    with pytest.raises(prod.ProductionInstallError, match="Git path"):
+        prod._authenticated_root_source_git_tree(0, os.getuid(), os.getgid(), commit)
+
+
+def test_root_git_cat_file_argv_variants_keep_strict_stdout_bound(tmp_path):
+    """Extra -c and absolute git executable must not bypass the object cap."""
+    import shutil
+    import zlib
+
+    checkout = tmp_path / "alternate-root-git-argv"
+    checkout.mkdir()
+    (checkout / "file").write_bytes(b"baseline\n")
+    subprocess.run(["git", "-C", str(checkout), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "file"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout),
+         "-c", "user.name=Git Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "baseline"],
+        check=True,
+    )
+    oid = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD^{tree}"],
+        stdout=subprocess.PIPE, check=True,
+    ).stdout.decode().strip()
+    fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        original = prod._root_source_git_argv(fd, ["cat-file", "tree", oid])
+        git_executable = shutil.which("git")
+        assert git_executable
+        alternate = [os.path.realpath(git_executable), "-c", "core.abbrev=8", *original[1:]]
+        payload = b"z" * (8 * 1024 * 1024 + 4096)
+        object_data = b"tree " + str(len(payload)).encode() + b"\0" + payload
+        loose = checkout / ".git" / "objects" / oid[:2] / oid[2:]
+        replacement = loose.with_suffix(".untrusted")
+        replacement.write_bytes(zlib.compress(object_data, level=1))
+        os.replace(replacement, loose)
+        with pytest.raises(prod.ProductionInstallError, match="safety bound"):
+            prod._run(alternate, pass_fds=(fd,))
+    finally:
+        os.close(fd)
