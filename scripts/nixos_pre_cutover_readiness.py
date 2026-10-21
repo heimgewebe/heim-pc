@@ -280,8 +280,11 @@ def _recovery_admission_scope(contract: dict[str, Any]) -> dict[str, Any]:
     return _copy_json(scope)
 
 
-def validate_recovery_contract_scope(path: Path) -> dict[str, Any]:
-    contract, _meta = _load_contract(path, label="recovery contract")
+def validate_recovery_contract_scope(
+    path: Path, *, contract_loader=None,
+) -> dict[str, Any]:
+    loader = contract_loader if contract_loader is not None else _load_contract
+    contract, _meta = loader(path, label="recovery contract")
     _recovery_policy(contract)
     return _recovery_admission_scope(contract)
 
@@ -1141,17 +1144,19 @@ def validate_readiness(
     now: datetime | None = None,
     expected_snapshot: dict[str, Any] | None = None,
     attestation_verifier=None,
+    contract_loader=None,
 ) -> dict[str, Any]:
     source_revision = _revision(source_revision, "source_revision")
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    recovery_contract, recovery_meta = _load_contract(
+    loader = contract_loader if contract_loader is not None else _load_contract
+    recovery_contract, recovery_meta = loader(
         recovery_contract_path, label="recovery contract"
     )
-    lifecycle_contract, lifecycle_meta = _load_contract(
+    lifecycle_contract, lifecycle_meta = loader(
         lifecycle_contract_path, label="Nix lifecycle contract"
     )
-    critical_contract, critical_meta = _load_contract(
+    critical_contract, critical_meta = loader(
         critical_user_data_contract_path, label="critical-user-data contract"
     )
     critical_scope_sha256 = _validate_critical_user_data_contract(
@@ -1342,6 +1347,7 @@ def revalidate_readiness(
     critical_user_data_contract_path: Path,
     now: datetime | None = None,
     attestation_verifier=None,
+    contract_loader=None,
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or snapshot.get("kind") != VERIFICATION_KIND:
         raise ReadinessError("reviewed pre-cutover readiness snapshot is missing")
@@ -1354,4 +1360,5 @@ def revalidate_readiness(
         now=now,
         expected_snapshot=snapshot,
         attestation_verifier=attestation_verifier,
+        contract_loader=contract_loader,
     )

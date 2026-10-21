@@ -521,6 +521,40 @@ def plan(
 
 def mock_trusted_build_gate(monkeypatch, compiled, events=None):
     log = events if events is not None else []
+    # Synthetic tests stub command execution. Preserve canonical source-root
+    # selection without making the mocked _run intercept git rev-parse; NEVER
+    # derive these trusted paths from mutable plan/readiness snapshot entries.
+    source_root = Path(compiled["flake_source"]).parent.parent
+    source_policy_root = source_root / "nixos" / "production"
+    trusted_source_contracts = tuple(
+        source_policy_root / filename
+        for filename in (
+            "recovery-contract-v1.json",
+            "nix-lifecycle-contract-v1.json",
+            "critical-user-data-contract-v1.json",
+        )
+    )
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source",
+        lambda _source: trusted_source_contracts,
+    )
+    # Deep physical-apply tests use a synthetic revision and mock executable
+    # commands. Preserve real contract content/FD reads, but stub the revision
+    # inventory to the reviewed bytes of these three real fixture contracts.
+    tracked = {}
+    for path in trusted_source_contracts:
+        relative = ("nixos/production/" + path.name).encode("ascii")
+        payload = path.read_bytes()
+        git_digest = hashlib.sha1(
+            b"blob " + str(len(payload)).encode("ascii") + bytes([0]) + payload,
+            usedforsecurity=False,
+        ).hexdigest().encode("ascii")
+        mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
+        tracked[relative] = mode, git_digest
+    monkeypatch.setattr(
+        prod, "_verify_open_root_source_git_state",
+        lambda _root_fd, _uid, _gid: (REVISION, tracked),
+    )
     docker_state = {
         "schema_version": 1,
         "kind": "heim_pc.nixos_docker_quiesce_state",
@@ -1841,6 +1875,7 @@ def test_plan_summary_is_constant_and_never_echoes_plan_payload():
         "private_plan_redacted": True,
         "private_hardware_identity_redacted": True,
         "pre_cutover_readiness_validated": False,
+        "final_physical_restore_required": False,
         "readiness_bundle_authorizes_production": False,
         "readiness_bundle_sha256": None,
         "recovery_contract_sha256": None,
@@ -1907,6 +1942,7 @@ def test_main_distinguishes_post_mutation_alarm_without_exception_text(monkeypat
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -1966,6 +2002,7 @@ def test_main_redacts_success_receipt_payload(monkeypatch, tmp_path, capsys):
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2107,6 +2144,7 @@ def test_main_completion_phase_interrupt_recovers_before_lock_release(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2260,6 +2298,7 @@ def test_main_persistent_receipt_fstat_error_retains_apply_lock(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2389,6 +2428,7 @@ def test_main_completion_recovery_interrupt_cannot_mask_thaw_alarm(
         result = prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(tmp_path / "receipt.json"),
@@ -2699,6 +2739,7 @@ def test_main_post_unmask_establishment_failure_redelivers_sigterm_after_cleanup
             assert prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(receipt_path),
@@ -2967,6 +3008,7 @@ def test_main_repeated_sigint_during_failure_recovery_is_deferred_until_terminal
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(tmp_path / "receipt.json"),
@@ -3063,6 +3105,7 @@ def test_main_success_sigint_is_delivered_only_after_terminal_cleanup(
             prod.main([
                 "--install-artifact", str(tmp_path / "unused.json"),
                 "--identity-contract", str(tmp_path / "private-identity.json"),
+                "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
                 "--apply",
                 "--credential-hash-file", str(tmp_path / "credential.hash"),
                 "--write-receipt", str(tmp_path / "receipt.json"),
@@ -3627,6 +3670,7 @@ def test_main_pre_thaw_fd_reuse_retains_global_apply_lock(
         assert prod.main([
             "--install-artifact", str(tmp_path / "unused.json"),
             "--identity-contract", str(tmp_path / "private-identity.json"),
+            "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
             "--apply",
             "--credential-hash-file", str(tmp_path / "credential.hash"),
             "--write-receipt", str(receipt_path),
@@ -3820,6 +3864,7 @@ def test_main_rejects_preexisting_receipt_before_execute_plan(monkeypatch, tmp_p
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -3851,6 +3896,7 @@ def test_main_pre_mutation_failure_discards_receipt_reservation(monkeypatch, tmp
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -3916,6 +3962,7 @@ def test_main_post_mutation_failure_persists_bound_failure_receipt(monkeypatch, 
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4013,6 +4060,7 @@ def test_main_failure_receipt_construction_interrupt_persists_bound_fallback(mon
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4115,6 +4163,7 @@ def test_main_rewrite_interrupt_invalidates_success_before_thaw_alarm(monkeypatc
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4169,6 +4218,7 @@ def test_main_thaw_failure_receipt_construction_interrupt_invalidates_success(mo
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4220,6 +4270,7 @@ def test_main_emergency_receipt_then_thaw_replacement_interrupt_invalidates_rece
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4254,6 +4305,7 @@ def test_main_receipt_finalization_failure_is_post_mutation_alarm(monkeypatch, t
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4314,6 +4366,7 @@ def test_main_release_identity_failure_rewrites_success_as_failure(monkeypatch, 
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4386,6 +4439,7 @@ def test_main_thaw_failure_rewrites_persisted_success_as_failure(monkeypatch, tm
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4455,6 +4509,7 @@ def test_main_receipt_failure_cannot_mask_thaw_failure(monkeypatch, tmp_path, ca
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4503,6 +4558,7 @@ def test_main_missing_success_freeze_handoff_fails_closed(monkeypatch, tmp_path,
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(receipt_path),
@@ -4550,6 +4606,7 @@ def test_main_pre_mutation_cleanup_attempts_thaw_before_receipt_discard(monkeypa
     assert prod.main([
         "--install-artifact", str(tmp_path / "unused.json"),
         "--identity-contract", str(tmp_path / "private-identity.json"),
+        "--pre-cutover-readiness", str(tmp_path / "synthetic-restore-evidence.json"),
         "--apply",
         "--credential-hash-file", str(tmp_path / "credential.hash"),
         "--write-receipt", str(tmp_path / "receipt.json"),
@@ -5318,6 +5375,12 @@ def test_verify_source_root_runs_git_as_checkout_owner(monkeypatch, tmp_path):
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    # The synthetic mocked Git index/tree is intentionally not a real object
+    # database. The separate real-Git adversarial test authenticates objects.
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree",
+        lambda *_args: {b"tracked.txt": (b"100644", blob_oid.encode("ascii"))},
+    )
 
     assert prod.verify_source(str(flake_source), REVISION) == REVISION
     assert len(calls) == 4
@@ -5464,6 +5527,10 @@ def test_verify_source_root_rejects_filter_false_clean_content(monkeypatch, tmp_
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree",
+        lambda *_args: {b"tracked.txt": (b"100644", blob_oid.encode("ascii"))},
+    )
 
     with pytest.raises(prod.ProductionInstallError, match="must be clean"):
         prod.verify_source(str(flake_source), REVISION)
@@ -5502,6 +5569,9 @@ def test_verify_source_root_rejects_untracked_file_outside_flake_source(monkeypa
 
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(prod, "_run", fake_run)
+    monkeypatch.setattr(
+        prod, "_authenticated_root_source_git_tree", lambda *_args: {},
+    )
 
     with pytest.raises(prod.ProductionInstallError, match="must be clean"):
         prod.verify_source(str(flake_source), REVISION)
@@ -6626,6 +6696,282 @@ def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_att
     assert compiled["managed_build_attestation_verification"]["artifact_sha256"] == receipt["artifact_file_sha256"]
 
 
+
+def test_final_physical_apply_demands_restore_even_when_dual_os_plan_skips_it(
+    monkeypatch, tmp_path,
+):
+    receipt = managed_receipt(MERGED_ARTIFACT)
+    compiled = prod.compile_plan(
+        observation(),
+        install_artifact=MERGED_ARTIFACT,
+        install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+        managed_build_receipt=receipt,
+        managed_policy_sha256=MANAGED_POLICY_SHA256,
+        flake_source=str(prod.FLAKE_SOURCE),
+        contract=CONTRACT,
+        managed_build_attestation_verification=managed_attestation_verification(
+            MERGED_ARTIFACT, receipt,
+        ),
+    )
+    assert compiled["pre_cutover_readiness_required"] is False
+    assert compiled["pre_cutover_readiness"] is None
+    assert compiled["final_physical_restore_required"] is True
+    effects = []
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding", lambda *_a, **_k: receipt,
+    )
+    monkeypatch.setattr(
+        prod, "verify_promoted_main_revision", lambda *_a: effects.append("main"),
+    )
+    monkeypatch.setattr(prod, "_run", lambda *_a, **_k: effects.append("command"))
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical NixOS cutover requires independently validated pre-cutover readiness",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+    assert effects == []
+
+
+def test_final_physical_apply_rejects_downgraded_restore_flag(
+    monkeypatch, tmp_path,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    assert isinstance(compiled["pre_cutover_readiness"], dict)
+    compiled["final_physical_restore_required"] = False
+    material = {key: value for key, value in compiled.items() if key != "plan_sha256"}
+    compiled["plan_sha256"] = prod.sha256_json(material)
+    monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        prod, "verify_managed_build_binding",
+        lambda *_a, **_k: compiled["managed_build_receipt"],
+    )
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical cutover recovery gate metadata is missing",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+
+
+def test_final_physical_restore_required_is_not_proof_only_authority():
+    staged = plan(artifact=ARTIFACT)
+    approved = plan(artifact=MERGED_ARTIFACT)
+    assert staged["final_physical_restore_required"] is False
+    assert approved["final_physical_restore_required"] is True
+    assert prod.plan_summary(approved)["final_physical_restore_required"] is True
+    assert prod.plan_summary(staged)["final_physical_restore_required"] is False
+
+
+def test_physical_cli_apply_without_restore_is_pre_effect_denied(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "signed-policy")
+    monkeypatch.setattr(prod, "reject_unattested_target_bootchain", lambda _c: None)
+    effects = []
+
+    def forbidden(*_a, **_k):
+        effects.append("source-or-effect")
+        raise AssertionError("physical apply progressed without restore evidence")
+
+    for name in (
+        "load_install_artifact", "acquire_production_apply_lock",
+        "reserve_private_receipt", "verify_source", "execute_plan",
+    ):
+        monkeypatch.setattr(prod, name, forbidden)
+    assert prod.main([
+        "--apply",
+        "--install-artifact", str(tmp_path / "untrusted-artifact.json"),
+        "--identity-contract", str(tmp_path / "untrusted-identity.json"),
+        "--credential-hash-file", str(tmp_path / "forbidden-credential"),
+        "--write-receipt", str(tmp_path / "forbidden-receipt.json"),
+    ]) == 2
+    assert effects == []
+    assert not (tmp_path / "forbidden-receipt.json").exists()
+
+
+
+@pytest.mark.parametrize(
+    "attacker_selected_field",
+    [
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    ],
+)
+def test_final_apply_recovery_trust_root_is_source_bound(
+    tmp_path, attacker_selected_field,
+):
+    # An internally self-consistent forged snapshot must never choose the
+    # trust policy or shrink the authoritative recovery-evidence obligations.
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    snapshot = dict(compiled["pre_cutover_readiness"])
+    snapshot[attacker_selected_field] = str(tmp_path / "attacker-policy.json")
+    assert snapshot[attacker_selected_field] != str(
+        prod.readiness_contract_paths_for_source(compiled["flake_source"])[
+            (
+                "recovery_contract_path",
+                "nix_lifecycle_contract_path",
+                "critical_user_data_contract_path",
+            ).index(attacker_selected_field)
+        ]
+    )
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery contract path is not source-bound",
+    ):
+        prod._trusted_physical_recovery_paths(
+            compiled["flake_source"], snapshot,
+        )
+
+
+
+@pytest.mark.parametrize(
+    "forged_field",
+    (
+        "recovery_contract_path",
+        "nix_lifecycle_contract_path",
+        "critical_user_data_contract_path",
+    ),
+)
+def test_physical_apply_rejects_forged_recovery_trust_root_before_setup(
+    monkeypatch, tmp_path, forged_field,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    compiled["pre_cutover_readiness"][forged_field] = str(
+        tmp_path / "attacker-selected-policy.json"
+    )
+    compiled = _rehash_plan(compiled)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *_a, **_k: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    # Simulate an erroneously permissive external attestation verifier; source
+    # identity must reject the forged contract path before verifier invocation.
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness",
+        lambda *_a, **_k: compiled["pre_cutover_readiness"],
+    )
+    storage_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **_kwargs: storage_commands.append(argv) or Result(),
+    )
+    # Trusted-source checking now happens before even the installer setup
+    # effects. A forged snapshot must not reach the older JIT storage gate.
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery contract path is not source-bound",
+    ):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "credential.hash",
+            observer=lambda _contract: observation(),
+        )
+    assert storage_commands == []
+
+
+@pytest.mark.parametrize("forged", ["scope", "readiness-bundle-digest"])
+def test_physical_apply_rejects_forged_policy_and_evidence_before_effects(
+    monkeypatch, tmp_path, forged,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    if forged == "scope":
+        compiled["recovery_admission_scope"] = {
+            **compiled["recovery_admission_scope"],
+            "unauthorized_policy": "self-attested",
+        }
+    else:
+        snapshot = dict(compiled["pre_cutover_readiness"])
+        snapshot["bundle_sha256"] = "0" * 64
+        compiled["pre_cutover_readiness"] = snapshot
+    compiled = _rehash_plan(compiled)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    effects = []
+    monkeypatch.setattr(
+        prod, "verify_install_artifact_environment",
+        lambda *_a: effects.append("environment"),
+    )
+    expected = (
+        "physical recovery policy is not bound to verified source"
+        if forged == "scope"
+        else "physical recovery evidence is not bound to verified source"
+    )
+    with pytest.raises(prod.ProductionInstallError, match=expected):
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "forbidden-credential",
+        )
+    assert effects == []
+
+
+def test_physical_jit_rechecks_source_contract_paths_after_preflight(
+    monkeypatch, tmp_path,
+):
+    compiled = plan(artifact=MERGED_ARTIFACT)
+    _mock_historical_apply_until_final_gate(monkeypatch, compiled)
+    monkeypatch.setattr(prod, "_attempt_teardown", lambda *_a, **_k: ([], None))
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", lambda *_a: None)
+    monkeypatch.setattr(prod, "efi_nvram_digest", lambda: "a" * 64)
+
+    selected = prod.readiness_contract_paths_for_source(compiled["flake_source"])
+    calls = []
+
+    def drift_between_preflight_and_mutation(_source):
+        calls.append(True)
+        if len(calls) == 1:
+            return selected
+        return (tmp_path / "untrusted-recovery-policy.json", *selected[1:])
+
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source",
+        drift_between_preflight_and_mutation,
+    )
+    storage_commands = []
+
+    class Result:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    monkeypatch.setattr(
+        prod, "_run",
+        lambda argv, **_k: storage_commands.append(argv) or Result(),
+    )
+    with pytest.raises(prod.PreMutationReadinessError) as error:
+        prod.execute_plan(
+            compiled,
+            contract=CONTRACT,
+            confirmation=prod.confirmation_for(compiled),
+            credential_hash_file=tmp_path / "unused",
+            observer=lambda _contract: observation(),
+        )
+    assert error.value.mutation_attempted is False
+    assert len(calls) == 2
+    assert storage_commands == []
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value"),
     [
@@ -7254,7 +7600,12 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
         lambda argv, **kwargs: mutation_commands.append(argv) or Result(),
     )
 
-    with pytest.raises(prod.PreMutationReadinessError) as exc:
+    # Any mutable contract/receipt drift is rejected before host setup;
+    # ordinary source-reading Git invocations do not count as disk writes.
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery evidence is not bound to verified source",
+    ):
         prod.execute_plan(
             compiled,
             contract=CONTRACT,
@@ -7262,7 +7613,6 @@ def test_apply_readiness_tamper_is_explicitly_pre_mutation(
             credential_hash_file=tmp_path / "credential.hash",
             observer=lambda _contract: observation(),
         )
-    assert exc.value.mutation_attempted is False
     assert mutation_commands == []
 
 
@@ -7683,3 +8033,434 @@ def test_physical_efi_superblock_magic_is_enforced_before_leaf_reads(monkeypatch
         local.setattr(prod, "_filesystem_magic", lambda _fd: 0xEF53)
         with pytest.raises(prod.ProductionInstallError, match="not on efivarfs"):
             prod._open_verified_efivarfs()
+
+
+@pytest.mark.parametrize("attack", ("same_uid_directory_swap", "same_uid_contract_rewrite"))
+def test_physical_recovery_policy_is_pinned_to_reviewed_git_blobs_during_race(
+    monkeypatch, tmp_path, attack,
+):
+    # A synthetic unprivileged checkout models the submitted source; the root
+    # and all contract files have the same owner as the adversary.
+    root = tmp_path / "approved"
+    (root / ".git").mkdir(parents=True)
+    source = root / "nixos" / "system"
+    source.mkdir(parents=True)
+    production = root / "nixos" / "production"
+    production.mkdir(parents=True)
+    names = (
+        "recovery-contract-v1.json",
+        "nix-lifecycle-contract-v1.json",
+        "critical-user-data-contract-v1.json",
+    )
+    paths = tuple(production / name for name in names)
+    tracked = {}
+    for name, path in zip(names, paths, strict=True):
+        payload = json.dumps({"marker": "reviewed", "name": name}).encode()
+        path.write_bytes(payload)
+        path.chmod(0o644)
+        relative = ("nixos/production/" + name).encode()
+        digest = hashlib.sha1(
+            b"blob " + str(len(payload)).encode() + bytes([0]) + payload,
+            usedforsecurity=False,
+        ).hexdigest().encode()
+        tracked[relative] = (b"100644", digest)
+    monkeypatch.setattr(
+        prod, "_verify_open_root_source_git_state",
+        lambda _fd, _uid, _gid: (REVISION, tracked),
+    )
+    monkeypatch.setattr(
+        prod, "readiness_contract_paths_for_source", lambda _source: paths,
+    )
+    snap = dict(zip(
+        (
+            "recovery_contract_path", "nix_lifecycle_contract_path",
+            "critical_user_data_contract_path",
+        ), map(str, paths), strict=True,
+    ))
+    expected_scope = {"marker": "reviewed"}
+    observed = []
+
+    def validate_scope(path, *, contract_loader):
+        if attack == "same_uid_directory_swap":
+            root.rename(tmp_path / "saved-original")
+            (root / "nixos" / "production").mkdir(parents=True)
+            (root / "nixos" / "system").mkdir(parents=True)
+            (root / ".git").mkdir()
+            for name in names:
+                (root / "nixos" / "production" / name).write_text(
+                    json.dumps({"marker": "attacker", "name": name}),
+                    encoding="utf-8",
+                )
+        else:
+            paths[0].write_text(
+                json.dumps({"marker": "attacker", "name": names[0]}),
+                encoding="utf-8",
+            )
+        data, _meta = contract_loader(path, label="recovery contract")
+        observed.append(data["marker"])
+        return {"marker": data["marker"]}
+
+    def revalidate(_snap, *, contract_loader, **kwargs):
+        for label, key in (
+            ("recovery contract", "recovery_contract_path"),
+            ("Nix lifecycle contract", "lifecycle_contract_path"),
+            ("critical-user-data contract", "critical_user_data_contract_path"),
+        ):
+            data, _meta = contract_loader(kwargs[key], label=label)
+            observed.append(data["marker"])
+        return {}
+
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "validate_recovery_contract_scope",
+        validate_scope,
+    )
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness", revalidate,
+    )
+    submitted_plan = {
+        "flake_source": str(source), "recovery_admission_scope": expected_scope,
+    }
+    if attack == "same_uid_contract_rewrite":
+        with pytest.raises(
+            prod.ProductionInstallError,
+            match="does not match verified Git source",
+        ):
+            prod._revalidate_physical_restore_from_source(
+                submitted_plan, snap, REVISION,
+            )
+        assert observed == []
+    else:
+        prod._revalidate_physical_restore_from_source(
+            submitted_plan, snap, REVISION,
+        )
+        assert observed == ["reviewed"] * 4
+
+
+def test_real_root_git_object_chain_rejects_forged_loose_tree_before_restore(
+    monkeypatch, tmp_path,
+):
+    """A clean index and unchanged HEAD cannot authenticate swapped Git tree bytes."""
+    import zlib
+
+    checkout = tmp_path / "committed-source"
+    source = checkout / "nixos" / "system"
+    contract = checkout / "nixos" / "production" / "recovery-contract-v1.json"
+    source.mkdir(parents=True)
+    contract.parent.mkdir(parents=True)
+    (source / "flake.nix").write_text("{ }\n", encoding="utf-8")
+    original_contract = b'{"admission_scope":{"independent_restore":true}}\n'
+    contract.write_bytes(original_contract)
+
+    def git(*args, input_bytes=None):
+        completed = subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=True,
+        )
+        return completed.stdout
+
+    git("init", "-q")
+    git("config", "user.name", "Adversarial Source Fixture")
+    git("config", "user.email", "source-fixture@example.invalid")
+    git("add", "nixos")
+    git("commit", "-qm", "authenticated source")
+    head = git("rev-parse", "HEAD").decode("ascii").strip()
+
+    # The privileged root runner executes Git against an fd-pinned checkout
+    # with the checkout owner credentials. This unprivileged fixture executes
+    # the same actual Git binary under the SAME owner, without elevating UID.
+    # Only credential dropping is stubbed; object/index/tree reads stay real.
+    def owner_git_only(argv, **kwargs):
+        assert argv[0] == "git", "no storage/effect command may run in this test"
+        assert kwargs["run_as_uid"] == os.getuid()
+        assert kwargs["run_as_gid"] == os.getgid()
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            pass_fds=kwargs["pass_fds"],
+            env={"PATH": prod.TRUSTED_PATH, "HOME": "/", "LC_ALL": "C", "LANG": "C"},
+        )
+
+    monkeypatch.setattr(prod, "_run", owner_git_only)
+    opened_source, opened_root, uid, gid = prod._open_root_source_git_context(source)
+    try:
+        verified_head, indexed = prod._verify_open_root_source_git_state(
+            opened_root, uid, gid,
+        )
+        assert verified_head == head
+        assert b"nixos/production/recovery-contract-v1.json" in indexed
+    finally:
+        os.close(opened_root)
+        os.close(opened_source)
+
+    # A same-UID attacker rewrites a LOOSE CHILD TREE object at the original
+    # OID's filename. Git's ls-tree does not rehash the raw tree object.
+    old_tree = git("rev-parse", "HEAD:nixos/production").decode("ascii").strip()
+    old_blob = git(
+        "rev-parse", "HEAD:nixos/production/recovery-contract-v1.json"
+    ).decode("ascii").strip()
+    new_contract = b'{"admission_scope":{"independent_restore":false}}\n'
+    new_blob = git(
+        "hash-object", "-w", "--stdin", input_bytes=new_contract
+    ).decode("ascii").strip()
+    raw_tree = git("cat-file", "tree", old_tree)
+    before = b"recovery-contract-v1.json\x00" + bytes.fromhex(old_blob)
+    after = b"recovery-contract-v1.json\x00" + bytes.fromhex(new_blob)
+    assert raw_tree.count(before) == 1
+    tampered_tree = raw_tree.replace(before, after, 1)
+    forged_object = (
+        b"tree " + str(len(tampered_tree)).encode("ascii") + b"\x00" + tampered_tree
+    )
+    forged_oid = hashlib.sha1(
+        forged_object, usedforsecurity=False,
+    ).hexdigest()
+    assert forged_oid != old_tree
+    object_file = checkout / ".git" / "objects" / old_tree[:2] / old_tree[2:]
+    assert object_file.is_file()
+    replacement = object_file.with_name(object_file.name + ".untrusted")
+    replacement.write_bytes(zlib.compress(forged_object))
+    os.replace(replacement, object_file)
+    contract.write_bytes(new_contract)
+    git(
+        "update-index", "--cacheinfo", "100644", new_blob,
+        "nixos/production/recovery-contract-v1.json",
+    )
+
+    assert git("rev-parse", "HEAD").decode("ascii").strip() == head
+    assert git("status", "--porcelain") == b""
+    assert new_blob.encode("ascii") in git(
+        "--no-replace-objects", "ls-tree", "-r", "HEAD",
+    )
+
+    opened_source, opened_root, uid, gid = prod._open_root_source_git_context(source)
+    try:
+        with pytest.raises(prod.ProductionInstallError, match="Git object"):
+            prod._verify_open_root_source_git_state(opened_root, uid, gid)
+    finally:
+        os.close(opened_root)
+        os.close(opened_source)
+
+    # The actual pre-effect physical-restore gate must likewise reject.
+    with pytest.raises(prod.ProductionInstallError, match="Git object"):
+        prod._revalidate_physical_restore_from_source(
+            {"flake_source": str(source)}, {}, head,
+        )
+
+
+def test_physical_restore_real_readiness_validation_uses_only_pinned_git_contract_loader(
+    monkeypatch, tmp_path,
+):
+    """Real signed-receipt validator may not fall back to replaceable contract paths."""
+    spec = importlib.util.spec_from_file_location(
+        "nixos_real_readiness_fixture",
+        ROOT / "tests" / "test_nixos_pre_cutover_readiness.py",
+    )
+    assert spec is not None and spec.loader is not None
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+
+    outside_evidence = tmp_path / "outside-git-evidence"
+    outside_evidence.mkdir()
+    recovery, lifecycle, critical = fixtures._contracts(outside_evidence)
+    checkout = tmp_path / "committed-git"
+    source = checkout / "nixos" / "system"
+    production = checkout / "nixos" / "production"
+    source.mkdir(parents=True)
+    production.mkdir(parents=True)
+    (source / "flake.nix").write_text("{ }\n", encoding="utf-8")
+    verified_contracts = (
+        production / "recovery-contract-v1.json",
+        production / "nix-lifecycle-contract-v1.json",
+        production / "critical-user-data-contract-v1.json",
+    )
+    for original, target in zip(
+        (recovery, lifecycle, critical), verified_contracts, strict=True,
+    ):
+        target.write_bytes(original.read_bytes())
+        target.chmod(0o644)
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout
+
+    git("init", "-q")
+    git("config", "user.name", "Adversarial Readiness Fixture")
+    git("config", "user.email", "readiness-fixture@example.invalid")
+    git("add", "nixos")
+    git("commit", "-qm", "authenticated reviewed contracts")
+    head = git("rev-parse", "HEAD").decode("ascii").strip()
+    fixtures.REVISION = head
+    bundle_path, _r, _l, _receipts, _c = fixtures._fixture(outside_evidence)
+
+    snapshot = prod.pre_cutover_readiness.validate_readiness(
+        bundle_path,
+        source_revision=head,
+        recovery_contract_path=verified_contracts[0],
+        lifecycle_contract_path=verified_contracts[1],
+        critical_user_data_contract_path=verified_contracts[2],
+        now=fixtures.NOW,
+        attestation_verifier=fixtures._synthetic_attestation_verifier,
+    )
+    scope = prod.pre_cutover_readiness.validate_recovery_contract_scope(
+        verified_contracts[0],
+    )
+    assert git("status", "--porcelain") == b""
+
+    def owner_git_only(argv, **kwargs):
+        assert argv[0] == "git", "no storage/EFI/TPM effect may run"
+        # Pinned privileged Git calls specify owner-drop; ordinary non-root
+        # source-path discovery Git calls require no explicit credential drop.
+        assert kwargs.get("run_as_uid", os.getuid()) == os.getuid()
+        assert kwargs.get("run_as_gid", os.getgid()) == os.getgid()
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            pass_fds=kwargs.get("pass_fds", ()),
+            env={"PATH": prod.TRUSTED_PATH, "HOME": "/", "LANG": "C", "LC_ALL": "C"},
+        )
+
+    def never_read_mutable_contract_path(*_args, **_kwargs):
+        raise AssertionError("contract validator must use the pinned source FD loader")
+
+    real_revalidate = prod.pre_cutover_readiness.revalidate_readiness
+
+    def actual_revalidate(snapshot_value, **kwargs):
+        return real_revalidate(
+            snapshot_value, now=fixtures.NOW,
+            attestation_verifier=fixtures._synthetic_attestation_verifier,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(prod, "_run", owner_git_only)
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "_load_contract",
+        never_read_mutable_contract_path,
+    )
+    monkeypatch.setattr(
+        prod.pre_cutover_readiness, "revalidate_readiness",
+        actual_revalidate,
+    )
+    assert prod._revalidate_physical_restore_from_source(
+        {"flake_source": str(source), "recovery_admission_scope": scope},
+        snapshot,
+        head,
+    ) is None
+
+
+def test_root_git_cat_file_stream_is_bounded_before_oid_verification(tmp_path):
+    """An oversized forged loose object must not be fully buffered by root."""
+    import zlib
+
+    checkout = tmp_path / "bounded-git-source"
+    checkout.mkdir()
+    (checkout / "tracked.txt").write_bytes(b"reviewed\n")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+
+    git("init", "-q")
+    git("add", "tracked.txt")
+    git("-c", "user.name=Read Only Fixture",
+        "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "bounded source fixture")
+    tree_oid = git("rev-parse", "HEAD^{tree}").decode().strip()
+
+    checkout_fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        argv = prod._root_source_git_argv(
+            checkout_fd, ["cat-file", "tree", tree_oid],
+        )
+        assert prod._run(argv, pass_fds=(checkout_fd,)).stdout == git(
+            "cat-file", "tree", tree_oid,
+        )
+
+        # Filename still names the reviewed tree OID; Git's cat-file can
+        # stream untrusted, decompressed bytes before hash verification.
+        oversized = b"x" * (8 * 1024 * 1024 + 4096)
+        envelope = b"tree " + str(len(oversized)).encode() + b"\0" + oversized
+        loose = checkout / ".git" / "objects" / tree_oid[:2] / tree_oid[2:]
+        assert loose.is_file()
+        temp = loose.with_name(loose.name + ".untrusted")
+        temp.write_bytes(zlib.compress(envelope, level=1))
+        os.replace(temp, loose)
+
+        with pytest.raises(prod.ProductionInstallError, match="safety bound"):
+            prod._run(argv, pass_fds=(checkout_fd,))
+    finally:
+        os.close(checkout_fd)
+
+
+@pytest.mark.parametrize("directory_components", [(256,), (200,) * 30])
+def test_root_authenticated_git_tree_rejects_oversized_paths(
+    monkeypatch, directory_components,
+):
+    """Even OID-authentic Git trees cannot supply unbounded recursive names."""
+    objects = {}
+
+    def authentic_object(kind, raw):
+        header = kind.encode("ascii") + b" " + str(len(raw)).encode("ascii") + b"\0"
+        oid = hashlib.sha1(header + raw, usedforsecurity=False).hexdigest()
+        objects[(kind, oid)] = raw
+        return oid
+
+    blob = bytes.fromhex("0" * 40)
+    tree = authentic_object("tree", b"100644 leaf\0" + blob)
+    for length in reversed(directory_components):
+        tree = authentic_object(
+            "tree", b"40000 " + b"d" * length + b"\0" + bytes.fromhex(tree),
+        )
+    commit = authentic_object(
+        "commit",
+        b"tree " + tree.encode("ascii") + b"\nauthor Fixture <fixture@example.invalid> 0 +0000\n\nx\n",
+    )
+
+    def authenticated_git_reader(_fd, _uid, _gid, arguments):
+        kind, oid = arguments[1:3]
+        return subprocess.CompletedProcess(
+            arguments, 0, objects[(kind, oid)], b"",
+        )
+
+    monkeypatch.setattr(prod, "_run_root_source_git", authenticated_git_reader)
+    with pytest.raises(prod.ProductionInstallError, match="Git path"):
+        prod._authenticated_root_source_git_tree(0, os.getuid(), os.getgid(), commit)
+
+
+def test_root_git_cat_file_argv_variants_keep_strict_stdout_bound(tmp_path):
+    """Extra -c and absolute git executable must not bypass the object cap."""
+    import shutil
+    import zlib
+
+    checkout = tmp_path / "alternate-root-git-argv"
+    checkout.mkdir()
+    (checkout / "file").write_bytes(b"baseline\n")
+    subprocess.run(["git", "-C", str(checkout), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "file"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout),
+         "-c", "user.name=Git Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "baseline"],
+        check=True,
+    )
+    oid = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD^{tree}"],
+        stdout=subprocess.PIPE, check=True,
+    ).stdout.decode().strip()
+    fd = os.open(checkout, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        original = prod._root_source_git_argv(fd, ["cat-file", "tree", oid])
+        git_executable = shutil.which("git")
+        assert git_executable
+        alternate = [os.path.realpath(git_executable), "-c", "core.abbrev=8", *original[1:]]
+        payload = b"z" * (8 * 1024 * 1024 + 4096)
+        object_data = b"tree " + str(len(payload)).encode() + b"\0" + payload
+        loose = checkout / ".git" / "objects" / oid[:2] / oid[2:]
+        replacement = loose.with_suffix(".untrusted")
+        replacement.write_bytes(zlib.compress(object_data, level=1))
+        os.replace(replacement, loose)
+        with pytest.raises(prod.ProductionInstallError, match="safety bound"):
+            prod._run(alternate, pass_fds=(fd,))
+    finally:
+        os.close(fd)
