@@ -7,7 +7,7 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/c0b75cfd580c221f8a5095fbf802c4f6386a017e";
+    nixer.url = "github:heimgewebe/nixer/712ea5b1e8f8cebeebb206e774023a8a4d842b4b";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
@@ -676,6 +676,7 @@
           assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
           assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
           assert contract.inputs.nixer.owns_runtime_nixpkgs;
           assert nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node;
           assert nixerRuntimeNixpkgsNode.locked.rev
