@@ -851,3 +851,27 @@ def test_cache_upload_authenticates_preexisting_and_new_signed_narinfo(
         assert marker.exists(), "allowed metadata must still use append-only upload"
     assert not (tmp_path / "ci-nix-cache-upload-key").exists()
     assert not (tmp_path / "ci-nix-cache-known-hosts").exists()
+
+def test_full_nix_ci_budget_covers_measured_complete_gates():
+    """The 90-minute job 118756701529 was cancelled before ISO/VM/signature gates."""
+    workflow = CONSUMER.read_text(encoding="utf-8")
+    assert workflow.count("\n  nix:\n") == 1
+    detect, nix_job = workflow.split("\n  nix:\n", 1)
+    assert "\n    timeout-minutes: 5\n" in detect
+    nix_header = nix_job.split("\n    steps:\n", 1)[0]
+    # Bounded increase, not disabling any expensive security checks.
+    assert "\n    timeout-minutes: 120\n" in nix_header
+    steps = [
+        "- name: Verify source identity",
+        "- name: Evaluate complete flake without building checks",
+        "- name: Prove evaluated Heim-PC contracts",
+        "- name: Build storage, VM and physical-gate closures",
+        "- name: Build live-gate and inventory ISOs",
+        "- name: Build no-IP agent-zone closures",
+        "- name: Run scoped VM checks",
+        "- name: Prove untrusted signatures are rejected by substitution",
+    ]
+    indices = [nix_job.index(step) for step in steps]
+    assert indices == sorted(indices)
+    assert "require-sigs = true" in nix_job
+    assert "bash scripts/ci/check_nix_cache_signature_rejection.sh" in nix_job
