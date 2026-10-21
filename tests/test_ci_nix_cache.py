@@ -955,3 +955,20 @@ def test_publisher_all_multiline_run_steps_parse_as_bash_without_execution():
         assert result.returncode == 0, (
             f"publisher step {index} invalid Bash: {result.stderr}"
         )
+
+
+def test_cache_architecture_documents_separate_nixos_system_closure_authority():
+    """Do not silently describe a whole system publication as heavy-only."""
+    contract = (ROOT / "architecture" / "ci-nix-cache-v1.md").read_text(encoding="utf-8")
+    workflow = PUBLISHER.read_text(encoding="utf-8")
+    assert "CI_NIX_CACHE_PUBLISH_ENABLED" in contract
+    assert "CI_NIX_CACHE_PUBLISH_SYSTEM_CLOSURE_ENABLED" in contract
+    assert "Two **independent repository-level**" in contract
+    assert "system-closure publication" in contract
+    assert "never implicitly enables system-closure publication" in contract
+    assert "nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel.outPath" in contract
+    assert "packages.x86_64-linux.heim-pc-storage-target-system" in contract
+    assert "complete remote closure of every selected" in contract
+    assert "physical NixOS cutover" in contract
+    assert "CI_NIX_CACHE_PUBLISH_SYSTEM_CLOSURE_ENABLED" in workflow
+    assert "vars.CI_NIX_CACHE_PUBLISH_ENABLED == 'true'" in workflow
