@@ -64,6 +64,10 @@ def synthetic_github_approval(source: dict) -> tuple[dict, dict, dict]:
     return receipt, remote, pr
 
 
+def synthetic_github_permission(remote: dict, permission: str = "write") -> dict:
+    return {"permission": permission, "user": {"id": remote["user"]["id"]}}
+
+
 class Stage0SourceTests(unittest.TestCase):
     def test_frozen_stage0_profile_btrfs_and_no_default_passwords(self):
         source = (stage0.ROOT / "nixos/system/modules/stage0-no-usb.nix").read_text()
@@ -957,12 +961,15 @@ class Stage0SourceTests(unittest.TestCase):
         source = sealed_source()
         receipt, original, original_pr = synthetic_github_approval(source)
         with patch.object(stage0, "_github_public_json",
-                          side_effect=[original, original_pr]) as github:
+                          side_effect=[original, original_pr,
+                                       synthetic_github_permission(original),
+                                       [original]]) as github:
             stage0.require_authenticated_github_review(receipt, source)
-            self.assertEqual(github.call_count, 2)
-            self.assertTrue(all(c.args[0].startswith(
-                "https://api.github.com/repos/heimgewebe/heim-pc/pulls/238")
-                for c in github.call_args_list))
+            self.assertEqual(github.call_count, 4)
+            self.assertIn("/collaborators/independent-test-reviewer/permission",
+                          github.call_args_list[2].args[0])
+            self.assertIn("reviews?per_page=100&page=1",
+                          github.call_args_list[3].args[0])
         # Valid-looking root JSON alone must never pass on a comment, dismissal,
         # unauthorized reviewer, self-review, or stale HEAD/PR.
         invalid = [
@@ -1000,6 +1007,84 @@ class Stage0SourceTests(unittest.TestCase):
                 stage0.require_authenticated_github_review(forged_url, source)
             remote.assert_not_called()
 
+    def test_member_without_effective_repo_write_permission_is_rejected(self):
+        source = sealed_source()
+        receipt, approved, pr = synthetic_github_approval(source)
+        for permission in ("none", "read", "triage", ""):
+            with self.subTest(permission=permission), patch.object(
+                stage0, "_github_public_json",
+                side_effect=[approved, pr, synthetic_github_permission(approved, permission)]
+            ) as github:
+                with self.assertRaisesRegex(stage0.AdmissionError, "write authority"):
+                    stage0.require_authenticated_github_review(receipt, source)
+                self.assertEqual(github.call_count, 3)
+        mismatched_id = {"permission": "admin", "user": {"id": 123456}}
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=[approved, pr, mismatched_id]):
+            with self.assertRaisesRegex(stage0.AdmissionError, "write authority"):
+                stage0.require_authenticated_github_review(receipt, source)
+        for permission in ("write", "maintain", "admin"):
+            with self.subTest(permission=permission), patch.object(
+                stage0, "_github_public_json",
+                side_effect=[approved, pr, synthetic_github_permission(approved, permission),
+                             [approved]]
+            ):
+                stage0.require_authenticated_github_review(receipt, source)
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=[approved, pr, stage0.AdmissionError("permission offline")]):
+            with self.assertRaisesRegex(stage0.AdmissionError, "permission offline"):
+                stage0.require_authenticated_github_review(receipt, source)
+
+    def test_historical_approval_rejected_after_superseding_review(self):
+        source = sealed_source()
+        receipt, approved, pr = synthetic_github_approval(source)
+        permission = synthetic_github_permission(approved)
+        revoked = {**approved, "id": 123456790, "state": "CHANGES_REQUESTED"}
+        dismissed = {**approved, "id": 123456791, "state": "DISMISSED"}
+        other_reviewer = {**approved, "id": 123456792,
+                          "user": {"login": "another-independent-reviewer", "id": 444444},
+                          "state": "CHANGES_REQUESTED"}
+        opinionless_comment = {**approved, "id": 123456793, "state": "COMMENTED"}
+        for name, history, expected in (
+            ("superseded-approval", [approved, revoked], "superseded"),
+            ("dismissed-after-approval", [approved, dismissed], "superseded"),
+            ("other-open-request", [approved, other_reviewer], "superseded"),
+            ("missing-approved-from-history", [opinionless_comment], "absent from current"),
+            ("empty-history", [], "absent from current"),
+        ):
+            with self.subTest(name=name), patch.object(
+                stage0, "_github_public_json",
+                side_effect=[approved, pr, permission, history]
+            ) as github:
+                with self.assertRaisesRegex(stage0.AdmissionError, expected):
+                    stage0.require_authenticated_github_review(receipt, source)
+                self.assertEqual(github.call_count, 4)
+        # A later COMMENTED review does not override an effective approval.
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=[approved, pr, permission,
+                                       [approved, opinionless_comment]]):
+            stage0.require_authenticated_github_review(receipt, source)
+
+    def test_github_review_history_pagination_is_complete_and_bounded(self):
+        source = sealed_source()
+        _, approved, _ = synthetic_github_approval(source)
+        filler = {**approved, "id": 13579, "state": "COMMENTED"}
+        first_page = [filler] * 100
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=[first_page, [approved]]) as github:
+            history = stage0._current_github_review_history()
+            self.assertEqual(len(history), 101)
+            self.assertIn("page=2", github.call_args_list[-1].args[0])
+        with patch.object(stage0, "_github_public_json",
+                          return_value=first_page) as github:
+            with self.assertRaisesRegex(stage0.AdmissionError, "pagination bound"):
+                stage0._current_github_review_history()
+            self.assertEqual(github.call_count, 10)
+        with patch.object(stage0, "_github_public_json",
+                          return_value=["malformed-review"]):
+            with self.assertRaisesRegex(stage0.AdmissionError, "malformed GitHub review history"):
+                stage0._current_github_review_history()
+
     def test_github_https_read_fails_closed_on_redirect_invalid_json_or_outage(self):
         class Response:
             def __init__(self, url, payload=b"{}"):
@@ -1030,6 +1115,11 @@ class Stage0SourceTests(unittest.TestCase):
         with patch.object(stage0.url_request, "urlopen",
                           side_effect=stage0.url_error.URLError("simulated offline")):
             with self.assertRaisesRegex(stage0.AdmissionError, "unavailable"):
+                stage0._github_public_json(expected)
+        with patch.object(stage0.url_request, "urlopen",
+                          return_value=Response(expected, b"[]")):
+            self.assertEqual(stage0._github_public_json(expected, collection=True), [])
+            with self.assertRaisesRegex(stage0.AdmissionError, "wrong JSON type"):
                 stage0._github_public_json(expected)
 
     def test_independent_review_receipt_is_bound_to_exact_head_and_bytes(self):
@@ -1087,10 +1177,13 @@ class Stage0SourceTests(unittest.TestCase):
             with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
                  patch.object(stage0.Path, "lstat", return_value=parent_meta), \
                  patch.object(stage0.os, "fstat", side_effect=meta + [meta[-1]]), \
-                 patch.object(stage0, "_github_public_json", side_effect=[approved, pr]) as github, \
+                 patch.object(stage0, "_github_public_json",
+                              side_effect=[approved, pr,
+                                           synthetic_github_permission(approved),
+                                           [approved]]) as github, \
                  patch.object(stage0, "output", side_effect=expected_output) as docker:
                 stage0.require_immutable_install_source(source)
-                self.assertEqual(github.call_count, 2)
+                self.assertEqual(github.call_count, 4)
                 self.assertEqual(docker.call_count, 2)
             # Forged-looking GitHub review with valid local hashes MUST stop
             # before Docker even if local root ownership has been mocked.

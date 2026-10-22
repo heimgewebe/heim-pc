@@ -628,8 +628,8 @@ def cleanup_target_mounts(mounts: list[Path]) -> None:
     demand(not failures, "Stage0 cleanup incomplete; installation NOT confirmed")
 
 
-def _github_public_json(url: str) -> dict:
-    """Read two fixed GitHub API resources over verified HTTPS; never trust local URLs."""
+def _github_public_json(url: str, *, collection: bool = False) -> dict | list:
+    """Read bounded GitHub API JSON over verified HTTPS; never trust local URLs."""
     request = url_request.Request(
         url, headers={"Accept": "application/vnd.github+json",
                       "User-Agent": "heim-pc-stage0-source-review",
@@ -638,20 +638,41 @@ def _github_public_json(url: str) -> dict:
         with url_request.urlopen(request, timeout=10) as response:
             demand(response.status == 200 and response.geturl() == url,
                    "Stage0 physical Apply BLOCKED: GitHub review endpoint redirected/invalid")
-            raw = response.read(65537)
+            limit = 1024 * 1024 if collection else 65536
+            raw = response.read(limit + 1)
     except (url_error.URLError, OSError, TimeoutError, ValueError) as exc:
         raise AdmissionError(
             "Stage0 physical Apply BLOCKED: authenticated GitHub review unavailable"
         ) from exc
-    demand(len(raw) <= 65536, "Stage0 physical Apply BLOCKED: GitHub review response oversized")
+    demand(len(raw) <= limit, "Stage0 physical Apply BLOCKED: GitHub review response oversized")
     try:
         result = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise AdmissionError(
             "Stage0 physical Apply BLOCKED: GitHub review response invalid"
         ) from exc
-    demand(isinstance(result, dict), "Stage0 physical Apply BLOCKED: GitHub review response not an object")
+    demand(isinstance(result, list if collection else dict),
+           "Stage0 physical Apply BLOCKED: GitHub review response wrong JSON type")
     return result
+
+
+def _current_github_review_history() -> list[dict]:
+    """Fetch the entire bounded, chronologically ordered GitHub review history.
+
+    Historical APPROVED entries alone are not current approval: a later
+    CHANGES_REQUESTED or DISMISSED entry can supersede them.
+    """
+    history: list[dict] = []
+    for page in range(1, 11):
+        items = _github_public_json(
+            f"https://api.github.com/repos/heimgewebe/heim-pc/pulls/238/reviews"
+            f"?per_page=100&page={page}", collection=True)
+        demand(len(items) <= 100 and all(isinstance(item, dict) for item in items),
+               "Stage0 physical Apply BLOCKED: malformed GitHub review history")
+        history.extend(items)
+        if len(items) < 100:
+            return history
+    raise AdmissionError("Stage0 physical Apply BLOCKED: GitHub review history exceeds safe pagination bound")
 
 
 def require_authenticated_github_review(review: dict, source: dict) -> None:
@@ -690,6 +711,39 @@ def require_authenticated_github_review(review: dict, source: dict) -> None:
            (pr.get("state") == "open" or
             (pr.get("state") == "closed" and pr.get("merged") is True)),
            "Stage0 physical Apply BLOCKED: GitHub approval absent, stale, dismissed, self-issued or unauthorized")
+    # An organization MEMBER is not necessarily a write-authorized reviewer.
+    # Resolve their *effective* permission on this repository, not just their
+    # historical author_association or a locally claimed reviewer string.
+    demand(bool(re.fullmatch(r"[A-Za-z0-9-]{1,39}", reviewer["login"])),
+           "Stage0 physical Apply BLOCKED: malformed GitHub reviewer login")
+    permission = _github_public_json(
+        f"https://api.github.com/repos/heimgewebe/heim-pc/collaborators/"
+        f"{reviewer['login']}/permission")
+    permission_user = permission.get("user") or {}
+    demand(isinstance(permission_user, dict) and
+           permission_user.get("id") == reviewer["id"] and
+           permission.get("permission") in ("write", "maintain", "admin"),
+           "Stage0 physical Apply BLOCKED: reviewer lacks verified repository write authority")
+
+    history = _current_github_review_history()
+    matched = [item for item in history if item.get("id") == review_id]
+    demand(len(matched) == 1 and matched[0].get("state") == "APPROVED" and
+           matched[0].get("commit_id") == source["revision"] and
+           isinstance(matched[0].get("user"), dict) and
+           matched[0]["user"].get("id") == reviewer["id"],
+           "Stage0 physical Apply BLOCKED: approved review absent from current GitHub history")
+    latest_by_user: dict[int, dict] = {}
+    for item in history:
+        if item.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            author = item.get("user") or {}
+            demand(isinstance(author, dict) and
+                   isinstance(author.get("id"), int) and author["id"] > 0,
+                   "Stage0 physical Apply BLOCKED: unidentifiable GitHub review decision")
+            latest_by_user[author["id"]] = item
+    demand(latest_by_user.get(reviewer["id"], {}).get("id") == review_id and
+           not any(item["state"] == "CHANGES_REQUESTED"
+                   for item in latest_by_user.values()),
+           "Stage0 physical Apply BLOCKED: approval superseded or outstanding changes requested")
 
 
 def require_immutable_install_source(source: dict) -> None:

@@ -109,12 +109,22 @@ reviewer identity or constitutes an independent approval.** The installer
 therefore now verifies the supplied review ID directly against GitHub's
 HTTPS API before any Docker or hardware access. It requires an actual
 `APPROVED` review on the exact current PR #238 HEAD, matching review ID,
-URL and reviewer identity, by a different GitHub account from the PR author
-with a repository-associated reviewer role. COMMENTED, DISMISSED, old-HEAD,
-self-reviews, mismatched identities, foreign PRs, and unavailable GitHub API
-all fail closed. This read uses public GitHub HTTPS from the **host**;
-containers remain network-isolated. No local cached JSON or URL syntax
-can substitute for current GitHub evidence.
+URL and reviewer identity, by a different GitHub account from the PR author.
+Additionally, the authenticated GitHub collaborator-permission API must
+confirm the reviewer's **effective repository permission** as `write`,
+`maintain` or `admin`, with the same numeric GitHub user ID. Merely
+being an organization `MEMBER` is insufficient. A bounded full pagination
+of PR review history also confirms the cited approval is this reviewer's
+latest decision-bearing review, and rejects any outstanding later
+`CHANGES_REQUESTED` decision from another reviewer. COMMENTED, DISMISSED,
+old-HEAD, superseded approvals, self-reviews, missing write permission,
+mismatched identities, foreign PRs and unavailable GitHub permission or review
+endpoints all fail closed. This read uses GitHub HTTPS from the **host**;
+containers remain network-isolated. If GitHub's permission endpoint refuses
+anonymous access, the installed root-side admission cannot proceed until an
+authorized access path exists; credentials must not be copied to logs, repo or
+the install container. No cached JSON or URL syntax substitutes for live
+GitHub evidence.
 
 **This does not by itself establish authorized independent source/provenance
 release or permission to destroy Seagate-p3.** Root-issued source and
