@@ -429,8 +429,14 @@ class Stage0SourceTests(unittest.TestCase):
     def test_reverify_source_closure_has_no_block_device_mounts(self):
         source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
-        with patch.object(stage0, "host_cmd") as verify:
+        # CI has no local OCI image. This is a strict command-construction
+        # regression test, not a live Docker integration; mock BOTH commands
+        # and NAR path-info output so no runner host state can leak into it.
+        with patch.object(stage0, "host_cmd") as verify, \
+             patch.object(stage0, "output", return_value=sealed_nar_info()) as nar, \
+             patch.object(stage0, "run", side_effect=AssertionError("unexpected live Docker")):
             stage0.verify_source_store(source)
+        nar.assert_called_once()
         argv = verify.call_args.args
         self.assertIn("--network=none", argv)
         self.assertIn("verify", argv)
