@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from urllib import error as url_error, request as url_request
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_REV = "e68efce49eaba0014865fd1c4e0b62f692f016af"
@@ -627,6 +628,70 @@ def cleanup_target_mounts(mounts: list[Path]) -> None:
     demand(not failures, "Stage0 cleanup incomplete; installation NOT confirmed")
 
 
+def _github_public_json(url: str) -> dict:
+    """Read two fixed GitHub API resources over verified HTTPS; never trust local URLs."""
+    request = url_request.Request(
+        url, headers={"Accept": "application/vnd.github+json",
+                      "User-Agent": "heim-pc-stage0-source-review",
+                      "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with url_request.urlopen(request, timeout=10) as response:
+            demand(response.status == 200 and response.geturl() == url,
+                   "Stage0 physical Apply BLOCKED: GitHub review endpoint redirected/invalid")
+            raw = response.read(65537)
+    except (url_error.URLError, OSError, TimeoutError, ValueError) as exc:
+        raise AdmissionError(
+            "Stage0 physical Apply BLOCKED: authenticated GitHub review unavailable"
+        ) from exc
+    demand(len(raw) <= 65536, "Stage0 physical Apply BLOCKED: GitHub review response oversized")
+    try:
+        result = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AdmissionError(
+            "Stage0 physical Apply BLOCKED: GitHub review response invalid"
+        ) from exc
+    demand(isinstance(result, dict), "Stage0 physical Apply BLOCKED: GitHub review response not an object")
+    return result
+
+
+def require_authenticated_github_review(review: dict, source: dict) -> None:
+    """Authenticate a current independent APPROVED review, not a root JSON claim.
+
+    Public GitHub HTTPS is the authority for review identity, state and commit.
+    On absent network, revoked/stale approval, foreign or self-review: deny.
+    This is SOURCE review only; separate disk-loss/TTY/recovery authority remains.
+    """
+    match = re.fullmatch(
+        r"https://github[.]com/heimgewebe/heim-pc/pull/238#pullrequestreview-([0-9]+)",
+        review["review_url"])
+    demand(match is not None, "Stage0 physical Apply BLOCKED: invalid GitHub review locator")
+    review_id = int(match.group(1))
+    remote_review = _github_public_json(
+        f"https://api.github.com/repos/heimgewebe/heim-pc/pulls/238/reviews/{review_id}")
+    pr = _github_public_json("https://api.github.com/repos/heimgewebe/heim-pc/pulls/238")
+    reviewer = remote_review.get("user") or {}
+    author = pr.get("user") or {}
+    demand(isinstance(reviewer, dict) and isinstance(author, dict),
+           "Stage0 physical Apply BLOCKED: malformed GitHub identities")
+    demand(remote_review.get("id") == review_id and
+           remote_review.get("html_url") == review["review_url"] and
+           remote_review.get("state") == "APPROVED" and
+           remote_review.get("commit_id") == source["revision"] and
+           remote_review.get("author_association") in ("OWNER", "MEMBER", "COLLABORATOR") and
+           reviewer.get("login") == review["reviewer"] and
+           isinstance(reviewer.get("id"), int) and reviewer["id"] > 0 and
+           isinstance(author.get("id"), int) and author["id"] != reviewer["id"] and
+           pr.get("number") == 238 and
+           isinstance(pr.get("head"), dict) and
+           pr["head"].get("sha") == source["revision"] and
+           pr["head"].get("ref") == "feat/nixos-seagate-no-usb-stage0-20261022" and
+           isinstance(pr.get("base"), dict) and
+           pr["base"].get("ref") == "main" and
+           (pr.get("state") == "open" or
+            (pr.get("state") == "closed" and pr.get("merged") is True)),
+           "Stage0 physical Apply BLOCKED: GitHub approval absent, stale, dismissed, self-issued or unauthorized")
+
+
 def require_immutable_install_source(source: dict) -> None:
     """Require an external, root-controlled revision-bound source release.
 
@@ -733,9 +798,9 @@ def require_immutable_install_source(source: dict) -> None:
                r"https://github[.]com/heimgewebe/heim-pc/pull/238#pullrequestreview-[0-9]+",
                review["review_url"])),
            "Stage0 physical Apply BLOCKED: independent review does not approve this source")
-    # The named URL and author must be externally authenticated against the
-    # actual GitHub review; JSON fields alone are not cryptographic signatures
-    # or source authority and never authorize physical disk data loss.
+    # This must succeed before any Docker/source check or hardware snapshot.
+    # A root-owned syntactically plausible review JSON is NOT approval.
+    require_authenticated_github_review(review, source)
     # Before a hardware snapshot or GPT write, verify exact image identity
     # and the binary hash of the helper that will make the in-container bind.
     demand(output("/usr/bin/docker", "image", "inspect", "--format",

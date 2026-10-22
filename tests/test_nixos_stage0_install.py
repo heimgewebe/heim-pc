@@ -50,6 +50,20 @@ def sealed_nar_info() -> str:
     })
 
 
+def synthetic_github_approval(source: dict) -> tuple[dict, dict, dict]:
+    """Synthetic HTTPS records for tests only; never issued as real authority."""
+    url = "https://github.com/heimgewebe/heim-pc/pull/238#pullrequestreview-123456789"
+    receipt = {"review_url": url, "reviewer": "independent-test-reviewer"}
+    remote = {"id": 123456789, "html_url": url, "state": "APPROVED",
+              "commit_id": source["revision"], "author_association": "MEMBER",
+              "user": {"login": "independent-test-reviewer", "id": 333333}}
+    pr = {"number": 238, "state": "open", "user": {"id": 216529510},
+          "head": {"sha": source["revision"],
+                   "ref": "feat/nixos-seagate-no-usb-stage0-20261022"},
+          "base": {"ref": "main"}}
+    return receipt, remote, pr
+
+
 class Stage0SourceTests(unittest.TestCase):
     def test_frozen_stage0_profile_btrfs_and_no_default_passwords(self):
         source = (stage0.ROOT / "nixos/system/modules/stage0-no-usb.nix").read_text()
@@ -939,6 +953,85 @@ class Stage0SourceTests(unittest.TestCase):
                 disk.assert_not_called()
 
 
+    def test_live_github_review_authority_rejects_syntactic_forgeries(self):
+        source = sealed_source()
+        receipt, original, original_pr = synthetic_github_approval(source)
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=[original, original_pr]) as github:
+            stage0.require_authenticated_github_review(receipt, source)
+            self.assertEqual(github.call_count, 2)
+            self.assertTrue(all(c.args[0].startswith(
+                "https://api.github.com/repos/heimgewebe/heim-pc/pulls/238")
+                for c in github.call_args_list))
+        # Valid-looking root JSON alone must never pass on a comment, dismissal,
+        # unauthorized reviewer, self-review, or stale HEAD/PR.
+        invalid = [
+            ("comment-only", {"state": "COMMENTED"}, {}),
+            ("dismissed", {"state": "DISMISSED"}, {}),
+            ("changes-requested", {"state": "CHANGES_REQUESTED"}, {}),
+            ("review-old-head", {"commit_id": "c"*40}, {}),
+            ("claimed-reviewer", {"user": {"login": "attacker", "id": 333333}}, {}),
+            ("no-repo-authority", {"author_association": "CONTRIBUTOR"}, {}),
+            ("self-approval", {"user": {"login": receipt["reviewer"], "id": 216529510}}, {}),
+            ("foreign-review-id", {"id": 987654321}, {}),
+            ("foreign-review-url", {"html_url": "https://github.com/evil/review"}, {}),
+            ("stale-pr-head", {}, {"head": {"sha": "d"*40,
+                     "ref": "feat/nixos-seagate-no-usb-stage0-20261022"}}),
+            ("changed-pr-branch", {}, {"head": {"sha": source["revision"], "ref": "foreign"}}),
+            ("wrong-pr-base", {}, {"base": {"ref": "unreviewed"}}),
+            ("unmerged-closed-pr", {}, {"state": "closed", "merged": False}),
+        ]
+        for case, review_change, pr_change in invalid:
+            with self.subTest(case=case):
+                remote = {**original, **review_change}
+                pr = {**original_pr, **pr_change}
+                with patch.object(stage0, "_github_public_json",
+                                  side_effect=[remote, pr]):
+                    with self.assertRaisesRegex(stage0.AdmissionError, "approval absent"):
+                        stage0.require_authenticated_github_review(receipt, source)
+        with patch.object(stage0, "_github_public_json",
+                          side_effect=stage0.AdmissionError("GitHub offline")):
+            with self.assertRaisesRegex(stage0.AdmissionError, "GitHub offline"):
+                stage0.require_authenticated_github_review(receipt, source)
+        forged_url = {**receipt,
+            "review_url": "https://github.com/other/repo/pull/238#pullrequestreview-123456789"}
+        with patch.object(stage0, "_github_public_json") as remote:
+            with self.assertRaisesRegex(stage0.AdmissionError, "invalid GitHub review locator"):
+                stage0.require_authenticated_github_review(forged_url, source)
+            remote.assert_not_called()
+
+    def test_github_https_read_fails_closed_on_redirect_invalid_json_or_outage(self):
+        class Response:
+            def __init__(self, url, payload=b"{}"):
+                self.status = 200
+                self.url = url
+                self.payload = payload
+            def geturl(self):
+                return self.url
+            def read(self, limit):
+                return self.payload[:limit]
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        expected = "https://api.github.com/repos/heimgewebe/heim-pc/pulls/238"
+        with patch.object(stage0.url_request, "urlopen",
+                          return_value=Response("https://evil.invalid/redirect")):
+            with self.assertRaisesRegex(stage0.AdmissionError, "redirected"):
+                stage0._github_public_json(expected)
+        with patch.object(stage0.url_request, "urlopen",
+                          return_value=Response(expected, b"not json")):
+            with self.assertRaisesRegex(stage0.AdmissionError, "response invalid"):
+                stage0._github_public_json(expected)
+        with patch.object(stage0.url_request, "urlopen",
+                          return_value=Response(expected, b"x"*65537)):
+            with self.assertRaisesRegex(stage0.AdmissionError, "oversized"):
+                stage0._github_public_json(expected)
+        with patch.object(stage0.url_request, "urlopen",
+                          side_effect=stage0.url_error.URLError("simulated offline")):
+            with self.assertRaisesRegex(stage0.AdmissionError, "unavailable"):
+                stage0._github_public_json(expected)
+
     def test_independent_review_receipt_is_bound_to_exact_head_and_bytes(self):
         source = sealed_source()
         review = {
@@ -949,7 +1042,7 @@ class Stage0SourceTests(unittest.TestCase):
             "image_id": stage0.SEALED_IMAGE,
             "disposition": "APPROVE_SOURCE_ONLY",
             "reviewer": "independent-test-reviewer",
-            "review_url": "https://github.com/heimgewebe/heim-pc/pull/238#pullrequestreview-5609380329",
+            "review_url": "https://github.com/heimgewebe/heim-pc/pull/238#pullrequestreview-123456789",
         }
         review_bytes = stage0.canonical(review)
         attestation = {
@@ -990,12 +1083,26 @@ class Stage0SourceTests(unittest.TestCase):
                 if argv[1:3] == ("run", "--rm"):
                     return stage0.SEALED_BUSYBOX_SHA256 + "  /busybox"
                 raise AssertionError("unexpected OCI probe")
+            _, approved, pr = synthetic_github_approval(source)
             with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
                  patch.object(stage0.Path, "lstat", return_value=parent_meta), \
                  patch.object(stage0.os, "fstat", side_effect=meta + [meta[-1]]), \
+                 patch.object(stage0, "_github_public_json", side_effect=[approved, pr]) as github, \
                  patch.object(stage0, "output", side_effect=expected_output) as docker:
                 stage0.require_immutable_install_source(source)
+                self.assertEqual(github.call_count, 2)
                 self.assertEqual(docker.call_count, 2)
+            # Forged-looking GitHub review with valid local hashes MUST stop
+            # before Docker even if local root ownership has been mocked.
+            forged = {**approved, "state": "COMMENTED"}
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
+                 patch.object(stage0.Path, "lstat", return_value=parent_meta), \
+                 patch.object(stage0.os, "fstat", side_effect=meta + [meta[-1]]), \
+                 patch.object(stage0, "_github_public_json", side_effect=[forged, pr]), \
+                 patch.object(stage0, "output") as docker:
+                with self.assertRaisesRegex(stage0.AdmissionError, "approval absent"):
+                    stage0.require_immutable_install_source(source)
+                docker.assert_not_called()
             # Changing only the review receipt must invalidate the copied
             # source seal before ANY Docker/image or disk access.
             review_path.write_bytes(review_bytes + b" ")

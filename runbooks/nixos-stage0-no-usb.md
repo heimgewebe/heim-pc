@@ -105,13 +105,25 @@ review-receipt SHA256. An actual *separate* root-owned 0600 file
 the content hash must match the seal; its source HEAD, script SHA, OCI ID,
 review disposition, reviewer and exact PR #238 review URL must match.
 **Neither root-only ownership nor a plausible GitHub URL authenticates
-reviewer identity or constitutes an independent approval.** Independent
-issuance and verification of the review receipt and source-chain authority
-are **not implemented or approved**.
-A syntactically valid review digest is not proof of review. Therefore **do
-not create this seal or run physical Apply** pending exact independent
-security review and hardware authority. Missing/mismatching seal is
-rejected before any hardware snapshot, GPT write, store copy or install.
+reviewer identity or constitutes an independent approval.** The installer
+therefore now verifies the supplied review ID directly against GitHub's
+HTTPS API before any Docker or hardware access. It requires an actual
+`APPROVED` review on the exact current PR #238 HEAD, matching review ID,
+URL and reviewer identity, by a different GitHub account from the PR author
+with a repository-associated reviewer role. COMMENTED, DISMISSED, old-HEAD,
+self-reviews, mismatched identities, foreign PRs, and unavailable GitHub API
+all fail closed. This read uses public GitHub HTTPS from the **host**;
+containers remain network-isolated. No local cached JSON or URL syntax
+can substitute for current GitHub evidence.
+
+**This does not by itself establish authorized independent source/provenance
+release or permission to destroy Seagate-p3.** Root-issued source and
+review receipts remain absent; GitHub affiliation alone is not hardware
+operator authority. Do not manufacture these receipts or run physical Apply
+pending independently verified provenance, source review, specific p3
+data-loss permission, privileged private TTY and a proven rollback route.
+A missing/mismatching/unapproved release remains rejected before any
+hardware snapshot, GPT write, store copy or install.
 
 The actual four Docker execution phases (recursive verify, namespace
 preflight, Nix copy, official nixos-install) are now tied to the same
