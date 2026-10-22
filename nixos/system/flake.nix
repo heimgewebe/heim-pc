@@ -279,6 +279,30 @@
         modules = [ ./modules/stage0-no-usb.nix ];
       };
 
+      # Separate remote-ready first-boot variant. The established isolated
+      # console-only Stage0 and its no-SSH assertions are deliberately intact.
+      # Public keys are staged into alex's persistent home on the Seagate,
+      # never embedded into the Nix store. Tailscale needs separate enrollment.
+      nixosConfigurations.heim-pc-stage0-remote = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./modules/stage0-no-usb.nix
+          ({ lib, ... }: {
+            services.openssh.enable = lib.mkForce true;
+            services.openssh.openFirewall = true;
+            services.openssh.settings = {
+              PasswordAuthentication = false;
+              KbdInteractiveAuthentication = false;
+              PermitRootLogin = "no";
+              AllowUsers = [ "alex" ];
+            };
+            services.tailscale.enable = true;
+            services.getty.autologinUser = "alex";
+            security.sudo.wheelNeedsPassword = lib.mkForce false;
+          })
+        ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
