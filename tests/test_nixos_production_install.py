@@ -6697,9 +6697,10 @@ def test_dual_os_merged_main_skips_source_readiness_but_requires_independent_att
 
 
 
-def test_final_physical_apply_demands_restore_even_when_dual_os_plan_skips_it(
+def test_isolated_parallel_apply_does_not_require_source_restore_but_keeps_main_gate(
     monkeypatch, tmp_path,
 ):
+    """A Seagate-only install may not inherit WD-source-cutover restore authority."""
     receipt = managed_receipt(MERGED_ARTIFACT)
     compiled = prod.compile_plan(
         observation(),
@@ -6715,35 +6716,41 @@ def test_final_physical_apply_demands_restore_even_when_dual_os_plan_skips_it(
     )
     assert compiled["pre_cutover_readiness_required"] is False
     assert compiled["pre_cutover_readiness"] is None
-    assert compiled["final_physical_restore_required"] is True
+    assert compiled["final_physical_restore_required"] is False
+    # Block at the next authenticated source/attestation gate, not storage.
     effects = []
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
         prod, "verify_managed_build_binding", lambda *_a, **_k: receipt,
     )
+    def stop_at_protected_main(*_args):
+        effects.append("protected-main-gate")
+        raise prod.ProductionInstallError("source admission not established")
+    monkeypatch.setattr(prod, "verify_promoted_main_revision", stop_at_protected_main)
     monkeypatch.setattr(
-        prod, "verify_promoted_main_revision", lambda *_a: effects.append("main"),
+        prod, "_run",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("no storage/EFI/TPM effects permitted")
+        ),
     )
-    monkeypatch.setattr(prod, "_run", lambda *_a, **_k: effects.append("command"))
     with pytest.raises(
-        prod.ProductionInstallError,
-        match="physical NixOS cutover requires independently validated pre-cutover readiness",
+        prod.ProductionInstallError, match="source admission not established",
     ):
         prod.execute_plan(
-            compiled,
-            contract=CONTRACT,
+            compiled, contract=CONTRACT,
             confirmation=prod.confirmation_for(compiled),
             credential_hash_file=tmp_path / "forbidden-credential",
         )
-    assert effects == []
+    assert effects == ["protected-main-gate"]
 
 
-def test_final_physical_apply_rejects_downgraded_restore_flag(
+def test_parallel_apply_rejects_forged_restore_flag(
     monkeypatch, tmp_path,
 ):
+    """A plan cannot silently promote an isolated install into a different gate."""
     compiled = plan(artifact=MERGED_ARTIFACT)
-    assert isinstance(compiled["pre_cutover_readiness"], dict)
-    compiled["final_physical_restore_required"] = False
+    assert compiled["final_physical_restore_required"] is False
+    compiled["final_physical_restore_required"] = True
     material = {key: value for key, value in compiled.items() if key != "plan_sha256"}
     compiled["plan_sha256"] = prod.sha256_json(material)
     monkeypatch.setattr(prod.os, "geteuid", lambda: 0)
@@ -6753,39 +6760,64 @@ def test_final_physical_apply_rejects_downgraded_restore_flag(
     )
     with pytest.raises(
         prod.ProductionInstallError,
-        match="physical cutover recovery gate metadata is missing",
+        match="physical restore policy does not match source-preservation scope",
     ):
         prod.execute_plan(
-            compiled,
-            contract=CONTRACT,
+            compiled, contract=CONTRACT,
             confirmation=prod.confirmation_for(compiled),
             credential_hash_file=tmp_path / "forbidden-credential",
         )
 
 
-def test_final_physical_restore_required_is_not_proof_only_authority():
+def test_parallel_restore_exemption_never_applies_to_source_cutover():
     staged = plan(artifact=ARTIFACT)
     approved = plan(artifact=MERGED_ARTIFACT)
     assert staged["final_physical_restore_required"] is False
-    assert approved["final_physical_restore_required"] is True
-    assert prod.plan_summary(approved)["final_physical_restore_required"] is True
+    assert approved["final_physical_restore_required"] is False
+    assert prod.plan_summary(approved)["final_physical_restore_required"] is False
     assert prod.plan_summary(staged)["final_physical_restore_required"] is False
 
+    # In a destructive source-cutover, full restore evidence is still mandatory.
+    destructive = json.loads(json.dumps(CONTRACT))
+    destructive["source_preservation"]["destructive_source_cutover"] = True
+    destructive["source_preservation"]["pre_cutover_readiness_required"] = True
+    receipt = managed_receipt(MERGED_ARTIFACT)
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="merged-main artifact requires validated pre-cutover readiness",
+    ):
+        prod.compile_plan(
+            observation(), install_artifact=MERGED_ARTIFACT,
+            install_artifact_path=SYNTHETIC_ARTIFACT_PATH,
+            managed_build_receipt=receipt,
+            managed_policy_sha256=MANAGED_POLICY_SHA256,
+            flake_source=str(prod.FLAKE_SOURCE), contract=destructive,
+            managed_build_attestation_verification=managed_attestation_verification(
+                MERGED_ARTIFACT, receipt,
+            ),
+        )
 
-def test_physical_cli_apply_without_restore_is_pre_effect_denied(
+
+def test_parallel_cli_without_source_restore_reaches_only_read_only_artifact_gate(
     monkeypatch, tmp_path,
 ):
+    """An isolated request may proceed to checks, not any persistent effect."""
     monkeypatch.setattr(prod, "verify_secure_boot_firmware", lambda: "signed-policy")
     monkeypatch.setattr(prod, "reject_unattested_target_bootchain", lambda _c: None)
-    effects = []
+    calls = []
+
+    def artifact_read(_path):
+        calls.append("artifact-read")
+        raise prod.ProductionInstallError("synthetic artifact deliberately missing")
 
     def forbidden(*_a, **_k):
-        effects.append("source-or-effect")
-        raise AssertionError("physical apply progressed without restore evidence")
+        calls.append("forbidden-mutation")
+        raise AssertionError("storage or persistent operation reached")
 
+    monkeypatch.setattr(prod, "load_install_artifact", artifact_read)
     for name in (
-        "load_install_artifact", "acquire_production_apply_lock",
-        "reserve_private_receipt", "verify_source", "execute_plan",
+        "acquire_production_apply_lock", "reserve_private_receipt",
+        "verify_source", "execute_plan",
     ):
         monkeypatch.setattr(prod, name, forbidden)
     assert prod.main([
@@ -6795,8 +6827,9 @@ def test_physical_cli_apply_without_restore_is_pre_effect_denied(
         "--credential-hash-file", str(tmp_path / "forbidden-credential"),
         "--write-receipt", str(tmp_path / "forbidden-receipt.json"),
     ]) == 2
-    assert effects == []
+    assert calls == ["artifact-read"]
     assert not (tmp_path / "forbidden-receipt.json").exists()
+    assert not (tmp_path / "production-apply-locks").exists()
 
 
 
@@ -8345,6 +8378,26 @@ def test_physical_restore_real_readiness_validation_uses_only_pinned_git_contrac
         snapshot,
         head,
     ) is None
+
+    # An isolated parallel install still authenticates the entire source,
+    # reviewed recovery-scope policy and contract OIDs, without a WD restore.
+    isolated = {
+        "flake_source": str(source), "recovery_admission_scope": scope,
+        "pre_cutover_readiness_required": False,
+        "final_physical_restore_required": False,
+    }
+    assert prod._revalidate_physical_restore_from_source(
+        isolated, None, head,
+    ) is None
+    forged = json.loads(json.dumps(isolated))
+    forged["recovery_admission_scope"]["excluded_installation"]["migration_mode"] = (
+        "unreviewed-all-disk-mode"
+    )
+    with pytest.raises(
+        prod.ProductionInstallError,
+        match="physical recovery policy is not bound to verified source",
+    ):
+        prod._revalidate_physical_restore_from_source(forged, None, head)
 
 
 def test_root_git_cat_file_stream_is_bounded_before_oid_verification(tmp_path):
