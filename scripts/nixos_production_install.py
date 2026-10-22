@@ -908,7 +908,7 @@ def readiness_contract_paths_for_source(flake_source: str) -> tuple[Path, Path, 
 
 
 def _trusted_physical_recovery_paths(
-    flake_source: str, readiness_snapshot: dict[str, Any],
+    flake_source: str, readiness_snapshot: dict[str, Any] | None,
 ) -> tuple[Path, Path, Path]:
     """Rebind JIT restore policy to verified source, never the mutable plan.
 
@@ -916,7 +916,7 @@ def _trusted_physical_recovery_paths(
     The authoritative contracts are from the exact source whose revision was
     verified at this gate, not from that snapshot's claimed path selection.
     """
-    if not isinstance(readiness_snapshot, dict):
+    if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("physical recovery snapshot is invalid")
     trusted = readiness_contract_paths_for_source(flake_source)
     fields = (
@@ -924,8 +924,12 @@ def _trusted_physical_recovery_paths(
         "nix_lifecycle_contract_path",
         "critical_user_data_contract_path",
     )
+    # With no restore snapshot, only the reviewed source selects policy paths.
     for field, expected in zip(fields, trusted, strict=True):
-        if readiness_snapshot.get(field) != str(expected):
+        if (
+            readiness_snapshot is not None
+            and readiness_snapshot.get(field) != str(expected)
+        ):
             raise ProductionInstallError(
                 "physical recovery contract path is not source-bound"
             )
@@ -935,7 +939,7 @@ def _trusted_physical_recovery_paths(
 
 def _revalidate_physical_restore_from_source(
     plan: dict[str, Any],
-    readiness_snapshot: dict[str, Any],
+    readiness_snapshot: dict[str, Any] | None,
     source_revision: str,
 ) -> None:
     """Authenticate contract contents beneath the *same open verified Git root*.
@@ -945,7 +949,17 @@ def _revalidate_physical_restore_from_source(
     validation. The three contract bytes must match their reviewed Git blobs,
     even if the submitting UID changes the checkout name or tracked files.
     """
-    if not isinstance(readiness_snapshot, dict):
+    if readiness_snapshot is None:
+        # An isolated target is not a destructive WD source cutover. Both
+        # source-authenticated plan gates must independently permit omission.
+        if (
+            plan.get("pre_cutover_readiness_required") is not False
+            or plan.get("final_physical_restore_required") is not False
+        ):
+            raise ProductionInstallError(
+                "isolated physical source recovery exemption is not authenticated"
+            )
+    elif not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("physical recovery snapshot is invalid")
     source = _source_git_path(plan["flake_source"])
     source_fd, checkout_fd, owner_uid, owner_gid = _open_root_source_git_context(source)
@@ -1048,14 +1062,15 @@ def _revalidate_physical_restore_from_source(
                 raise ProductionInstallError(
                     "physical recovery policy is not bound to verified source"
                 )
-            pre_cutover_readiness.revalidate_readiness(
-                readiness_snapshot,
-                source_revision=source_revision,
-                recovery_contract_path=recovery,
-                lifecycle_contract_path=lifecycle,
-                critical_user_data_contract_path=critical,
-                contract_loader=pinned_contract_loader,
-            )
+            if readiness_snapshot is not None:
+                pre_cutover_readiness.revalidate_readiness(
+                    readiness_snapshot,
+                    source_revision=source_revision,
+                    recovery_contract_path=recovery,
+                    lifecycle_contract_path=lifecycle,
+                    critical_user_data_contract_path=critical,
+                    contract_loader=pinned_contract_loader,
+                )
         except pre_cutover_readiness.ReadinessError as exc:
             raise ProductionInstallError(
                 "physical recovery evidence is not bound to verified source"
@@ -3186,7 +3201,9 @@ def compile_plan(
         "pre_cutover_readiness_required": (
             artifact["source_authority"] == "merged-main" and readiness_required
         ),
-        "final_physical_restore_required": artifact["source_authority"] == "merged-main",
+        "final_physical_restore_required": (
+            artifact["source_authority"] == "merged-main" and readiness_required
+        ),
         "recovery_admission_scope": recovery_admission_scope,
         "pre_cutover_readiness": readiness_verification,
         "readiness_bundle_authorizes_production": False,
@@ -6631,15 +6648,15 @@ def execute_plan(
     )
     if plan.get("pre_cutover_readiness_required") is not expected_readiness_required:
         raise ProductionInstallError("production plan readiness policy no longer matches storage contract")
-    # The isolated dual-OS exemption covers nonproductive planning/rehearsal,
-    # never a final physical target-write apply. Exact source/restore evidence
-    # is mandatory independently of a retained WD fallback and of the public
-    # storage contract's narrower destructive-source-cutover definition.
-    if plan.get("final_physical_restore_required") is not True:
-        raise ProductionInstallError("physical cutover recovery gate metadata is missing")
-    if not isinstance(readiness_snapshot, dict):
+    # A source-preserving isolated Seagate install does not destroy WD data.
+    # True destructive source cutover still requires full authenticated restore.
+    if plan.get("final_physical_restore_required") is not expected_readiness_required:
         raise ProductionInstallError(
-            "physical NixOS cutover requires independently validated pre-cutover readiness"
+            "physical restore policy does not match source-preservation scope"
+        )
+    if expected_readiness_required and not isinstance(readiness_snapshot, dict):
+        raise ProductionInstallError(
+            "destructive source cutover requires independently validated pre-cutover readiness"
         )
     if readiness_snapshot is not None and not isinstance(readiness_snapshot, dict):
         raise ProductionInstallError("production readiness evidence is malformed")
@@ -7121,9 +7138,20 @@ def main(argv: list[str] | None = None) -> int:
                 ) from exc
             reject_unattested_target_bootchain(public_boot_policy)
             if args.pre_cutover_readiness is None:
-                raise ProductionInstallError(
-                    "physical NixOS cutover requires --pre-cutover-readiness"
-                )
+                # Pre-effect advisory gate: the pinned source is checked again
+                # by compile_plan, execute_plan and the JIT verifier.
+                try:
+                    recovery_scope = json.loads(
+                        RECOVERY_CONTRACT_PATH.read_text(encoding="utf-8")
+                    )["admission_scope"]
+                except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                    raise ProductionInstallError(
+                        "physical source-preservation recovery policy cannot be read"
+                    ) from exc
+                if pre_cutover_readiness_required(public_boot_policy, recovery_scope):
+                    raise ProductionInstallError(
+                        "destructive source cutover requires --pre-cutover-readiness"
+                    )
         artifact_path = args.install_artifact.resolve()
         artifact = load_install_artifact(artifact_path)
         verify_source(args.flake_source, artifact["source_revision"])
