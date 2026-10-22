@@ -297,3 +297,34 @@ The production path is deliberately split into **local prepare -> independent re
 For `merged-main`, source-preservation readiness is controlled by the public storage contract rather than by artifact authority alone. The recovery contract is fail-closed for a destructive source cutover and machine-declares this isolated replacement path as outside that admission scope. The current `isolated-parallel-disk-dual-os` contract declares a retained protected Pop!_OS source and therefore sets `pre_cutover_readiness_required = false`: installation does not depend on Critical-User-Data inventory, preservation capsules, off-host restore or Source/Restore digest equality. This does **not** weaken disk isolation: the protected WD partition table, filesystem signatures and ESP remain pre/post fingerprint invariants; NixOS uses its own Seagate ESP, EFI variables remain untouched, and all destructive target addressing remains exact private by-id. If a readiness bundle is explicitly supplied it is still validated and remains non-authoritative. Data backup/recovery can continue independently without blocking installation.
 
 Before any effect, the planner requires the target to remain unmounted, to have no kernel holders or nested block-device descendants, and to match the exact private replacement preimage (GPT GUID, sector size, partition geometry/identity and signature identities). It checks hidden signatures with read-only `wipefs`, proves `/` and `/boot/efi` still resolve to the protected WD, verifies all declared WD by-id aliases, and requires the active `BootCurrent` firmware entry to target the protected WD ESP PARTUUID with an existing regular EFI loader under that mounted ESP. The live GPT disk GUID plus partition offsets/type GUIDs/names/attributes, protected EFI contents and firmware-bootability proof are bound into the preimage fingerprint; target/protected alias collisions, artifact/source drift and scratch-state drift fail before storage mutation, and the plan remains bound to the private identity digest. The default CLI output contains only a redacted plan summary; a full private plan requires explicit `--write-plan` and is create-only mode 0600. Apply additionally requires root, a `merged-main` artifact, the exact plan confirmation, and interactive credentials. GPT creation uses private plan-bound PARTUUIDs; formatting and LUKS address only target-derived stable by-id partition paths. Public PARTLABELs are never boot or mount authority. Apply gives the LUKS2 header the private encrypted-partition UUID, stages all three private PARTUUIDs create-only under encrypted `/persist`, and binds NixOS systemd-boot entries locally with `rd.luks.name=<private-uuid>=heimpc-nixos-crypt` plus `rd.luks.options=<private-uuid>=tpm2-device=auto,headless=yes`. The LUKS2 enrollment contract is TPM2 auto-unlock on PCR 7 only, with no TPM PIN and with pcrlock plus Signed-PCR/public-key autodiscovery explicitly disabled. A cryptographically random bootstrap key exists only in a sealed/unlinked memfd and initially occupies slot 0; after TPM2 and recovery enrollment the bootstrap slot is removed. The recovery key is persisted create-only in a root-private local destination and is never emitted through logs, argv, public receipts, or the initrd prompt path. The reproducible closure contains only generic code: after root unlock it mounts `/boot` and `/recovery` through the private `/persist` identity and `/dev/disk/by-partuuid`, and its systemd-boot hook rebinds future regenerated entries without embedding concrete private IDs in the Store. The critical Apply phase deliberately removes Docker from the executor path rather than relying on container permissions: after Docker has been proven quiescent and the root-only containerd verifier has independently accepted the seal, `mkfs.btrfs`, `btrfs` and `nixos-install` execute directly by exact absolute path from the immutable attested system closure under the read-only `/nix/store`, with a bounded `PATH`. This trades a short Docker outage during the later real cutover for eliminating the user-controlled Docker/root bypass and the verify-then-swap race. Any Docker reactivation, surviving Moby shim, seal teardown uncertainty, or Docker-state restore uncertainty fails closed; post-mutation cleanup/restore failures have dedicated public alarms. The installed profile, Seagate ESP, encrypted `@persist`, EFI/NVRAM state, complete fallback GPT fingerprint and closed mapper are all verified after the run.
+
+## USB-free Stage0 first boot (nonproduction)
+
+The internal Seagate ZP4000GP304001 is the sole intended target. The
+WD_BLACK SN850X and its independent Pop!_OS ESP must remain intact. The stage0
+flake output nixosConfigurations.heim-pc-stage0 is a deliberately small,
+plain Btrfs, console-only test system. It does not use the production LUKS2,
+TPM/PCR7 or full-workload contracts. It is NOT a production apply approval
+and does not weaken heim-pc-storage-target.
+
+A running Pop!_OS can serve as the installer: NixOS officially supports
+installation from another Linux distribution without any USB device. Before
+physical apply, independently verify the selected Seagate by-id identity,
+partition/GPT signatures, source WD fingerprint and target quiescence. Do not
+reuse kernel NVMe indices or assume any external disk is disposable.
+
+Stage0 deliberately uses the existing separate Seagate ESP identified by
+NIXOS2_EFI and a new UNIQUE Btrfs filesystem label
+NIXOS_STAGE0_ROOT on the Seagate's third partition; boot-time ambiguity from
+duplicate labels must be rejected before applying. The layout expects Btrfs
+subvolumes @root, @nix, @home and @persist. Only after the
+source-bound NixOS closure is built and an install environment is proven ready
+should the root partition be formatted and mounted for nixos-install --root.
+Do not reformat the Seagate ESP or recovery partition merely for Stage0.
+
+Before the first reboot the installer must set a strong, private password for
+alex in the installed NixOS /etc/shadow; there is no autologin, open SSH
+server, repository password or Nix-store password. Review the installed loader
+files on the Seagate ESP and the WD before/after fingerprint; do not update
+EFI/NVRAM and do not rely on an unverified fallback boot entry. After an actual
+NixOS boot, independently boot Pop!_OS again and record both observations.

@@ -272,6 +272,13 @@
         ];
       };
 
+      # Disposable, USB-free console-first NixOS on the internal Seagate only.
+      # This does not change any production install/apply admission policy.
+      nixosConfigurations.heim-pc-stage0 = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ ./modules/stage0-no-usb.nix ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -343,6 +350,7 @@
 
       packages.${system} = {
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
+        heim-pc-stage0-system = self.nixosConfigurations.heim-pc-stage0.config.system.build.toplevel;
         heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;
         physical-gate-proprietary-system = self.nixosConfigurations.heim-pc-physical-gate-proprietary.config.system.build.toplevel;
         physical-gate-open-system = self.nixosConfigurations.heim-pc-physical-gate-open.config.system.build.toplevel;
@@ -364,6 +372,26 @@
       };
 
       checks.${system} = {
+        # Evaluation-only: Stage0 must be an isolated, root-label-bound
+        # console profile with the firmware/WD protections still enforced.
+        stage0-no-usb-contract =
+          let cfg = self.nixosConfigurations.heim-pc-stage0.config;
+          in
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert cfg.fileSystems."/boot".fsType == "vfat";
+          assert cfg.boot.loader.systemd-boot.enable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !cfg.boot.loader.systemd-boot.editor;
+          assert !cfg.services.openssh.enable;
+          assert !cfg.services.xserver.enable;
+          assert cfg.users.mutableUsers;
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.boot.initrd.luks.devices == {};
+          pkgs.runCommand "heim-pc-stage0-no-usb-contract" {} ''
+            mkdir -p "$out"
+          '';
+
         # Check *module option compatibility only*. This explicitly does not
         # prove a bootable LUKS-root target: private rd.luks kernel parameters
         # still rely on the separate systemd-boot post-install entry hook.
