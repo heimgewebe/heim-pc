@@ -747,7 +747,15 @@ class Stage0SourceTests(unittest.TestCase):
                 [cmd[-1] for cmd in commands if cmd[:3] == ("btrfs", "subvolume", "create")],
                 [str(path / subvol) for subvol in stage0.SUBVOLS])
             self.assertFalse(any(wd in " ".join(cmd) for cmd in commands))
-            self.assertEqual(len([c for c in commands if c[0] == "mount"]), 7)
+            mount_cmds = [c for c in commands if c[0] == "mount"]
+            self.assertEqual(len(mount_cmds), 7)
+            # No writable VFAT probe before the first p3 GPT operation.
+            self.assertEqual(mount_cmds[0][2:5],
+                             ("vfat", "-o", "ro,umask=0077,nodev,nosuid"))
+            self.assertLess(commands.index(mount_cmds[0]), commands.index(gpt[0]))
+            self.assertEqual(mount_cmds[-1][2:5],
+                             ("vfat", "-o", "umask=0077,nodev,nosuid"))
+            self.assertGreater(commands.index(mount_cmds[-1]), commands.index(formatted[0]))
             self.assertEqual(len([c for c in commands if c[0] == "umount"]), 7)
             self.assertEqual(fingerprints.call_count, 3)
             verify_tools.assert_called_once_with()

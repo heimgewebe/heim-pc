@@ -157,9 +157,10 @@ No password, salt/credential plaintext or hash is placed in Git or logs.
 Expected guarded sequence, not yet a physical install receipt:
 
 1. Recheck source/target and existing Seagate EFI loader absence. The
-   preflight mounts Seagate p1 only, never the WD ESP; after unmount it
-   removes the temporary HOST /mnt/.../boot stub and verifies no active
-   mount remains. The parent mountpoint is removed on clean completion
+   preflight mounts Seagate p1 **read-only** (vfat `ro,nodev,nosuid`), never
+   the WD ESP; it does not require an early writable FAT probe. After
+   unmount it removes the temporary HOST /mnt/.../boot stub and verifies
+   no active mount remains. The parent mountpoint is removed on clean completion
    only if this invocation created it.
 2. Change the Linux-LUKS historical GPT type of ONLY Seagate p3 to
    Linux filesystem; rename its partition label NIXOS_STAGE0_ROOT.
@@ -167,7 +168,9 @@ Expected guarded sequence, not yet a physical install receipt:
    WD/EFI invariants remain unchanged.
 3. Recheck no hidden p3 signatures, mkfs.btrfs without -f on by-id p3.
 4. Create Btrfs subvolumes @root, @nix, @home, @persist. Mount
-   target /, /nix, /home, /persist and the existing Seagate p1 on /boot.
+   target /, /nix, /home, /persist and then mount existing Seagate p1
+   **writable only for the already authorized bootloader installation**
+   on /boot. The preceding ESP conflict preflight remained read-only.
 5. First populate the fresh target Nix store from the source-bound built
    system closure via official Nix copy --to local?root=/mnt. Offline copy
    requires source Nix DB metadata temporarily writable and --no-check-sigs

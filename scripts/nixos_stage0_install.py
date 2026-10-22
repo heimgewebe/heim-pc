@@ -782,7 +782,10 @@ def apply_plan(filename: Path, confirmation: str) -> None:
     try:
         ensure_empty_mount_path(NIX_ROOT)
         (NIX_ROOT / "boot").mkdir(mode=0o700)
-        host_cmd("mount", "-t", "vfat", "-o", "umask=0077,nodev,nosuid",
+        # Before any GPT effect, inspect the existing Seagate ESP read-only.
+        # A writable VFAT probe may alter filesystem metadata even if it
+        # merely checks for pre-existing bootloader files.
+        host_cmd("mount", "-t", "vfat", "-o", "ro,umask=0077,nodev,nosuid",
                  p1, str(NIX_ROOT / "boot"))
         mounts.append(NIX_ROOT / "boot")
         demand(not (NIX_ROOT / "boot/EFI/BOOT/BOOTX64.EFI").exists(),
