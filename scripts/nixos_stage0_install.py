@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -39,6 +40,11 @@ SUBVOLS = ("@root", "@nix", "@home", "@persist")
 MIN_ROOT_SIZE = 3_000_000_000_000
 MAX_ESP_FILES = 5000
 MAX_ESP_BYTES = 2 * 1024**3
+TRUSTED_HOST_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+APPLY_HOST_TOOLS = (
+    "sgdisk", "udevadm", "wipefs", "lsblk", "sfdisk", "findmnt",
+    "efibootmgr", "mount", "umount", "btrfs", "mkfs.btrfs", "git",
+)
 
 
 class AdmissionError(RuntimeError):
@@ -324,6 +330,7 @@ def credential_bootstrap(shadow: Path) -> None:
     fd, temp = tempfile.mkstemp(prefix=".shadow-stage0-", dir=str(shadow.parent))
     try:
         os.fchmod(fd, stat.S_IMODE(existing.st_mode) & 0o640)
+        os.fchown(fd, existing.st_uid, existing.st_gid)
         with os.fdopen(fd, "w") as f:
             f.writelines(rows)
             f.flush()
@@ -375,6 +382,39 @@ def live_protected_state(wd: str) -> dict:
             "wd_efi_source": mounted_source("/boot/efi")}
 
 
+def verify_host_tools() -> None:
+    """All storage executables must exist BEFORE the first GPT mutation."""
+    os.environ["PATH"] = TRUSTED_HOST_PATH
+    for name in APPLY_HOST_TOOLS:
+        resolved = shutil.which(name, path=TRUSTED_HOST_PATH)
+        demand(bool(resolved) and Path(resolved).is_file() and os.access(resolved, os.X_OK),
+               f"required host tool missing or unusable before GPT write: {name}")
+    for name in ("btrfs", "mkfs.btrfs"):
+        demand(bool(output(name, "--version")), f"unusable host Btrfs tool: {name}")
+
+
+def verify_install_namespace(source: dict) -> None:
+    """Prove chroot's mount propagation can run before touching Seagate GPT.
+
+    The pinned NixOS nixos-enter uses unshare and mount --make-rprivate.
+    Docker's default AppArmor profile blocks this even with SYS_ADMIN,
+    so both this preflight and the real installer use the tested policy.
+    The preflight has no target binds, host disks, or network.
+    """
+    cmd = [
+        "/usr/bin/docker", "run", "--rm", "--network=none",
+        "--cap-add=SYS_ADMIN", "--security-opt=seccomp=unconfined",
+        "--security-opt=apparmor=unconfined", "--pids-limit=128",
+        "--memory=2g",
+        "--mount", f"type=volume,src={source['volume']},dst=/nix,readonly",
+        "--entrypoint", "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin/bin/unshare",
+        source["image"], "--mount", "--uts", "--mount-proc", "--",
+        "/nix/var/nix/profiles/default/bin/bash", "-c",
+        "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin/bin/mount --make-rprivate /",
+    ]
+    host_cmd(*cmd)
+
+
 def verify_source_store(source: dict) -> None:
     """Fail before physical mutations if the existing Nix closure is corrupt."""
     cmd = [
@@ -416,6 +456,7 @@ def run_container(source: dict, *arguments: str) -> None:
     command = [
         "/usr/bin/docker", "run", "--rm", "--network=none",
         "--cap-add=SYS_ADMIN", "--security-opt=seccomp=unconfined",
+        "--security-opt=apparmor=unconfined",
         "--pids-limit=768", "--memory=10g",
         "--mount", f"type=volume,src={source['volume']},dst=/nix,readonly",
         "--mount", f"type=bind,src={NIX_ROOT},dst=/mnt",
@@ -434,8 +475,8 @@ def verify_installed_esp() -> None:
     demand(entries, "no systemd-boot NixOS entry")
     for entry in entries:
         data = entry.read_text()
-        demand("initrd " in data and "linux " in data and ROOT_LABEL in data,
-               "boot entry missing initrd, kernel or Stage0 root label")
+        demand("initrd " in data and "linux " in data and "root=fstab" in data,
+               "boot entry missing initrd, kernel or evaluated root=fstab")
         demand("NIXOS2_CRYPT" not in data and "rd.luks" not in data,
                "nonproduction boot entry unexpectedly references LUKS")
     demand((NIX_ROOT / "etc/shadow").is_file(), "installed NixOS shadow not found")
@@ -460,7 +501,9 @@ def apply_plan(filename: Path, confirmation: str) -> None:
     demand(not NIX_ROOT.exists() or not any(NIX_ROOT.iterdir()), "installation mount path is in use")
     demand(not Path("/nix").is_mount(), "host /nix must remain outside Stage0")
     demand(Path("/usr/bin/openssl").is_file(), "private credential hashing unavailable")
+    verify_host_tools()
     verify_source_store(source)
+    verify_install_namespace(source)
 
     # Block mutations begin only after every precondition above succeeded.
     mounts: list[Path] = []
@@ -542,6 +585,7 @@ def main() -> int:
     parser.add_argument("--confirm", default="")
     args = parser.parse_args()
     try:
+        os.environ["PATH"] = TRUSTED_HOST_PATH
         if args.plan:
             demand(args.seagate_by_id and args.wd_by_id and not args.confirm,
                    "plan requires both disk aliases and no confirmation token")

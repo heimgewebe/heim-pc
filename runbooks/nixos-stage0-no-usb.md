@@ -74,7 +74,12 @@ Only the hardware executor may consider, after checking those gates:
 Root-owned 0600 plan, real interactive TTY, exact confirmation SHA256,
 snapshot equality and matching Git/script/closure/build sources are
 mandatory. Source store integrity must pass a fresh recursive verification
-before any physical disk mutation. Existing Pop!_OS and EFI variables are outside mutation scope.
+before any physical disk mutation. Existing Pop!_OS and EFI variables are
+outside mutation scope. Before changing GPT, Apply now probes all host
+storage tools (including btrfs, mkfs.btrfs, sgdisk) and runs the pinned
+NixOS chroot mount-namespace preflight in a Docker container without
+host-device binds or networking. This addresses the previously observed
+missing-host-btrfs-tools and Docker default-AppArmor denial.
 
 Expected guarded sequence, not yet a physical install receipt:
 
@@ -95,10 +100,15 @@ Expected guarded sequence, not yet a physical install receipt:
    isolated Docker volumes and completed successfully.
 6. Run source-bound official nixos-install in the pinned offline Docker
    image with SOURCE Nix volume READONLY and target mount writable:
-   --root /mnt --system BUILT-SYSTEM --no-root-passwd --no-channel-copy. The NixOS profile has
+   --root /mnt --system BUILT-SYSTEM --no-root-passwd --no-channel-copy.
+   Verified chroot use requires Docker SYS_ADMIN, seccomp=unconfined and
+   apparmor=unconfined; this is a security-sensitive installation container
+   with no network or raw host-disk device mounts. The NixOS profile has
    boot.loader.efi.canTouchEfiVariables=false.
 7. Verify Seagate own EFI/BOOT/BOOTX64.EFI and generated loader entries,
-   installed shadow, root-label reference. Ask interactively for a
+   installed shadow, and NixOS 26.05's evaluated kernel parameter
+   root=fstab (the root's Btrfs label is resolved through NixOS initrd
+   filesystems, not expected literally in the EFI entry). Ask interactively for a
    new 16+ character password for alex, hash it only into the installed
    /etc/shadow; no secret in Git, store, argv or logs. Refuse an existing
    alex password; root remains locked. Validate WD GPT/ESP and EFI
@@ -110,6 +120,31 @@ Expected guarded sequence, not yet a physical install receipt:
 
 This is unencrypted, nonproduction Stage0; no confidential user data
 or productive workloads should be migrated.
+
+## Proof boundaries and current root-broker constraint
+
+An actual source-bound NixOS scratch install was followed by
+nixos-enter --root /mnt inside an isolated Docker volume. After adding
+Docker apparmor=unconfined (the tested minimum change needed for its
+unshare/mount logic), NixOS activation created the alex account and
+/etc/shadow; the probe succeeded and the scratch volume was removed.
+The pinned source has effective boot.kernelParams containing root=fstab,
+so verifying a literal NIXOS_STAGE0_ROOT label inside the EFI loader
+entry would incorrectly reject a valid NixOS boot configuration.
+Neither probe establishes a FAT ESP bootloader install, real first
+login, UEFI firmware disk selection or a physical NixOS boot.
+
+The currently audited root broker cannot access the source checkout
+under /home/alex or a developer interactive TTY. This exact source
+driver therefore CANNOT be considered directly executable through
+that broker. Do not bypass sudo, the broker, source seals, hardware
+permission or protected WD boot verification to work around it.
+Root-authorized staging/credential input and a true isolated
+bootloader test are required before physical Apply. Pop!_OS's
+current initrd changed and was regenerated after a package trigger;
+a complete physical Pop!_OS boot has not yet been proven. Preserve
+the updated WD ESP/boot preimage and do not assert that WD files were
+byte-unchanged from the older pre-package baseline.
 
 ## Independent boot and rollback proof for Thread 2
 

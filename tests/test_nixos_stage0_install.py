@@ -125,7 +125,7 @@ class Stage0SourceTests(unittest.TestCase):
             dest = Path(temp) / "plan.json"
             dest.write_text('{"schema_version":1,"profile":"nonproductive-stage0","no_nvram_changes":false,"wd_protected":true}')
             mode = dest.stat().st_mode
-            stat_result = types.SimpleNamespace(st_mode=(mode & ~0o077), st_uid=0, st_nlink=1)
+            stat_result = types.SimpleNamespace(st_mode=(mode & ~0o077), st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0.Path, "lstat", return_value=stat_result):
                 with self.assertRaisesRegex(stage0.AdmissionError, "unsafe"):
                     stage0.stored_plan(dest)
@@ -188,11 +188,50 @@ class Stage0SourceTests(unittest.TestCase):
         command = mutate.call_args.args
         self.assertEqual(command[0], "/usr/bin/docker")
         self.assertIn("--network=none", command)
+        self.assertIn("--security-opt=apparmor=unconfined", command)
         self.assertIn("readonly", " ".join(command))
         self.assertIn(str(stage0.NIX_ROOT), " ".join(command))
         self.assertIn("--no-root-passwd", command)
         self.assertNotIn("/dev/nvme0n1", " ".join(command))
         self.assertNotIn("efibootmgr", " ".join(command))
+
+    def test_host_toolchain_admission_rejects_missing_mkfs_before_mutation(self):
+        def fake_which(name, *, path=None):
+            if name == "mkfs.btrfs":
+                return None
+            return "/usr/bin/" + name
+        with patch.object(stage0.shutil, "which", side_effect=fake_which), \
+             patch.object(stage0.Path, "is_file", return_value=True), \
+             patch.object(stage0.os, "access", return_value=True), \
+             patch.object(stage0, "host_cmd") as mutate:
+            with self.assertRaisesRegex(stage0.AdmissionError, "mkfs.btrfs"):
+                stage0.verify_host_tools()
+        mutate.assert_not_called()
+
+    def test_host_toolchain_requires_real_btrfs_version(self):
+        with patch.object(stage0.shutil, "which", side_effect=lambda n, path=None: "/usr/bin/" + n), \
+             patch.object(stage0.Path, "is_file", return_value=True), \
+             patch.object(stage0.os, "access", return_value=True), \
+             patch.object(stage0, "output", side_effect=["", "btrfs-progs v5.16.2"]), \
+             patch.object(stage0, "host_cmd") as mutate:
+            with self.assertRaisesRegex(stage0.AdmissionError, "unusable host Btrfs tool"):
+                stage0.verify_host_tools()
+        mutate.assert_not_called()
+
+    def test_mount_namespace_preflight_has_no_disks_and_no_network(self):
+        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE}
+        with patch.object(stage0, "host_cmd") as executor:
+            stage0.verify_install_namespace(source)
+        cmd = executor.call_args.args
+        self.assertEqual(cmd[:3], ("/usr/bin/docker", "run", "--rm"))
+        self.assertIn("--network=none", cmd)
+        self.assertIn("--security-opt=apparmor=unconfined", cmd)
+        self.assertIn("--security-opt=seccomp=unconfined", cmd)
+        self.assertIn("--cap-add=SYS_ADMIN", cmd)
+        self.assertIn("readonly", " ".join(cmd))
+        self.assertNotIn("/dev/", " ".join(cmd))
+        self.assertNotIn("type=bind", " ".join(cmd))
+        self.assertNotIn("--privileged", cmd)
 
     def test_offline_store_copy_is_target_scoped_and_uses_local_unsigned_paths(self):
         source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
@@ -241,7 +280,7 @@ class Stage0SourceTests(unittest.TestCase):
             shadow = Path(td) / "shadow"
             shadow.write_text("root:!:1:0:99999:7:::\nalex:!:1:0:99999:7:::\n")
             original = shadow.read_bytes()
-            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
                  patch.object(stage0.getpass, "getpass", side_effect=["short", "short"]), \
                  patch.object(stage0, "output_hash") as hasher:
@@ -254,12 +293,14 @@ class Stage0SourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             shadow = Path(td) / "shadow"
             shadow.write_text("root:!:1:0:99999:7:::\nalex:!:1:0:99999:7:::\n")
-            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
                  patch.object(stage0.getpass, "getpass",
                               side_effect=["unique-password-with-23-symbols", "unique-password-with-23-symbols"]), \
-                 patch.object(stage0, "output_hash", return_value="$6$salt$hashdata"):
+                 patch.object(stage0, "output_hash", return_value="$6$salt$hashdata"), \
+                 patch.object(stage0.os, "fchown") as preserve_owner:
                 stage0.credential_bootstrap(shadow)
+                preserve_owner.assert_called_once()
             value = shadow.read_text()
             self.assertIn("alex:$6$salt$hashdata:", value)
             self.assertNotIn("unique-password", value)
@@ -314,6 +355,8 @@ class Stage0SourceTests(unittest.TestCase):
                 stack.enter_context(patch.object(stage0.os.path, "realpath", return_value=patched_p3["name"]))
                 stack.enter_context(patch.object(stage0, "hidden_signatures"))
                 fingerprints = stack.enter_context(patch.object(stage0, "same_protected_fingerprint"))
+                verify_tools = stack.enter_context(patch.object(stage0, "verify_host_tools"))
+                verify_namespace = stack.enter_context(patch.object(stage0, "verify_install_namespace"))
                 verify_store = stack.enter_context(patch.object(stage0, "verify_source_store"))
                 copy_store = stack.enter_context(patch.object(stage0, "copy_source_closure_to_target"))
                 installer = stack.enter_context(patch.object(stage0, "run_container"))
@@ -338,6 +381,8 @@ class Stage0SourceTests(unittest.TestCase):
             self.assertEqual(len([c for c in commands if c[0] == "mount"]), 7)
             self.assertEqual(len([c for c in commands if c[0] == "umount"]), 7)
             self.assertEqual(fingerprints.call_count, 3)
+            verify_tools.assert_called_once_with()
+            verify_namespace.assert_called_once_with(source)
             verify_store.assert_called_once_with(source)
             copy_store.assert_called_once_with(source)
             installer.assert_called_once_with(source)
@@ -349,13 +394,36 @@ class Stage0SourceTests(unittest.TestCase):
             shadow = Path(td) / "shadow"
             shadow.write_text("root:!:1:0:99999:7:::\nalex:$6$old$existing:1:0:99999:7:::\n")
             before = shadow.read_bytes()
-            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
                  patch.object(stage0.getpass, "getpass", side_effect=["secret-of-length-at-least-16"]*2), \
                  patch.object(stage0, "output_hash", return_value="$6$new$hash"):
                 with self.assertRaisesRegex(stage0.AdmissionError, "already has a password"):
                     stage0.credential_bootstrap(shadow)
             self.assertEqual(shadow.read_bytes(), before)
+
+    def test_uefi_loader_entry_matches_evaluated_root_fstab(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            boot = root / "boot"
+            efi = boot / "EFI/BOOT/BOOTX64.EFI"
+            entry = boot / "loader/entries/nixos-generation-1.conf"
+            efi.parent.mkdir(parents=True)
+            entry.parent.mkdir(parents=True)
+            efi.write_bytes(b"simulated systemd-boot EFI file")
+            (root / "etc").mkdir()
+            (root / "etc/shadow").write_text("alex:!:1:0:99999:7:::\n")
+            entry.write_text(
+                "title NixOS Stage0\n"
+                "linux /EFI/nixos/stage0-linux.efi\n"
+                "initrd /EFI/nixos/stage0-initrd.efi\n"
+                "options init=/nix/store/exact-system/init nomodeset root=fstab loglevel=4\n"
+            )
+            with patch.object(stage0, "NIX_ROOT", root):
+                stage0.verify_installed_esp()
+                entry.write_text(entry.read_text().replace("root=fstab", "root=/dev/sda1"))
+                with self.assertRaisesRegex(stage0.AdmissionError, "root=fstab"):
+                    stage0.verify_installed_esp()
 
     def test_shadow_metadata_rejects_world_readable_or_nonroot(self):
         with tempfile.TemporaryDirectory() as td:
