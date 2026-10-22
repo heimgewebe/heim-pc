@@ -920,6 +920,11 @@ def apply_plan(filename: Path, confirmation: str) -> None:
         (NIX_ROOT / "boot").rmdir()
         demand(not any(NIX_ROOT.iterdir()), "ESP preflight left host files")
 
+        # Review approval can be withdrawn during source verification, password
+        # entry, or the read-only ESP preflight. Refresh the same root-owned seal
+        # and live GitHub decision immediately before the first destructive write.
+        require_immutable_install_source(source)
+
         # Correct the historical Linux-LUKS GPT type before plain Btrfs format.
         host_cmd("sgdisk", "--typecode=3:8300", "--change-name=3:NIXOS_STAGE0_ROOT",
                  snapshot["seagate_by_id"])

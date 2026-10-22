@@ -732,7 +732,7 @@ class Stage0SourceTests(unittest.TestCase):
                 stack.enter_context(patch.object(stage0.Path, "is_mount", return_value=False))
                 stack.enter_context(patch.object(stage0, "stored_plan", return_value=(plan, "d"*64)))
                 stack.enter_context(patch.object(stage0, "check_source", return_value=source))
-                stack.enter_context(patch.object(stage0, "require_immutable_install_source"))
+                source_review = stack.enter_context(patch.object(stage0, "require_immutable_install_source"))
                 stack.enter_context(patch.object(stage0, "live_snapshot", return_value=snapshot))
                 stack.enter_context(patch.object(stage0, "disk_tree", return_value=({"name": "/dev/nvme0n1"}, modified)))
                 stack.enter_context(patch.object(stage0, "output", side_effect=output))
@@ -780,11 +780,59 @@ class Stage0SourceTests(unittest.TestCase):
             verify_namespace.assert_called_once_with(source)
             verify_store.assert_called_once_with(source)
             password_hash.assert_called_once_with()
+            self.assertEqual(source_review.call_count, 2)
             copy_store.assert_called_once_with(source)
             target_verify.assert_called_once_with(source)
             installer.assert_called_once_with(source)
             esp.assert_called_once()
             credentials.assert_called_once_with(path / "etc/shadow", "$6$test$hash")
+
+    def test_review_revoked_after_preflight_aborts_before_first_gpt_write(self):
+        # The review may be withdrawn during password entry or the read-only
+        # ESP probe. All host/storage operations here are mocked.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "synthetic-stage0-root"
+            source = sealed_source()
+            snapshot = {"seagate_by_id": "/dev/disk/by-id/SYNTHETIC_SEAGATE",
+                        "wd_by_id": "/dev/disk/by-id/SYNTHETIC_WD"}
+            plan = {"source": source, "snapshot": snapshot}
+            commands = []
+            reviews = []
+
+            def recheck(_source):
+                reviews.append("checked")
+                if len(reviews) == 2:
+                    raise stage0.AdmissionError("review revoked before GPT")
+
+            def fake_host(*argv):
+                self.assertIn(argv[0], ("mount", "umount"))
+                commands.append(argv)
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(stage0, "NIX_ROOT", root))
+                stack.enter_context(patch.object(stage0.os, "geteuid", return_value=0))
+                stack.enter_context(patch.object(stage0.sys.stdin, "isatty", return_value=True))
+                stack.enter_context(patch.object(stage0.sys.stderr, "isatty", return_value=True))
+                stack.enter_context(patch.object(stage0.Path, "is_mount", return_value=False))
+                stack.enter_context(patch.object(stage0, "stored_plan", return_value=(plan, "d"*64)))
+                stack.enter_context(patch.object(stage0, "check_source", return_value=source))
+                stack.enter_context(patch.object(stage0, "require_immutable_install_source",
+                                                side_effect=recheck))
+                stack.enter_context(patch.object(stage0, "live_snapshot", return_value=snapshot))
+                stack.enter_context(patch.object(stage0, "verify_host_tools"))
+                stack.enter_context(patch.object(stage0, "verify_source_store"))
+                stack.enter_context(patch.object(stage0, "verify_install_namespace"))
+                stack.enter_context(patch.object(stage0, "prepare_private_credential_hash",
+                                                return_value="$6$synthetic$never-used"))
+                stack.enter_context(patch.object(stage0, "host_cmd", side_effect=fake_host))
+                with self.assertRaisesRegex(stage0.AdmissionError,
+                                            "review revoked before GPT"):
+                    stage0.apply_plan(Path(td) / "no-real-plan",
+                                      "APPLY-STAGE0:" + "d"*64)
+            self.assertEqual(reviews, ["checked", "checked"])
+            self.assertEqual([c[0] for c in commands], ["mount", "umount"])
+            self.assertEqual(commands[0][4], "ro,umask=0077,nodev,nosuid")
+            self.assertFalse(root.exists())
 
     def test_password_bootstrap_never_overwrites_preexisting_hash(self):
         with tempfile.TemporaryDirectory() as td:
@@ -921,6 +969,7 @@ class Stage0SourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             filename = Path(td) / "seal.json"
             filename.write_text(json.dumps(payload))
+            filename.chmod(0o600)  # Synthetic root-only fixture, independent of umask.
             st = filename.stat()
             parent_root = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
             file_root = types.SimpleNamespace(st_mode=st.st_mode, st_uid=0,
