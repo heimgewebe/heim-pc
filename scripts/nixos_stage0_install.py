@@ -36,7 +36,7 @@ LUKS_GUID = "ca7d7ccb-63ed-4c53-861c-1742536059cc"
 LINUX_GUID = "0fc63daf-8483-4772-8e79-3d69d8477de4"
 EFI_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 BY_ID = re.compile(r"^/dev/disk/by-id/nvme-[a-zA-Z0-9_.:+-]+$")
-STORE = re.compile(r"^/nix/store/[0-9a-z]{32}-nixos-(install|system-heim-pc-stage0)[a-zA-Z0-9._+-]*$")
+UTIL_LINUX = "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin"
 SUBVOLS = ("@root", "@nix", "@home", "@persist")
 MIN_ROOT_SIZE = 3_000_000_000_000
 MAX_ESP_FILES = 5000
@@ -63,7 +63,13 @@ def run(*argv: str, check: bool = True, input_bytes: bytes | None = None, **kwar
     p = subprocess.run(list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        check=False, **kwargs)
     if check and p.returncode:
-        raise AdmissionError(f"command failed: {argv[0]} (exit={p.returncode})")
+        # Explicitly suppress diagnostics for anything that received secrets.
+        # No command arguments, plaintext passwords, or environment are echoed.
+        diagnostics = ""
+        if input_bytes is None:
+            diagnostics = p.stderr.decode("utf-8", errors="replace").splitlines()
+            diagnostics = f": {diagnostics[0][:240]}" if diagnostics else ""
+        raise AdmissionError(f"command failed: {argv[0]} (exit={p.returncode}){diagnostics}")
     return p
 
 
@@ -80,24 +86,36 @@ def canonical(obj: object) -> bytes:
 
 
 def read_text(path: Path) -> str:
-    demand(path.is_file() and not path.is_symlink(), f"missing/unsafe local build evidence: {path.name}")
-    return path.read_text().strip()
+    """Read one evidence inode, disallowing a symlink substitution."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        st = os.fstat(stream.fileno())
+        demand(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_size < 65536,
+               f"missing/unsafe local build evidence: {path.name}")
+        return stream.read(65536).decode("utf-8", errors="strict").strip()
+
+
+def git_args(*arguments: str) -> tuple[str, ...]:
+    """Allow only this exact, pinned checkout under root, without global git config."""
+    return ("git", "-c", f"safe.directory={ROOT}",
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "diff.external=", "-C", str(ROOT), *arguments)
 
 
 def check_source() -> dict:
-    revision = output("git", "-C", str(ROOT), "rev-parse", "HEAD")
+    revision = output(*git_args("rev-parse", "HEAD"))
     demand(re.fullmatch(r"[a-f0-9]{40}", revision), "invalid Git revision")
-    demand(not output("git", "-C", str(ROOT), "status", "--porcelain"),
+    demand(not output(*git_args("status", "--porcelain")),
            "dirty repository: commit and re-review before planning")
-    demand(run("git", "-C", str(ROOT), "merge-base", "--is-ancestor", BUILD_REV, "HEAD", check=False).returncode == 0,
+    demand(run(*git_args("merge-base", "--is-ancestor", BUILD_REV, "HEAD"), check=False).returncode == 0,
            "built revision is not an ancestor of the installer revision")
-    demand(not output("git", "-C", str(ROOT), "diff", "--name-only", BUILD_REV, "HEAD", "--", "nixos/system"),
+    demand(not output(*git_args("diff", "--name-only", BUILD_REV, "HEAD", "--", "nixos/system")),
            "Stage0 NixOS source changed since the realized build")
     demand(read_text(BUILD_STATE / "source-head") == BUILD_REV, "build/source revision mismatch")
     demand(read_text(BUILD_STATE / "closure-path") == SYSTEM, "build/system closure mismatch")
     demand(read_text(BUILD_STATE / "nix-image") == NIX_IMAGE, "Nix image mismatch")
     tools = read_text(BUILD_STATE / "stage0-tools").splitlines()
-    demand(tools == [INSTALLER],
+    demand(tools == [INSTALLER] and UTIL_LINUX.startswith("/nix/store/"),
            "realized official nixos-install path differs from reviewed, pinned output")
     return {"revision": revision, "system": SYSTEM, "installer": tools[0],
             "image": NIX_IMAGE, "volume": BUILD_VOLUME,
@@ -287,16 +305,33 @@ def create_plan(filename: Path, seagate: str, wd: str) -> None:
 
 
 def stored_plan(filename: Path) -> tuple[dict, str]:
-    st = filename.lstat()
-    demand(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1 and
-           (st.st_mode & 0o077) == 0, "Apply requires a root-owned private plan (0600)")
-    payload = filename.read_bytes()
+    # fstat/read on the SAME inode; lstat + read_bytes was a symlink/rename race.
+    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        st = os.fstat(stream.fileno())
+        demand(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1 and
+               (st.st_mode & 0o077) == 0, "Apply requires a root-owned private plan (0600)")
+        payload = stream.read(65536)
     demand(len(payload) < 65536, "plan exceeds 64 KiB limit")
     plan = json.loads(payload)
     demand(plan.get("schema_version") == 1 and plan.get("profile") == "nonproductive-stage0",
            "wrong install plan kind")
-    demand(plan.get("no_nvram_changes") is True and plan.get("wd_protected") is True,
+    demand(plan.get("no_nvram_changes") is True and plan.get("wd_protected") is True and
+           plan.get("required_root_label") == ROOT_LABEL and
+           plan.get("expected_p3_gpt_rewrite") == {"from": LUKS_GUID, "to": LINUX_GUID},
            "unsafe stage0 plan")
+    snapshot = plan.get("snapshot")
+    demand(isinstance(snapshot, dict), "Stage0 plan missing hardware snapshot")
+    # JSON object keys are strings; disk_tree() and other live observations
+    # use integer GPT partition numbers. Normalize after hashing the raw
+    # immutable plan, so future direct lookups cannot silently diverge.
+    for category in ("seagate_parts", "wd_parts"):
+        if category in snapshot:
+            parts = snapshot[category]
+            demand(isinstance(parts, dict) and all(
+                isinstance(n, str) and re.fullmatch(r"[1-9][0-9]*", n)
+                for n in parts), f"unsafe {category} indices")
+            snapshot[category] = {int(n): details for n, details in parts.items()}
     return plan, digest(payload)
 
 
@@ -309,19 +344,33 @@ def validated_shadow_metadata(shadow: Path) -> os.stat_result:
     return existing
 
 
-def credential_bootstrap(shadow: Path) -> None:
+def prepare_private_credential_hash() -> str:
+    """Collect and validate the password BEFORE the first disk/ESP effect."""
+    for attempt in range(3):
+        password = getpass.getpass("Stage0 login password (not logged): ")
+        repeat = getpass.getpass("Repeat Stage0 login password: ")
+        valid = password == repeat and len(password) >= 16
+        if valid:
+            salt = secrets.token_urlsafe(12).replace("-", "a").replace("_", "b")[:16]
+            hashed = output_hash(password, salt)
+            del password, repeat
+            demand(bool(re.fullmatch(r"\$6\$[A-Za-z0-9./]{1,16}\$[A-Za-z0-9./]{1,128}", hashed)),
+                   "invalid private password hash")
+            return hashed
+        del password, repeat
+        if attempt < 2:
+            print("Stage0 password mismatch/short; retry (no disk changes)", file=sys.stderr)
+    raise AdmissionError("Stage0 requires matching passwords of at least 16 characters")
+
+
+def credential_bootstrap(shadow: Path, hashed: str) -> None:
+    demand(bool(re.fullmatch(r"\$6\$[A-Za-z0-9./]{1,16}\$[A-Za-z0-9./]{1,128}", hashed)),
+           "invalid private password hash")
     existing = validated_shadow_metadata(shadow)
     original = shadow.read_text()
     rows = original.splitlines(keepends=True)
     indexes = [i for i, line in enumerate(rows) if line.startswith("alex:")]
     demand(len(indexes) == 1, "installed login user missing or duplicated")
-    password = getpass.getpass("Stage0 login password (not logged): ")
-    repeat = getpass.getpass("Repeat Stage0 login password: ")
-    demand(password == repeat and len(password) >= 16,
-           "Stage0 requires matching passwords of at least 16 characters")
-    salt = secrets.token_urlsafe(12).replace("-", "a").replace("_", "b")[:16]
-    hashed = output_hash(password, salt)
-    del password, repeat
     tokens = rows[indexes[0]].rstrip("\n").split(":")
     demand(len(tokens) == 9, "unexpected NixOS shadow record")
     demand(tokens[1] in ("!", "!!", "*", "!*"),
@@ -408,10 +457,9 @@ def verify_install_namespace(source: dict) -> None:
         "--security-opt=apparmor=unconfined", "--pids-limit=128",
         "--memory=2g",
         "--mount", f"type=volume,src={source['volume']},dst=/nix,readonly",
-        "--entrypoint", "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin/bin/unshare",
+        "--entrypoint", UTIL_LINUX + "/bin/unshare",
         source["image"], "--mount", "--uts", "--mount-proc", "--",
-        "/nix/var/nix/profiles/default/bin/bash", "-c",
-        "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin/bin/mount --make-rprivate /",
+        UTIL_LINUX + "/bin/mount", "--make-rprivate", "/",
     ]
     host_cmd(*cmd)
 
@@ -425,7 +473,7 @@ def verify_source_store(source: dict) -> None:
         "--mount", f"type=volume,src={source['volume']},dst=/nix",
         "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
         source["image"], "--extra-experimental-features", "nix-command",
-        "store", "verify", "--recursive", source["system"], source["installer"],
+        "store", "verify", "--recursive", source["system"], source["installer"], UTIL_LINUX,
     ]
     host_cmd(*cmd)
 
@@ -470,15 +518,35 @@ def run_container(source: dict, *arguments: str) -> None:
 
 def verify_installed_esp() -> None:
     boot = NIX_ROOT / "boot"
-    demand((boot / "EFI/BOOT/BOOTX64.EFI").is_file(),
-           "missing Seagate removable-path EFI bootloader")
+    fallback = boot / "EFI/BOOT/BOOTX64.EFI"
+    demand(fallback.is_file() and fallback.stat().st_size > 0,
+           "missing/empty Seagate removable-path EFI bootloader")
     entries = list((boot / "loader/entries").glob("nixos*.conf"))
     demand(entries, "no systemd-boot NixOS entry")
     for entry in entries:
-        data = entry.read_text()
-        demand("initrd " in data and "linux " in data and "root=fstab" in data,
-               "boot entry missing initrd, kernel or evaluated root=fstab")
-        demand("NIXOS2_CRYPT" not in data and "rd.luks" not in data,
+        demand(entry.is_file() and not entry.is_symlink(), "unsafe EFI loader entry")
+        fields: dict[str, list[str]] = {}
+        for line in entry.read_text().splitlines():
+            chunks = line.strip().split(maxsplit=1)
+            if len(chunks) == 2 and chunks[0] in ("linux", "initrd", "options"):
+                fields.setdefault(chunks[0], []).append(chunks[1])
+        demand(all(len(fields.get(field, [])) == 1 for field in ("linux", "initrd", "options")),
+               "boot entry missing/duplicate kernel, initrd or options")
+        args = fields["options"][0].split()
+        demand("root=fstab" in args and f"init={SYSTEM}/init" in args,
+               "boot entry missing source-bound init= or evaluated root=fstab")
+        for field in ("linux", "initrd"):
+            # Relative paths, embedded whitespace and traversal are never permitted.
+            reference = fields[field][0]
+            demand(reference.startswith("/") and not reference.startswith("//") and
+                   len(reference.split()) == 1 and
+                   all(part not in ("", ".", "..") for part in reference[1:].split("/")),
+                   "unsafe boot entry kernel/initrd path")
+            artifact = boot / reference.lstrip("/")
+            demand(artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_size > 0,
+                   f"missing/empty installed {field} image")
+        demand("NIXOS2_CRYPT" not in fields["options"][0] and
+               not any(arg.startswith("rd.luks") for arg in args),
                "nonproduction boot entry unexpectedly references LUKS")
     demand((NIX_ROOT / "etc/shadow").is_file(), "installed NixOS shadow not found")
 
@@ -538,9 +606,12 @@ def apply_plan(filename: Path, confirmation: str) -> None:
     verify_host_tools()
     verify_source_store(source)
     verify_install_namespace(source)
+    # Password errors must never strand a formatted Seagate with a locked user.
+    hashed = prepare_private_credential_hash()
 
     # Block mutations begin only after every precondition above succeeded.
     mounts: list[Path] = []
+    root_was_created = not NIX_ROOT.exists()
     try:
         ensure_empty_mount_path(NIX_ROOT)
         (NIX_ROOT / "boot").mkdir(mode=0o700)
@@ -554,7 +625,11 @@ def apply_plan(filename: Path, confirmation: str) -> None:
                not (NIX_ROOT / "boot/EFI/systemd/systemd-bootx64.efi").exists(),
                "Seagate ESP already contains bootloader configuration; refusing overwrite")
         host_cmd("umount", str(NIX_ROOT / "boot"))
+        demand(not (NIX_ROOT / "boot").is_mount(), "ESP preflight mount still active")
         mounts.pop()
+        # The Btrfs root is NOT mounted yet. Do not leave a host /boot stub.
+        (NIX_ROOT / "boot").rmdir()
+        demand(not any(NIX_ROOT.iterdir()), "ESP preflight left host files")
 
         # Correct the historical Linux-LUKS GPT type before plain Btrfs format.
         host_cmd("sgdisk", "--typecode=3:8300", "--change-name=3:NIXOS_STAGE0_ROOT",
@@ -595,10 +670,22 @@ def apply_plan(filename: Path, confirmation: str) -> None:
         copy_source_closure_to_target(source)
         run_container(source)
         verify_installed_esp()
-        credential_bootstrap(NIX_ROOT / "etc/shadow")
+        credential_bootstrap(NIX_ROOT / "etc/shadow", hashed)
         same_protected_fingerprint(snapshot)
     finally:
         cleanup_target_mounts(mounts)
+        # Only remove the host directory we created, never non-empty/active
+        # directories or any Btrfs directory while the target remains mounted.
+        if NIX_ROOT.exists() and not NIX_ROOT.is_mount():
+            residual = NIX_ROOT / "boot"
+            if residual.exists():
+                demand(residual.is_dir() and not residual.is_symlink() and
+                       not residual.is_mount() and not any(residual.iterdir()),
+                       "unsafe residual host ESP mount path")
+                residual.rmdir()
+            if root_was_created:
+                demand(not any(NIX_ROOT.iterdir()), "Stage0 host mount path still occupied")
+                NIX_ROOT.rmdir()
     print(json.dumps({"stage0": "INSTALLED_REQUIRES_PHYSICAL_BOOT_TEST",
                       "system": SYSTEM, "wd_and_nvram_unchanged": True},
                      sort_keys=True))

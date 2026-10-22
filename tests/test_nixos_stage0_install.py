@@ -36,6 +36,23 @@ def mock_disk(parts: int, model: str = "Seagate ZP4000GP304001") -> dict:
 
 
 class Stage0SourceTests(unittest.TestCase):
+    def test_frozen_stage0_profile_btrfs_and_no_default_passwords(self):
+        source = (stage0.ROOT / "nixos/system/modules/stage0-no-usb.nix").read_text()
+        self.assertIn('rootDevice = "/dev/disk/by-label/NIXOS_STAGE0_ROOT";', source)
+        for mount, subvol in (("/", "@root"), ("/nix", "@nix"),
+                              ("/home", "@home"), ("/persist", "@persist")):
+            self.assertIn(f'fileSystems."{mount}" = subvolume "{subvol}";', source)
+        self.assertIn('fsType = "btrfs";', source)
+        self.assertIn('device = rootDevice;', source)
+        self.assertIn('options = [ "subvol=${name}" "compress=zstd" ];', source)
+        self.assertIn('device = "/dev/disk/by-label/NIXOS2_EFI";', source)
+        self.assertIn('security.sudo.wheelNeedsPassword = true;', source)
+        self.assertIn('users.mutableUsers = true;', source)
+        for secret in ('hashedPassword =', 'initialPassword =', 'initialHashedPassword =',
+                       'hashedPasswordFile ='):
+            self.assertNotIn(secret, source)
+        self.assertIn('boot.loader.efi.canTouchEfiVariables = false;', source)
+
     def test_pinned_installer_cannot_be_replaced_by_sidecar(self):
         fake = {
             str(stage0.BUILD_STATE / "source-head"): stage0.BUILD_REV,
@@ -116,9 +133,30 @@ class Stage0SourceTests(unittest.TestCase):
                 stage0.hidden_signatures("mock")
 
     def test_missing_root_label_rejected_on_plan(self):
-        with patch.object(stage0.os.path, "lexists", return_value=True):
-            self.assertTrue(os.path.lexists("/dev/disk/by-label/NIXOS_STAGE0_ROOT"))
-
+        disk = {"name": "/dev/nvme0n1", "model": "Seagate ZP4000GP304001",
+                "size": 4_000_000_000_000, "pttype": "gpt"}
+        wd = {"name": "/dev/nvme1n1", "model": "WD_BLACK SN850X",
+              "size": 2_000_000_000_000, "pttype": "gpt"}
+        parts = {n: {"name": f"/dev/nvme0n1p{n}",
+                     "partuuid": f"0000000{n}-0000-0000-0000-000000000001"}
+                 for n in (1, 2, 3)}
+        parts[1].update(parttype=stage0.EFI_GUID, fstype="vfat", label=stage0.EFI_LABEL)
+        parts[2].update(fstype="ext4", label=stage0.RECOVERY_LABEL)
+        parts[3].update(parttype=stage0.LUKS_GUID, partlabel="NIXOS2_CRYPT",
+                        fstype=None, uuid=None, size=stage0.MIN_ROOT_SIZE)
+        with patch.object(stage0, "by_id_disk", side_effect=["/dev/nvme0n1", "/dev/nvme1n1"]), \
+             patch.object(stage0.os, "stat", side_effect=[
+                 types.SimpleNamespace(st_rdev=10), types.SimpleNamespace(st_rdev=11)]), \
+             patch.object(stage0, "disk_tree", side_effect=[(disk, parts), (wd, {})]), \
+             patch.object(stage0, "no_mounts_and_holders"), \
+             patch.object(stage0, "protected_mounts_on_wd"), \
+             patch.object(stage0, "part_path"), \
+             patch.object(stage0, "hidden_signatures"), \
+             patch.object(stage0.os.path, "lexists", return_value=True), \
+             patch.object(stage0, "host_cmd") as mutate:
+            with self.assertRaisesRegex(stage0.AdmissionError, "occupied Stage0 root label"):
+                stage0.live_snapshot("/dev/disk/by-id/nvme-seagate", "/dev/disk/by-id/nvme-wd")
+            mutate.assert_not_called()
     def test_plan_creates_only_private_file_and_never_calls_mutator(self):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "stage0-private.json"
@@ -146,21 +184,28 @@ class Stage0SourceTests(unittest.TestCase):
     def test_plan_owner_requirement_rejects_user_owned_file(self):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "test-plan.json"
-            dest.write_text('{"schema_version":1,"profile":"nonproductive-stage0","no_nvram_changes":true,"wd_protected":true}')
-            if os.getuid() != 0:
+            dest.write_text("{}")
+            os.chmod(dest, 0o600)
+            original = dest.stat()
+            stat_result = types.SimpleNamespace(st_mode=original.st_mode, st_uid=1000, st_nlink=1)
+            with patch.object(stage0.os, "fstat", return_value=stat_result):
                 with self.assertRaisesRegex(stage0.AdmissionError, "root-owned"):
                     stage0.stored_plan(dest)
-
     def test_stored_plan_requires_no_nvram_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "plan.json"
-            dest.write_text('{"schema_version":1,"profile":"nonproductive-stage0","no_nvram_changes":false,"wd_protected":true}')
-            mode = dest.stat().st_mode
-            stat_result = types.SimpleNamespace(st_mode=(mode & ~0o077), st_uid=0, st_gid=0, st_nlink=1)
-            with patch.object(stage0.Path, "lstat", return_value=stat_result):
+            dest.write_text(json.dumps({
+                "schema_version": 1, "profile": "nonproductive-stage0",
+                "no_nvram_changes": False, "wd_protected": True,
+                "required_root_label": stage0.ROOT_LABEL,
+                "expected_p3_gpt_rewrite": {"from": stage0.LUKS_GUID, "to": stage0.LINUX_GUID},
+            }))
+            os.chmod(dest, 0o600)
+            st = dest.stat()
+            with patch.object(stage0.os, "fstat", return_value=types.SimpleNamespace(
+                st_mode=st.st_mode, st_uid=0, st_nlink=1)):
                 with self.assertRaisesRegex(stage0.AdmissionError, "unsafe"):
                     stage0.stored_plan(dest)
-
     def test_cleanup_error_fails_closed_and_reports_alarm(self):
         mounts = [Path("/mock-root"), Path("/mock-root/boot")]
         def fake_umount(*args):
@@ -184,7 +229,8 @@ class Stage0SourceTests(unittest.TestCase):
         unmount.assert_called_once_with("umount", "/mock-root")
 
     def test_cleanup_success_reverse_order(self):
-        with patch.object(stage0, "host_cmd") as cmd:
+        with patch.object(stage0, "host_cmd") as cmd, \
+             patch.object(stage0.Path, "is_mount", return_value=False):
             stage0.cleanup_target_mounts([Path("/mock-root"), Path("/mock-root/boot")])
         self.assertEqual([c.args for c in cmd.call_args_list],
                          [("umount", "/mock-root/boot"), ("umount", "/mock-root")])
@@ -315,6 +361,9 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn("--network=none", cmd)
         self.assertIn("--security-opt=apparmor=unconfined", cmd)
         self.assertIn("--security-opt=seccomp=unconfined", cmd)
+        self.assertIn(stage0.UTIL_LINUX + "/bin/unshare", cmd)
+        self.assertIn(stage0.UTIL_LINUX + "/bin/mount", cmd)
+        self.assertNotIn("/nix/var/nix/profiles/default/bin/bash", cmd)
         self.assertIn("--cap-add=SYS_ADMIN", cmd)
         self.assertIn("readonly", " ".join(cmd))
         self.assertNotIn("/dev/", " ".join(cmd))
@@ -349,6 +398,7 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn("--recursive", argv)
         self.assertIn(stage0.SYSTEM, argv)
         self.assertIn(stage0.INSTALLER, argv)
+        self.assertIn(stage0.UTIL_LINUX, argv)
 
     def test_reverify_source_closure_has_no_block_device_mounts(self):
         source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
@@ -374,18 +424,126 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn(b"private-secret-sent-to-stdin", wrapper.call_args.kwargs["input_bytes"])
 
     def test_weak_password_rejected_before_shadow_change(self):
-        with tempfile.TemporaryDirectory() as td:
-            shadow = Path(td) / "shadow"
-            shadow.write_text("root:!:1:0:99999:7:::\nalex:!:1:0:99999:7:::\n")
-            original = shadow.read_bytes()
-            shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
-            with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
-                 patch.object(stage0.getpass, "getpass", side_effect=["short", "short"]), \
-                 patch.object(stage0, "output_hash") as hasher:
-                with self.assertRaisesRegex(stage0.AdmissionError, "at least 16"):
-                    stage0.credential_bootstrap(shadow)
-            self.assertEqual(shadow.read_bytes(), original)
+        with patch.object(stage0.getpass, "getpass", side_effect=["short", "short"]*3) as prompt, \
+             patch.object(stage0, "output_hash") as hasher, \
+             patch.object(stage0, "host_cmd") as disk, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(stage0.AdmissionError, "at least 16"):
+                stage0.prepare_private_credential_hash()
+            self.assertEqual(prompt.call_count, 6)
             hasher.assert_not_called()
+            disk.assert_not_called()
+    def test_password_retry_succeeds_only_after_matching_long_secret(self):
+        secret = "private-stage0-password-length-32"
+        with patch.object(stage0.getpass, "getpass", side_effect=[
+                 "mistake", "mistake", secret, secret]) as prompt, \
+             patch.object(stage0, "output_hash", return_value="$6$saltsalt$hashdata") as hasher, \
+             patch.object(stage0, "host_cmd") as disk, \
+             contextlib.redirect_stderr(io.StringIO()):
+            result = stage0.prepare_private_credential_hash()
+        self.assertEqual(result, "$6$saltsalt$hashdata")
+        self.assertEqual(prompt.call_count, 4)
+        hasher.assert_called_once()
+        self.assertEqual(hasher.call_args.args[0], secret)
+        disk.assert_not_called()
+
+    def test_source_git_uses_exact_checkout_scoped_safety(self):
+        args = stage0.git_args("status", "--porcelain")
+        self.assertEqual(args[0], "git")
+        self.assertIn(f"safe.directory={stage0.ROOT}", args)
+        self.assertIn("core.fsmonitor=false", args)
+        self.assertIn("core.hooksPath=/dev/null", args)
+        self.assertEqual(args[-2:], ("status", "--porcelain"))
+
+    def test_stored_plan_symlink_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "target"
+            alias = Path(td) / "alias"
+            target.write_text("{}")
+            alias.symlink_to(target.name)
+            with self.assertRaises(OSError):
+                stage0.stored_plan(alias)
+
+    def test_plan_validation_rejects_wrong_root_label_on_same_open_inode(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "plan"
+            path.write_text(json.dumps({
+                "schema_version": 1, "profile": "nonproductive-stage0",
+                "no_nvram_changes": True, "wd_protected": True,
+                "required_root_label": "ATTACKER_LABEL",
+                "expected_p3_gpt_rewrite": {"from": stage0.LUKS_GUID, "to": stage0.LINUX_GUID},
+            }))
+            os.chmod(path, 0o600)
+            st = path.stat()
+            with patch.object(stage0.os, "fstat", return_value=types.SimpleNamespace(
+                st_mode=st.st_mode, st_uid=0, st_nlink=1)):
+                with self.assertRaisesRegex(stage0.AdmissionError, "unsafe"):
+                    stage0.stored_plan(path)
+
+    def test_stored_plan_normalizes_json_partition_numbers_on_one_inode(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "plan.json"
+            path.write_text(json.dumps({
+                "schema_version": 1, "profile": "nonproductive-stage0",
+                "no_nvram_changes": True, "wd_protected": True,
+                "required_root_label": stage0.ROOT_LABEL,
+                "expected_p3_gpt_rewrite": {
+                    "from": stage0.LUKS_GUID, "to": stage0.LINUX_GUID,
+                },
+                "snapshot": {
+                    "seagate_parts": {"1": {"size": 1024}, "3": {"size": 4096}},
+                    "wd_parts": {"2": {"size": 8192}},
+                },
+            }))
+            os.chmod(path, 0o600)
+            original = path.read_bytes()
+            st = path.stat()
+            with patch.object(stage0.os, "fstat", return_value=types.SimpleNamespace(
+                st_uid=0, st_mode=st.st_mode, st_nlink=1)), \
+                 patch.object(stage0.Path, "read_bytes", side_effect=AssertionError("TOCTOU")):
+                plan, digest = stage0.stored_plan(path)
+            self.assertEqual(digest, stage0.digest(original))
+            self.assertEqual(sorted(plan["snapshot"]["seagate_parts"]), [1, 3])
+            self.assertEqual(sorted(plan["snapshot"]["wd_parts"]), [2])
+
+    def test_stored_plan_rejects_forged_gpt_partition_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "plan.json"
+            path.write_text(json.dumps({
+                "schema_version": 1, "profile": "nonproductive-stage0",
+                "no_nvram_changes": True, "wd_protected": True,
+                "required_root_label": stage0.ROOT_LABEL,
+                "expected_p3_gpt_rewrite": {
+                    "from": stage0.LUKS_GUID, "to": stage0.LINUX_GUID,
+                },
+                "snapshot": {"seagate_parts": {"3;bad": {}}},
+            }))
+            os.chmod(path, 0o600)
+            st = path.stat()
+            with patch.object(stage0.os, "fstat", return_value=types.SimpleNamespace(
+                st_uid=0, st_mode=st.st_mode, st_nlink=1)):
+                with self.assertRaisesRegex(stage0.AdmissionError, "indices"):
+                    stage0.stored_plan(path)
+
+    def test_hashing_malformed_output_fails_before_first_storage_operation(self):
+        value = "compliant-stage0-password-123456789"
+        with patch.object(stage0.getpass, "getpass", side_effect=[value, value]), \
+             patch.object(stage0, "output_hash", return_value="$6$malformed"), \
+             patch.object(stage0, "host_cmd") as disk:
+            with self.assertRaisesRegex(stage0.AdmissionError, "invalid private password hash"):
+                stage0.prepare_private_credential_hash()
+            disk.assert_not_called()
+
+    def test_nonsecret_stderr_is_bounded_but_hash_input_never_logged(self):
+        failed = subprocess.CompletedProcess([], 3, b"", b"reason: read-only FAT volume\nsecond detail")
+        with patch.object(stage0.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(stage0.AdmissionError, "read-only FAT volume"):
+                stage0.run("mkfs.btrfs", "--version")
+            with self.assertRaises(stage0.AdmissionError) as secret:
+                stage0.run("/usr/bin/openssl", "passwd", "-stdin",
+                           input_bytes=b"password-value-should-not-leak\n")
+        self.assertNotIn("password-value", str(secret.exception))
+        self.assertNotIn("reason:", str(secret.exception))
 
     def test_secure_hash_saved_to_shadow_without_plaintxt(self):
         with tempfile.TemporaryDirectory() as td:
@@ -393,21 +551,20 @@ class Stage0SourceTests(unittest.TestCase):
             shadow.write_text("root:!:1:0:99999:7:::\nalex:!:1:0:99999:7:::\n")
             shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
-                 patch.object(stage0.getpass, "getpass",
-                              side_effect=["unique-password-with-23-symbols", "unique-password-with-23-symbols"]), \
-                 patch.object(stage0, "output_hash", return_value="$6$salt$hashdata"), \
+                 patch.object(stage0.getpass, "getpass") as prompt, \
                  patch.object(stage0.os, "fchown") as preserve_owner:
-                stage0.credential_bootstrap(shadow)
+                stage0.credential_bootstrap(shadow, "$6$salt$hashdata")
                 preserve_owner.assert_called_once()
+                prompt.assert_not_called()
             value = shadow.read_text()
             self.assertIn("alex:$6$salt$hashdata:", value)
-            self.assertNotIn("unique-password", value)
             self.assertEqual(stat.S_IMODE(shadow.stat().st_mode), 0o600)
 
     def test_simulated_apply_obeys_exact_target_partition_order(self):
         # All storage/external calls are mocked; NO block device, mount or EFI is touched.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "stage0-root"
+            path.mkdir()  # Existing empty host mountpoint, never a real block mount.
             source = {"revision": "a"*40, "system": stage0.SYSTEM,
                       "installer": "/nix/store/"+"a"*32+"-nixos-install",
                       "image": stage0.NIX_IMAGE, "volume": stage0.BUILD_VOLUME,
@@ -456,6 +613,8 @@ class Stage0SourceTests(unittest.TestCase):
                 fingerprints = stack.enter_context(patch.object(stage0, "same_protected_fingerprint"))
                 verify_tools = stack.enter_context(patch.object(stage0, "verify_host_tools"))
                 verify_namespace = stack.enter_context(patch.object(stage0, "verify_install_namespace"))
+                password_hash = stack.enter_context(patch.object(stage0, "prepare_private_credential_hash",
+                                                                  return_value="$6$test$hash"))
                 verify_store = stack.enter_context(patch.object(stage0, "verify_source_store"))
                 copy_store = stack.enter_context(patch.object(stage0, "copy_source_closure_to_target"))
                 installer = stack.enter_context(patch.object(stage0, "run_container"))
@@ -483,10 +642,11 @@ class Stage0SourceTests(unittest.TestCase):
             verify_tools.assert_called_once_with()
             verify_namespace.assert_called_once_with(source)
             verify_store.assert_called_once_with(source)
+            password_hash.assert_called_once_with()
             copy_store.assert_called_once_with(source)
             installer.assert_called_once_with(source)
             esp.assert_called_once()
-            credentials.assert_called_once_with(path / "etc/shadow")
+            credentials.assert_called_once_with(path / "etc/shadow", "$6$test$hash")
 
     def test_password_bootstrap_never_overwrites_preexisting_hash(self):
         with tempfile.TemporaryDirectory() as td:
@@ -495,11 +655,11 @@ class Stage0SourceTests(unittest.TestCase):
             before = shadow.read_bytes()
             shadow_meta = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
             with patch.object(stage0, "validated_shadow_metadata", return_value=shadow_meta), \
-                 patch.object(stage0.getpass, "getpass", side_effect=["secret-of-length-at-least-16"]*2), \
-                 patch.object(stage0, "output_hash", return_value="$6$new$hash"):
+                 patch.object(stage0, "output_hash") as hasher:
                 with self.assertRaisesRegex(stage0.AdmissionError, "already has a password"):
-                    stage0.credential_bootstrap(shadow)
+                    stage0.credential_bootstrap(shadow, "$6$new$hash")
             self.assertEqual(shadow.read_bytes(), before)
+            hasher.assert_not_called()
 
     def test_uefi_loader_entry_matches_evaluated_root_fstab(self):
         with tempfile.TemporaryDirectory() as td:
@@ -509,19 +669,32 @@ class Stage0SourceTests(unittest.TestCase):
             entry = boot / "loader/entries/nixos-generation-1.conf"
             efi.parent.mkdir(parents=True)
             entry.parent.mkdir(parents=True)
-            efi.write_bytes(b"simulated systemd-boot EFI file")
+            efi.write_bytes(b"systemd-boot EFI image")
             (root / "etc").mkdir()
             (root / "etc/shadow").write_text("alex:!:1:0:99999:7:::\n")
+            (boot / "EFI/nixos").mkdir(parents=True)
+            kernel = boot / "EFI/nixos/stage0-linux.efi"
+            initrd = boot / "EFI/nixos/stage0-initrd.efi"
+            kernel.write_bytes(b"kernel-image")
+            initrd.write_bytes(b"initrd-image")
             entry.write_text(
                 "title NixOS Stage0\n"
                 "linux /EFI/nixos/stage0-linux.efi\n"
                 "initrd /EFI/nixos/stage0-initrd.efi\n"
-                "options init=/nix/store/exact-system/init nomodeset root=fstab loglevel=4\n"
+                f"options init={stage0.SYSTEM}/init nomodeset root=fstab loglevel=4\n"
             )
             with patch.object(stage0, "NIX_ROOT", root):
                 stage0.verify_installed_esp()
-                entry.write_text(entry.read_text().replace("root=fstab", "root=/dev/sda1"))
+                good = entry.read_text()
+                entry.write_text(good.replace("root=fstab", "root=/dev/sda1"))
                 with self.assertRaisesRegex(stage0.AdmissionError, "root=fstab"):
+                    stage0.verify_installed_esp()
+                entry.write_text(good.replace(f"init={stage0.SYSTEM}/init", "init=/nix/store/tamper/init"))
+                with self.assertRaisesRegex(stage0.AdmissionError, "init="):
+                    stage0.verify_installed_esp()
+                entry.write_text(good)
+                initrd.unlink()
+                with self.assertRaisesRegex(stage0.AdmissionError, "missing/empty"):
                     stage0.verify_installed_esp()
 
     def test_shadow_metadata_rejects_world_readable_or_nonroot(self):

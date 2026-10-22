@@ -83,17 +83,34 @@ Only the hardware executor may consider, after checking those gates:
 
 Root-owned 0600 plan, real interactive TTY, exact confirmation SHA256,
 snapshot equality and matching Git/script/closure/build sources are
-mandatory. Source store integrity must pass a fresh recursive verification
+mandatory. The private 0600 plan is read from one NOFOLLOW file descriptor
+with fstat on the same inode, then checked against the exact Seagate p3-GPT
+type rewrite and root label. Git source inspection uses an explicit,
+checkout-scoped safe.directory without changing global Git configuration.
+Source store integrity must pass a fresh recursive verification
 before any physical disk mutation. Existing Pop!_OS and EFI variables are
 outside mutation scope. Before changing GPT, Apply now probes all host
 storage tools (including btrfs, mkfs.btrfs, sgdisk) and runs the pinned
 NixOS chroot mount-namespace preflight in a Docker container without
 host-device binds or networking. This addresses the previously observed
 missing-host-btrfs-tools and Docker default-AppArmor denial.
+The exact pinned util-linux/minimal closure is also verified recursively;
+the mount namespace probe executes its unshare/mount directly (without
+using the unverified default-profile Bash executable).
+
+The user password is now requested, confirmed (up to three attempts),
+and hashed BEFORE the very first ESP mount/GPT/filesystem write; only
+the private SHA-512-crypt hash remains for final /etc/shadow insertion.
+Credential input errors therefore cannot produce a half-formatted target.
+No password, salt/credential plaintext or hash is placed in Git or logs.
 
 Expected guarded sequence, not yet a physical install receipt:
 
-1. Recheck source/target and existing Seagate EFI loader absence.
+1. Recheck source/target and existing Seagate EFI loader absence. The
+   preflight mounts Seagate p1 only, never the WD ESP; after unmount it
+   removes the temporary HOST /mnt/.../boot stub and verifies no active
+   mount remains. The parent mountpoint is removed on clean completion
+   only if this invocation created it.
 2. Change the Linux-LUKS historical GPT type of ONLY Seagate p3 to
    Linux filesystem; rename its partition label NIXOS_STAGE0_ROOT.
    Verify all three Seagate PARTUUIDs remain unchanged and the protected
@@ -115,15 +132,15 @@ Expected guarded sequence, not yet a physical install receipt:
    apparmor=unconfined; this is a security-sensitive installation container
    with no network or raw host-disk device mounts. The NixOS profile has
    boot.loader.efi.canTouchEfiVariables=false.
-7. Verify Seagate own EFI/BOOT/BOOTX64.EFI and generated loader entries,
-   installed shadow, and NixOS 26.05's evaluated kernel parameter
-   root=fstab (the root's Btrfs label is resolved through NixOS initrd
-   filesystems, not expected literally in the EFI entry). Ask interactively for a
-   new 16+ character password for alex, hash it only into the installed
-   /etc/shadow; no secret in Git, store, argv or logs. Refuse an existing
-   alex password; root remains locked. Validate WD GPT/ESP and EFI
-   boot entry fingerprints before/after. Unmount every target in reverse
-   order; cleanup errors require manual recovery.
+7. Verify nonempty Seagate EFI/BOOT/BOOTX64.EFI, referenced kernel/initrd
+   files, unique loader arguments including exact init=BUILT-SYSTEM/init,
+   and NixOS 26.05's evaluated root=fstab (the Btrfs label is resolved
+   through the initrd filesystems). Install ONLY the previously prepared
+   private crypt hash into the installed /etc/shadow; no second interactive
+   prompt after disk mutation. Refuse an existing alex password; root
+   remains locked. Validate WD GPT/ESP and EFI boot entry fingerprints
+   before/after. Unmount in reverse order and verify every mount is gone;
+   cleanup errors require manual recovery.
 8. There is no automatic reboot or automatic firmware entry update.
    Any partially completed GPT/format/install effects require
    explicit diagnosis, never an unreviewed retry.
@@ -200,6 +217,40 @@ negative holder regression. The full local Python suite subsequently
 passed (2167 tests, 1 skipped, 465 subtests), as did the 37 Stage0 tests
 and 52 NixOS-source unit regressions. **These tests do not resolve the
 outstanding immutable-source P1 or constitute physical boot evidence.**
+
+## Sealed OCI candidate: actual integration proof, not a source release
+
+An independently created, self-contained OCI image now embeds a snapshot of
+the built Nix Store, rather than sharing the mutable Docker volume:
+`sha256:91b210f35fe468e2901448b5d9dadbadcf12e3240121d573c08255028f874aa9`.
+Its layer-separated Nix content and concurrent-container COW isolation were
+tested without any Seagate/WD device mount; see the independent source
+review thread and
+`/home/alex/labs/heim-pc-stage0-sealed-oci-prototype-20261022.md`.
+A further **real** no-bootloader scratch installation from this exact image
+finished successfully in a disposable target Docker volume, task
+`547d1aa18bf34756b76cea25`, marker
+`STAGE0_SELFCONTAINED_OCI_OFFLINE_NO_BOOTLOADER_INSTALL_OK`.
+It did not share the old source Docker volume with the installation
+container. This is an actual executable integration candidate, but
+**not a reviewed root-owned attestation of the provenance or physical
+bootability of the final installer**; Docker-daemon/root tampering and
+end-to-end Seagate ESP/Btrfs installation have not been excluded.
+The production Stage0 source remains pinned to the original image and
+retains the unconditional `--apply` hold. Never lift it based solely on
+this successful test.
+
+## Deferred NixOS module-bound review items
+
+The independent review recommends `usbhid`/`hid_generic` in the initrd
+for early recovery-shell keyboard support, and stronger Nix evaluation
+assertions on all Btrfs subvolumes and passwordlessness. They change
+`nixos/system/` and require a **new, pinned, realized Stage0 system
+closure, revised BUILD_REV and refreshed provenance**: the old closure
+cannot truthfully be reused. Do not silently modify the module while
+claiming the former built source is unchanged. These items remain
+tracked pre-hardware-review work; the Btrfs+ESP target still lacks a
+successful installed-target VM boot and the real rootbroker TTY route.
 
 ## Independent boot and rollback proof for Thread 2
 
