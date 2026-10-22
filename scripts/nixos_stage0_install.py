@@ -42,6 +42,21 @@ LUKS_GUID = "ca7d7ccb-63ed-4c53-861c-1742536059cc"
 LINUX_GUID = "0fc63daf-8483-4772-8e79-3d69d8477de4"
 EFI_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 BY_ID = re.compile(r"^/dev/disk/by-id/nvme-[a-zA-Z0-9_.:+-]+$")
+# Hardware-pinned Stage0 scope: never accept another similar model/size disk.
+# All identities are verified again in Plan and immediately before Apply.
+SEAGATE_BY_ID = "/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7"
+WD_BY_ID = "/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519"
+SEAGATE_IDENTITY = {
+    "model": "Seagate ZP4000GP304001", "serial": "7VS01DX7",
+    "wwn": "eui.6479a7716f000a39", "size": 4000787030016,
+    "gpt_guid": "b862830a-c8f1-4968-bf65-636b87bc2e85",
+}
+WD_IDENTITY = {
+    "model": "WD_BLACK SN850X 2000GB", "serial": "25025T802519",
+    "wwn": "eui.e8238fa6bf530001001b448b4d59e756",
+    "size": 2000398934016,
+    "gpt_guid": "79aa7645-4dea-4992-bf90-72e8d75e117b",
+}
 UTIL_LINUX = "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin"
 # Exact content (NAR) fingerprints remeasured from pinned standalone OCI image.
 # A source Nix DB self-check alone must not authorize an alternate NAR.
@@ -158,7 +173,7 @@ def part_path(disk_alias: str, number: int, observed: dict) -> str:
 
 def disk_tree(disk_alias: str, exact_three: bool = True) -> tuple[dict, dict[int, dict]]:
     data = json.loads(output("lsblk", "--json", "--bytes", "--paths",
-                             "--output", "NAME,KNAME,TYPE,MODEL,SERIAL,SIZE,PTTYPE,PARTTYPE,PARTLABEL,PARTUUID,FSTYPE,LABEL,UUID,MOUNTPOINTS,RO,RM",
+                             "--output", "NAME,KNAME,TYPE,MODEL,SERIAL,WWN,SIZE,PTTYPE,PARTTYPE,PARTLABEL,PARTUUID,FSTYPE,LABEL,UUID,MOUNTPOINTS,RO,RM",
                              disk_alias))
     nodes = data.get("blockdevices", [])
     demand(len(nodes) == 1 and nodes[0]["type"] == "disk", "expected exactly one disk")
@@ -240,18 +255,29 @@ def wd_esp_tree_fingerprint(root: Path = Path("/boot/efi")) -> str:
     return h.hexdigest()
 
 
+def require_disk_guid(dump: str, identity: dict, disk_name: str) -> None:
+    """Reject a lookalike NVMe with a changed GPT disk GUID before planning."""
+    matches = re.findall(r"(?mi)^label-id:\s*([0-9a-f-]{36})\s*$", dump)
+    demand(len(matches) == 1 and matches[0].lower() == identity["gpt_guid"],
+           f"{disk_name} GPT disk GUID differs from verified physical preimage")
+
+
 def live_snapshot(seagate: str, wd: str) -> dict:
+    demand(seagate == SEAGATE_BY_ID and wd == WD_BY_ID,
+           "only the exact contract-bound Seagate target and protected WD aliases are allowed")
     target, protected = by_id_disk(seagate), by_id_disk(wd)
     demand(target != protected and os.stat(seagate).st_rdev != os.stat(wd).st_rdev,
            "protected and target device aliases collide")
     disk, parts = disk_tree(seagate)
     wd_disk, wdparts = disk_tree(wd, exact_three=False)
-    demand("ZP4000GP304001" in (disk.get("model") or "") and
-           3_800_000_000_000 <= int(disk["size"]) <= 4_100_000_000_000,
-           "Seagate model/size mismatch")
-    demand("SN850X" in (wd_disk.get("model") or "") and
-           1_800_000_000_000 <= int(wd_disk["size"]) <= 2_100_000_000_000,
-           "protected WD model/size mismatch")
+    for observed, expected, name in (
+            (disk, SEAGATE_IDENTITY, "Seagate target"),
+            (wd_disk, WD_IDENTITY, "protected WD")):
+        demand(observed.get("model") == expected["model"] and
+               observed.get("serial") == expected["serial"] and
+               (observed.get("wwn") or "").lower() == expected["wwn"] and
+               int(observed.get("size") or 0) == expected["size"],
+               f"{name} model/serial/WWN/exact byte size mismatch")
     demand(disk.get("pttype") == "gpt" and wd_disk.get("pttype") == "gpt",
            "expected GPT on both internal NVMe disks")
     no_mounts_and_holders(disk, parts)
@@ -285,6 +311,8 @@ def live_snapshot(seagate: str, wd: str) -> dict:
            "Seagate EFI filesystem label is not unique and target-bound")
     wd_gpt = output("sfdisk", "--dump", wd)
     seagate_gpt = output("sfdisk", "--dump", seagate)
+    require_disk_guid(wd_gpt, WD_IDENTITY, "protected WD")
+    require_disk_guid(seagate_gpt, SEAGATE_IDENTITY, "Seagate target")
     return {
         "seagate_by_id": seagate, "wd_by_id": wd,
         "seagate_real": target, "wd_real": protected,

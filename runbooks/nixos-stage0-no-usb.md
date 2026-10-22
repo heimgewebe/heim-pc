@@ -39,25 +39,46 @@ target. The only intended destination is internal Seagate ZP4000GP304001
 - p2: own ~4GiB ext4 NIXOS2_RECOVERY; do not mount/write
 - p3: ~3.995TB unformatted, historical GPT Linux-LUKS type, PARTLABEL
   NIXOS2_CRYPT; rewrite p3 type to Linux filesystem and name, format p3
-  (only) Btrfs label NIXOS_STAGE0_ROOT, with no force flag; no detected signature is NOT proof that the entire partition is empty, so a separately evidenced p3 data-loss decision remains mandatory
+  (only) Btrfs label NIXOS_STAGE0_ROOT, with no force flag. Absence of a recognized signature does not prove that
+  all p3 bytes are unused; a separate explicit p3 data-loss decision is mandatory
 - No USB media is needed. External Freecom and Game Drive are not targets.
 
-The operator must freshly prove private whole-NVMe /dev/disk/by-id/nvme-*
-aliases, partition aliases -part1 and -part3, model, size, GPT type and
-PARTUUIDs, read-only wipefs signatures, kernel holders, all mounts, unique
-filesystem labels, and both protected WD root/ESP mounts. Never infer
-hardware identity from nvme0n1/nvme1n1. Plan and Apply fail closed on
-hardware drift, previously occupied root label or ESP loader conflict.
+The physical Plan/Apply is **hard-bound to the exact pre-identified
+two internal NVMe drives**, not merely models of similar capacity:
+
+- Seagate: `/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7`,
+  model `Seagate ZP4000GP304001`, serial `7VS01DX7`,
+  WWN `eui.6479a7716f000a39`, exactly `4000787030016` bytes,
+  GPT disk GUID `B862830A-C8F1-4968-BF65-636B87BC2E85`.
+- Protected WD: `/dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519`,
+  model `WD_BLACK SN850X 2000GB`, serial `25025T802519`,
+  WWN `eui.e8238fa6bf530001001b448b4d59e756`, exactly
+  `2000398934016` bytes, GPT GUID
+  `79AA7645-4DEA-4992-BF90-72E8D75E117B`.
+
+Stage0 refuses swapped, differently numbered, similar model, mismatched
+serial/WWN/geometry or changed GPT-disk-ID inputs **before planning**.
+The physical unit identities and byte sizes were re-observed read-only
+on 22 October 2026. They do **not** prove permission to destroy p3.
+
+The operator must still freshly prove matching private partition aliases,
+GPT partition types/PARTUUIDs, read-only `wipefs` signatures, kernel
+holders, all mounts, unique filesystem labels, and protected WD
+root/ESP mount lineage. Never infer identity from `nvme0n1/nvme1n1`;
+Plan and Apply fail closed on hardware drift, occupied labels or ESP loader
+conflict. A non-root `wipefs --no-act` probe returned permission denied;
+this cannot substitute for a privileged read-only p3 signature check.
 
 ## No-effect plan (hardware executor only, root-owned 0600)
 
-The command below has placeholders; no fabricated serial/by-id path may be
-used. Source checkout must be the exact clean reviewed/committed PR #238
-revision and the built store evidence must be present.
+Only the authorized physical hardware executor may run this
+**effect-free**, create-only Plan, after receiving access through the
+legitimate root/TTY route and proving the source checkout and built-store
+revision. A generic substitute NVMe alias is deliberately rejected:
 
     sudo python3 scripts/nixos_stage0_install.py --plan \
-      --seagate-by-id /dev/disk/by-id/nvme-EXACT-SEAGATE-ID \
-      --wd-by-id /dev/disk/by-id/nvme-EXACT-PROTECTED-WD-ID \
+      --seagate-by-id /dev/disk/by-id/nvme-Seagate_ZP4000GP304001_7VS01DX7 \
+      --wd-by-id /dev/disk/by-id/nvme-WD_BLACK_SN850X_2000GB_25025T802519 \
       --plan-file /root/nixos-stage0-plan.json
 
 The plan is create-only, private mode 0600, and records source/script/store
@@ -69,8 +90,9 @@ filesystem, mount, NVRAM or boot effects.
 ## Apply remains subject to new hardware authority and independent review
 
 **Physical Apply remains blocked in the current host state.** The
-previous unconditional guard has been replaced *in the unpublished source
-candidate* by a strictly evaluated admission contract. It rejects
+previous unconditional guard has been replaced in the *published Stage0
+source branch* by a strictly evaluated admission contract. It does not
+constitute release authority. It rejects
 any mutable/source-volume identity and requires an **absent by default**
 root-owned, 0600, NOFOLLOW `/etc/heim-pc/stage0-sealed-oci-source-v1.json`
 in a root-owned non-group-writable directory. The schema binds original

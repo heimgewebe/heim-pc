@@ -121,6 +121,82 @@ class Stage0SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(stage0.AdmissionError, "partition name"):
                 stage0.disk_tree("fake")
 
+    def test_only_exact_seagate_and_protected_wd_aliases_are_accepted(self):
+        for target, protected in (
+            (stage0.WD_BY_ID, stage0.SEAGATE_BY_ID),
+            ("/dev/disk/by-id/nvme-Seagate_ZP4000GP304001_LOOKALIKE", stage0.WD_BY_ID),
+            (stage0.SEAGATE_BY_ID, "/dev/disk/by-id/nvme-WD_BLACK_SN850X_OTHER"),
+        ):
+            with self.subTest(target=target, protected=protected), \
+                 patch.object(stage0, "by_id_disk") as probe, \
+                 patch.object(stage0, "host_cmd") as mutate:
+                with self.assertRaisesRegex(stage0.AdmissionError, "exact contract-bound"):
+                    stage0.live_snapshot(target, protected)
+                probe.assert_not_called()
+                mutate.assert_not_called()
+
+    def test_physical_disk_identity_refuses_lookalike_model_or_serial_or_wwn(self):
+        wd = {"name": "/dev/nvme1n1", "pttype": "gpt",
+              **{k: stage0.WD_IDENTITY[k]
+                 for k in ("model", "serial", "wwn", "size")}}
+        sea = {"name": "/dev/nvme0n1", "pttype": "gpt",
+               **{k: stage0.SEAGATE_IDENTITY[k]
+                  for k in ("model", "serial", "wwn", "size")}}
+        for field, value in (
+            ("model", "Seagate ZP4000GP304001 duplicate"),
+            ("serial", "ATTACKER-SERIAL"),
+            ("wwn", "eui.0000000000000000"),
+            ("size", stage0.SEAGATE_IDENTITY["size"] - 1),
+        ):
+            altered = dict(sea, **{field: value})
+            with self.subTest(field=field), \
+                 patch.object(stage0, "by_id_disk", side_effect=["/dev/nvme0n1", "/dev/nvme1n1"]), \
+                 patch.object(stage0.os, "stat", side_effect=[
+                     types.SimpleNamespace(st_rdev=10), types.SimpleNamespace(st_rdev=11)]), \
+                 patch.object(stage0, "disk_tree", side_effect=[(altered, {}), (wd, {})]), \
+                 patch.object(stage0, "no_mounts_and_holders") as inspect, \
+                 patch.object(stage0, "host_cmd") as mutate:
+                with self.assertRaisesRegex(stage0.AdmissionError, "model/serial/WWN"):
+                    stage0.live_snapshot(stage0.SEAGATE_BY_ID, stage0.WD_BY_ID)
+                inspect.assert_not_called()
+                mutate.assert_not_called()
+
+    def test_protected_wd_serial_wwn_and_size_mismatch_fail_before_scanning(self):
+        sea = {"name": "/dev/nvme0n1", "pttype": "gpt",
+               **{k: stage0.SEAGATE_IDENTITY[k]
+                  for k in ("model", "serial", "wwn", "size")}}
+        wd = {"name": "/dev/nvme1n1", "pttype": "gpt",
+              **{k: stage0.WD_IDENTITY[k]
+                 for k in ("model", "serial", "wwn", "size")}}
+        for field, value in (
+            ("model", "WD_BLACK SN850X clone"),
+            ("serial", "ANOTHER-WD"),
+            ("wwn", "eui.0000000000000000"),
+            ("size", stage0.WD_IDENTITY["size"] + 4096),
+        ):
+            with self.subTest(field=field), \
+                 patch.object(stage0, "by_id_disk", side_effect=["/dev/nvme0n1", "/dev/nvme1n1"]), \
+                 patch.object(stage0.os, "stat", side_effect=[
+                     types.SimpleNamespace(st_rdev=10), types.SimpleNamespace(st_rdev=11)]), \
+                 patch.object(stage0, "disk_tree", side_effect=[(sea, {}), (dict(wd, **{field: value}), {})]), \
+                 patch.object(stage0, "no_mounts_and_holders") as scan, \
+                 patch.object(stage0, "host_cmd") as mutate:
+                with self.assertRaisesRegex(stage0.AdmissionError, "protected WD model/serial/WWN"):
+                    stage0.live_snapshot(stage0.SEAGATE_BY_ID, stage0.WD_BY_ID)
+                scan.assert_not_called()
+                mutate.assert_not_called()
+
+    def test_exact_gpt_disk_guid_rejects_substitutions_and_duplicates(self):
+        sea_guid = stage0.SEAGATE_IDENTITY["gpt_guid"]
+        self.assertIsNone(stage0.require_disk_guid(
+            "label: gpt\nlabel-id: " + sea_guid.upper() + "\n",
+            stage0.SEAGATE_IDENTITY, "Seagate"))
+        for bad in ("", "label-id: 00000000-0000-0000-0000-000000000000",
+                    "label-id: " + sea_guid + "\nlabel-id: " + sea_guid):
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(stage0.AdmissionError, "GPT disk GUID"):
+                    stage0.require_disk_guid(bad, stage0.SEAGATE_IDENTITY, "Seagate")
+
     def test_holder_check_rejects_mounted_target_without_touching_disk(self):
         disk = mock_disk(3)["blockdevices"][0]
         disk["children"][2]["mountpoints"] = ["/media/mounted"]
@@ -148,10 +224,12 @@ class Stage0SourceTests(unittest.TestCase):
                 stage0.hidden_signatures("mock")
 
     def test_missing_root_label_rejected_on_plan(self):
-        disk = {"name": "/dev/nvme0n1", "model": "Seagate ZP4000GP304001",
-                "size": 4_000_000_000_000, "pttype": "gpt"}
-        wd = {"name": "/dev/nvme1n1", "model": "WD_BLACK SN850X",
-              "size": 2_000_000_000_000, "pttype": "gpt"}
+        disk = {"name": "/dev/nvme0n1", "pttype": "gpt",
+                **{k: stage0.SEAGATE_IDENTITY[k]
+                   for k in ("model", "serial", "wwn", "size")}}
+        wd = {"name": "/dev/nvme1n1", "pttype": "gpt",
+              **{k: stage0.WD_IDENTITY[k]
+                 for k in ("model", "serial", "wwn", "size")}}
         parts = {n: {"name": f"/dev/nvme0n1p{n}",
                      "partuuid": f"0000000{n}-0000-0000-0000-000000000001"}
                  for n in (1, 2, 3)}
@@ -170,7 +248,7 @@ class Stage0SourceTests(unittest.TestCase):
              patch.object(stage0.os.path, "lexists", return_value=True), \
              patch.object(stage0, "host_cmd") as mutate:
             with self.assertRaisesRegex(stage0.AdmissionError, "occupied Stage0 root label"):
-                stage0.live_snapshot("/dev/disk/by-id/nvme-seagate", "/dev/disk/by-id/nvme-wd")
+                stage0.live_snapshot(stage0.SEAGATE_BY_ID, stage0.WD_BY_ID)
             mutate.assert_not_called()
     def test_plan_creates_only_private_file_and_never_calls_mutator(self):
         with tempfile.TemporaryDirectory() as temp:
