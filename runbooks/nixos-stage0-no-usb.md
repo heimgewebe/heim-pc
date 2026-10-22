@@ -212,9 +212,11 @@ under /home/alex or a developer interactive TTY. This exact source
 driver therefore CANNOT be considered directly executable through
 that broker. Do not bypass sudo, the broker, source seals, hardware
 permission or protected WD boot verification to work around it.
-Root-authorized staging/credential input, an installation-specific
-Btrfs/ESP boot test and physical firmware/rollback control are required
-before physical Apply. Pop!_OS's
+Root-authorized staging/credential input and **physical** firmware/rollback
+control are required before physical Apply. A separate actual *virtual*
+Btrfs/ESP installation and tty1 login with test-only credentials has since
+been completed, but does not validate the real Seagate, host root broker,
+Pop!_OS restart, or the complete physical script's hardware-apply path. Pop!_OS's
 current initrd changed and was regenerated after a package trigger;
 a complete physical Pop!_OS boot has not yet been proven. Preserve
 the updated WD ESP/boot preimage and do not assert that WD files were
@@ -323,8 +325,55 @@ modification is needed. Additional assertions would change
 closure, revised BUILD_REV and refreshed provenance**: the old closure
 cannot truthfully be reused. Do not silently modify the module while
 claiming the former built source is unchanged. These items remain
-tracked pre-hardware-review work; the Btrfs+ESP target still lacks a
-successful installed-target VM boot and the real rootbroker TTY route.
+tracked pre-hardware-review work. The synthetic Btrfs/ESP installed-target VM
+has since booted and authenticated a disposable test user (see below);
+the real rootbroker TTY and physical Seagate/WD return paths remain blocked.
+
+## Additional VM integration: synthetic GPT/Btrfs/UEFI boot and login
+
+The previous `vmWithBootLoader` test used ext4. A **different real
+virtual installation** now tests an 8-GiB QEMU disk with a separate
+FAT32 ESP, ext4 recovery partition and Btrfs root with `@root`,
+`@nix`, `@home`, `@persist`. The official NixOS `nixos-install`
+installed the EFI fallback and loader entries, followed by a cold
+OVMF/systemd-boot start from the same virtual disk.
+
+- Verified standalone R3 test: Grabowski task `0af8953ec34b4916aa4ad721`,
+  exit 0, outcome receipt
+  `e1d6cae5b9159a605248977613b1583dde307071147563b63826472f3c54bb0e`.
+  Source `/home/alex/labs/heim-pc-stage0-btrfs-install-test-20261022/stage0-btrfs-install-test-r3.nix`,
+  SHA-256 `1a9fc803e38d4a99336f2b219971f4e1095b97765ab8c5710e20676e41c12162`.
+  The actual installed target reached visible VGA `heim-pc-stage0 login:`
+  (separately verified R3 report SHA
+  `28dc572691a8e720229d1cf98e7242385734f8379069a89fb760ee9602b1bd09`).
+- Additional reproducible test `tests/stage0-gpt-btrfs-efi-login-vm.nix`
+  (source SHA-256 `5bbcf0000842f6524689884c032f617ae911e0a696176bef6a3699e820aa3374`)
+  used **exclusively synthetic, disposable VM password data** after official
+  installation; no real password is embedded. It sent `alex` and the
+  matching test password through QEMU's VGA keyboard, then `sudo poweroff`
+  and the sudo password. The NixOS test demanded a subsequent **QMP SHUTDOWN
+  event and a completed guest shutdown** (not an SSH-backdoor assertion).
+  Real successful run: Grabowski task `ac6e929f3c6a495d89e73293`,
+  systemd exit 0 and receipt
+  `d8ec714050b24588735cb825836a39d0b66bd7e8e79c5838e699de84c7d04136`;
+  local built Nix test `/nix/store/qy0xqm93z8dry9s6nmlnbyxrhmw8431x-vm-test-run-stage0-fake-seagate-gpt-btrfs-uefi-login-r4`.
+  Its separately read Nix derivation log contains
+  `STAGE0_VIRTUAL_GPT_BTRFS_UEFI_REAL_USER_SUDO_POWEROFF_OK` (reader task
+  `61347f401e8f4230b55bf8c4`, exit 0).
+- A separate R5 synthetic experiment ran the actual Stage0
+  `credential_bootstrap()` against VM `/mnt/etc/shadow` and reached VGA
+  screenshot capture using test credentials, task
+  `e87042e451af4a71a6edb5e7`, exit 0. R5 did **not** assert login
+  and is independent of R4's test-only shadow injection; do not combine
+  those into a single end-to-end hardware-credential claim.
+
+**Limits:** VM-specific VirtIO modules and simulated disk/firmware are not
+the built physical Seagate closure or the ASUS firmware. Neither
+`scripts/nixos_stage0_install.py --apply` nor the host Rootbroker's
+private TTY flow was exercised. This synthetic login is not a
+successful physical NixOS login, permission to destroy p3, a
+Pop!_OS boot/rollback receipt, or an independent OCI trust-source approval.
+Physical `--apply` remains forbidden.
 
 ## Independent boot and rollback proof for Thread 2
 
