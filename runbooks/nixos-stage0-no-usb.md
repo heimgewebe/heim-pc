@@ -61,6 +61,16 @@ filesystem, mount, NVRAM or boot effects.
 
 ## Apply remains subject to new hardware authority and independent review
 
+**Current code deliberately denies every physical `--apply` invocation.**
+`require_immutable_install_source()` raises `AdmissionError` after the
+private plan/source confirmation and **before** hardware snapshot, Nix
+verification/copy, any GPT/format/mount operation, or privileged installer.
+This is an enforceable safety hold, **not** resolution of the mutable-store
+P1; an independently root-sealed source with a concurrent-writer negative
+test remains necessary before the hold can be replaced. Do not bypass the
+guard, patch the code locally for hardware use, or interpret a synthetic
+test that mocks the guard as an Apply authorization.
+
 Do not run Apply until this issue/PR names the reviewed immutable HEAD,
 fresh green checks, successful synthetic installation proof (not just
 mocked unit tests), ability to select the Seagate's independent EFI boot
@@ -134,13 +144,24 @@ entry would incorrectly reject a valid NixOS boot configuration.
 Neither probe establishes a FAT ESP bootloader install, real first
 login, UEFI firmware disk selection or a physical NixOS boot.
 
+An independent virtual UEFI boot using the NixOS
+`vmWithBootLoader` derivation was also **actually run** in QEMU/KVM with
+OVMF: firmware launched systemd-boot, and a captured 1280×800 VGA frame
+showed `Welcome to NixOS ... tty1` and `heim-pc-stage0 login:`.
+See Issue #237 comment 6334889268 and the private screenshot hash
+`696b5faabdba72138c0b648fc5539455e8b78c4aaed1d9774a5788077c38238a`.
+That VM uses a specially generated ext4/QCOW2 root and does not prove
+the actual Btrfs/Seagate installer, physical UEFI device selection,
+password authentication or Pop!_OS WD rollback.
+
 The currently audited root broker cannot access the source checkout
 under /home/alex or a developer interactive TTY. This exact source
 driver therefore CANNOT be considered directly executable through
 that broker. Do not bypass sudo, the broker, source seals, hardware
 permission or protected WD boot verification to work around it.
-Root-authorized staging/credential input and a true isolated
-bootloader test are required before physical Apply. Pop!_OS's
+Root-authorized staging/credential input, an installation-specific
+Btrfs/ESP boot test and physical firmware/rollback control are required
+before physical Apply. Pop!_OS's
 current initrd changed and was regenerated after a package trigger;
 a complete physical Pop!_OS boot has not yet been proven. Preserve
 the updated WD ESP/boot preimage and do not assert that WD files were
@@ -162,10 +183,11 @@ correctness/security issues:
 - P1, source store lifetime: another host process with Docker access can
   still remount or change the Docker Nix volume after verification. A
   read-only bind inside the installation container does not eliminate that
-  race. **This P1 remains open, and the hardware Apply must remain blocked
-  until a root-controlled immutable source seal / exclusive trust handoff
-  is independently implemented, tested and admitted.** Do not interpret a
-  clean CI run or this documented contract as a compensating approval.
+  race. **This P1 remains open. The script now technically blocks every
+  physical Apply before hardware observation or mutation.** The hold must
+  remain until a root-controlled immutable source seal / exclusive trust
+  handoff is independently implemented, tested and admitted. Do not
+  interpret a clean CI run or this documented contract as a compensating approval.
 - P2, cleanup false success: the helper now reports installation success
   only after all target mountpoints have been unmounted and read back as
   detached. Failed umount or persistent mounts produce a nonzero failure

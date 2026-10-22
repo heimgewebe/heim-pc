@@ -226,6 +226,34 @@ class Stage0SourceTests(unittest.TestCase):
                 stage0.apply_plan(Path("/root/private"), "APPLY-STAGE0:"+"f"*64)
             mutate.assert_not_called()
 
+    def test_immutable_source_missing_seal_blocks_before_any_device_command(self):
+        source = {"revision": "b"*40, "volume": stage0.BUILD_VOLUME,
+                  "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
+        plan = {"source": source, "snapshot":
+                {"seagate_by_id": "/dev/disk/by-id/nvme-seagate",
+                 "wd_by_id": "/dev/disk/by-id/nvme-wd"}}
+        with patch.object(stage0.os, "geteuid", return_value=0), \
+             patch.object(stage0.sys.stdin, "isatty", return_value=True), \
+             patch.object(stage0.sys.stderr, "isatty", return_value=True), \
+             patch.object(stage0, "stored_plan", return_value=(plan, "f"*64)), \
+             patch.object(stage0, "check_source", return_value=source), \
+             patch.object(stage0, "live_snapshot") as snapshot, \
+             patch.object(stage0, "verify_source_store") as verify, \
+             patch.object(stage0, "copy_source_closure_to_target") as copy, \
+             patch.object(stage0, "run_container") as install, \
+             patch.object(stage0, "host_cmd") as mutate:
+            with self.assertRaisesRegex(stage0.AdmissionError, "physical Apply BLOCKED"):
+                stage0.apply_plan(Path("/nonexistent/test-plan"), "APPLY-STAGE0:"+"f"*64)
+            snapshot.assert_not_called()
+            verify.assert_not_called()
+            copy.assert_not_called()
+            install.assert_not_called()
+            mutate.assert_not_called()
+
+    def test_immutable_source_guard_rejects_other_docker_volume(self):
+        with self.assertRaisesRegex(stage0.AdmissionError, "unrecognized Stage0 source volume"):
+            stage0.require_immutable_install_source({"volume": "untrusted-docker-volume"})
+
     def test_snapshot_drift_stops_before_partition_ops(self):
         saved = {"source": {"revision": "a"*40}, "snapshot": {"seagate_by_id": "target", "wd_by_id": "protected", "state": "before"}}
         with patch.object(stage0.os, "geteuid", return_value=0), \
@@ -233,6 +261,7 @@ class Stage0SourceTests(unittest.TestCase):
              patch.object(stage0.sys.stderr, "isatty", return_value=True), \
              patch.object(stage0, "stored_plan", return_value=(saved, "f"*64)), \
              patch.object(stage0, "check_source", return_value=saved["source"]), \
+             patch.object(stage0, "require_immutable_install_source"), \
              patch.object(stage0, "live_snapshot", return_value={**saved["snapshot"], "state": "after"}), \
              patch.object(stage0, "host_cmd") as mutate:
             with self.assertRaisesRegex(stage0.AdmissionError, "hardware"):
@@ -418,6 +447,7 @@ class Stage0SourceTests(unittest.TestCase):
                 stack.enter_context(patch.object(stage0.Path, "is_mount", return_value=False))
                 stack.enter_context(patch.object(stage0, "stored_plan", return_value=(plan, "d"*64)))
                 stack.enter_context(patch.object(stage0, "check_source", return_value=source))
+                stack.enter_context(patch.object(stage0, "require_immutable_install_source"))
                 stack.enter_context(patch.object(stage0, "live_snapshot", return_value=snapshot))
                 stack.enter_context(patch.object(stage0, "disk_tree", return_value=({"name": "/dev/nvme0n1"}, modified)))
                 stack.enter_context(patch.object(stage0, "output", side_effect=output))

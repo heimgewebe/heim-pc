@@ -497,6 +497,22 @@ def cleanup_target_mounts(mounts: list[Path]) -> None:
     demand(not failures, "Stage0 cleanup incomplete; installation NOT confirmed")
 
 
+def require_immutable_install_source(source: dict) -> None:
+    """Mandatory independent root-controlled seal is not yet implemented.
+
+    A named Docker volume remains writable by another host/Docker client
+    between verification and the privileged nixos-install launch. A
+    container-local readonly mount, a Nix Store path pin and a recursive
+    check are insufficient admission. This *intentionally* denies physical
+    Apply until a reviewed, independently immutable source handoff exists.
+    """
+    demand(source.get("volume") == BUILD_VOLUME, "unrecognized Stage0 source volume")
+    raise AdmissionError(
+        "Stage0 physical Apply BLOCKED: Docker Nix source volume is mutable; "
+        "independent root-owned immutable source seal and concurrency test required"
+    )
+
+
 def apply_plan(filename: Path, confirmation: str) -> None:
     demand(os.geteuid() == 0, "Apply must be root")
     demand(sys.stdin.isatty() and sys.stderr.isatty(), "Apply requires a real interactive TTY")
@@ -504,6 +520,9 @@ def apply_plan(filename: Path, confirmation: str) -> None:
     demand(confirmation == f"APPLY-STAGE0:{plan_sha}", "confirmation token mismatch")
     source = check_source()
     demand(source == plan["source"], "source revision/script/tool identity drift")
+    # Closed hardware admission: never enter the verify/copy/privileged Docker
+    # race while its root-controlled, immutable source seal is unavailable.
+    require_immutable_install_source(source)
     snapshot = live_snapshot(plan["snapshot"]["seagate_by_id"], plan["snapshot"]["wd_by_id"])
     demand(canonical(snapshot) == canonical(plan["snapshot"]),
            "current hardware differs from private plan")
