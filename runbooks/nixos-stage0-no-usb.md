@@ -146,6 +146,39 @@ a complete physical Pop!_OS boot has not yet been proven. Preserve
 the updated WD ESP/boot preimage and do not assert that WD files were
 byte-unchanged from the older pre-package baseline.
 
+## Independent PR security review: bounded fixes and unresolved P1
+
+At the published R2 baseline (c7ca36e2d5b070f1740e20e0c1024ccb6f0ef2bd),
+an independent review of earlier commit e2712dd identified three concrete
+correctness/security issues:
+
+- P1, trusted installer source: `stage0-tools` formerly accepted any
+  syntactically valid Nix Store installer path. The helper now pins the exact
+  realized `nixos-install` store path and verifies **both** the NixOS system
+  and the installer recursively before any disk write. This closes only the
+  unpinned-installer and omitted-verification subissues. The verification
+  is a point-in-time check against local Store metadata; it is **not** an
+  independent attestation of an immutable installation source.
+- P1, source store lifetime: another host process with Docker access can
+  still remount or change the Docker Nix volume after verification. A
+  read-only bind inside the installation container does not eliminate that
+  race. **This P1 remains open, and the hardware Apply must remain blocked
+  until a root-controlled immutable source seal / exclusive trust handoff
+  is independently implemented, tested and admitted.** Do not interpret a
+  clean CI run or this documented contract as a compensating approval.
+- P2, cleanup false success: the helper now reports installation success
+  only after all target mountpoints have been unmounted and read back as
+  detached. Failed umount or persistent mounts produce a nonzero failure
+  and a manual-recovery alarm. Negative tests cover both cases.
+
+The GitHub CI `validate` failure for the earlier R2 head was caused by a
+test inadvertently reading the runner's real kernel holder state. The
+test now uses an entirely synthetic sysfs fixture, with a separate
+negative holder regression. The full local Python suite subsequently
+passed (2167 tests, 1 skipped, 465 subtests), as did the 37 Stage0 tests
+and 52 NixOS-source unit regressions. **These tests do not resolve the
+outstanding immutable-source P1 or constitute physical boot evidence.**
+
 ## Independent boot and rollback proof for Thread 2
 
 Prior inspection showed Boot0002 UEFI OS points to external Freecom,

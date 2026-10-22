@@ -36,6 +36,25 @@ def mock_disk(parts: int, model: str = "Seagate ZP4000GP304001") -> dict:
 
 
 class Stage0SourceTests(unittest.TestCase):
+    def test_pinned_installer_cannot_be_replaced_by_sidecar(self):
+        fake = {
+            str(stage0.BUILD_STATE / "source-head"): stage0.BUILD_REV,
+            str(stage0.BUILD_STATE / "closure-path"): stage0.SYSTEM,
+            str(stage0.BUILD_STATE / "nix-image"): stage0.NIX_IMAGE,
+            str(stage0.BUILD_STATE / "stage0-tools"): stage0.INSTALLER,
+        }
+        def fake_output(*argv):
+            if argv[-2:] == ("rev-parse", "HEAD"):
+                return "f" * 40
+            return ""
+        with patch.object(stage0, "output", side_effect=fake_output), \
+             patch.object(stage0, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")), \
+             patch.object(stage0, "read_text", side_effect=lambda p: fake[str(p)]):
+            self.assertEqual(stage0.check_source()["installer"], stage0.INSTALLER)
+            fake[str(stage0.BUILD_STATE / "stage0-tools")] = "/nix/store/" + "a"*32 + "-nixos-install"
+            with self.assertRaisesRegex(stage0.AdmissionError, "differs"):
+                stage0.check_source()
+
     def test_no_utf8_invisible_install_contract(self):
         text = SCRIPT.read_text()
         self.assertNotIn("\u200b", text)
@@ -73,8 +92,20 @@ class Stage0SourceTests(unittest.TestCase):
     def test_holder_check_rejects_mounted_target_without_touching_disk(self):
         disk = mock_disk(3)["blockdevices"][0]
         disk["children"][2]["mountpoints"] = ["/media/mounted"]
-        with patch.object(stage0, "host_cmd") as mutate:
+        # Never read the developer/CI runner's actual sysfs holders.
+        with patch.object(stage0.Path, "is_dir", return_value=True), \
+             patch.object(stage0.Path, "iterdir", return_value=iter(())), \
+             patch.object(stage0, "host_cmd") as mutate:
             with self.assertRaisesRegex(stage0.AdmissionError, "mounted"):
+                stage0.no_mounts_and_holders(disk, {3: disk["children"][2]})
+            mutate.assert_not_called()
+
+    def test_kernel_holder_refuses_even_if_unmounted(self):
+        disk = mock_disk(3)["blockdevices"][0]
+        with patch.object(stage0.Path, "is_dir", return_value=True), \
+             patch.object(stage0.Path, "iterdir", return_value=iter([Path("mapper")])), \
+             patch.object(stage0, "host_cmd") as mutate:
+            with self.assertRaisesRegex(stage0.AdmissionError, "holder"):
                 stage0.no_mounts_and_holders(disk, {3: disk["children"][2]})
             mutate.assert_not_called()
 
@@ -129,6 +160,34 @@ class Stage0SourceTests(unittest.TestCase):
             with patch.object(stage0.Path, "lstat", return_value=stat_result):
                 with self.assertRaisesRegex(stage0.AdmissionError, "unsafe"):
                     stage0.stored_plan(dest)
+
+    def test_cleanup_error_fails_closed_and_reports_alarm(self):
+        mounts = [Path("/mock-root"), Path("/mock-root/boot")]
+        def fake_umount(*args):
+            if args[-1].endswith("/boot"):
+                raise stage0.AdmissionError("simulated busy mount")
+        with patch.object(stage0, "host_cmd", side_effect=fake_umount) as cmd, \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaisesRegex(stage0.AdmissionError, "cleanup incomplete"):
+                stage0.cleanup_target_mounts(mounts)
+        self.assertIn("ALARM", stderr.getvalue())
+        self.assertEqual([c.args for c in cmd.call_args_list],
+                         [("umount", "/mock-root/boot"), ("umount", "/mock-root")])
+
+    def test_cleanup_zero_exit_but_mount_remains_fails_closed(self):
+        with patch.object(stage0, "host_cmd") as unmount, \
+             patch.object(stage0.Path, "is_mount", return_value=True), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaisesRegex(stage0.AdmissionError, "cleanup incomplete"):
+                stage0.cleanup_target_mounts([Path("/mock-root")])
+        self.assertIn("ALARM", stderr.getvalue())
+        unmount.assert_called_once_with("umount", "/mock-root")
+
+    def test_cleanup_success_reverse_order(self):
+        with patch.object(stage0, "host_cmd") as cmd:
+            stage0.cleanup_target_mounts([Path("/mock-root"), Path("/mock-root/boot")])
+        self.assertEqual([c.args for c in cmd.call_args_list],
+                         [("umount", "/mock-root/boot"), ("umount", "/mock-root")])
 
     def test_non_root_apply_never_calls_host_mutator(self):
         with patch.object(stage0.os, "geteuid", return_value=1000), \
@@ -252,9 +311,19 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertNotIn("/dev/nvme0n1", " ".join(argv))
         self.assertNotIn("readonly", " ".join(argv))
 
+    def test_verifier_checks_system_and_pinned_installer(self):
+        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
+                  "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
+        with patch.object(stage0, "host_cmd") as verify:
+            stage0.verify_source_store(source)
+        argv = verify.call_args.args
+        self.assertIn("--recursive", argv)
+        self.assertIn(stage0.SYSTEM, argv)
+        self.assertIn(stage0.INSTALLER, argv)
+
     def test_reverify_source_closure_has_no_block_device_mounts(self):
         source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
-                  "system": stage0.SYSTEM}
+                  "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
         with patch.object(stage0, "host_cmd") as verify:
             stage0.verify_source_store(source)
         argv = verify.call_args.args

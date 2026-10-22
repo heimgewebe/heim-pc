@@ -27,6 +27,7 @@ BUILD_STATE = Path("/home/alex/.local/state/heim-pc-stage0-e68efce49eab")
 BUILD_VOLUME = "heim-pc-nixos-stage0-e68efce49eab"
 NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
 SYSTEM = "/nix/store/9imhrwyy6bf5fkhqrjfx6dqn4rva8y67-nixos-system-heim-pc-stage0-26.05.20260829.c5c4a43"
+INSTALLER = "/nix/store/k4a7p2ap87g5a7hvrdxx8ii9fb9fq5if-nixos-install"
 NIX_ROOT = Path("/mnt/heim-pc-stage0")
 EFI_LABEL = "NIXOS2_EFI"
 RECOVERY_LABEL = "NIXOS2_RECOVERY"
@@ -96,8 +97,8 @@ def check_source() -> dict:
     demand(read_text(BUILD_STATE / "closure-path") == SYSTEM, "build/system closure mismatch")
     demand(read_text(BUILD_STATE / "nix-image") == NIX_IMAGE, "Nix image mismatch")
     tools = read_text(BUILD_STATE / "stage0-tools").splitlines()
-    demand(len(tools) == 1 and re.fullmatch(r"/nix/store/[0-9a-z]{32}-nixos-install", tools[0]),
-           "the realized official nixos-install path is missing")
+    demand(tools == [INSTALLER],
+           "realized official nixos-install path differs from reviewed, pinned output")
     return {"revision": revision, "system": SYSTEM, "installer": tools[0],
             "image": NIX_IMAGE, "volume": BUILD_VOLUME,
             "script_sha256": digest(Path(__file__).read_bytes())}
@@ -424,7 +425,7 @@ def verify_source_store(source: dict) -> None:
         "--mount", f"type=volume,src={source['volume']},dst=/nix",
         "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
         source["image"], "--extra-experimental-features", "nix-command",
-        "store", "verify", "--recursive", source["system"],
+        "store", "verify", "--recursive", source["system"], source["installer"],
     ]
     host_cmd(*cmd)
 
@@ -480,6 +481,20 @@ def verify_installed_esp() -> None:
         demand("NIXOS2_CRYPT" not in data and "rd.luks" not in data,
                "nonproduction boot entry unexpectedly references LUKS")
     demand((NIX_ROOT / "etc/shadow").is_file(), "installed NixOS shadow not found")
+
+
+def cleanup_target_mounts(mounts: list[Path]) -> None:
+    """A failed unmount is never a successful Stage0 installation."""
+    failures = []
+    for path in reversed(mounts):
+        try:
+            host_cmd("umount", str(path))
+            demand(not path.is_mount(), "mount remains active after umount")
+        except AdmissionError:
+            failures.append(str(path))
+            print(f"ALARM: failed to unmount {path}; manual recovery required",
+                  file=sys.stderr)
+    demand(not failures, "Stage0 cleanup incomplete; installation NOT confirmed")
 
 
 def apply_plan(filename: Path, confirmation: str) -> None:
@@ -563,15 +578,11 @@ def apply_plan(filename: Path, confirmation: str) -> None:
         verify_installed_esp()
         credential_bootstrap(NIX_ROOT / "etc/shadow")
         same_protected_fingerprint(snapshot)
-        print(json.dumps({"stage0": "INSTALLED_REQUIRES_PHYSICAL_BOOT_TEST",
-                          "system": SYSTEM, "wd_and_nvram_unchanged": True},
-                         sort_keys=True))
     finally:
-        for path in reversed(mounts):
-            try:
-                host_cmd("umount", str(path))
-            except AdmissionError:
-                print(f"ALARM: failed to unmount {path}; manual recovery required", file=sys.stderr)
+        cleanup_target_mounts(mounts)
+    print(json.dumps({"stage0": "INSTALLED_REQUIRES_PHYSICAL_BOOT_TEST",
+                      "system": SYSTEM, "wd_and_nvram_unchanged": True},
+                     sort_keys=True))
 
 
 def main() -> int:
