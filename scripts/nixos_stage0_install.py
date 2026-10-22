@@ -26,6 +26,12 @@ BUILD_REV = "e68efce49eaba0014865fd1c4e0b62f692f016af"
 BUILD_STATE = Path("/home/alex/.local/state/heim-pc-stage0-e68efce49eab")
 BUILD_VOLUME = "heim-pc-nixos-stage0-e68efce49eab"
 NIX_IMAGE = "sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f"
+SEALED_IMAGE = "sha256:91b210f35fe468e2901448b5d9dadbadcf12e3240121d573c08255028f874aa9"
+SEALED_BUSYBOX_SHA256 = "b3c1009e1b5c927e537487c80639cdf404f69e3eb49371d9be5d841672be3ff9"
+SEALED_SOURCE_ATTESTATION = Path("/etc/heim-pc/stage0-sealed-oci-source-v1.json")
+SOURCE_PROTOTYPE_REPORT_SHA256 = "778bd0ea924717c2492661f4b03e4d9ce11de814a2ef10dc058318ccdbec865e"
+SOURCE_SCRATCH_REPORT_SHA256 = "e82c5b85df9ed491b0d4a4686fe172f1ba4cf5c49d8c88e07b27cc7658a0f0cd"
+
 SYSTEM = "/nix/store/9imhrwyy6bf5fkhqrjfx6dqn4rva8y67-nixos-system-heim-pc-stage0-26.05.20260829.c5c4a43"
 INSTALLER = "/nix/store/k4a7p2ap87g5a7hvrdxx8ii9fb9fq5if-nixos-install"
 NIX_ROOT = Path("/mnt/heim-pc-stage0")
@@ -117,8 +123,10 @@ def check_source() -> dict:
     tools = read_text(BUILD_STATE / "stage0-tools").splitlines()
     demand(tools == [INSTALLER] and UTIL_LINUX.startswith("/nix/store/"),
            "realized official nixos-install path differs from reviewed, pinned output")
-    return {"revision": revision, "system": SYSTEM, "installer": tools[0],
-            "image": NIX_IMAGE, "volume": BUILD_VOLUME,
+    return {"revision": revision, "build_revision": BUILD_REV,
+            "system": SYSTEM, "installer": tools[0],
+            "image": SEALED_IMAGE, "builder_image": NIX_IMAGE,
+            "source_kind": "sealed-oci-stage0-v1",
             "script_sha256": digest(Path(__file__).read_bytes())}
 
 
@@ -443,77 +451,71 @@ def verify_host_tools() -> None:
         demand(bool(output(name, "--version")), f"unusable host Btrfs tool: {name}")
 
 
-def verify_install_namespace(source: dict) -> None:
-    """Prove chroot's mount propagation can run before touching Seagate GPT.
+def _oci_command(source: dict, executable: str, *args: str,
+                 target: bool = False, installer: bool = False) -> tuple[str, ...]:
+    """Run only the pinned image, never a host-shared Nix source volume.
 
-    The pinned NixOS nixos-enter uses unshare and mount --make-rprivate.
-    Docker's default AppArmor profile blocks this even with SYS_ADMIN,
-    so both this preflight and the real installer use the tested policy.
-    The preflight has no target binds, host disks, or network.
+    /sealed-nix is a content-addressed Docker image lower layer. The BusyBox
+    bind is within this single disposable container; all writable Nix DB
+    metadata lives in its private, --rm-discarded overlay. No --volume-from,
+    original Docker volume or physical /dev mount is admitted.
     """
-    cmd = [
-        "/usr/bin/docker", "run", "--rm", "--network=none",
-        "--cap-add=SYS_ADMIN", "--security-opt=seccomp=unconfined",
-        "--security-opt=apparmor=unconfined", "--pids-limit=128",
-        "--memory=2g",
-        "--mount", f"type=volume,src={source['volume']},dst=/nix,readonly",
-        "--entrypoint", UTIL_LINUX + "/bin/unshare",
-        source["image"], "--mount", "--uts", "--mount-proc", "--",
-        UTIL_LINUX + "/bin/mount", "--make-rprivate", "/",
-    ]
-    host_cmd(*cmd)
+    demand(source.get("image") == SEALED_IMAGE and
+           source.get("source_kind") == "sealed-oci-stage0-v1" and
+           "volume" not in source, "unsealed or mutable Stage0 source")
+    demand(executable.startswith("/nix/store/") or
+           executable == "/nix/var/nix/profiles/default/bin/nix",
+           "untrusted OCI executable")
+    cmd = ["/usr/bin/docker", "run", "--rm", "--pull=never", "--network=none"]
+    if not installer:
+        cmd += ["--cap-drop=ALL", "--cap-add=CHOWN",
+                "--security-opt=no-new-privileges"]
+    # Mounting the image-local /sealed-nix onto /nix requires SYS_ADMIN.
+    # The original installer already needed SYS_ADMIN and unconfined seccomp
+    # for nixos-enter; these rights are contained in this one Docker namespace.
+    cmd += ["--cap-add=SYS_ADMIN", "--security-opt=seccomp=unconfined",
+            "--security-opt=apparmor=unconfined", "--pids-limit=768",
+            "--memory=10g" if installer or target else "--memory=2g"]
+    if target:
+        cmd += ["--mount", f"type=bind,src={NIX_ROOT},dst=/mnt"]
+    cmd += ["--entrypoint", "/busybox", source["image"], "sh", "-ec",
+            '/busybox mount --bind /sealed-nix /nix; exec "$@"',
+            "stage0-source", executable, *args]
+    return tuple(cmd)
+
+
+def verify_install_namespace(source: dict) -> None:
+    """Preflight the actual pinned unshare+mount path, without host devices."""
+    host_cmd(*_oci_command(source, UTIL_LINUX + "/bin/unshare",
+                          "--mount", "--uts", "--mount-proc", "--",
+                          UTIL_LINUX + "/bin/mount", "--make-rprivate", "/"))
 
 
 def verify_source_store(source: dict) -> None:
-    """Fail before physical mutations if the existing Nix closure is corrupt."""
-    cmd = [
-        "/usr/bin/docker", "run", "--rm", "--network=none",
-        "--cap-drop=ALL", "--cap-add=CHOWN", "--security-opt", "no-new-privileges",
-        "--cpus=3", "--memory=10g", "--pids-limit=512",
-        "--mount", f"type=volume,src={source['volume']},dst=/nix",
-        "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
-        source["image"], "--extra-experimental-features", "nix-command",
-        "store", "verify", "--recursive", source["system"], source["installer"], UTIL_LINUX,
-    ]
-    host_cmd(*cmd)
+    """Recursive store check from independent OCI image, never mutable volume."""
+    host_cmd(*_oci_command(
+        source, "/nix/var/nix/profiles/default/bin/nix",
+        "--extra-experimental-features", "nix-command",
+        "store", "verify", "--recursive",
+        source["system"], source["installer"], UTIL_LINUX))
 
 
 def copy_source_closure_to_target(source: dict) -> None:
-    """Proven offline Nix copy: local unsigned build paths need --no-check-sigs.
-
-    Source DB must be writable for Nix's local-store transaction/locks;
-    the target remains isolated to the mounted Stage0 directory. Never
-    permit a block device, host network or elevated SYS_ADMIN in this copy.
-    """
-    cmd = [
-        "/usr/bin/docker", "run", "--rm", "--network=none",
-        "--cap-drop=ALL", "--cap-add=CHOWN", "--security-opt", "no-new-privileges",
-        "--cpus=3", "--memory=10g", "--pids-limit=512",
-        "--mount", f"type=volume,src={source['volume']},dst=/nix",
-        "--mount", f"type=bind,src={NIX_ROOT},dst=/mnt",
-        "--entrypoint", "/nix/var/nix/profiles/default/bin/nix",
-        source["image"], "--extra-experimental-features", "nix-command",
+    """Offline copy from a new OCI lower-layer snapshot into Seagate mount."""
+    host_cmd(*_oci_command(
+        source, "/nix/var/nix/profiles/default/bin/nix",
+        "--extra-experimental-features", "nix-command",
         "copy", "--no-check-sigs", "--to", "local?root=/mnt",
-        source["system"],
-    ]
-    host_cmd(*cmd)
+        source["system"], target=True))
 
 
 def run_container(source: dict, *arguments: str) -> None:
-    # The Nix store from the exact prebuilt Docker volume is readonly.
-    # Only the bounded Seagate target mount is writable inside the container.
-    command = [
-        "/usr/bin/docker", "run", "--rm", "--network=none",
-        "--cap-add=SYS_ADMIN", "--security-opt=seccomp=unconfined",
-        "--security-opt=apparmor=unconfined",
-        "--pids-limit=768", "--memory=10g",
-        "--mount", f"type=volume,src={source['volume']},dst=/nix,readonly",
-        "--mount", f"type=bind,src={NIX_ROOT},dst=/mnt",
-        "--entrypoint", source["installer"] + "/bin/nixos-install",
-        source["image"], "--root", "/mnt", "--system", source["system"],
+    """Invoke pinned official nixos-install from independent sealed OCI source."""
+    host_cmd(*_oci_command(
+        source, source["installer"] + "/bin/nixos-install",
+        "--root", "/mnt", "--system", source["system"],
         "--no-root-passwd", "--no-channel-copy", *arguments,
-    ]
-    host_cmd(*command)
+        target=True, installer=True))
 
 
 def verify_installed_esp() -> None:
@@ -566,19 +568,122 @@ def cleanup_target_mounts(mounts: list[Path]) -> None:
 
 
 def require_immutable_install_source(source: dict) -> None:
-    """Mandatory independent root-controlled seal is not yet implemented.
+    """Require an external, root-controlled revision-bound source release.
 
-    A named Docker volume remains writable by another host/Docker client
-    between verification and the privileged nixos-install launch. A
-    container-local readonly mount, a Nix Store path pin and a recursive
-    check are insufficient admission. This *intentionally* denies physical
-    Apply until a reviewed, independently immutable source handoff exists.
+    Local Docker image IDs address immutable image CONFIG+layer digests under
+    the trusted local Docker daemon. A root-owned release record ties this
+    exact candidate back to the realized Nix build, reviewed source/script,
+    independent evidence and BusyBox helper. It is deliberately NOT created
+    automatically; until the hardware/source approver supplies it the physical
+    Apply stays blocked. Host-root/daemon compromise is outside this model.
     """
-    demand(source.get("volume") == BUILD_VOLUME, "unrecognized Stage0 source volume")
-    raise AdmissionError(
-        "Stage0 physical Apply BLOCKED: Docker Nix source volume is mutable; "
-        "independent root-owned immutable source seal and concurrency test required"
-    )
+    demand(source.get("source_kind") == "sealed-oci-stage0-v1" and
+           source.get("image") == SEALED_IMAGE and
+           source.get("builder_image") == NIX_IMAGE and
+           source.get("build_revision") == BUILD_REV and
+           source.get("system") == SYSTEM and
+           source.get("installer") == INSTALLER and
+           "volume" not in source,
+           "Stage0 physical Apply BLOCKED: unsealed or mutable source identity")
+    parent = SEALED_SOURCE_ATTESTATION.parent
+    try:
+        pstat = parent.lstat()
+        demand(stat.S_ISDIR(pstat.st_mode) and pstat.st_uid == 0 and
+               not (pstat.st_mode & 0o022),
+               "Stage0 physical Apply BLOCKED: attestation directory unsafe")
+        fd = os.open(SEALED_SOURCE_ATTESTATION,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            st = os.fstat(stream.fileno())
+            demand(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and
+                   st.st_nlink == 1 and not (st.st_mode & 0o077) and
+                   st.st_size < 8192,
+                   "Stage0 physical Apply BLOCKED: source seal is not private/root-owned")
+            raw = stream.read(8192)
+    except (FileNotFoundError, PermissionError, NotADirectoryError) as exc:
+        raise AdmissionError(
+            "Stage0 physical Apply BLOCKED: independent root-owned OCI source seal missing"
+        ) from exc
+    try:
+        attestation = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AdmissionError("Stage0 physical Apply BLOCKED: invalid source seal JSON") from exc
+    expected = {
+        "schema_version": 1,
+        "kind": "heim-pc-stage0-sealed-oci-source-v1",
+        "image_id": SEALED_IMAGE,
+        "original_nix_builder_image": NIX_IMAGE,
+        "original_build_revision": BUILD_REV,
+        "system_store": SYSTEM,
+        "installer_store": INSTALLER,
+        "util_linux_store": UTIL_LINUX,
+        "busybox_sha256": SEALED_BUSYBOX_SHA256,
+        "source_prototype_report_sha256": SOURCE_PROTOTYPE_REPORT_SHA256,
+        "source_scratch_report_sha256": SOURCE_SCRATCH_REPORT_SHA256,
+        "reviewed_source_head": source["revision"],
+        "reviewed_installer_script_sha256": source["script_sha256"],
+    }
+    demand(isinstance(attestation, dict) and
+           set(attestation) == set(expected) | {"independent_review_receipt_sha256"} and
+           all(attestation.get(k) == v for k, v in expected.items()) and
+           isinstance(attestation.get("independent_review_receipt_sha256"), str) and
+           bool(re.fullmatch(r"[0-9a-f]{64}",
+                             attestation["independent_review_receipt_sha256"])),
+           "Stage0 physical Apply BLOCKED: source attestation/provenance mismatch")
+    # A reviewer SHA by itself can be an arbitrary 64-hex string. Require
+    # the actual separately root-protected receipt and bind its exact bytes.
+    review_path = SEALED_SOURCE_ATTESTATION.with_name("stage0-independent-source-review-v1.json")
+    try:
+        fd = os.open(review_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as stream:
+            review_stat = os.fstat(stream.fileno())
+            demand(stat.S_ISREG(review_stat.st_mode) and
+                   review_stat.st_uid == 0 and review_stat.st_nlink == 1 and
+                   not (review_stat.st_mode & 0o077) and
+                   0 < review_stat.st_size < 8192,
+                   "Stage0 physical Apply BLOCKED: independent review receipt is unsafe")
+            review_raw = stream.read(8192)
+    except (FileNotFoundError, PermissionError, NotADirectoryError) as exc:
+        raise AdmissionError(
+            "Stage0 physical Apply BLOCKED: independent source review receipt missing"
+        ) from exc
+    demand(digest(review_raw) == attestation["independent_review_receipt_sha256"],
+           "Stage0 physical Apply BLOCKED: independent review receipt hash mismatch")
+    try:
+        review = json.loads(review_raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AdmissionError("Stage0 physical Apply BLOCKED: review receipt malformed") from exc
+    demand(isinstance(review, dict) and
+           review.get("schema_version") == 1 and
+           review.get("kind") == "heim-pc-stage0-source-security-review-v1" and
+           review.get("source_head") == source["revision"] and
+           review.get("installer_script_sha256") == source["script_sha256"] and
+           review.get("image_id") == SEALED_IMAGE and
+           review.get("disposition") == "APPROVE_SOURCE_ONLY" and
+           isinstance(review.get("reviewer"), str) and
+           3 <= len(review["reviewer"]) <= 128 and
+           isinstance(review.get("review_url"), str) and
+           bool(re.fullmatch(
+               r"https://github[.]com/heimgewebe/heim-pc/pull/238#pullrequestreview-[0-9]+",
+               review["review_url"])),
+           "Stage0 physical Apply BLOCKED: independent review does not approve this source")
+    # The named URL and author must be externally authenticated against the
+    # actual GitHub review; JSON fields alone are not cryptographic signatures
+    # or source authority and never authorize physical disk data loss.
+    # Before a hardware snapshot or GPT write, verify exact image identity
+    # and the binary hash of the helper that will make the in-container bind.
+    demand(output("/usr/bin/docker", "image", "inspect", "--format",
+                  "{{.Id}}", SEALED_IMAGE) == SEALED_IMAGE,
+           "Stage0 physical Apply BLOCKED: OCI image digest mismatch")
+    fingerprint = output(
+        "/usr/bin/docker", "run", "--rm", "--pull=never", "--network=none",
+        "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--entrypoint", "/busybox", SEALED_IMAGE,
+        "sha256sum", "/busybox").split()
+    demand(len(fingerprint) == 2 and
+           fingerprint[0] == SEALED_BUSYBOX_SHA256 and
+           fingerprint[1] == "/busybox",
+           "Stage0 physical Apply BLOCKED: OCI mount helper integrity mismatch")
 
 
 def apply_plan(filename: Path, confirmation: str) -> None:
@@ -594,10 +699,6 @@ def apply_plan(filename: Path, confirmation: str) -> None:
     snapshot = live_snapshot(plan["snapshot"]["seagate_by_id"], plan["snapshot"]["wd_by_id"])
     demand(canonical(snapshot) == canonical(plan["snapshot"]),
            "current hardware differs from private plan")
-    demand(output("docker", "image", "inspect", "-f", "{{.Id}}", source["image"]) == source["image"],
-           "pinned Nix container image unavailable")
-    vol = json.loads(output("docker", "volume", "inspect", source["volume"]))
-    demand(len(vol) == 1 and vol[0].get("Driver") == "local", "unexpected Nix store volume")
     p3 = snapshot["seagate_by_id"] + "-part3"
     p1 = snapshot["seagate_by_id"] + "-part1"
     demand(not NIX_ROOT.exists() or not any(NIX_ROOT.iterdir()), "installation mount path is in use")

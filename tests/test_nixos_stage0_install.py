@@ -35,6 +35,14 @@ def mock_disk(parts: int, model: str = "Seagate ZP4000GP304001") -> dict:
     }]}
 
 
+def sealed_source() -> dict:
+    return {"revision": "a"*40, "build_revision": stage0.BUILD_REV,
+            "source_kind": "sealed-oci-stage0-v1",
+            "system": stage0.SYSTEM, "installer": stage0.INSTALLER,
+            "image": stage0.SEALED_IMAGE, "builder_image": stage0.NIX_IMAGE,
+            "script_sha256": "b"*64}
+
+
 class Stage0SourceTests(unittest.TestCase):
     def test_frozen_stage0_profile_btrfs_and_no_default_passwords(self):
         source = (stage0.ROOT / "nixos/system/modules/stage0-no-usb.nix").read_text()
@@ -273,8 +281,8 @@ class Stage0SourceTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def test_immutable_source_missing_seal_blocks_before_any_device_command(self):
-        source = {"revision": "b"*40, "volume": stage0.BUILD_VOLUME,
-                  "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
+        source = sealed_source()
+        source["revision"] = "b"*40
         plan = {"source": source, "snapshot":
                 {"seagate_by_id": "/dev/disk/by-id/nvme-seagate",
                  "wd_by_id": "/dev/disk/by-id/nvme-wd"}}
@@ -287,6 +295,7 @@ class Stage0SourceTests(unittest.TestCase):
              patch.object(stage0, "verify_source_store") as verify, \
              patch.object(stage0, "copy_source_closure_to_target") as copy, \
              patch.object(stage0, "run_container") as install, \
+             patch.object(stage0, "SEALED_SOURCE_ATTESTATION", Path("/impossible-stage0-seal/absent")) as unused_seal, \
              patch.object(stage0, "host_cmd") as mutate:
             with self.assertRaisesRegex(stage0.AdmissionError, "physical Apply BLOCKED"):
                 stage0.apply_plan(Path("/nonexistent/test-plan"), "APPLY-STAGE0:"+"f"*64)
@@ -297,7 +306,7 @@ class Stage0SourceTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def test_immutable_source_guard_rejects_other_docker_volume(self):
-        with self.assertRaisesRegex(stage0.AdmissionError, "unrecognized Stage0 source volume"):
+        with self.assertRaisesRegex(stage0.AdmissionError, "unsealed or mutable"):
             stage0.require_immutable_install_source({"volume": "untrusted-docker-volume"})
 
     def test_snapshot_drift_stops_before_partition_ops(self):
@@ -315,7 +324,7 @@ class Stage0SourceTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def test_run_container_is_target_scoped_no_network_readonly_nix(self):
-        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
+        source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "installer": "/nix/store/"+"a"*32+"-nixos-install", "system": stage0.SYSTEM}
         with patch.object(stage0, "host_cmd") as mutate:
             stage0.run_container(source)
@@ -323,7 +332,11 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertEqual(command[0], "/usr/bin/docker")
         self.assertIn("--network=none", command)
         self.assertIn("--security-opt=apparmor=unconfined", command)
-        self.assertIn("readonly", " ".join(command))
+        self.assertIn("--pull=never", command)
+        self.assertIn(stage0.SEALED_IMAGE, command)
+        self.assertIn("/busybox", command)
+        self.assertNotIn("type=volume", " ".join(command))
+        self.assertNotIn(stage0.BUILD_VOLUME, " ".join(command))
         self.assertIn(str(stage0.NIX_ROOT), " ".join(command))
         self.assertIn("--no-root-passwd", command)
         self.assertNotIn("/dev/nvme0n1", " ".join(command))
@@ -353,7 +366,7 @@ class Stage0SourceTests(unittest.TestCase):
         mutate.assert_not_called()
 
     def test_mount_namespace_preflight_has_no_disks_and_no_network(self):
-        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE}
+        source = sealed_source()
         with patch.object(stage0, "host_cmd") as executor:
             stage0.verify_install_namespace(source)
         cmd = executor.call_args.args
@@ -365,13 +378,14 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn(stage0.UTIL_LINUX + "/bin/mount", cmd)
         self.assertNotIn("/nix/var/nix/profiles/default/bin/bash", cmd)
         self.assertIn("--cap-add=SYS_ADMIN", cmd)
-        self.assertIn("readonly", " ".join(cmd))
+        self.assertIn(stage0.SEALED_IMAGE, cmd)
+        self.assertNotIn("type=volume", " ".join(cmd))
         self.assertNotIn("/dev/", " ".join(cmd))
         self.assertNotIn("type=bind", " ".join(cmd))
         self.assertNotIn("--privileged", cmd)
 
     def test_offline_store_copy_is_target_scoped_and_uses_local_unsigned_paths(self):
-        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
+        source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "system": stage0.SYSTEM}
         with patch.object(stage0, "host_cmd") as mutate:
             stage0.copy_source_closure_to_target(source)
@@ -385,12 +399,15 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn(stage0.SYSTEM, argv)
         self.assertIn("type=bind,src="+str(stage0.NIX_ROOT)+",dst=/mnt", argv)
         self.assertNotIn("--privileged", argv)
-        self.assertNotIn("--cap-add=SYS_ADMIN", argv)
+        self.assertIn("--cap-add=SYS_ADMIN", argv)
+        self.assertNotIn("type=volume", " ".join(argv))
+        self.assertNotIn(stage0.BUILD_VOLUME, " ".join(argv))
         self.assertNotIn("/dev/nvme0n1", " ".join(argv))
-        self.assertNotIn("readonly", " ".join(argv))
+        self.assertIn(stage0.SEALED_IMAGE, argv)
+        self.assertIn("--pull=never", argv)
 
     def test_verifier_checks_system_and_pinned_installer(self):
-        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
+        source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
         with patch.object(stage0, "host_cmd") as verify:
             stage0.verify_source_store(source)
@@ -401,7 +418,7 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn(stage0.UTIL_LINUX, argv)
 
     def test_reverify_source_closure_has_no_block_device_mounts(self):
-        source = {"volume": stage0.BUILD_VOLUME, "image": stage0.NIX_IMAGE,
+        source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
         with patch.object(stage0, "host_cmd") as verify:
             stage0.verify_source_store(source)
@@ -410,7 +427,9 @@ class Stage0SourceTests(unittest.TestCase):
         self.assertIn("verify", argv)
         self.assertIn("--recursive", argv)
         self.assertIn(stage0.SYSTEM, argv)
-        self.assertNotIn("--cap-add=SYS_ADMIN", argv)
+        self.assertIn("--cap-add=SYS_ADMIN", argv)
+        self.assertNotIn("type=volume", " ".join(argv))
+        self.assertNotIn(stage0.BUILD_VOLUME, " ".join(argv))
         self.assertNotIn("--privileged", argv)
         self.assertNotIn("/dev/", " ".join(argv))
 
@@ -565,10 +584,8 @@ class Stage0SourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "stage0-root"
             path.mkdir()  # Existing empty host mountpoint, never a real block mount.
-            source = {"revision": "a"*40, "system": stage0.SYSTEM,
-                      "installer": "/nix/store/"+"a"*32+"-nixos-install",
-                      "image": stage0.NIX_IMAGE, "volume": stage0.BUILD_VOLUME,
-                      "script_sha256": "f"*64}
+            source = sealed_source()
+            source["script_sha256"] = "f"*64
             target = "/dev/disk/by-id/nvme-seagate"
             wd = "/dev/disk/by-id/nvme-protected-wd"
             snapshot = {
@@ -723,6 +740,187 @@ class Stage0SourceTests(unittest.TestCase):
             (root / "link").symlink_to("file")
             with self.assertRaisesRegex(stage0.AdmissionError, "unexpected"):
                 stage0.wd_esp_tree_fingerprint(root)
+
+    def test_all_source_phases_use_only_same_pinned_oci_image(self):
+        source = sealed_source()
+        calls = []
+        with patch.object(stage0, "host_cmd", side_effect=lambda *cmd: calls.append(cmd)):
+            stage0.verify_source_store(source)
+            stage0.verify_install_namespace(source)
+            stage0.copy_source_closure_to_target(source)
+            stage0.run_container(source)
+        self.assertEqual(len(calls), 4)
+        for cmd in calls:
+            self.assertEqual(cmd.count(stage0.SEALED_IMAGE), 1)
+            self.assertIn("--pull=never", cmd)
+            self.assertIn("--network=none", cmd)
+            self.assertNotIn("type=volume", " ".join(cmd))
+            self.assertNotIn(stage0.BUILD_VOLUME, " ".join(cmd))
+            self.assertNotIn(stage0.NIX_IMAGE, " ".join(cmd))
+            self.assertNotIn("--privileged", cmd)
+            self.assertNotIn("/dev/disk/", " ".join(cmd))
+        # A concurrent writer on the old Docker volume has no source access
+        # in any command of the new verify/copy/privileged install pipeline.
+        self.assertEqual(calls[-1][calls[-1].index("--entrypoint")+1], "/busybox")
+
+    def test_oci_command_refuses_wrong_digest_and_mutable_volume(self):
+        source = sealed_source()
+        source["image"] = "sha256:" + "f"*64
+        with self.assertRaisesRegex(stage0.AdmissionError, "unsealed"):
+            stage0.verify_source_store(source)
+        source = sealed_source()
+        source["volume"] = stage0.BUILD_VOLUME
+        with self.assertRaisesRegex(stage0.AdmissionError, "mutable"):
+            stage0.run_container(source)
+
+    def test_attestation_rejects_tampered_reviewed_head_before_docker(self):
+        source = sealed_source()
+        payload = {
+            "schema_version": 1, "kind": "heim-pc-stage0-sealed-oci-source-v1",
+            "image_id": stage0.SEALED_IMAGE,
+            "original_nix_builder_image": stage0.NIX_IMAGE,
+            "original_build_revision": stage0.BUILD_REV,
+            "system_store": stage0.SYSTEM,
+            "installer_store": stage0.INSTALLER,
+            "util_linux_store": stage0.UTIL_LINUX,
+            "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
+            "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
+            "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
+            "reviewed_source_head": "f"*40,
+            "reviewed_installer_script_sha256": source["script_sha256"],
+            "independent_review_receipt_sha256": "1"*64,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            filename = Path(td) / "seal.json"
+            filename.write_text(json.dumps(payload))
+            st = filename.stat()
+            parent_root = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+            file_root = types.SimpleNamespace(st_mode=st.st_mode, st_uid=0,
+                                              st_nlink=1, st_size=st.st_size)
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", filename), \
+                 patch.object(stage0.Path, "lstat", return_value=parent_root), \
+                 patch.object(stage0.os, "fstat", return_value=file_root), \
+                 patch.object(stage0, "output") as command:
+                with self.assertRaisesRegex(stage0.AdmissionError, "provenance mismatch"):
+                    stage0.require_immutable_install_source(source)
+                command.assert_not_called()
+
+    def test_attestation_rejects_wrong_image_id_before_docker(self):
+        source = sealed_source()
+        # The source image is pinned by code. A source-side digest override
+        # must fail even if a synthetic sign-off file is otherwise present.
+        source["image"] = "sha256:" + "0"*64
+        with patch.object(stage0, "output") as command:
+            with self.assertRaisesRegex(stage0.AdmissionError, "unsealed or mutable"):
+                stage0.require_immutable_install_source(source)
+            command.assert_not_called()
+
+    def test_missing_attestation_never_snapshots_hardware(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = sealed_source()
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", Path(td)/"missing"), \
+                 patch.object(stage0.Path, "lstat", return_value=types.SimpleNamespace(
+                     st_mode=stat.S_IFDIR | 0o700, st_uid=0)), \
+                 patch.object(stage0, "output") as docker, \
+                 patch.object(stage0, "live_snapshot") as disk:
+                with self.assertRaisesRegex(stage0.AdmissionError, "source seal missing"):
+                    stage0.require_immutable_install_source(source)
+                docker.assert_not_called()
+                disk.assert_not_called()
+
+
+    def test_independent_review_receipt_is_bound_to_exact_head_and_bytes(self):
+        source = sealed_source()
+        review = {
+            "schema_version": 1,
+            "kind": "heim-pc-stage0-source-security-review-v1",
+            "source_head": source["revision"],
+            "installer_script_sha256": source["script_sha256"],
+            "image_id": stage0.SEALED_IMAGE,
+            "disposition": "APPROVE_SOURCE_ONLY",
+            "reviewer": "independent-test-reviewer",
+            "review_url": "https://github.com/heimgewebe/heim-pc/pull/238#pullrequestreview-5609380329",
+        }
+        review_bytes = stage0.canonical(review)
+        attestation = {
+            "schema_version": 1, "kind": "heim-pc-stage0-sealed-oci-source-v1",
+            "image_id": stage0.SEALED_IMAGE,
+            "original_nix_builder_image": stage0.NIX_IMAGE,
+            "original_build_revision": stage0.BUILD_REV,
+            "system_store": stage0.SYSTEM, "installer_store": stage0.INSTALLER,
+            "util_linux_store": stage0.UTIL_LINUX,
+            "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
+            "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
+            "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
+            "reviewed_source_head": source["revision"],
+            "reviewed_installer_script_sha256": source["script_sha256"],
+            "independent_review_receipt_sha256": stage0.digest(review_bytes),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "seal.json"
+            path.write_bytes(stage0.canonical(attestation))
+            review_path = path.with_name("stage0-independent-source-review-v1.json")
+            review_path.write_bytes(review_bytes)
+            # Test only: spoof ownership of disposable local test files.
+            # A real production release must be issued by a root operator.
+            st_a, st_b = path.stat(), review_path.stat()
+            parent_meta = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0)
+            meta = [types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0,
+                                          st_nlink=1, st_size=st.st_size)
+                    for st in (st_a, st_b)]
+            def expected_output(*argv):
+                if argv[1:3] == ("image", "inspect"):
+                    return stage0.SEALED_IMAGE
+                if argv[1:3] == ("run", "--rm"):
+                    return stage0.SEALED_BUSYBOX_SHA256 + "  /busybox"
+                raise AssertionError("unexpected OCI probe")
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
+                 patch.object(stage0.Path, "lstat", return_value=parent_meta), \
+                 patch.object(stage0.os, "fstat", side_effect=meta + [meta[-1]]), \
+                 patch.object(stage0, "output", side_effect=expected_output) as docker:
+                stage0.require_immutable_install_source(source)
+                self.assertEqual(docker.call_count, 2)
+            # Changing only the review receipt must invalidate the copied
+            # source seal before ANY Docker/image or disk access.
+            review_path.write_bytes(review_bytes + b" ")
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
+                 patch.object(stage0.Path, "lstat", return_value=parent_meta), \
+                 patch.object(stage0.os, "fstat", side_effect=meta), \
+                 patch.object(stage0, "output") as docker:
+                with self.assertRaisesRegex(stage0.AdmissionError, "receipt hash mismatch"):
+                    stage0.require_immutable_install_source(source)
+                docker.assert_not_called()
+
+    def test_forged_review_receipt_digest_without_file_is_rejected(self):
+        source = sealed_source()
+        attestation = {
+            "schema_version": 1, "kind": "heim-pc-stage0-sealed-oci-source-v1",
+            "image_id": stage0.SEALED_IMAGE,
+            "original_nix_builder_image": stage0.NIX_IMAGE,
+            "original_build_revision": stage0.BUILD_REV,
+            "system_store": stage0.SYSTEM, "installer_store": stage0.INSTALLER,
+            "util_linux_store": stage0.UTIL_LINUX,
+            "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
+            "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
+            "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
+            "reviewed_source_head": source["revision"],
+            "reviewed_installer_script_sha256": source["script_sha256"],
+            "independent_review_receipt_sha256": "a"*64,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "seal.json"
+            path.write_bytes(stage0.canonical(attestation))
+            st = path.stat()
+            with patch.object(stage0, "SEALED_SOURCE_ATTESTATION", path), \
+                 patch.object(stage0.Path, "lstat", return_value=types.SimpleNamespace(
+                     st_mode=stat.S_IFDIR | 0o700, st_uid=0)), \
+                 patch.object(stage0.os, "fstat", return_value=types.SimpleNamespace(
+                     st_mode=stat.S_IFREG | 0o600, st_uid=0,
+                     st_nlink=1, st_size=st.st_size)), \
+                 patch.object(stage0, "output") as docker:
+                with self.assertRaisesRegex(stage0.AdmissionError, "review receipt missing"):
+                    stage0.require_immutable_install_source(source)
+                docker.assert_not_called()
 
 
 if __name__ == "__main__":

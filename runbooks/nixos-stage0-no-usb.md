@@ -9,8 +9,11 @@ This document and development-thread tests DO NOT authorize physical apply.
 - Stage0 profile: nixosConfigurations.heim-pc-stage0
 - Built source commit: e68efce49eaba0014865fd1c4e0b62f692f016af
 - Built system: /nix/store/9imhrwyy6bf5fkhqrjfx6dqn4rva8y67-nixos-system-heim-pc-stage0-26.05.20260829.c5c4a43
-- Docker Nix image: sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
-- Nix volume: heim-pc-nixos-stage0-e68efce49eab
+- Original build Docker Nix image: sha256:98edc6813218e179ce84587373e0b52d4aa58babae2d26b51fb01e7fdacf815f
+- Original build-only Nix volume: heim-pc-nixos-stage0-e68efce49eab
+- Runtime installation source: **standalone, digest-bound OCI image** sha256:91b210f35fe468e2901448b5d9dadbadcf12e3240121d573c08255028f874aa9; complete store at /sealed-nix inside its image lower layer
+- Pinned internal helper SHA256: b3c1009e1b5c927e537487c80639cdf404f69e3eb49371d9be5d841672be3ff9 (/busybox)
+- Physical-source admission candidate: root-owned private file /etc/heim-pc/stage0-sealed-oci-source-v1.json (not yet issued or independently approved)
 - Local store evidence directory: /home/alex/.local/state/heim-pc-stage0-e68efce49eab
 - The exact realized official nixos-install store path is in stage0-tools.
 - Driver: scripts/nixos_stage0_install.py (separate from the production installer).
@@ -32,7 +35,7 @@ target. The only intended destination is internal Seagate ZP4000GP304001
 - p2: own ~4GiB ext4 NIXOS2_RECOVERY; do not mount/write
 - p3: ~3.995TB unformatted, historical GPT Linux-LUKS type, PARTLABEL
   NIXOS2_CRYPT; rewrite p3 type to Linux filesystem and name, format p3
-  (only) Btrfs label NIXOS_STAGE0_ROOT, with no force flag
+  (only) Btrfs label NIXOS_STAGE0_ROOT, with no force flag; no detected signature is NOT proof that the entire partition is empty, so a separately evidenced p3 data-loss decision remains mandatory
 - No USB media is needed. External Freecom and Game Drive are not targets.
 
 The operator must freshly prove private whole-NVMe /dev/disk/by-id/nvme-*
@@ -61,15 +64,35 @@ filesystem, mount, NVRAM or boot effects.
 
 ## Apply remains subject to new hardware authority and independent review
 
-**Current code deliberately denies every physical `--apply` invocation.**
-`require_immutable_install_source()` raises `AdmissionError` after the
-private plan/source confirmation and **before** hardware snapshot, Nix
-verification/copy, any GPT/format/mount operation, or privileged installer.
-This is an enforceable safety hold, **not** resolution of the mutable-store
-P1; an independently root-sealed source with a concurrent-writer negative
-test remains necessary before the hold can be replaced. Do not bypass the
-guard, patch the code locally for hardware use, or interpret a synthetic
-test that mocks the guard as an Apply authorization.
+**Physical Apply remains blocked in the current host state.** The
+previous unconditional guard has been replaced *in the unpublished source
+candidate* by a strictly evaluated admission contract. It rejects
+any mutable/source-volume identity and requires an **absent by default**
+root-owned, 0600, NOFOLLOW `/etc/heim-pc/stage0-sealed-oci-source-v1.json`
+in a root-owned non-group-writable directory. The schema binds original
+Nix build revision/image, exact pinned current source HEAD and installer
+script bytes, OCI image digest, system/installer/util-linux store paths,
+BusyBox SHA256, two historical evidence report SHA256 values and a
+review-receipt SHA256. An actual *separate* root-owned 0600 file
+`/etc/heim-pc/stage0-independent-source-review-v1.json` is required:
+the content hash must match the seal; its source HEAD, script SHA, OCI ID,
+review disposition, reviewer and exact PR #238 review URL must match.
+**Neither root-only ownership nor a plausible GitHub URL authenticates
+reviewer identity or constitutes an independent approval.** Independent
+issuance and verification of the review receipt and source-chain authority
+are **not implemented or approved**.
+A syntactically valid review digest is not proof of review. Therefore **do
+not create this seal or run physical Apply** pending exact independent
+security review and hardware authority. Missing/mismatching seal is
+rejected before any hardware snapshot, GPT write, store copy or install.
+
+The actual four Docker execution phases (recursive verify, namespace
+preflight, Nix copy, official nixos-install) are now tied to the same
+`--pull=never` immutable OCI image, with no original named source
+volume mounted. The Nix metadata writable state is transient and
+container-local, discarded at `--rm`. The Docker daemon and privileged
+host root remain part of the trusted computing base; a pinned image ID
+and COW isolation alone do not defend against their compromise.
 
 Do not run Apply until this issue/PR names the reviewed immutable HEAD,
 fresh green checks, successful synthetic installation proof (not just
@@ -120,13 +143,16 @@ Expected guarded sequence, not yet a physical install receipt:
    target /, /nix, /home, /persist and the existing Seagate p1 on /boot.
 5. First populate the fresh target Nix store from the source-bound built
    system closure via official Nix copy --to local?root=/mnt. Offline copy
-   requires source Nix DB temporarily writable and --no-check-sigs for
-   locally built unsigned paths (the source is verified before writing
-   GPT; no network or SYS_ADMIN during the copy). This exact
-   no-bootloader Nix-store transfer plus nixos-install was exercised on
-   isolated Docker volumes and completed successfully.
-6. Run source-bound official nixos-install in the pinned offline Docker
-   image with SOURCE Nix volume READONLY and target mount writable:
+   requires source Nix DB metadata temporarily writable and --no-check-sigs
+   for locally built unsigned paths; the source is verified before GPT.
+   OCI runtime needs namespace-local SYS_ADMIN to bind its sealed lower
+   image layer /sealed-nix to /nix; no host physical device is passed to
+   Docker and the original source volume is not mounted. Previous
+   offline scratch copy/install was exercised successfully; updated
+   driver-specific scratch tests must be reviewed before hardware.
+6. Run source-bound official nixos-install in the pinned standalone OCI
+   image, with image lower-layer /sealed-nix privately bound to /nix and
+   only the Seagate target mount writable (no shared source volume):
    --root /mnt --system BUILT-SYSTEM --no-root-passwd --no-channel-copy.
    Verified chroot use requires Docker SYS_ADMIN, seccomp=unconfined and
    apparmor=unconfined; this is a security-sensitive installation container
@@ -197,14 +223,14 @@ correctness/security issues:
   unpinned-installer and omitted-verification subissues. The verification
   is a point-in-time check against local Store metadata; it is **not** an
   independent attestation of an immutable installation source.
-- P1, source store lifetime: another host process with Docker access can
-  still remount or change the Docker Nix volume after verification. A
-  read-only bind inside the installation container does not eliminate that
-  race. **This P1 remains open. The script now technically blocks every
-  physical Apply before hardware observation or mutation.** The hold must
-  remain until a root-controlled immutable source seal / exclusive trust
-  handoff is independently implemented, tested and admitted. Do not
-  interpret a clean CI run or this documented contract as a compensating approval.
+- P1, source store lifetime: the old volume was mutable between verify
+  and install. The new source candidate completely eliminates that
+  volume from the installer pipeline, using pinned image lower layers.
+  A separate OCI/Review-admission mechanism is now required before
+  any physical disk observation, but its external attestation authority
+  and full scratch install/boot tests still require review. The P1
+  thread remains open until independently confirmed at the final HEAD;
+  a documented conditional guard is not a compensating approval.
 - P2, cleanup false success: the helper now reports installation success
   only after all target mountpoints have been unmounted and read back as
   detached. Failed umount or persistent mounts produce a nonzero failure
@@ -236,15 +262,33 @@ container. This is an actual executable integration candidate, but
 **not a reviewed root-owned attestation of the provenance or physical
 bootability of the final installer**; Docker-daemon/root tampering and
 end-to-end Seagate ESP/Btrfs installation have not been excluded.
-The production Stage0 source remains pinned to the original image and
-retains the unconditional `--apply` hold. Never lift it based solely on
-this successful test.
+The current source candidate has switched all four installer subprocesses
+to the pinned standalone OCI image and refuses missing/malformed private
+source attestations or review receipts. Real execution of its own
+`verify_source_store()` and `verify_install_namespace()` succeeded in
+Grabowski task `bcfdc076144849888d016c68`, Exit 0.
+Its actual `copy_source_closure_to_target()` and `run_container(...,
+"--no-bootloader")` generated commands were executed against a fresh,
+safely labeled synthetic Docker target volume
+`heim-pc-stage0-oci-pr238-integration-20261022-v1` (instead of the
+physical host NIX_ROOT bind), task `00ff729ebc934f819e7cfb1b`, Exit 0,
+with independent readonly /etc/NIXOS, system-store and profile postchecks.
+This exercises official Nix copy and nixos-install, **not** the full
+root-mounted Btrfs/ESP installer with bootloader or a physical boot.
+The Python suite on the then-current dirty source tested 2183 passing,
+1 skipped, 465 subtests and NixOS-source tests 52 passing; new source
+changes require fresh tests before publishing.
+The host has no approved root-owned release seal;
+physical Apply remains forbidden. Do not mint an attestation merely to
+make the code run or treat candidate-image smoke tests as hardware approval.
 
 ## Deferred NixOS module-bound review items
 
-The independent review recommends `usbhid`/`hid_generic` in the initrd
-for early recovery-shell keyboard support, and stronger Nix evaluation
-assertions on all Btrfs subvolumes and passwordlessness. They change
+The independent review recommends `usbhid`/`hid_generic` in the
+initrd and stronger Nix assertions on all Btrfs subvolumes and passwordlessness.
+Nixer's live NixOS effective-option evaluation on 2026-10-22 confirmed
+**both `usbhid` and `hid_generic` already present**; no new HID source
+modification is needed. Additional assertions would change
 `nixos/system/` and require a **new, pinned, realized Stage0 system
 closure, revised BUILD_REV and refreshed provenance**: the old closure
 cannot truthfully be reused. Do not silently modify the module while
