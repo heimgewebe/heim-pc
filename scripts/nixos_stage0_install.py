@@ -43,6 +43,13 @@ LINUX_GUID = "0fc63daf-8483-4772-8e79-3d69d8477de4"
 EFI_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 BY_ID = re.compile(r"^/dev/disk/by-id/nvme-[a-zA-Z0-9_.:+-]+$")
 UTIL_LINUX = "/nix/store/j2cwh4a23s7z65nyvjfck2axj2ci16ml-util-linux-minimal-2.42.2-bin"
+# Exact content (NAR) fingerprints remeasured from pinned standalone OCI image.
+# A source Nix DB self-check alone must not authorize an alternate NAR.
+SEALED_NAR = {
+    SYSTEM: ("sha256-ocr+cay5yrcarnw5ZzFxQnht7pTQwC1HEMbU/i8zN4U=", 200200),
+    INSTALLER: ("sha256-bxwMQvK0elYQJUdV2+uKVeGDf9TVHTz5v/8uhagZPs8=", 15464),
+    UTIL_LINUX: ("sha256-QTeruJR6p/tf7gNryZqDMHuT63N9rqrADmS2aBuRB4I=", 8905168),
+}
 SUBVOLS = ("@root", "@nix", "@home", "@persist")
 MIN_ROOT_SIZE = 3_000_000_000_000
 MAX_ESP_FILES = 5000
@@ -492,12 +499,23 @@ def verify_install_namespace(source: dict) -> None:
 
 
 def verify_source_store(source: dict) -> None:
-    """Recursive store check from independent OCI image, never mutable volume."""
+    """Verify closures and independently pinned NAR identities, before GPT."""
     host_cmd(*_oci_command(
         source, "/nix/var/nix/profiles/default/bin/nix",
         "--extra-experimental-features", "nix-command",
         "store", "verify", "--recursive",
         source["system"], source["installer"], UTIL_LINUX))
+    details = json.loads(output(*_oci_command(
+        source, "/nix/var/nix/profiles/default/bin/nix",
+        "--extra-experimental-features", "nix-command",
+        "path-info", "--json", source["system"], source["installer"], UTIL_LINUX)))
+    demand(isinstance(details, dict) and set(details) == set(SEALED_NAR),
+           "sealed OCI source NAR entries missing/changed")
+    for path, (nar_hash, nar_size) in SEALED_NAR.items():
+        item = details.get(path)
+        demand(isinstance(item, dict) and item.get("narHash") == nar_hash and
+               item.get("narSize") == nar_size,
+               "sealed OCI source NAR hash or size differs from reviewed build")
 
 
 def copy_source_closure_to_target(source: dict) -> None:
@@ -507,6 +525,20 @@ def copy_source_closure_to_target(source: dict) -> None:
         "--extra-experimental-features", "nix-command",
         "copy", "--no-check-sigs", "--to", "local?root=/mnt",
         source["system"], target=True))
+
+
+def verify_target_store(source: dict) -> None:
+    """Verify byte-level integrity of the copied unsigned target closure.
+
+    --no-trust disables the signature expectation for the locally built,
+    unsigned Stage0 closure but NOT its recursive contents hash check.
+    Source provenance is separately constrained by verified OCI/NAR seal.
+    """
+    host_cmd(*_oci_command(
+        source, "/nix/var/nix/profiles/default/bin/nix",
+        "--extra-experimental-features", "nix-command",
+        "store", "verify", "--no-trust", "--recursive",
+        "--store", "local?root=/mnt", source["system"], target=True))
 
 
 def run_container(source: dict, *arguments: str) -> None:
@@ -617,6 +649,12 @@ def require_immutable_install_source(source: dict) -> None:
         "system_store": SYSTEM,
         "installer_store": INSTALLER,
         "util_linux_store": UTIL_LINUX,
+        "system_nar_hash": SEALED_NAR[SYSTEM][0],
+        "system_nar_size": SEALED_NAR[SYSTEM][1],
+        "installer_nar_hash": SEALED_NAR[INSTALLER][0],
+        "installer_nar_size": SEALED_NAR[INSTALLER][1],
+        "util_linux_nar_hash": SEALED_NAR[UTIL_LINUX][0],
+        "util_linux_nar_size": SEALED_NAR[UTIL_LINUX][1],
         "busybox_sha256": SEALED_BUSYBOX_SHA256,
         "source_prototype_report_sha256": SOURCE_PROTOTYPE_REPORT_SHA256,
         "source_scratch_report_sha256": SOURCE_SCRATCH_REPORT_SHA256,
@@ -769,6 +807,7 @@ def apply_plan(filename: Path, confirmation: str) -> None:
                "Stage0 root label is ambiguous after formatting")
         same_protected_fingerprint(snapshot)
         copy_source_closure_to_target(source)
+        verify_target_store(source)
         run_container(source)
         verify_installed_esp()
         credential_bootstrap(NIX_ROOT / "etc/shadow", hashed)

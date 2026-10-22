@@ -13,6 +13,10 @@ This document and development-thread tests DO NOT authorize physical apply.
 - Original build-only Nix volume: heim-pc-nixos-stage0-e68efce49eab
 - Runtime installation source: **standalone, digest-bound OCI image** sha256:91b210f35fe468e2901448b5d9dadbadcf12e3240121d573c08255028f874aa9; complete store at /sealed-nix inside its image lower layer
 - Pinned internal helper SHA256: b3c1009e1b5c927e537487c80639cdf404f69e3eb49371d9be5d841672be3ff9 (/busybox)
+- Measured NAR hash + NAR size, bound in `SEALED_NAR` and root release seal:
+  - NixOS system: `sha256-ocr+cay5yrcarnw5ZzFxQnht7pTQwC1HEMbU/i8zN4U=`, 200200 bytes
+  - Official `nixos-install`: `sha256-bxwMQvK0elYQJUdV2+uKVeGDf9TVHTz5v/8uhagZPs8=`, 15464 bytes
+  - `util-linux-minimal`: `sha256-QTeruJR6p/tf7gNryZqDMHuT63N9rqrADmS2aBuRB4I=`, 8905168 bytes
 - Physical-source admission candidate: root-owned private file /etc/heim-pc/stage0-sealed-oci-source-v1.json (not yet issued or independently approved)
 - Local store evidence directory: /home/alex/.local/state/heim-pc-stage0-e68efce49eab
 - The exact realized official nixos-install store path is in stage0-tools.
@@ -72,7 +76,8 @@ root-owned, 0600, NOFOLLOW `/etc/heim-pc/stage0-sealed-oci-source-v1.json`
 in a root-owned non-group-writable directory. The schema binds original
 Nix build revision/image, exact pinned current source HEAD and installer
 script bytes, OCI image digest, system/installer/util-linux store paths,
-BusyBox SHA256, two historical evidence report SHA256 values and a
+their independent expected NAR hashes/sizes, BusyBox SHA256, two
+historical evidence report SHA256 values and a
 review-receipt SHA256. An actual *separate* root-owned 0600 file
 `/etc/heim-pc/stage0-independent-source-review-v1.json` is required:
 the content hash must match the seal; its source HEAD, script SHA, OCI ID,
@@ -147,9 +152,14 @@ Expected guarded sequence, not yet a physical install receipt:
    for locally built unsigned paths; the source is verified before GPT.
    OCI runtime needs namespace-local SYS_ADMIN to bind its sealed lower
    image layer /sealed-nix to /nix; no host physical device is passed to
-   Docker and the original source volume is not mounted. Previous
-   offline scratch copy/install was exercised successfully; updated
-   driver-specific scratch tests must be reviewed before hardware.
+   Docker and the original source volume is not mounted. Before the
+   privileged installation, the new driver verifies the recursively
+   copied target system content with
+   `nix store verify --no-trust --recursive --store local?root=/mnt`.
+   Here `--no-trust` only disables the signature requirement for an
+   unsigned local source build; it does **not** disable content checks.
+   The source verifies all three pre-pinned NAR identities after its
+   recursive store verification and before writing GPT.
 6. Run source-bound official nixos-install in the pinned standalone OCI
    image, with image lower-layer /sealed-nix privately bound to /nix and
    only the Seagate target mount writable (no shared source volume):
@@ -262,7 +272,7 @@ container. This is an actual executable integration candidate, but
 **not a reviewed root-owned attestation of the provenance or physical
 bootability of the final installer**; Docker-daemon/root tampering and
 end-to-end Seagate ESP/Btrfs installation have not been excluded.
-The current source candidate has switched all four installer subprocesses
+The current source candidate has switched all verify/copy/install subprocesses
 to the pinned standalone OCI image and refuses missing/malformed private
 source attestations or review receipts. Real execution of its own
 `verify_source_store()` and `verify_install_namespace()` succeeded in
@@ -273,8 +283,28 @@ safely labeled synthetic Docker target volume
 `heim-pc-stage0-oci-pr238-integration-20261022-v1` (instead of the
 physical host NIX_ROOT bind), task `00ff729ebc934f819e7cfb1b`, Exit 0,
 with independent readonly /etc/NIXOS, system-store and profile postchecks.
-This exercises official Nix copy and nixos-install, **not** the full
-root-mounted Btrfs/ESP installer with bootloader or a physical boot.
+After adding independent NAR pins and recursive *target-store* content
+verification, a **fresh** second disposable source-to-target OCI workflow
+ran under Grabowski task `b7292f816ad0453d8f729aff`, exit 0:
+recursive source verify + exact NAR metadata, mount-namespace preflight,
+real Nix copy, recursive target integrity verification, official
+`nixos-install --no-bootloader`, read-only postconditions.
+The script SHA remained `d7f8f314ae9c56265c7cdcffc7075467f58908de8cca7f7029b61d97a80dee80`
+throughout that entire operation; volume
+`heim-pc-stage0-oci-pr238-nar-20261022-v2` was specifically created
+under label `heim-pc.stage0=oci-pr238-nar-scratch-20261022-v2`.
+A **real negative target-content mutation** was then performed on
+exactly that still-labeled, idle, isolated v2 Docker scratch volume,
+never on any host NVMe or the sealed image. A synthetic extra file
+was inserted under the target NixOS system Store directory; the actual
+target `nix store verify --no-trust --recursive` returned **exit 1**
+as required. Grabowski task `32b8ea58447c49b6b46e5769`,
+`STAGE0_CORRUPTED_TARGET_REAL_VERIFY_FAIL_CLOSED`. The scratch target
+is hence deliberately invalid for later boot tests.
+
+This is **not** a full root-mounted Btrfs/ESP installer with bootloader
+or a physical boot. Do not equate any scratch receipt or unsigned local
+NAR self-check with independent source authorization.
 The Python suite on the then-current dirty source tested 2183 passing,
 1 skipped, 465 subtests and NixOS-source tests 52 passing; new source
 changes require fresh tests before publishing.

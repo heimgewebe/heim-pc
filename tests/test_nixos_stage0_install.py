@@ -43,6 +43,13 @@ def sealed_source() -> dict:
             "script_sha256": "b"*64}
 
 
+def sealed_nar_info() -> str:
+    return json.dumps({
+        path: {"narHash": nar_hash, "narSize": nar_size}
+        for path, (nar_hash, nar_size) in stage0.SEALED_NAR.items()
+    })
+
+
 class Stage0SourceTests(unittest.TestCase):
     def test_frozen_stage0_profile_btrfs_and_no_default_passwords(self):
         source = (stage0.ROOT / "nixos/system/modules/stage0-no-usb.nix").read_text()
@@ -409,8 +416,10 @@ class Stage0SourceTests(unittest.TestCase):
     def test_verifier_checks_system_and_pinned_installer(self):
         source = {"source_kind": "sealed-oci-stage0-v1", "image": stage0.SEALED_IMAGE,
                   "system": stage0.SYSTEM, "installer": stage0.INSTALLER}
-        with patch.object(stage0, "host_cmd") as verify:
+        with patch.object(stage0, "host_cmd") as verify, \
+             patch.object(stage0, "output", return_value=sealed_nar_info()) as nar:
             stage0.verify_source_store(source)
+        nar.assert_called_once()
         argv = verify.call_args.args
         self.assertIn("--recursive", argv)
         self.assertIn(stage0.SYSTEM, argv)
@@ -634,6 +643,7 @@ class Stage0SourceTests(unittest.TestCase):
                                                                   return_value="$6$test$hash"))
                 verify_store = stack.enter_context(patch.object(stage0, "verify_source_store"))
                 copy_store = stack.enter_context(patch.object(stage0, "copy_source_closure_to_target"))
+                target_verify = stack.enter_context(patch.object(stage0, "verify_target_store"))
                 installer = stack.enter_context(patch.object(stage0, "run_container"))
                 esp = stack.enter_context(patch.object(stage0, "verify_installed_esp"))
                 credentials = stack.enter_context(patch.object(stage0, "credential_bootstrap"))
@@ -661,6 +671,7 @@ class Stage0SourceTests(unittest.TestCase):
             verify_store.assert_called_once_with(source)
             password_hash.assert_called_once_with()
             copy_store.assert_called_once_with(source)
+            target_verify.assert_called_once_with(source)
             installer.assert_called_once_with(source)
             esp.assert_called_once()
             credentials.assert_called_once_with(path / "etc/shadow", "$6$test$hash")
@@ -744,7 +755,8 @@ class Stage0SourceTests(unittest.TestCase):
     def test_all_source_phases_use_only_same_pinned_oci_image(self):
         source = sealed_source()
         calls = []
-        with patch.object(stage0, "host_cmd", side_effect=lambda *cmd: calls.append(cmd)):
+        with patch.object(stage0, "host_cmd", side_effect=lambda *cmd: calls.append(cmd)), \
+             patch.object(stage0, "output", return_value=sealed_nar_info()):
             stage0.verify_source_store(source)
             stage0.verify_install_namespace(source)
             stage0.copy_source_closure_to_target(source)
@@ -783,6 +795,12 @@ class Stage0SourceTests(unittest.TestCase):
             "system_store": stage0.SYSTEM,
             "installer_store": stage0.INSTALLER,
             "util_linux_store": stage0.UTIL_LINUX,
+            "system_nar_hash": stage0.SEALED_NAR[stage0.SYSTEM][0],
+            "system_nar_size": stage0.SEALED_NAR[stage0.SYSTEM][1],
+            "installer_nar_hash": stage0.SEALED_NAR[stage0.INSTALLER][0],
+            "installer_nar_size": stage0.SEALED_NAR[stage0.INSTALLER][1],
+            "util_linux_nar_hash": stage0.SEALED_NAR[stage0.UTIL_LINUX][0],
+            "util_linux_nar_size": stage0.SEALED_NAR[stage0.UTIL_LINUX][1],
             "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
             "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
             "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
@@ -849,6 +867,12 @@ class Stage0SourceTests(unittest.TestCase):
             "original_build_revision": stage0.BUILD_REV,
             "system_store": stage0.SYSTEM, "installer_store": stage0.INSTALLER,
             "util_linux_store": stage0.UTIL_LINUX,
+            "system_nar_hash": stage0.SEALED_NAR[stage0.SYSTEM][0],
+            "system_nar_size": stage0.SEALED_NAR[stage0.SYSTEM][1],
+            "installer_nar_hash": stage0.SEALED_NAR[stage0.INSTALLER][0],
+            "installer_nar_size": stage0.SEALED_NAR[stage0.INSTALLER][1],
+            "util_linux_nar_hash": stage0.SEALED_NAR[stage0.UTIL_LINUX][0],
+            "util_linux_nar_size": stage0.SEALED_NAR[stage0.UTIL_LINUX][1],
             "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
             "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
             "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
@@ -900,6 +924,12 @@ class Stage0SourceTests(unittest.TestCase):
             "original_build_revision": stage0.BUILD_REV,
             "system_store": stage0.SYSTEM, "installer_store": stage0.INSTALLER,
             "util_linux_store": stage0.UTIL_LINUX,
+            "system_nar_hash": stage0.SEALED_NAR[stage0.SYSTEM][0],
+            "system_nar_size": stage0.SEALED_NAR[stage0.SYSTEM][1],
+            "installer_nar_hash": stage0.SEALED_NAR[stage0.INSTALLER][0],
+            "installer_nar_size": stage0.SEALED_NAR[stage0.INSTALLER][1],
+            "util_linux_nar_hash": stage0.SEALED_NAR[stage0.UTIL_LINUX][0],
+            "util_linux_nar_size": stage0.SEALED_NAR[stage0.UTIL_LINUX][1],
             "busybox_sha256": stage0.SEALED_BUSYBOX_SHA256,
             "source_prototype_report_sha256": stage0.SOURCE_PROTOTYPE_REPORT_SHA256,
             "source_scratch_report_sha256": stage0.SOURCE_SCRATCH_REPORT_SHA256,
@@ -921,6 +951,43 @@ class Stage0SourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(stage0.AdmissionError, "review receipt missing"):
                     stage0.require_immutable_install_source(source)
                 docker.assert_not_called()
+
+    def test_source_nar_metadata_tampering_fails_closed(self):
+        source = sealed_source()
+        info = json.loads(sealed_nar_info())
+        info[stage0.INSTALLER]["narHash"] = "sha256-ATTACKER_FORGED_NAR="
+        with patch.object(stage0, "host_cmd") as check, \
+             patch.object(stage0, "output", return_value=json.dumps(info)):
+            with self.assertRaisesRegex(stage0.AdmissionError, "NAR hash or size"):
+                stage0.verify_source_store(source)
+        check.assert_called_once()
+        # A substitute exact Store path whose metadata differs is rejected
+        # BEFORE a target install operation can begin.
+
+    def test_source_nar_missing_entry_fails_closed(self):
+        source = sealed_source()
+        info = json.loads(sealed_nar_info())
+        del info[stage0.UTIL_LINUX]
+        with patch.object(stage0, "host_cmd") as check, \
+             patch.object(stage0, "output", return_value=json.dumps(info)):
+            with self.assertRaisesRegex(stage0.AdmissionError, "NAR entries"):
+                stage0.verify_source_store(source)
+        check.assert_called_once()
+
+    def test_target_store_verification_is_recursive_content_check_before_installer(self):
+        source = sealed_source()
+        with patch.object(stage0, "host_cmd") as verify:
+            stage0.verify_target_store(source)
+        cmd = verify.call_args.args
+        self.assertIn("local?root=/mnt", cmd)
+        self.assertIn("--no-trust", cmd)
+        self.assertIn("--recursive", cmd)
+        self.assertIn(stage0.SYSTEM, cmd)
+        self.assertIn("--pull=never", cmd)
+        self.assertIn(stage0.SEALED_IMAGE, cmd)
+        self.assertNotIn("type=volume", " ".join(cmd))
+        self.assertNotIn(stage0.BUILD_VOLUME, " ".join(cmd))
+        self.assertNotIn("--privileged", cmd)
 
 
 if __name__ == "__main__":
