@@ -743,6 +743,11 @@ PY
           assert cfg.services.displayManager.sddm.enable;
           assert cfg.services.desktopManager.plasma6.enable;
           assert cfg.hardware.nvidia.modesetting.enable;
+          # The physical Stage0 console fallback remains nomodeset, but Plasma
+          # and NVIDIA DRM require the graphical successor to drop that flag.
+          assert builtins.elem "nomodeset"
+            self.nixosConfigurations.heim-pc-stage0.config.boot.kernelParams;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
           assert cfg.services.pipewire.enable;
           assert cfg.virtualisation.podman.enable;
           pkgs.runCommand "heim-pc-seagate-workstation-candidate-contract" {} ''
@@ -767,6 +772,7 @@ PY
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert !cfg.heimPc.grabowskiProduction.enable;
           assert cfg.heimPc.nixerHeadless.enable;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
           assert cfg.virtualisation.podman.enable;
           assert unit.wantedBy == [ "multi-user.target" ];
           assert sc.User == "alex" && sc.Group == "alex";
