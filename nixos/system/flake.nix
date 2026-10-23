@@ -708,7 +708,10 @@ PY
             wrongBroker = runProof { broker = pkgs.coreutils; };
             wrongRelease = runProof { id = "different-release-must-fail"; };
             proof = runProof { };
-            sock = proof.systemd.sockets.grabowski-privileged-broker.socketConfig;
+            socketUnit = proof.systemd.sockets.grabowski-privileged-broker;
+            sock = socketUnit.socketConfig;
+            policyUnit = proof.systemd.services.grabowski-private-policy-install;
+            policy = policyUnit.serviceConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
@@ -727,6 +730,27 @@ PY
           assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
           assert sock.Accept && sock.SocketMode == "0660" && sock.SocketGroup == "grabowski";
+          assert builtins.elem "grabowski-private-policy-install.service" socketUnit.requires;
+          assert builtins.elem "grabowski-private-policy-install.service" socketUnit.after;
+          assert socketUnit.wantedBy == [ "multi-user.target" ];
+          assert socketUnit.unitConfig.DefaultDependencies == false;
+          assert builtins.elem "basic.target" socketUnit.after;
+          assert builtins.elem "shutdown.target" socketUnit.conflicts;
+          assert builtins.elem "grabowski-private-policy-install.service"
+            proof.systemd.services.grabowski-operator.requires;
+          assert builtins.elem "grabowski-private-policy-install.service"
+            proof.systemd.services.grabowski-operator.after;
+          assert policy.User == "root" && policy.Group == "root";
+          assert policy.Type == "oneshot" && policy.RemainAfterExit;
+          assert policy.ConfigurationDirectory == "grabowski";
+          assert policy.ConfigurationDirectoryMode == "0755";
+          assert policy.ProtectHome && policy.ProtectSystem == "strict";
+          assert policy.PrivateNetwork && policy.NoNewPrivileges;
+          assert policy.UMask == "0077";
+          assert builtins.match ".*grabowski-private-policy-install[.]py"
+            policy.ExecStart != null;
+          assert policyUnit.unitConfig.RequiresMountsFor == "/persist";
+          assert policyUnit.unitConfig.AssertPathIsMountPoint == "/persist";
           assert builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore != null;
           assert broker.User == "root";
           assert broker.Environment == [

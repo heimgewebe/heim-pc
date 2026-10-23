@@ -8,6 +8,36 @@ let
   };
   revision = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
 
+  # Isolated VM only: one harmless fixed command, never a production allowlist.
+  benignResponse = builtins.toJSON {
+    schema_version = 1;
+    kind = "grabowski.critical_user_data_inventory_status.v1";
+    status = "running";
+    scanner_sha256 = null;
+    contract_sha256 = null;
+    unit = "vm-only-unchanged-host";
+    unit_state = {
+      load = "loaded";
+      active = "active";
+      sub = "running";
+      result = "success";
+    };
+    result_sha256 = null;
+  };
+  benignResponseFile = pkgs.writeText "vm-only-rootbroker-readback.json" benignResponse;
+  syntheticPolicy = pkgs.writeText "vm-only-rootbroker-policy-NOT-PRODUCTION.json" (builtins.toJSON {
+    schema_version = 2;
+    actions.critical_user_data_inventory_read = {
+      enabled = true;
+      target_pattern = ".*";
+      argv = [ "${pkgs.coreutils}/bin/cat" "${benignResponseFile}" ];
+      timeout_seconds = 5;
+      allowed_peer_uid = 1000;
+      allowed_peer_unit = "grabowski-operator.service";
+    };
+  });
+
+
   verifyIdentity = pkgs.writeText "grabowski-verify-systemd-identity.py" ''
     import grp
     import os
@@ -96,7 +126,113 @@ let
                         + " unexpected=" + str(sorted(observed - expected))
                     )
                 print("verified all 203 MCP tools in systemd-run NixOS")
+                # Use the unchanged original operator MainPID and the only
+                # allowlisted VM command: immutable coreutils cat.
+                answer = await asyncio.wait_for(session.call_tool(
+                    "grabowski_critical_user_data_inventory_read",
+                    {"operation": "status", "scanner_sha256": "a" * 64,
+                     "contract_sha256": "b" * 64},
+                ), timeout=50)
+                if getattr(answer, "isError", False):
+                    raise SystemExit("positive original MCP broker call returned an error")
+                candidates = [getattr(answer, "structuredContent", None)]
+                for item in answer.content:
+                    try:
+                        candidates.append(json.loads(item.text))
+                    except (AttributeError, ValueError, TypeError):
+                        pass
+                valid = False
+                for candidate in candidates:
+                    if (isinstance(candidate, dict) and "success" not in candidate
+                        and isinstance(candidate.get("result"), dict)):
+                        candidate = candidate["result"]
+                    if (isinstance(candidate, dict) and candidate.get("success") is True
+                        and candidate.get("broker_returncode") == 0
+                        and isinstance(candidate.get("result"), dict)
+                        and candidate["result"].get("status") == "running"):
+                        valid = True
+                if not valid:
+                    raise SystemExit("MainPID broker did not execute VM-only fixed file read: " + str(candidates)[:1000])
+                print("original operator/MainPID/rootbroker positive VM action passed")
     asyncio.run(main())
+  '';
+
+
+  verifyOriginalPolicy = pkgs.writeText "grabowski-verify-original-policy.py" ''
+    from pathlib import Path
+    import sys
+    import tempfile
+
+    sys.path.insert(0, "${broker}/lib/grabowski")
+    from grabowski_privileged_broker import load_root_config, resolve_regular_execution, claim_once
+
+    config = load_root_config(Path("/etc/grabowski/privileged-actions.json"))
+    assert config["schema_version"] == 2
+    assert set(config["actions"]) == {"critical_user_data_inventory_read"}
+    resolution = resolve_regular_execution(config, {
+        "action": "critical_user_data_inventory_read", "target": "VM-only",
+    })
+    assert resolution["mode"] == "template"
+    assert resolution["argv"] == ["${pkgs.coreutils}/bin/cat", "${benignResponseFile}"]
+    assert resolution["allowed_peer_uid"] == 1000
+    assert resolution["allowed_peer_unit"] == "grabowski-operator.service"
+    try:
+        resolve_regular_execution(config, {"action": "not-allowed", "target": "VM-only"})
+    except PermissionError:
+        pass
+    else:
+        raise SystemExit("original broker accepted an unlisted action")
+    with tempfile.TemporaryDirectory() as temp:
+        replay_dir = Path(temp) / "used"
+        claim_once(replay_dir, "abcdef0123456789abcdef0123456789")
+        try:
+            claim_once(replay_dir, "abcdef0123456789abcdef0123456789")
+        except FileExistsError:
+            pass
+        else:
+            raise SystemExit("original broker replay guard admitted reuse")
+    print("original policy loader, resolver, deny and replay checks passed")
+  '';
+
+  wrongMainPid = pkgs.writeText "grabowski-negative-wrong-mainpid.py" ''
+    import grp
+    import hashlib
+    import json
+    import os
+    import pwd
+    import socket
+    import time
+
+    now = int(time.time())
+    reference = {
+        "schema_version": 1,
+        "execution": "unprivileged-reference-only",
+        "may_execute": False,
+        "requires_external_privileged_agent": True,
+        "replay_policy": "single-use-external-broker",
+        "action": "critical_user_data_inventory_read",
+        "target": "VM-only",
+        "justification": "Negative MainPID test on isolated virtual host",
+        "request_id": "abcdefffabcdefffabcdefffabcdefff",
+        "created_at_unix": now,
+        "expires_at_unix": now + 60,
+    }
+    raw = json.dumps(reference, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    reference["reference_sha256"] = hashlib.sha256(raw).hexdigest()
+    account = pwd.getpwnam("alex")
+    os.setgroups([grp.getgrnam("grabowski").gr_gid])
+    os.setgid(account.pw_gid)
+    os.setuid(account.pw_uid)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(25)
+        client.connect("/run/grabowski/privileged-broker.sock")
+        client.sendall(json.dumps(reference).encode())
+        client.shutdown(socket.SHUT_WR)
+        response = client.recv(65536)
+    parsed = json.loads(response)
+    if "systemd MainPID" not in parsed.get("error", ""):
+        raise SystemExit("wrong-MainPID request was not rejected: " + repr(parsed))
+    print("correct UID/group but wrong MainPID denied by original broker")
   '';
 
   rootBrokerNegative = pkgs.writeText "grabowski-broker-no-policy.py" ''
@@ -147,6 +283,42 @@ pkgs.testers.runNixOSTest {
       createHome = true;
     };
     services.getty.autologinUser = null;
+    # This VM has no physical Btrfs/Seagate partition. Use the SAME
+    # virtualisation.fileSystems + fileSystems pattern as the existing
+    # firstboot-credentials VM test: otherwise the NixOS test driver discards
+    # /persist and our root policy start fails because persist.mount is absent.
+    # This is an isolated ephemeral QEMU disk, never the physical Seagate.
+    virtualisation.useDefaultFilesystems = true;
+    virtualisation.emptyDiskImages = [ 256 ];
+    virtualisation.fileSystems."/persist" = {
+      device = "/dev/vdb";
+      fsType = "ext4";
+      autoFormat = true;
+    };
+    fileSystems."/persist" = {
+      device = "/dev/vdb";
+      fsType = "ext4";
+    };
+    systemd.services.grabowski-test-seed-policy = {
+      description = "VM-only synthetic single-safe-action root-owned broker policy";
+      requires = [ "persist.mount" ];
+      after = [ "persist.mount" ];
+      before = [ "grabowski-private-policy-install.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        UMask = "0077";
+        ExecStart = "${pkgs.writeShellScript "grabowski-test-seed-policy" ''
+          set -eu
+          ${pkgs.coreutils}/bin/install -d -m 0700 /persist/secrets /persist/secrets/grabowski
+          ${pkgs.coreutils}/bin/install -m 0600 ${syntheticPolicy} /persist/secrets/grabowski/privileged-actions.json
+          ${pkgs.coreutils}/bin/chmod 0600 /persist/secrets/grabowski/privileged-actions.json
+        ''}";
+      };
+    };
+    systemd.services.grabowski-private-policy-install = {
+      requires = [ "grabowski-test-seed-policy.service" ];
+      after = [ "grabowski-test-seed-policy.service" ];
+    };
     heimPc.grabowskiProduction = {
       enable = true;
       operatorPackage = operator;
@@ -162,6 +334,36 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.start()
     machine.wait_for_unit("multi-user.target", timeout=240)
+    for cmd in (
+        "systemctl is-active persist.mount",
+        "systemctl status grabowski-test-seed-policy.service --no-pager -l",
+        "systemctl status grabowski-private-policy-install.service --no-pager -l",
+        "systemctl status grabowski-privileged-broker.socket --no-pager -l",
+        "journalctl -u grabowski-test-seed-policy.service -b --no-pager -n 50",
+        "journalctl -u grabowski-private-policy-install.service -b --no-pager -n 50",
+    ):
+        code, output = machine.execute(cmd)
+        print("PRIVATE-POLICY-DIAG:", cmd, "code", code, output[-5500:])
+    machine.wait_until_succeeds(
+        "systemctl is-active grabowski-private-policy-install.service", timeout=45,
+    )
+    with subtest("private source copied into root-only /etc before broker/socket activation"):
+        machine.succeed("test -s /persist/secrets/grabowski/privileged-actions.json")
+        machine.succeed("test -s /etc/grabowski/privileged-actions.json")
+        machine.succeed("test $(stat -c %a /persist/secrets/grabowski) = 700")
+        machine.succeed("test $(stat -c %a /persist/secrets/grabowski/privileged-actions.json) = 600")
+        machine.succeed("test $(stat -c %a /etc/grabowski) = 755")
+        machine.succeed("test $(stat -c %a /etc/grabowski/privileged-actions.json) = 600")
+        machine.succeed("cmp /persist/secrets/grabowski/privileged-actions.json /etc/grabowski/privileged-actions.json")
+        machine.succeed("${pkgs.python3}/bin/python3 ${verifyOriginalPolicy}")
+        machine.succeed(
+            "su -s ${pkgs.bash}/bin/bash -c "
+            "'stat -c %U /etc/grabowski/privileged-actions.json | grep -qx root' alex"
+        )
+        machine.succeed(
+            "su -s ${pkgs.bash}/bin/bash -c "
+            "'test ! -r /etc/grabowski/privileged-actions.json' alex"
+        )
     machine.wait_until_succeeds(
         "systemctl is-active grabowski-privileged-broker.socket", timeout=160,
     )
@@ -183,10 +385,11 @@ pkgs.testers.runNixOSTest {
         )
     with subtest("canonical per-request root broker is fail-closed"):
         machine.succeed("${pkgs.python3}/bin/python3 ${rootBrokerNegative}")
+        machine.succeed("${pkgs.python3}/bin/python3 ${wrongMainPid}")
         machine.succeed(
             "su -s ${pkgs.bash}/bin/bash -c "
             "'${pkgs.python3}/bin/python3 ${nonmemberNegative}' alex"
         )
-        machine.fail("test -e /etc/grabowski/privileged-actions.json")
+        machine.succeed("test -s /etc/grabowski/privileged-actions.json")
   '';
 }

@@ -81,9 +81,63 @@ in
       "d /run/grabowski 0750 root grabowski -"
     ];
 
+    # This service contains no policy payload: the root-owned 0600 source on
+    # the *existing* Seagate @persist volume is copied atomically to /etc.
+    # No Nix derivation or generated configuration ever contains policy bytes.
+    # Missing/unsafe policy fails the service, preventing the socket and
+    # headless operator from starting; never substitute a sample allowlist.
+    systemd.services.grabowski-private-policy-install = lib.mkIf admit {
+      description = "Install private root-controlled Grabowski Rootbroker policy";
+      after = [ "local-fs.target" ];
+      unitConfig = {
+        RequiresMountsFor = "/persist";
+        AssertPathIsMountPoint = "/persist";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "root";
+        Group = "root";
+        ExecStart = "${pkgs.python3}/bin/python3 -B ${./grabowski-private-policy-install.py}";
+        ConfigurationDirectory = "grabowski";
+        ConfigurationDirectoryMode = "0755";
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateNetwork = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadOnlyPaths = [ "/persist/secrets/grabowski" ];
+        ReadWritePaths = [ "/etc/grabowski" ];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        SystemCallArchitectures = "native";
+        SystemCallFilter = "~@mount @module @reboot @swap";
+        SystemCallErrorNumber = "EPERM";
+        CapabilityBoundingSet =
+          "~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME";
+      };
+    };
+
     systemd.sockets.grabowski-privileged-broker = lib.mkIf admit {
       description = "Single root-controlled Grabowski action broker socket";
-      wantedBy = [ "sockets.target" ];
+      # A socket with systemd's default Before=sockets.target cannot also
+      # depend on an ordinary service (which starts After=basic.target):
+      # sockets.target -> basic.target -> policy.service -> this socket is a
+      # boot transaction cycle. Start this privileged socket only in the
+      # headless multi-user phase, after the root-only policy is installed.
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "grabowski-private-policy-install.service" ];
+      after = [ "basic.target" "grabowski-private-policy-install.service" ];
+      before = [ "shutdown.target" ];
+      conflicts = [ "shutdown.target" ];
+      unitConfig.DefaultDependencies = false;
       socketConfig = {
         ListenStream = "/run/grabowski/privileged-broker.sock";
         Accept = true;
@@ -147,8 +201,8 @@ in
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" ];
-      after = [ "network.target" "grabowski-privileged-broker.socket" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" ];
+      after = [ "network.target" "grabowski-private-policy-install.service" "grabowski-privileged-broker.socket" ];
       serviceConfig = {
         Type = "simple";
         User = "alex";
