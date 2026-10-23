@@ -60,12 +60,38 @@ def _safe_file(path: Path, trusted_uid: int, *, executable: bool = False) -> boo
 
 
 def _store_unit(path: Path, store_root: Path) -> bool:
-    # nixpkgs systemd.units.<name>.unit evaluates to an immutable regular
-    # file, /nix/store/<hash>-unit-grabowski-operator.service, not a directory.
+    # Physical NixOS VM proof: systemd FragmentPath resolves to a *file inside*
+    # /nix/store/<hash>-unit-grabowski-operator.service/. Do not accept another
+    # systemd unit, a differently named store object or a user-controlled path.
     return (
         path.is_absolute()
-        and path.parent == store_root
-        and STORE_UNIT_RE.fullmatch(path.name) is not None
+        and path.parent.parent == store_root
+        and path.name == UNIT_NAME
+        and STORE_UNIT_RE.fullmatch(path.parent.name) is not None
+    )
+
+
+def _safe_nix_store_directory(store_root: Path, trusted_uid: int) -> bool:
+    # NixOS gives /nix/store mode 01775: owned by root, group-writable with a
+    # sticky bit. Sticky ownership prevents group members from replacing a
+    # root-owned store object; each accepted unit/file remains root-owned,
+    # non-symlink and non-writable below. Never accept world-write or
+    # group-write without sticky, including in the VM.
+    if not _safe_dir(store_root.parent, trusted_uid):
+        return False
+    try:
+        metadata = store_root.lstat()
+    except (OSError, ValueError):
+        return False
+    mode = metadata.st_mode
+    return (
+        stat.S_ISDIR(mode)
+        and metadata.st_uid == trusted_uid
+        and not mode & stat.S_IWOTH
+        and (
+            not mode & stat.S_IWGRP
+            or bool(mode & stat.S_ISVTX)
+        )
     )
 
 
@@ -101,7 +127,7 @@ def fragment_trusted(
     """
     if not fragment_allowed(fragment, etc_fragment=etc_fragment, store_root=store_root):
         return False
-    if not all(_safe_dir(parent, trusted_uid) for parent in (store_root.parent, store_root)):
+    if not _safe_nix_store_directory(store_root, trusted_uid):
         return False
     if fragment == etc_fragment:
         # A mutable, arbitrary /etc unit file cannot stand in for NixOS's
@@ -155,7 +181,8 @@ def expected_operator_argv(
         or path.name != "grabowski-operator"
         or path.parent.parent.parent != store_root
         or OPERATOR_PACKAGE_RE.fullmatch(path.parent.parent.name) is None
-        or not all(_safe_dir(parent, trusted_uid) for parent in (store_root.parent, store_root, path.parent.parent, path.parent))
+        or not _safe_nix_store_directory(store_root, trusted_uid)
+        or not all(_safe_dir(parent, trusted_uid) for parent in (path.parent.parent, path.parent))
         or not _safe_file(path, trusted_uid, executable=True)
     ):
         raise PermissionError("NixOS operator entrypoint is not immutable/root-controlled")

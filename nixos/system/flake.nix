@@ -394,6 +394,9 @@
 
       packages.${system} = {
         grabowski-operator-pinned = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+        # Optional real systemd + socket + MCP VM proof. Never a physical host.
+        grabowski-headless-systemd-vm-proof =
+          import ./tests/grabowski-headless-systemd.nix { inherit pkgs; };
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
         heim-pc-stage0-system = self.nixosConfigurations.heim-pc-stage0.config.system.build.toplevel;
         heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;

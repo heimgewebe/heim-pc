@@ -21,8 +21,10 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.store.mkdir(parents=True, mode=0o700)
         self.store.parent.chmod(0o700)
         self.store.chmod(0o700)
-        # Actual nixpkgs unit derivation is a file directly under /nix/store.
-        self.unit_file = self.store / ("a" * 32 + "-unit-grabowski-operator.service")
+        # A real NixOS VM resolves the unit inside a root-owned Store output.
+        self.unit_dir = self.store / ("a" * 32 + "-unit-grabowski-operator.service")
+        self.unit_dir.mkdir(mode=0o700)
+        self.unit_file = self.unit_dir / "grabowski-operator.service"
         self.unit_file.write_text("[Service]\nExecStart=/nix/store/pinned\n")
         self.unit_file.chmod(0o444)
         self.etc = root / "etc"
@@ -75,13 +77,22 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.unit_file.chmod(0o666)
         self.assertFalse(self.trusted_fragment())
         self.unit_file.chmod(0o444)
-        noncanonical_dir = self.store / ("c" * 32 + "-unit-grabowski-operator.service")
+        self.unit_dir.chmod(0o777)
+        self.assertFalse(self.trusted_fragment())
+        self.unit_dir.chmod(0o700)
+        noncanonical_dir = self.store / ("c" * 32 + "-unit-unrelated.service")
         noncanonical_dir.mkdir(mode=0o700)
         nested = noncanonical_dir / "grabowski-operator.service"
         nested.write_text("[Service]\n")
         nested.chmod(0o444)
         self.assertFalse(self.trusted_fragment(nested))
-        self.store.chmod(0o777)
+        # Root-owned and sticky /nix/store 01775 is the observed NixOS mode;
+        # group-writable without sticky, or world-writable, is forbidden.
+        self.store.chmod(0o1775)
+        self.assertTrue(self.trusted_fragment())
+        self.store.chmod(0o775)
+        self.assertFalse(self.trusted_fragment())
+        self.store.chmod(0o1777)
         self.assertFalse(self.trusted_fragment())
 
     def test_etc_path_must_be_root_controlled_symlink(self):
@@ -127,6 +138,12 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
                           store_root=self.store, trusted_uid=self.uid)
         self.assertRaises(PermissionError, self.argv, "/tmp/grabowski-operator")
         self.assertRaises(PermissionError, self.argv, str(self.entry) + "\x00bad")
+        self.store.chmod(0o1775)
+        self.assertEqual(self.argv()[0], str(self.entry))
+        self.store.chmod(0o775)
+        self.assertRaises(PermissionError, self.argv)
+        self.store.chmod(0o1777)
+        self.assertRaises(PermissionError, self.argv)
 
     def test_modified_or_unrelated_binary_rejected(self):
         self.entry.chmod(0o777)
