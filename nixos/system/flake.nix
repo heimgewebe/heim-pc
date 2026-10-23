@@ -455,6 +455,62 @@
             mkdir -p "$out"
           '';
 
+        # Source-only structural proof. The synthetic packages deliberately
+        # contain no Grabowski executable and this configuration is not
+        # exported as a host; it can NEVER be activated by this check.
+        grabowski-production-unit-contract =
+          let
+            inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+            noPackages = (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                ./modules/seagate-primary-candidate.nix
+                ({ ... }: {
+                  heimPc.grabowskiProduction = {
+                    enable = true;
+                    releaseId = "no-packages-must-fail";
+                  };
+                })
+              ];
+            }).config;
+            proof = (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                ./modules/seagate-primary-candidate.nix
+                ({ pkgs, ... }: {
+                  heimPc.grabowskiProduction = {
+                    enable = true;
+                    operatorPackage = pkgs.coreutils;
+                    brokerPackage = pkgs.coreutils;
+                    releaseId = "evaluation-only-not-a-usable-release";
+                  };
+                })
+              ];
+            }).config;
+            sock = proof.systemd.sockets.grabowski-privileged-broker.socketConfig;
+            broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
+            operator = proof.systemd.services.grabowski-operator.serviceConfig;
+          in
+          assert !inactive.heimPc.grabowskiProduction.enable;
+          assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
+          assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
+          assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
+          assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
+          assert sock.Accept && sock.SocketMode == "0660" && sock.SocketGroup == "grabowski";
+          assert broker.User == "root";
+          assert broker.StandardInput == "socket" && broker.StandardOutput == "socket";
+          assert broker.ProtectHome == "tmpfs" && broker.ProtectSystem == "strict";
+          assert broker.StateDirectory == "grabowski/privileged-broker";
+          assert broker.StateDirectoryMode == "0700";
+          assert operator.User == "alex" && operator.Group == "alex";
+          assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          assert builtins.elem "grabowski-privileged-broker.socket"
+            proof.systemd.services.grabowski-operator.requires;
+          assert builtins.elem "grabowski" proof.users.users.alex.extraGroups;
+          pkgs.runCommand "heim-pc-grabowski-production-unit-contract" {} ''
+            mkdir -p "$out"
+          '';
+
         # Check *module option compatibility only*. This explicitly does not
         # prove a bootable LUKS-root target: private rd.luks kernel parameters
         # still rely on the separate systemd-boot post-install entry hook.
