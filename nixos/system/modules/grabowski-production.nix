@@ -1,9 +1,31 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.heimPc.grabowskiProduction;
   packagesPresent = cfg.operatorPackage != null && cfg.brokerPackage != null;
-  # Neither the Pop!_OS venv nor demo binary can be a production package.
-  admit = cfg.enable && packagesPresent;
+  # Use exactly the derivations created by the reviewed, hash-bound Nix
+  # definitions. Matching self-declared passthru values alone is insufficient:
+  # a synthetic or substitute binary can lie about source and release IDs.
+  canonicalOperator = import ./grabowski-operator-package.nix { inherit pkgs; };
+  canonicalBroker = import ./grabowski-broker-package.nix {
+    inherit lib pkgs;
+    packageOnly = true;
+  };
+  expectedReleaseId = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+  expectedRevision = "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
+  expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
+  releaseBound = packagesPresent
+    && cfg.releaseId == expectedReleaseId
+    && cfg.operatorPackage.outPath == canonicalOperator.outPath
+    && cfg.brokerPackage.outPath == canonicalBroker.outPath
+    && cfg.operatorPackage.passthru.releaseId == expectedReleaseId
+    && cfg.brokerPackage.passthru.releaseId == expectedReleaseId
+    && cfg.operatorPackage.passthru.sourceRevision == expectedRevision
+    && cfg.brokerPackage.passthru.sourceRevision == expectedRevision
+    && cfg.operatorPackage.passthru.lockSha256 == expectedLockSha256
+    && cfg.brokerPackage.passthru.lockSha256 == expectedLockSha256;
+  # The root broker remains gated until real NixOS peer authorization and
+  # private policy runtime acceptance. Evaluation is NOT activation approval.
+  admit = cfg.enable && packagesPresent && releaseBound;
 in
 {
   options.heimPc.grabowskiProduction = {
@@ -38,6 +60,10 @@ in
           && builtins.match "^[a-zA-Z0-9._-]+$" cfg.releaseId != null
         );
         message = "Grabowski needs a pinned runtime release identity";
+      }
+      {
+        assertion = !cfg.enable || releaseBound;
+        message = "Grabowski rejects mismatched operator/broker derivations, release IDs, source and runtime lock";
       }
       {
         assertion = !cfg.enable || config.services.getty.autologinUser == null;
@@ -75,6 +101,11 @@ in
         User = "root";
         Group = "root";
         ExecStart = "${cfg.brokerPackage}/bin/grabowski-privileged-broker";
+        # Only PID 1 defines this for the root-owned per-request broker.
+        # The original peer check still requires exact UID/MainPID/cgroup/argv.
+        Environment = [
+          "GRABOWSKI_NIXOS_OPERATOR_ENTRYPOINT=${cfg.operatorPackage}/bin/grabowski-operator"
+        ];
         StandardInput = "socket";
         StandardOutput = "socket";
         StandardError = "journal";

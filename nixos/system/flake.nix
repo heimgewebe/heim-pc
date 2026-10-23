@@ -393,6 +393,7 @@
       };
 
       packages.${system} = {
+        grabowski-operator-pinned = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
         heim-pc-stage0-system = self.nixosConfigurations.heim-pc-stage0.config.system.build.toplevel;
         heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;
@@ -416,6 +417,96 @@
       };
 
       checks.${system} = {
+        # Built artifact admission, not a live privileged-action or boot test.
+        # This check forces BOTH immutable binaries into the closure, verifies
+        # the complete locked operator startup import and compares the release
+        # manifest to the canonical broker/operator revision and runtime lock.
+        grabowski-release-artifacts =
+          let
+            operator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            broker = import ./modules/grabowski-broker-package.nix {
+              inherit (nixpkgs) lib;
+              inherit pkgs;
+              packageOnly = true;
+            };
+            release = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+            revision = "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
+            lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
+          in
+          assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
+          assert operator.passthru.sourceRevision == revision && broker.passthru.sourceRevision == revision;
+          assert operator.passthru.lockSha256 == lockSha256 && broker.passthru.lockSha256 == lockSha256;
+          pkgs.runCommand "grabowski-exact-release-artifacts" {
+            nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.python312 ];
+          } ''
+            set -euo pipefail
+            test -x ${operator}/bin/grabowski-operator
+            test -x ${broker}/bin/grabowski-privileged-broker
+            test -s ${broker}/libexec/grabowski-privileged-broker.py
+            printf '%s  %s\n' ${lockSha256} \
+              ${operator}/share/grabowski/requirements/runtime.lock.txt | sha256sum -c -
+            ${operator}/bin/grabowski-operator --help > "$TMPDIR/operator-help"
+            grep -Fq 'streamable-http' "$TMPDIR/operator-help"
+            ${pkgs.python312}/bin/python3 -B - <<'PY'
+import json
+from pathlib import Path
+root = Path("${operator}")
+manifest = json.loads((root / "share/grabowski/nixos-release.json").read_text())
+expected = {
+  "schema_version": 1,
+  "release_id": "${release}",
+  "source_revision": "${revision}",
+  "runtime_lock_sha256": "${lockSha256}",
+  "entrypoint": "bin/grabowski-operator",
+  "transport": "streamable-http",
+  "host": "127.0.0.1",
+  "port": 18181,
+}
+if manifest != expected:
+    raise SystemExit("operator release manifest does not match the pinned broker and lock")
+for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_contract.py"):
+    if not (root / "lib/python3.12/site-packages" / name).is_file():
+        raise SystemExit(f"missing full operator module {name}")
+PY
+            # Real packaged broker (not the fixture) must fail closed for
+            # forged peers, even before a root policy or socket is involved.
+            ${pkgs.python3}/bin/python3 -B - <<'PY'
+import runpy
+scope = runpy.run_path(
+    "${broker}/libexec/grabowski-privileged-broker.py",
+    run_name="nixos_broker_negative_smoke",
+)
+peer_guard = scope["_validate_blockade_lifecycle_peer"]
+unit = {
+    "main_pid": 4002,
+    "control_group": "/system.slice/grabowski-operator.service",
+}
+peer_guard.__globals__["_socket_peer_credentials"] = lambda descriptor: (4001, 1000, 1000)
+peer_guard.__globals__["_operator_system_unit_identity"] = lambda uid, unit_name: dict(unit)
+for request, fragment in (
+    ({"allowed_peer_uid": 1001, "allowed_peer_unit": "grabowski-operator.service"}, "UID"),
+    ({"allowed_peer_uid": 1000, "allowed_peer_unit": "grabowski-operator.service"}, "MainPID"),
+):
+    try:
+        peer_guard(request, descriptor=0)
+    except PermissionError as exc:
+        if fragment not in str(exc):
+            raise SystemExit(f"wrong negative broker error: {exc}")
+    else:
+        raise SystemExit("unauthorized peer was accepted")
+try:
+    scope["_operator_expected_argv"]("/home/alex")
+except PermissionError:
+    pass
+else:
+    raise SystemExit("NixOS broker accepted a missing root-owned argv binding")
+PY
+            mkdir -p "$out"
+            cp ${operator}/share/grabowski/nixos-release.json "$out/release.json"
+            printf '%s\n' ${broker} > "$out/broker-store-path"
+            printf '%s\n' ${operator} > "$out/operator-store-path"
+          '';
+
         # Evaluation-only: Stage0 must be an isolated, root-label-bound
         # console profile with the firmware/WD protections still enforced.
         stage0-no-usb-contract =
@@ -469,52 +560,58 @@
             mkdir -p "$out"
           '';
 
-        # Source-only structural proof. The synthetic packages deliberately
-        # contain no Grabowski executable and this configuration is not
-        # exported as a host; it can NEVER be activated by this check.
+        # NixOS evaluation proof of the exact pinned pair, NEVER a deployment
+        # target. Positive unit properties require the immutable release.
+        # Negative fixtures prove that missing, unrelated and mismatched
+        # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
+            release = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
-            noPackages = (nixpkgs.lib.nixosSystem {
-              inherit system;
-              modules = [
-                ./modules/seagate-primary-candidate.nix
-                ({ ... }: {
-                  heimPc.grabowskiProduction = {
-                    enable = true;
-                    releaseId = "no-packages-must-fail";
-                  };
-                })
-              ];
-            }).config;
-            proof = (nixpkgs.lib.nixosSystem {
-              inherit system;
-              modules = [
-                ./modules/seagate-primary-candidate.nix
-                ({ pkgs, ... }: {
-                  heimPc.grabowskiProduction = {
-                    enable = true;
-                    operatorPackage = pkgs.coreutils;
-                    brokerPackage = pkgs.coreutils;
-                    releaseId = "evaluation-only-not-a-usable-release";
-                  };
-                })
-              ];
-            }).config;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            runProof = { op ? pinnedOperator, broker ? null, id ? release }:
+              (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  ./modules/seagate-primary-candidate.nix
+                  ({ ... }: {
+                    heimPc.grabowskiProduction = {
+                      enable = true;
+                      operatorPackage = op;
+                      releaseId = id;
+                    } // (if broker == null then { } else { brokerPackage = broker; });
+                  })
+                ];
+              }).config;
+            noPackages = runProof { op = null; id = "no-packages-must-fail"; };
+            wrongOperator = runProof { op = pkgs.coreutils; };
+            wrongBroker = runProof { broker = pkgs.coreutils; };
+            wrongRelease = runProof { id = "different-release-must-fail"; };
+            proof = runProof { };
             sock = proof.systemd.sockets.grabowski-privileged-broker.socketConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
           in
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
             == "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;
           assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
+          assert proof.heimPc.grabowskiProduction.releaseId == release;
+          assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
           assert sock.Accept && sock.SocketMode == "0660" && sock.SocketGroup == "grabowski";
+          assert builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore != null;
           assert broker.User == "root";
+          assert broker.Environment == [
+            "GRABOWSKI_NIXOS_OPERATOR_ENTRYPOINT=${pinnedOperator}/bin/grabowski-operator"
+          ];
           assert broker.StandardInput == "socket" && broker.StandardOutput == "socket";
           assert broker.ProtectHome == "tmpfs" && broker.ProtectSystem == "strict";
           assert broker.StateDirectory == "grabowski/privileged-broker";

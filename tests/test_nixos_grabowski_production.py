@@ -53,7 +53,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         pinned = (MODULES / "grabowski-broker-package.nix").read_text()
         flake = (ROOT / "nixos" / "system" / "flake.nix").read_text()
         self.assertIn("./grabowski-broker-package.nix", candidate)
-        self.assertIn("admit = cfg.enable && packagesPresent;", production)
+        self.assertIn("admit = cfg.enable && packagesPresent && releaseBound;", production)
         self.assertIn("default = null;", production)
         self.assertIn("lib.mkIf admit", production)
         self.assertIn("lib.mkDefault brokerPackage;", pinned)
@@ -70,6 +70,58 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('SystemCallErrorNumber = "EPERM";', production)
         self.assertIn('RestrictNamespaces = true;', production)
         self.assertIn('assert broker.RestrictNamespaces;', flake)
+
+
+    def test_full_operator_is_hash_locked_and_release_identity_is_shared(self):
+        op = (MODULES / "grabowski-operator-package.nix").read_text()
+        broker = (MODULES / "grabowski-broker-package.nix").read_text()
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        release_id = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc"
+        lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
+        self.assertIn('releaseId = "' + release_id + '";', op)
+        self.assertIn('releaseId = "' + release_id + '";', broker)
+        self.assertIn('lockSha256 = "' + lock_sha256 + '";', op)
+        self.assertIn('lockSha256 = "' + lock_sha256 + '";', broker)
+        self.assertIn('sha256-y/6EMxK7jFHXSJzI4xWre15WY4VOyeP+C33SQPjNESg=', op)
+        self.assertNotIn("pkgs.lib.fakeHash", op)
+        self.assertIn("--require-hashes --only-binary=:all:", op)
+        self.assertIn("--no-index --no-deps --no-compile --no-input", op)
+        self.assertIn("PYTHONPATH", op)
+        self.assertIn("grabowski_operator --transport streamable-http", op)
+        self.assertIn('cfg.operatorPackage.outPath == canonicalOperator.outPath', prod)
+        self.assertIn('cfg.brokerPackage.outPath == canonicalBroker.outPath', prod)
+        self.assertIn('cfg.releaseId == expectedReleaseId', prod)
+        self.assertIn('cfg.operatorPackage.passthru.lockSha256 == expectedLockSha256', prod)
+        self.assertIn('cfg.brokerPackage.passthru.lockSha256 == expectedLockSha256', prod)
+        self.assertIn("assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;", flake)
+        self.assertIn("assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;", flake)
+        self.assertIn("assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;", flake)
+        self.assertIn("grabowski-release-artifacts =", flake)
+        self.assertIn("test -x ${operator}/bin/grabowski-operator", flake)
+        self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
+
+    def test_nixos_broker_port_keeps_original_peer_authority_checks(self):
+        broker = (MODULES / "grabowski-broker-package.nix").read_text()
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        helper = (MODULES / "grabowski-nixos-unit-authority.py").read_text()
+        self.assertIn("grabowski_nixos_unit_authority as nixos_auth", broker)
+        self.assertIn("nixos_auth.fragment_trusted(", broker)
+        self.assertIn("nixos_auth.expected_operator_argv()", broker)
+        for original_peer_gate in (
+            "systemd_main_pid != pid",
+            "_socket_peer_credentials(descriptor)",
+            "_validate_system_cgroup_authority(",
+            "_process_cmdline(pid, proc_root=proc_root) != effective_expected_argv",
+        ):
+            self.assertIn(original_peer_gate, broker)
+        self.assertIn("GRABOWSKI_NIXOS_OPERATOR_ENTRYPOINT=${cfg.operatorPackage}", prod)
+        self.assertIn('OPERATOR_ENTRYPOINT_ENV = "GRABOWSKI_NIXOS_OPERATOR_ENTRYPOINT"', helper)
+        self.assertIn('stat.S_ISLNK(link.st_mode)', helper)
+        self.assertIn('fragment.resolve(strict=True)', helper)
+        self.assertIn('stat.S_ISREG(meta.st_mode)', helper)
+        self.assertIn('trusted_uid: int = 0', helper)
+        self.assertNotIn('users.users.alex.extraGroups = lib.mkIf admit', prod)
 
 
 
