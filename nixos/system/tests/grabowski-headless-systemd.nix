@@ -306,6 +306,9 @@ pkgs.testers.runNixOSTest {
       before = [ "grabowski-private-policy-install.service" ];
       serviceConfig = {
         Type = "oneshot";
+        # Seed exactly once: the unit stays active so later policy starts
+        # cannot silently replace an intentionally unsafe/missing VM source.
+        RemainAfterExit = true;
         UMask = "0077";
         ExecStart = "${pkgs.writeShellScript "grabowski-test-seed-policy" ''
           set -eu
@@ -391,5 +394,35 @@ pkgs.testers.runNixOSTest {
             "'${pkgs.python3}/bin/python3 ${nonmemberNegative}' alex"
         )
         machine.succeed("test -s /etc/grabowski/privileged-actions.json")
+    # A stale valid target must not override a missing/unsafe source on /persist.
+    with subtest("unsafe source blocks broker socket and operator"):
+        machine.succeed(
+            "systemctl stop grabowski-operator.service "
+            "grabowski-privileged-broker.socket "
+            "grabowski-private-policy-install.service"
+        )
+        machine.succeed("chmod 0644 /persist/secrets/grabowski/privileged-actions.json")
+        machine.succeed("test -s /etc/grabowski/privileged-actions.json")
+        machine.fail("systemctl start grabowski-privileged-broker.socket")
+        machine.fail("systemctl is-active grabowski-private-policy-install.service")
+        machine.fail("systemctl is-active grabowski-privileged-broker.socket")
+        machine.fail("systemctl is-active grabowski-operator.service")
+        machine.succeed("chmod 0600 /persist/secrets/grabowski/privileged-actions.json")
+        machine.succeed("systemctl reset-failed grabowski-private-policy-install.service")
+        machine.succeed("systemctl start grabowski-privileged-broker.socket")
+        machine.succeed("systemctl is-active grabowski-private-policy-install.service")
+        machine.succeed("systemctl is-active grabowski-privileged-broker.socket")
+    with subtest("missing source blocks broker despite stale valid /etc"):
+        machine.succeed(
+            "systemctl stop grabowski-operator.service "
+            "grabowski-privileged-broker.socket "
+            "grabowski-private-policy-install.service"
+        )
+        machine.succeed("rm /persist/secrets/grabowski/privileged-actions.json")
+        machine.succeed("test -s /etc/grabowski/privileged-actions.json")
+        machine.fail("systemctl start grabowski-privileged-broker.socket")
+        machine.fail("systemctl is-active grabowski-private-policy-install.service")
+        machine.fail("systemctl is-active grabowski-privileged-broker.socket")
+        machine.fail("systemctl is-active grabowski-operator.service")
   '';
 }
