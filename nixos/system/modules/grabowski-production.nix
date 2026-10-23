@@ -49,7 +49,8 @@ in
     # root or agent capability. Admission must additionally validate the
     # broker's peer/UID/MainPID checks and root-only private allowlist.
     users.groups = lib.mkIf admit { grabowski = { }; };
-    users.users.alex.extraGroups = lib.mkIf admit [ "grabowski" ];
+    # The interactive alex account must NOT acquire the broker socket group.
+    # Only the canonical system service gets this supplementary group.
     systemd.tmpfiles.rules = lib.optionals admit [
       "d /run/grabowski 0750 root grabowski -"
     ];
@@ -82,6 +83,14 @@ in
         PrivateTmp = true;
         ProtectHome = "tmpfs";
         ProtectSystem = "strict";
+        # No direct mount, kernel module, raw-I/O or reboot capability in the
+        # request broker. Actions requiring broader authority must be reviewed
+        # and delegated explicitly; NoNewPrivileges alone is insufficient.
+        CapabilityBoundingSet =
+          "~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_TTY_CONFIG";
+        SystemCallFilter = "~@mount @module @reboot @swap";
+        SystemCallErrorNumber = "EPERM";
+        RestrictNamespaces = true;
         BindReadOnlyPaths = [
           "-/home/alex/repos"
           "-/home/alex/.local/state/grabowski/recovery/last-server-recovery.json"
@@ -113,6 +122,7 @@ in
         Type = "simple";
         User = "alex";
         Group = "alex";
+        SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
         Restart = "on-failure";

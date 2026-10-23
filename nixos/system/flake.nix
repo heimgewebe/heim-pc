@@ -519,11 +519,16 @@
           assert broker.ProtectHome == "tmpfs" && broker.ProtectSystem == "strict";
           assert broker.StateDirectory == "grabowski/privileged-broker";
           assert broker.StateDirectoryMode == "0700";
+          assert builtins.match ".*CAP_SYS_ADMIN.*" broker.CapabilityBoundingSet != null;
+          assert builtins.match ".*@mount.*" broker.SystemCallFilter != null;
+          assert broker.SystemCallErrorNumber == "EPERM";
+          assert broker.RestrictNamespaces;
           assert operator.User == "alex" && operator.Group == "alex";
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
           assert builtins.elem "grabowski-privileged-broker.socket"
             proof.systemd.services.grabowski-operator.requires;
-          assert builtins.elem "grabowski" proof.users.users.alex.extraGroups;
+          assert !(builtins.elem "grabowski" proof.users.users.alex.extraGroups);
+          assert builtins.elem "grabowski" operator.SupplementaryGroups;
           pkgs.runCommand "heim-pc-grabowski-production-unit-contract" {} ''
             mkdir -p "$out"
           '';

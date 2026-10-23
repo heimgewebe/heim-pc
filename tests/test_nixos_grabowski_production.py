@@ -60,6 +60,17 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("assert !inactive.heimPc.grabowskiProduction.enable;", flake)
         self.assertIn("assert inactive.heimPc.grabowskiProduction.operatorPackage == null;", flake)
         self.assertIn("assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;", flake)
+        self.assertNotIn('users.users.alex.extraGroups = lib.mkIf admit', production)
+        self.assertIn('SupplementaryGroups = [ "grabowski" ];', production)
+        self.assertIn('assert !(builtins.elem "grabowski" proof.users.users.alex.extraGroups);', flake)
+        self.assertIn('assert builtins.elem "grabowski" operator.SupplementaryGroups;', flake)
+        self.assertIn('CapabilityBoundingSet =', production)
+        self.assertIn('CAP_SYS_ADMIN', production)
+        self.assertIn('SystemCallFilter = "~@mount @module @reboot @swap";', production)
+        self.assertIn('SystemCallErrorNumber = "EPERM";', production)
+        self.assertIn('RestrictNamespaces = true;', production)
+        self.assertIn('assert broker.RestrictNamespaces;', flake)
+
 
 
 if __name__ == "__main__":
