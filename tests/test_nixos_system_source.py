@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "22f5d1830ef3d3e0187c8a0fcbfb5683edca627064c7eef47592f0bed0cedde4"
+SOURCE_SNAPSHOT_SHA256 = "cdf370f69eeec0faddb2a2cabd378a68f32ee2436b70252e8724aae474435472"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -316,7 +316,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 39)
+        self.assertEqual(len(files), 41)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):

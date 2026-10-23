@@ -361,6 +361,19 @@
           ];
         };
 
+      # Separate SOURCE-ONLY headless-agent integration. The existing Plasma
+      # candidate stays free of Nixer or other session-scoped background units.
+      # This successor uses the exact pinned upstream package but hosts its
+      # loopback MCP endpoint as a system service under unprivileged alex.
+      nixosConfigurations.heim-pc-seagate-nixer-headless-candidate =
+        self.nixosConfigurations.heim-pc-seagate-workstation-candidate.extendModules {
+          modules = [
+            nixer.nixosModules.default
+            ./modules/nixer-headless.nix
+            ({ ... }: { heimPc.nixerHeadless.enable = true; })
+          ];
+        };
+
       # Negative pre-deployment proof is exported as a module, not as a normal
       # nixosConfiguration. Regular `nix flake check` must remain healthy; CI
       # instantiates this module explicitly and requires evaluation to fail.
@@ -421,6 +434,11 @@
         # Optional real systemd + socket + MCP VM proof. Never a physical host.
         grabowski-headless-systemd-vm-proof =
           import ./tests/grabowski-headless-systemd.nix { inherit pkgs; };
+        # Explicit KVM-only proof for the original Nixer MCP in system scope.
+        # One VM must deny startup without its pinned image; a second VM
+        # bypasses ONLY the test preflight to exercise the real MCP process.
+        nixer-headless-systemd-vm-proof =
+          import ./tests/nixer-headless-systemd.nix { inherit pkgs nixer; };
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
         heim-pc-stage0-system = self.nixosConfigurations.heim-pc-stage0.config.system.build.toplevel;
         heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;
@@ -728,6 +746,39 @@ PY
           assert cfg.services.pipewire.enable;
           assert cfg.virtualisation.podman.enable;
           pkgs.runCommand "heim-pc-seagate-workstation-candidate-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # The Nixer specialist is an unprivileged *system* service; the
+        # upstream session-based service is not activated and alex.linger
+        # stays disabled. No unreviewed OCI pull is performed by Nixer.
+        seagate-nixer-headless-contract =
+          let
+            cfg = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
+            unit = cfg.systemd.services.nixer-headless;
+            sc = unit.serviceConfig;
+          in
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.services.nixer.enable;
+          assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
+          assert !cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.nixerHeadless.enable;
+          assert cfg.virtualisation.podman.enable;
+          assert unit.wantedBy == [ "multi-user.target" ];
+          assert sc.User == "alex" && sc.Group == "alex";
+          assert sc.RuntimeDirectory == "nixer-headless";
+          assert sc.RuntimeDirectoryMode == "0700";
+          assert sc.UMask == "0077";
+          assert unit.environment.NIXER_CONTAINER_XDG_RUNTIME_DIR == "/run/nixer-headless";
+          assert unit.environment.NIXER_REPO_ROOT == "/home/alex/repos";
+          assert builtins.match ".*heim-pc-nixer-check-image" sc.ExecStartPre != null;
+          assert builtins.match ".*nixer --transport streamable-http --host 127[.]0[.]0[.]1 --port 18187"
+            sc.ExecStart != null;
+          pkgs.runCommand "heim-pc-seagate-nixer-headless-contract" {} ''
             mkdir -p "$out"
           '';
 
