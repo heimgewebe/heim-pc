@@ -64,13 +64,78 @@ pkgs.stdenvNoCC.mkDerivation {
       --target "$out/lib/python3.12/site-packages" \
       -r extracted/requirements/runtime.lock.txt
 
-    # Retain the existing operator; do not synthesize a smaller MCP server.
-    # Include runtime assets for later deployment-manifest admission tests.
-    install -m 0644 extracted/src/*.py "$out/lib/python3.12/site-packages/"
+    # Reproduce the ORIGINAL canonical 203-tool deployment entrypoint.
+    # The source file name differs from the Python module name: the public
+    # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
+    # grabowski_operator and src/grabowski_operator.py to
+    # grabowski_operator_core. Blindly copying src/*.py builds only the old
+    # 53-tool core and silently omits the real runtime extensions.
     cp -r extracted/config extracted/requirements "$out/share/grabowski/"
     install -m 0644 extracted/pyproject.toml "$out/share/grabowski/pyproject.toml"
+    ${python}/bin/python3.12 -B - "$PWD/extracted" \
+      "$out/lib/python3.12/site-packages" "$out/share/grabowski" <<'PY'
+import json
+from pathlib import Path
+import shutil
+import sys
+
+root = Path(sys.argv[1]).resolve(strict=True)
+site = Path(sys.argv[2])
+share = Path(sys.argv[3])
+contract = json.loads((root / "config/runtime-entrypoint.json").read_text())
+if not (
+    contract.get("mode") == "module"
+    and contract.get("module") == "grabowski_operator"
+    and contract.get("source") == "src/grabowski_runtime.py"
+):
+    raise SystemExit("unexpected upstream canonical runtime entrypoint")
+expected = contract.get("expected_tools")
+if not (isinstance(expected, list) and len(expected) == 203
+        and len(set(expected)) == len(expected)):
+    raise SystemExit("canonical runtime tool contract changed")
+supporting = contract.get("supporting_sources")
+if not isinstance(supporting, list) or len(supporting) != 127:
+    raise SystemExit("canonical runtime module mapping changed")
+entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
+seen = set()
+for entry in entries:
+    name = entry.get("module")
+    original = entry.get("source")
+    if not (
+        isinstance(name, str) and name.isidentifier()
+        and isinstance(original, str) and original.startswith("src/")
+        and original.endswith(".py") and ".." not in Path(original).parts
+        and name not in seen
+    ):
+        raise SystemExit("unsafe or duplicate canonical runtime module mapping")
+    seen.add(name)
+    src = (root / original).resolve(strict=True)
+    if not src.is_relative_to(root / "src") or not src.is_file():
+        raise SystemExit("runtime module source escaped pinned source tree")
+    dst = site / (name + ".py")
+    shutil.copyfile(src, dst)
+    dst.chmod(0o444)
+for item in contract.get("runtime_assets", []):
+    original = item.get("source")
+    dest = item.get("destination")
+    if not (
+        isinstance(original, str) and isinstance(dest, str)
+        and ".." not in Path(original).parts
+        and ".." not in Path(dest).parts
+        and not Path(dest).is_absolute()
+    ):
+        raise SystemExit("invalid canonical runtime asset")
+    src = (root / original).resolve(strict=True)
+    if not src.is_file() or not src.is_relative_to(root):
+        raise SystemExit("runtime asset escaped pinned source tree")
+    target = share / dest
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, target)
+    target.chmod(0o444)
+PY
 
     makeWrapper ${python}/bin/python3.12 "$out/bin/grabowski-operator" \
+      --argv0 "$out/bin/grabowski-operator" \
       --set PYTHONDONTWRITEBYTECODE 1 \
       --prefix PYTHONPATH : "$out/lib/python3.12/site-packages" \
       --prefix PATH : "${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin" \

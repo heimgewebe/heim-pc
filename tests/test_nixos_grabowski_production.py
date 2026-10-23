@@ -1,6 +1,6 @@
 """Offline regression gates for the real, pinned NixOS Grabowski broker package.
 
-These tests do not claim that the full operator is packaged or running.
+These static tests complement actual isolated Nix builds and MCP protocol checks.
 """
 from pathlib import Path
 import unittest
@@ -89,6 +89,15 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("--no-index --no-deps --no-compile --no-input", op)
         self.assertIn("PYTHONPATH", op)
         self.assertIn("grabowski_operator --transport streamable-http", op)
+        self.assertIn('--argv0 "$out/bin/grabowski-operator"', op)
+        # The deployment manifest maps runtime.py to grabowski_operator and
+        # the previous grabowski_operator.py to grabowski_operator_core.
+        self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
+        self.assertIn('len(expected) == 203', op)
+        self.assertIn('len(supporting) != 127', op)
+        self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
+        self.assertIn('dst = site / (name + ".py")', op)
+        self.assertNotIn('install -m 0644 extracted/src/*.py', op)
         self.assertIn('cfg.operatorPackage.outPath == canonicalOperator.outPath', prod)
         self.assertIn('cfg.brokerPackage.outPath == canonicalBroker.outPath', prod)
         self.assertIn('cfg.releaseId == expectedReleaseId', prod)
@@ -98,8 +107,12 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;", flake)
         self.assertIn("assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;", flake)
         self.assertIn("grabowski-release-artifacts =", flake)
+        self.assertIn('if observed != expected:', flake)
+        self.assertIn('if len(expected) != 203:', flake)
+        self.assertIn('"cmdline"', flake)
         self.assertIn("test -x ${operator}/bin/grabowski-operator", flake)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
+        self.assertIn('builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore', flake)
 
     def test_nixos_broker_port_keeps_original_peer_authority_checks(self):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()

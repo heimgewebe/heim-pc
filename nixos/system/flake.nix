@@ -447,6 +447,11 @@
               ${operator}/share/grabowski/requirements/runtime.lock.txt | sha256sum -c -
             ${operator}/bin/grabowski-operator --help > "$TMPDIR/operator-help"
             grep -Fq 'streamable-http' "$TMPDIR/operator-help"
+            # The original rootbroker checks exact /proc/<MainPID>/cmdline.
+            # The Nix-generated wrapper MUST retain its own pinned path in
+            # argv[0] when exec'ing Python; --help alone does not prove this.
+            grep -Fq 'exec -a "${operator}/bin/grabowski-operator"' \
+              "${operator}/bin/grabowski-operator"
             ${pkgs.python312}/bin/python3 -B - <<'PY'
 import json
 from pathlib import Path
@@ -467,6 +472,88 @@ if manifest != expected:
 for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_contract.py"):
     if not (root / "lib/python3.12/site-packages" / name).is_file():
         raise SystemExit(f"missing full operator module {name}")
+PY
+            # Prove the real executable reaches the canonical 203-tool MCP
+            # surface, not just the legacy 53-tool core. No host resources
+            # are mounted and no tools are invoked; only initialize/list.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+root = Path("${operator}")
+binary = str(root / "bin/grabowski-operator")
+source_contract = json.loads(
+    (root / "share/grabowski/config/runtime-entrypoint.json").read_text()
+)
+expected = set(source_contract["expected_tools"])
+if len(expected) != 203:
+    raise SystemExit("canonical expected tool catalog is not exactly 203")
+
+with tempfile.TemporaryDirectory(prefix="nixos-grabowski-mcp-") as home:
+    env = {
+        "HOME": home,
+        "XDG_STATE_HOME": home + "/state",
+        "XDG_CONFIG_HOME": home + "/config",
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    # Kernel-observed command-line bytes are checked, not just wrapper text.
+    child = subprocess.Popen(
+        [binary, "--transport", "stdio"], cwd=home, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        prefix = [
+            binary, "-m", "grabowski_operator", "--transport",
+            "streamable-http", "--host", "127.0.0.1", "--port", "18181",
+        ]
+        seen = []
+        for _ in range(60):
+            if child.poll() is not None:
+                raise SystemExit("operator exited before /proc identity readback")
+            try:
+                raw = Path("/proc") / str(child.pid) / "cmdline"
+                seen = [part.decode("utf-8") for part in raw.read_bytes().rstrip(b"\0").split(b"\0")]
+            except OSError:
+                seen = []
+            if seen[:len(prefix)] == prefix:
+                break
+            time.sleep(0.05)
+        if seen[:len(prefix)] != prefix:
+            raise SystemExit("operator MainPID command line does not match rootbroker contract")
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+    async def handshake():
+        params = StdioServerParameters(
+            command=binary, args=["--transport", "stdio"],
+            env=env, cwd=home,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await asyncio.wait_for(session.initialize(), timeout=35)
+                catalog = await asyncio.wait_for(session.list_tools(), timeout=35)
+                observed = {tool.name for tool in catalog.tools}
+                if observed != expected:
+                    raise RuntimeError(
+                        "canonical MCP tool catalog mismatch: missing="
+                        + str(sorted(expected - observed))
+                        + " unexpected=" + str(sorted(observed - expected))
+                    )
+                print("verified canonical Grabowski MCP tools:", len(observed))
+
+    asyncio.run(handshake())
 PY
             # Real packaged broker (not the fixture) must fail closed for
             # forged peers, even before a root policy or socket is involved.
