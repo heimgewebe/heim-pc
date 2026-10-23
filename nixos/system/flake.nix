@@ -308,7 +308,19 @@
       # not supersede the separate encrypted production storage contract.
       nixosConfigurations.heim-pc-seagate-primary-candidate = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [ ./modules/seagate-primary-candidate.nix ];
+        modules = [
+          ./modules/seagate-primary-candidate.nix
+          ({ ... }: {
+            # Candidate runtime identity must bind to the exact clean source.
+            # Source-only evaluations from a dirty checkout are not releases.
+            system.configurationRevision = sourceRevision;
+            environment.etc."heim-pc/source-revision".text = sourceRevision;
+            assertions = [{
+              assertion = builtins.match "^[0-9a-f]{40}$" sourceRevision != null;
+              message = "Seagate primary activation requires an exact clean Git revision";
+            }];
+          })
+        ];
       };
 
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
@@ -430,6 +442,8 @@
           let cfg = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
           in
           assert cfg.networking.hostName == "heim-pc";
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert builtins.match "^[0-9a-f]{40}$" cfg.system.configurationRevision != null;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/nix".options) [ "subvol=@nix" "compress=zstd" ];
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
