@@ -442,6 +442,9 @@
             set -euo pipefail
             test -x ${operator}/bin/grabowski-operator
             test -x ${broker}/bin/grabowski-privileged-broker
+            test -x ${broker}/bin/grabowski-privileged-request
+            ${broker}/bin/grabowski-privileged-request --help > "$TMPDIR/broker-request-help"
+            grep -Fq 'reference_file' "$TMPDIR/broker-request-help"
             test -s ${broker}/libexec/grabowski-privileged-broker.py
             printf '%s  %s\n' ${lockSha256} \
               ${operator}/share/grabowski/requirements/runtime.lock.txt | sha256sum -c -
@@ -735,6 +738,12 @@ PY
           assert broker.SystemCallErrorNumber == "EPERM";
           assert broker.RestrictNamespaces;
           assert operator.User == "alex" && operator.Group == "alex";
+          assert builtins.elem
+            "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
+            operator.Environment;
+          assert builtins.elem
+            "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin"
+            operator.Environment;
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
           assert builtins.elem "grabowski-privileged-broker.socket"
             proof.systemd.services.grabowski-operator.requires;

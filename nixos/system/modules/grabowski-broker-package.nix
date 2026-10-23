@@ -34,6 +34,10 @@ let
     done
     install -m 0644 extracted/tools/grabowski_privileged_broker.py \
       "$out/libexec/grabowski-privileged-broker.py"
+    # The original operator's broker-ready contract also needs the ORIGINAL
+    # request CLI. It is a user-mode socket client, never another root daemon.
+    install -m 0644 extracted/tools/grabowski_privileged_request.py \
+      "$out/libexec/grabowski-privileged-request.py"
 
     # Immutable Nix source replaces the mutable Pop!/usr/local import path.
     # Pin systemd executables, never use PATH lookup for privileged actions.
@@ -117,6 +121,12 @@ PY
       --add-flags "$out/libexec/grabowski-privileged-broker.py" \
       --set PYTHONDONTWRITEBYTECODE 1
 
+    makeWrapper "${pkgs.python3}/bin/python3" \
+      "$out/bin/grabowski-privileged-request" \
+      --add-flags "$out/libexec/grabowski-privileged-request.py" \
+      --set PYTHONDONTWRITEBYTECODE 1
+    "$out/bin/grabowski-privileged-request" --help >/dev/null
+
     # No socket, root policy, or system state is accessed during this import.
     ${pkgs.python3}/bin/python3 -B -c '
 import runpy
@@ -125,7 +135,8 @@ runpy.run_path(
     run_name="nixos_package_import_smoke",
 )
 '
-    chmod 0444 "$out/libexec/grabowski-privileged-broker.py" "$out/lib/grabowski/"*.py
+    chmod 0444 "$out/libexec/grabowski-privileged-broker.py" \
+      "$out/libexec/grabowski-privileged-request.py" "$out/lib/grabowski/"*.py
   '';
 in
 if args ? packageOnly && args.packageOnly then brokerPackage else {

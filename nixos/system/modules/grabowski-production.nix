@@ -162,7 +162,15 @@ in
         TimeoutStopSec = "20s";
         KillMode = "mixed";
         UMask = "0077";
-        Environment = [ "HOME=/home/alex" "PYTHONUNBUFFERED=1" ];
+        # The original operator's ready-status verifies a root-owned regular
+        # broker binary, root-owned private policy, protected socket AND its
+        # original CLI on PATH. NixOS must supply the real immutable package.
+        Environment = [
+          "HOME=/home/alex"
+          "PYTHONUNBUFFERED=1"
+          "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
+          "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin"
+        ];
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";

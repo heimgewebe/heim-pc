@@ -121,6 +121,11 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("grabowski_nixos_unit_authority as nixos_auth", broker)
         self.assertIn("nixos_auth.fragment_trusted(", broker)
         self.assertIn("nixos_auth.expected_operator_argv()", broker)
+        self.assertIn("extracted/tools/grabowski_privileged_request.py", broker)
+        self.assertIn('"$out/bin/grabowski-privileged-request"', broker)
+        self.assertIn("GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker", prod)
+        self.assertIn('PATH=${cfg.brokerPackage}/bin:', prod)
+        self.assertIn("test -x ${broker}/bin/grabowski-privileged-request", (ROOT / "nixos/system/flake.nix").read_text())
         for original_peer_gate in (
             "systemd_main_pid != pid",
             "_socket_peer_credentials(descriptor)",
