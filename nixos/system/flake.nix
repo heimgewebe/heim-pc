@@ -473,6 +473,33 @@ for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_con
     if not (root / "lib/python3.12/site-packages" / name).is_file():
         raise SystemExit(f"missing full operator module {name}")
 PY
+            # Runtime assembly must match the full original 203-tool MCP
+            # surface, not the older 53-tool core. Register tools only; no
+            # MCP listener, privileged operation or production state is used.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import importlib
+import json
+from pathlib import Path
+contract = json.loads(Path("${operator}/share/grabowski/config/runtime-entrypoint.json").read_text())
+if (contract.get("mode"), contract.get("module"), contract.get("source")) != (
+    "module", "grabowski_operator", "src/grabowski_runtime.py"
+):
+    raise SystemExit("pinned canonical runtime module/source contract changed")
+expected = contract.get("expected_tools")
+if not isinstance(expected, list) or len(expected) != 203 or len(set(expected)) != 203:
+    raise SystemExit("canonical runtime tool list is incomplete")
+actual = [
+    tool.name
+    for tool in importlib.import_module("grabowski_operator").mcp._tool_manager.list_tools()
+]
+if len(actual) != 203 or set(actual) != set(expected):
+    raise SystemExit(
+        "Nix Grabowski runtime tool surface differs from canonical 203-tool release: "
+        + str({"missing": sorted(set(expected) - set(actual)),
+               "unexpected": sorted(set(actual) - set(expected))})
+    )
+PY
             # Prove the real executable reaches the canonical 203-tool MCP
             # surface, not just the legacy 53-tool core. No host resources
             # are mounted and no tools are invoked; only initialize/list.
