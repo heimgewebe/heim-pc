@@ -962,7 +962,7 @@ PY
           assert builtins.match ".*@mount.*" broker.SystemCallFilter != null;
           assert broker.SystemCallErrorNumber == "EPERM";
           assert broker.RestrictNamespaces;
-          assert operator.User == "alex" && operator.Group == "alex";
+          assert operator.User == "alex" && operator.Group == "users";
           assert builtins.elem
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
