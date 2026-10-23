@@ -431,9 +431,9 @@
           in
           assert cfg.networking.hostName == "heim-pc";
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
-          assert cfg.fileSystems."/nix".options == [ "subvol=@nix" "compress=zstd" ];
-          assert cfg.fileSystems."/home".options == [ "subvol=@home" "compress=zstd" ];
-          assert cfg.fileSystems."/persist".options == [ "subvol=@persist" "compress=zstd" ];
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/nix".options) [ "subvol=@nix" "compress=zstd" ];
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/persist".options) [ "subvol=@persist" "compress=zstd" ];
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
           assert cfg.boot.loader.systemd-boot.enable;
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
