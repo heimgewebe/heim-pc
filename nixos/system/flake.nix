@@ -374,6 +374,32 @@
           ];
         };
 
+      # Explicit SOURCE-ONLY full-operator successor. The first three
+      # profiles and their already tested physical Stage0 boot remain unchanged.
+      # Real private Rootbroker policy is provisioned by root from /persist;
+      # on this physical host it has NOT been provisioned or accepted yet.
+      # Accordingly the policy, socket and operator must fail closed at boot
+      # until separate host authority and runtime acceptance exist.
+      nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =
+        self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
+          modules = [
+            ({ pkgs, ... }: {
+              heimPc.grabowskiProduction = {
+                enable = true;
+                operatorPackage =
+                  import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+                brokerPackage = import ./modules/grabowski-broker-package.nix {
+                  inherit pkgs;
+                  lib = pkgs.lib;
+                  packageOnly = true;
+                };
+                releaseId =
+                  "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+              };
+            })
+          ];
+        };
+
       # Negative pre-deployment proof is exported as a module, not as a normal
       # nixosConfiguration. Regular `nix flake check` must remain healthy; CI
       # instantiates this module explicitly and requires evaluation to fail.
@@ -785,6 +811,62 @@ PY
           assert builtins.match ".*nixer --transport streamable-http --host 127[.]0[.]0[.]1 --port 18187"
             sc.ExecStart != null;
           pkgs.runCommand "heim-pc-seagate-nixer-headless-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Integrate the genuine pinned Grabowski release with the already
+        # tested Nixer/Plasma successor without enabling the default host.
+        # This proves declarative service and rootbroker *admission wiring*,
+        # NOT real Seagate private policy or remote boot readiness.
+        seagate-grabowski-headless-contract =
+          let
+            baseline = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
+            cfg = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
+            op = cfg.systemd.services.grabowski-operator;
+            broker = cfg.systemd.services."grabowski-privileged-broker@";
+            socket = cfg.systemd.sockets.grabowski-privileged-broker;
+            policy = cfg.systemd.services.grabowski-private-policy-install;
+            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            originalBroker = import ./modules/grabowski-broker-package.nix {
+              inherit pkgs;
+              lib = pkgs.lib;
+              packageOnly = true;
+            };
+          in
+          assert !baseline.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
+          assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
+          assert cfg.heimPc.grabowskiProduction.releaseId ==
+            "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert cfg.fileSystems."/persist".fsType == "btrfs";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
+          assert cfg.services.openssh.enable && cfg.services.tailscale.enable;
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert !cfg.users.users.alex.linger;
+          assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
+          assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
+          assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
+          assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);
+          assert op.serviceConfig.User == "alex";
+          assert op.serviceConfig.Group == "alex";
+          assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
+          assert builtins.elem "grabowski-private-policy-install.service" op.requires;
+          assert builtins.elem "grabowski-privileged-broker.socket" op.requires;
+          assert policy.serviceConfig.User == "root";
+          assert policy.unitConfig.AssertPathIsMountPoint == "/persist";
+          assert builtins.elem "grabowski-private-policy-install.service" socket.requires;
+          assert socket.socketConfig.SocketMode == "0660";
+          assert socket.socketConfig.SocketGroup == "grabowski";
+          assert broker.serviceConfig.User == "root";
+          assert builtins.match ".*CAP_SYS_ADMIN.*" broker.serviceConfig.CapabilityBoundingSet != null;
+          assert !(builtins.hasAttr "grabowski-demo" cfg.systemd.services);
+          pkgs.runCommand "heim-pc-seagate-grabowski-headless-contract" {} ''
             mkdir -p "$out"
           '';
 
