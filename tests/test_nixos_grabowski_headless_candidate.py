@@ -28,6 +28,7 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
             self.candidate,
         )
         self.assertIn("heimPc.grabowskiProduction = {", self.candidate)
+        self.assertIn("users.users.alex.linger = pkgs.lib.mkForce true;", self.candidate)
         self.assertIn("enable = true;", self.candidate)
         self.assertIn(f'releaseId =\n                  "{RELEASE}";', self.candidate)
         self.assertIn("import ./modules/grabowski-operator-package.nix", self.candidate)
@@ -54,6 +55,10 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
             "assert !cfg.boot.loader.efi.canTouchEfiVariables;",
             'assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);',
             'assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";',
+            'assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";',
+            'assert op.serviceConfig.Group == "users";',
+            'assert cfg.users.users.alex.linger;',
+            'assert builtins.elem "user@1000.service" op.requires;',
             'assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);',
             'assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];',
             'assert policy.unitConfig.AssertPathIsMountPoint == "/persist";',

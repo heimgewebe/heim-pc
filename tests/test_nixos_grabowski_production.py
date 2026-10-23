@@ -70,6 +70,9 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('SystemCallErrorNumber = "EPERM";', production)
         self.assertIn('RestrictNamespaces = true;', production)
         self.assertIn('assert broker.RestrictNamespaces;', flake)
+        self.assertIn('Group = "users";', production)
+        self.assertIn("XDG_RUNTIME_DIR=/run/user/1000", production)
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", production)
 
 
     def test_full_operator_is_hash_locked_and_release_identity_is_shared(self):
@@ -88,6 +91,12 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("--require-hashes --only-binary=:all:", op)
         self.assertIn("--no-index --no-deps --no-compile --no-input", op)
         self.assertIn("PYTHONPATH", op)
+        self.assertIn('GRABOWSKI_NIXOS_GIT_BIN', op)
+        self.assertIn('GRABOWSKI_NIXOS_GH_BIN', op)
+        self.assertIn('"src/grabowski_operator.py": (4, 1)', op)
+        self.assertIn('"src/grabowski_self_deploy.py": (2, 0)', op)
+        self.assertIn('makeWrapper ${pkgs.git}/bin/git', op)
+        self.assertIn('makeWrapper ${pkgs.gh}/bin/gh', op)
         self.assertIn("grabowski_operator --transport streamable-http", op)
         self.assertIn('--argv0 "$out/bin/grabowski-operator"', op)
         # The deployment manifest maps runtime.py to grabowski_operator and
@@ -128,7 +137,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)

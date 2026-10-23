@@ -43,9 +43,9 @@
   services.getty.autologinUser = lib.mkForce null;
   security.sudo.wheelNeedsPassword = lib.mkForce true;
 
-  # The eventual primary writer must be a system service with User=...,
-  # not a session-bound user service. Never solve headless operation by
-  # enabling every legacy user unit via linger before workload classification.
+  # The base profile keeps its user manager session-bound. Only the opt-in
+  # full Grabowski profile enables linger for original systemd-run --user jobs.
+  # Nixer and the main operator remain independently started system services.
   users.users.alex.linger = false;
 
   # Reuse the existing gated executor; it provides no root service, sudo
@@ -71,8 +71,9 @@
       message = "Primary candidate forbids auto-login and blanket passwordless wheel sudo";
     }
     {
-      assertion = !config.users.users.alex.linger;
-      message = "Primary candidate must not activate legacy alex user services at boot";
+      assertion =
+        config.users.users.alex.linger == config.heimPc.grabowskiProduction.enable;
+      message = "Only full Grabowski may enable the headless alex user manager";
     }
   ];
 }

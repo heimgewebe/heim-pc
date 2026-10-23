@@ -40,10 +40,6 @@ in
         message = "Nixer headless must not also create its session-bound user service";
       }
       {
-        assertion = !config.users.users.alex.linger;
-        message = "Nixer headless must not depend on enabling all alex user units";
-      }
-      {
         assertion = !(builtins.elem "grabowski" config.users.users.alex.extraGroups);
         message = "Nixer must not grant interactive alex rootbroker socket membership";
       }
@@ -73,7 +69,7 @@ in
       serviceConfig = {
         Type = "simple";
         User = "alex";
-        Group = "alex";
+        Group = "users";
         WorkingDirectory = "/home/alex";
         RuntimeDirectory = "nixer-headless";
         RuntimeDirectoryMode = "0700";

@@ -384,6 +384,9 @@
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
           modules = [
             ({ pkgs, ... }: {
+              # The original operator's bounded task/job tools call systemd-run --user.
+              # Enable this manager only for the full, explicit Grabowski successor.
+              users.users.alex.linger = pkgs.lib.mkForce true;
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -801,7 +804,7 @@ PY
           assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
           assert cfg.virtualisation.podman.enable;
           assert unit.wantedBy == [ "multi-user.target" ];
-          assert sc.User == "alex" && sc.Group == "alex";
+          assert sc.User == "alex" && sc.Group == "users";
           assert sc.RuntimeDirectory == "nixer-headless";
           assert sc.RuntimeDirectoryMode == "0700";
           assert sc.UMask == "0077";
@@ -848,13 +851,18 @@ PY
           assert cfg.services.openssh.enable && cfg.services.tailscale.enable;
           assert cfg.services.getty.autologinUser == null;
           assert cfg.security.sudo.wheelNeedsPassword;
-          assert !cfg.users.users.alex.linger;
+          assert cfg.users.users.alex.linger;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
           assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);
           assert op.serviceConfig.User == "alex";
-          assert op.serviceConfig.Group == "alex";
+          assert op.serviceConfig.Group == "users";
+          assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";
+          assert builtins.elem "user@1000.service" op.requires;
+          assert builtins.elem "XDG_RUNTIME_DIR=/run/user/1000" op.serviceConfig.Environment;
+          assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+            op.serviceConfig.Environment;
           assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
           assert builtins.elem "grabowski-private-policy-install.service" op.requires;
           assert builtins.elem "grabowski-privileged-broker.socket" op.requires;

@@ -64,6 +64,14 @@ pkgs.stdenvNoCC.mkDerivation {
       --target "$out/lib/python3.12/site-packages" \
       -r extracted/requirements/runtime.lock.txt
 
+    # Immutable Nix-Store wrappers retain root-owned executable validation
+    # without depending on Pop!_OS /usr/bin/git or /usr/bin/gh.
+    makeWrapper ${pkgs.git}/bin/git "$out/bin/git"
+    makeWrapper ${pkgs.gh}/bin/gh "$out/bin/gh" \
+      --prefix PATH : "${pkgs.git}/bin:${pkgs.coreutils}/bin"
+    export GRABOWSKI_NIXOS_GIT_BIN="$out/bin/git"
+    export GRABOWSKI_NIXOS_GH_BIN="$out/bin/gh"
+
     # Reproduce the ORIGINAL canonical 203-tool deployment entrypoint.
     # The source file name differs from the Python module name: the public
     # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
@@ -75,6 +83,7 @@ pkgs.stdenvNoCC.mkDerivation {
     ${python}/bin/python3.12 -B - "$PWD/extracted" \
       "$out/lib/python3.12/site-packages" "$out/share/grabowski" <<'PY'
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -114,6 +123,21 @@ for entry in entries:
         raise SystemExit("runtime module source escaped pinned source tree")
     dst = site / (name + ".py")
     shutil.copyfile(src, dst)
+    # Adapt ONLY the known immutable executable selectors in the pinned
+    # upstream revision. Mismatched occurrences fail the Nix build closed.
+    expected_paths = {
+        "src/grabowski_operator.py": (4, 1),
+        "src/grabowski_self_deploy.py": (2, 0),
+    }
+    if original in expected_paths:
+        content = dst.read_text()
+        expected_git, expected_gh = expected_paths[original]
+        if (content.count("/usr/bin/git") != expected_git
+                or content.count("/usr/bin/gh") != expected_gh):
+            raise SystemExit("unexpected pinned Grabowski CLI path topology")
+        content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
+        content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
+        dst.write_text(content)
     dst.chmod(0o444)
 for item in contract.get("runtime_assets", []):
     original = item.get("source")
@@ -171,5 +195,7 @@ for package, expected in {
         raise SystemExit(f"{package}: expected {expected}, got {actual}")
 '
     test -x "$out/bin/grabowski-operator"
+    test -x "$out/bin/git"
+    test -x "$out/bin/gh"
   '';
 }

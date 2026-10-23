@@ -201,12 +201,12 @@ in
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" ];
-      after = [ "network.target" "grabowski-private-policy-install.service" "grabowski-privileged-broker.socket" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];
+      after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-privileged-broker.socket" ];
       serviceConfig = {
         Type = "simple";
         User = "alex";
-        Group = "alex";
+        Group = "users";
         SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
@@ -221,6 +221,8 @@ in
         # original CLI on PATH. NixOS must supply the real immutable package.
         Environment = [
           "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin"
