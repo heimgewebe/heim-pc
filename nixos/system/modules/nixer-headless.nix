@@ -15,8 +15,10 @@ let
       set -eu
       # NixOS rootless Podman requires the host's setuid ID-map wrappers.
       export PATH="/run/wrappers/bin:$PATH"
+      # Podman reports .Id as 64 hex characters, normally without sha256:.
+      expected=${lib.escapeShellArg (lib.removePrefix "sha256:" pinnedImageId)}
       observed="$(podman image inspect --format '{{.Id}}' ${lib.escapeShellArg pinnedImageId})"
-      if [ "$observed" != ${lib.escapeShellArg pinnedImageId} ]; then
+      if [ "$observed" != "$expected" ] && [ "$observed" != "sha256:$expected" ]; then
         echo "Nixer immutable container image identity mismatch" >&2
         exit 1
       fi
