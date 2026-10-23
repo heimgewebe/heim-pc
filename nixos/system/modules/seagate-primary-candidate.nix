@@ -12,6 +12,7 @@
     ./observability.nix
     ./day2-activation.nix
     ./grabowski-production.nix
+    ./grabowski-broker-package.nix
   ];
 
   networking.hostName = lib.mkForce "heim-pc";

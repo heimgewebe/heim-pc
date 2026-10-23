@@ -506,6 +506,9 @@
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
           in
           assert !inactive.heimPc.grabowskiProduction.enable;
+          assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
+          assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
+            == "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
