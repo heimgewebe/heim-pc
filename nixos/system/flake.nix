@@ -303,6 +303,14 @@
         ];
       };
 
+      # Incremental, deliberately non-activating migration candidate based on
+      # the physically verified unencrypted Seagate Stage0 mounts. This does
+      # not supersede the separate encrypted production storage contract.
+      nixosConfigurations.heim-pc-seagate-primary-candidate = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ ./modules/seagate-primary-candidate.nix ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -413,6 +421,37 @@
           assert cfg.services.getty.autologinUser == null;
           assert cfg.boot.initrd.luks.devices == {};
           pkgs.runCommand "heim-pc-stage0-no-usb-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Evaluation-only bridge from the physical Seagate Stage0 layout to
+        # a secure headless core. It is NOT an operator/GUI/boot acceptance.
+        seagate-primary-candidate-contract =
+          let cfg = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+          in
+          assert cfg.networking.hostName == "heim-pc";
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/nix".options == [ "subvol=@nix" "compress=zstd" ];
+          assert cfg.fileSystems."/home".options == [ "subvol=@home" "compress=zstd" ];
+          assert cfg.fileSystems."/persist".options == [ "subvol=@persist" "compress=zstd" ];
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert cfg.boot.loader.systemd-boot.enable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;
+          assert cfg.services.openssh.settings.PasswordAuthentication == false;
+          assert cfg.services.openssh.settings.KbdInteractiveAuthentication == false;
+          assert cfg.services.openssh.settings.PermitRootLogin == "no";
+          assert cfg.services.openssh.settings.AllowUsers == [ "alex" ];
+          assert cfg.services.tailscale.enable;
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.services.xserver.enable;
+          assert cfg.nix.settings.trusted-users == [ "root" ];
+          assert !cfg.nix.gc.automatic;
+          assert cfg.heimPc.day2Activation.enable;
+          assert !(builtins.hasAttr "grabowski-demo" cfg.systemd.services);
+          pkgs.runCommand "heim-pc-seagate-primary-candidate-contract" {} ''
             mkdir -p "$out"
           '';
 
