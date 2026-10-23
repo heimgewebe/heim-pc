@@ -337,6 +337,30 @@
         modules = hostModules;
       };
 
+      # Source-only workstation successor to the headless Seagate primary
+      # baseline. Reuses the physically tested, unencrypted Stage0 mounts and
+      # never changes BootOrder, protected WD_BLACK or production enablement.
+      # NVIDIA/Plasma hardware remains subject to a separate PHYSICAL proof.
+      nixosConfigurations.heim-pc-seagate-workstation-candidate =
+        self.nixosConfigurations.heim-pc-seagate-primary-candidate.extendModules {
+          modules = [
+            ./modules/desktop.nix
+            ./modules/nvidia.nix
+            ./modules/audio.nix
+            ./modules/development.nix
+            ./modules/containers.nix
+            ({ lib, ... }: {
+              # Stage0 deliberately has X disabled; override ONLY in this
+              # explicitly named, non-activated workstation successor.
+              services.xserver.enable = lib.mkForce true;
+              nixpkgs.config.allowUnfreePredicate = pkg:
+                lib.hasPrefix "nvidia-" (lib.getName pkg);
+              heimPc.desktop.enable = true;
+              heimPc.hardware.nvidia.enable = true;
+            })
+          ];
+        };
+
       # Negative pre-deployment proof is exported as a module, not as a normal
       # nixosConfiguration. Regular `nix flake check` must remain healthy; CI
       # instantiates this module explicitly and requires evaluation to fail.
@@ -677,6 +701,33 @@ PY
           assert cfg.heimPc.day2Activation.enable;
           assert !(builtins.hasAttr "grabowski-demo" cfg.systemd.services);
           pkgs.runCommand "heim-pc-seagate-primary-candidate-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Real source module composition for Plasma 6, NVIDIA and PipeWire
+        # against the actual Seagate Stage0 root, not synthetic LUKS storage.
+        # A successful evaluation does NOT prove physical GPU or peripherals.
+        seagate-workstation-candidate-contract =
+          let cfg = self.nixosConfigurations.heim-pc-seagate-workstation-candidate.config;
+          in
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert cfg.services.openssh.enable && cfg.services.tailscale.enable;
+          assert cfg.services.openssh.settings.PermitRootLogin == "no";
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.desktop.enable && cfg.heimPc.hardware.nvidia.enable;
+          assert cfg.services.xserver.enable;
+          assert cfg.services.displayManager.sddm.enable;
+          assert cfg.services.desktopManager.plasma6.enable;
+          assert cfg.hardware.nvidia.modesetting.enable;
+          assert cfg.services.pipewire.enable;
+          assert cfg.virtualisation.podman.enable;
+          pkgs.runCommand "heim-pc-seagate-workstation-candidate-contract" {} ''
             mkdir -p "$out"
           '';
 
