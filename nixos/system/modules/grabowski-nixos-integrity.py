@@ -51,7 +51,7 @@ def _read(root: Path, relative: str, *, maximum: int = MAX_READ) -> bytes:
     path = root / relative
     meta = path.lstat()
     if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or
-            meta.st_nlink != 1 or meta.st_size > maximum or
+            meta.st_nlink < 1 or meta.st_size > maximum or
             (stat.S_IMODE(meta.st_mode) & 0o022)):
         raise ValueError("unsafe release artifact: " + relative)
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
@@ -59,7 +59,7 @@ def _read(root: Path, relative: str, *, maximum: int = MAX_READ) -> bytes:
         actual = os.fstat(descriptor)
         if (actual.st_dev != meta.st_dev or actual.st_ino != meta.st_ino or
                 actual.st_mode != meta.st_mode or actual.st_uid != meta.st_uid or
-                actual.st_nlink != 1):
+                actual.st_nlink != meta.st_nlink):
             raise ValueError("artifact identity changed during open")
         data = os.read(descriptor, maximum + 1)
         if len(data) > maximum or os.read(descriptor, 1):
