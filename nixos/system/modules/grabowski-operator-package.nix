@@ -54,6 +54,11 @@ pkgs.stdenvNoCC.mkDerivation {
     set -euo pipefail
     export HOME="$TMPDIR" PIP_DISABLE_PIP_VERSION_CHECK=1
     mkdir -p extracted "$out/bin" "$out/lib/python3.12/site-packages" "$out/share/grabowski"
+    # Python -I intentionally ignores PYTHONPATH. Install a store-owned
+    # virtual environment so subprocess tools can import their pinned modules
+    # even under isolated execution, without a writable home directory.
+    ln -s ${python}/bin/python3.12 "$out/bin/python3"
+    printf 'home = ${python}/bin\ninclude-system-site-packages = false\n' > "$out/pyvenv.cfg"
     tar -xzf ${sourceArchive} --strip-components=1 -C extracted
     printf '%s  %s\n' ${lockSha256} extracted/requirements/runtime.lock.txt | sha256sum -c -
 
@@ -138,6 +143,45 @@ for entry in entries:
         content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
         content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
         dst.write_text(content)
+    # The copied full upstream runtime is still the canonical 203-tool
+    # entrypoint. Repair only Nix-specific argv0 and catalog discovery.
+    if original == "src/grabowski_runtime.py":
+        content = dst.read_text()
+        marker = "from __future__ import annotations\n\n"
+        if not content.startswith(marker) or content.count(marker) != 1:
+            raise SystemExit("canonical Grabowski runtime prologue changed")
+        real_python = str(Path("${python}/bin/python3.12").resolve(strict=True))
+        wrapper = str(site.parents[2] / "bin/grabowski-operator")
+        venv_python = str(site.parents[2] / "bin/python3")
+        bootstrap = (
+            "import os as _grabowski_nix_os\n"
+            "import sys as _grabowski_nix_sys\n"
+            f"if (_grabowski_nix_sys.executable == {wrapper!r}\n"
+            f"        and _grabowski_nix_os.path.realpath('/proc/self/exe') == {real_python!r}):\n"
+            f"    _grabowski_nix_sys.executable = {venv_python!r}\n\n"
+        )
+        dst.write_text(content.replace(marker, marker + bootstrap, 1))
+    if original == "src/grabowski_coding_agent_router.py":
+        content = dst.read_text()
+        old = (
+            "def _deployment_catalog_path() -> Path:\n"
+            "    module_path = Path(__file__).resolve()\n"
+            "    environment_prefix = Path(sys.prefix).resolve()\n"
+            "    if (\n"
+            "        sys.prefix != sys.base_prefix\n"
+            "        and module_path.is_relative_to(environment_prefix)\n"
+            "    ):\n"
+            "        return environment_prefix.parent / \"config\" / \"coding-agent-catalog.json\"\n"
+            "    return module_path.parent.parent / \"config\" / \"coding-agent-catalog.json\"\n"
+        )
+        new = (
+            "def _deployment_catalog_path() -> Path:\n"
+            "    # Nix-built canonical catalog inside the immutable package output.\n"
+            "    return Path(__file__).resolve().parents[3] / \"share/grabowski/config/coding-agent-catalog.json\"\n"
+        )
+        if content.count(old) != 1:
+            raise SystemExit("pinned coding-agent catalog path topology changed")
+        dst.write_text(content.replace(old, new, 1))
     dst.chmod(0o444)
 for item in contract.get("runtime_assets", []):
     original = item.get("source")
@@ -169,7 +213,7 @@ from grabowski_nixos_integrity import patch_pinned_module
 path = Path(sys.argv[1]) / "lib/python3.12/site-packages/grabowski_mcp.py"
 patch_pinned_module(path)
 PY
-    makeWrapper ${python}/bin/python3.12 "$out/bin/grabowski-operator" \
+    makeWrapper "$out/bin/python3" "$out/bin/grabowski-operator" \
       --argv0 "$out/bin/grabowski-operator" \
       --set PYTHONDONTWRITEBYTECODE 1 \
       --prefix PYTHONPATH : "$out/lib/python3.12/site-packages" \
@@ -224,6 +268,26 @@ for package, expected in {
     if actual != expected:
         raise SystemExit(f"{package}: expected {expected}, got {actual}")
 '
+    # Build-time live proof: Nix Python -I must discover the real pinned
+    # job-finalization module and the pinned coding agent catalog.
+    "$out/bin/python3" -I -B - "$out" <<'PY'
+from pathlib import Path
+import importlib.util
+import sys
+
+root = Path(sys.argv[1])
+if Path(sys.prefix) != root or sys.prefix == sys.base_prefix:
+    raise SystemExit("Nix Python isolated site-packages prefix is not the package root")
+if importlib.util.find_spec("grabowski_job_finalizer") is None:
+    raise SystemExit("Nix isolated job finalizer is not importable")
+import grabowski_coding_agent_router as router
+health = router.coding_agent_catalog_health()
+if health.get("ready") is not True:
+    raise SystemExit("Nix immutable coding-agent catalog is not ready: " + repr(health))
+if Path(health["path"]).resolve(strict=True) != root / "share/grabowski/config/coding-agent-catalog.json":
+    raise SystemExit("Nix coding-agent catalog is not the pinned store asset")
+print("nix isolated jobfinalizer and immutable catalog verified")
+PY
     test -x "$out/bin/grabowski-operator"
     test -x "$out/bin/git"
     test -x "$out/bin/gh"
