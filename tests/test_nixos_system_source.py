@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "a8e3b3036a2d2c45e6db3401a680673c45efc1a25a9800ddeeb69e7867a6fa10"
+SOURCE_SNAPSHOT_SHA256 = "3d0a2fc6a9411550109876126301020452631b971736c9fe5004999d505e445f"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -309,6 +309,15 @@ class T(unittest.TestCase):
         self.assertNotIn("mkfs", stage0)
         self.assertNotIn("tpm2", stage0.lower())
         self.assertNotIn("nixos_production_install", stage0)
+
+    def test_nixos_local_task_capture_python_keeps_remote_ssh_interpreter(self):
+        package = (SOURCE / "modules/grabowski-operator-package.nix").read_text()
+        self.assertIn('if original == "src/grabowski_tasks.py":', package)
+        self.assertIn('if original == "src/grabowski_fleet.py":', package)
+        self.assertIn('unexpected pinned task capture Python topology', package)
+        self.assertIn('unexpected pinned fleet cleanup Python guard', package)
+        self.assertIn('else TASK_OUTPUT_CAPTURE_PYTHON', package)
+        self.assertIn('else TASK_OUTPUT_READ_PYTHON', package)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()

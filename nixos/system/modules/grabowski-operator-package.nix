@@ -182,6 +182,55 @@ for entry in entries:
         if content.count(old) != 1:
             raise SystemExit("pinned coding-agent catalog path topology changed")
         dst.write_text(content.replace(old, new, 1))
+    # Preserve Debian /usr/bin/python3 for SSH fleet hosts; NixOS-local
+    # user systemd jobs need this package's immutable runtime interpreter.
+    # Every substitution is bound to the exact pinned upstream topology.
+    if original == "src/grabowski_tasks.py":
+        content = dst.read_text()
+        local_python = (
+            '(sys.executable if fleet.fleet_host(str(record["host"]))["transport"] == "local"\n'
+            '         else TASK_OUTPUT_CAPTURE_PYTHON)'
+        )
+        anchors = (
+            (
+                '        TASK_OUTPUT_CAPTURE_PYTHON,\n'
+                '        str(_task_output_capture_script_path()),',
+                '        ' + local_python + ',\n'
+                '        str(_task_output_capture_script_path()),',
+            ),
+            (
+                '        TASK_OUTPUT_CAPTURE_PYTHON,\n'
+                '        "-c",\n'
+                '        TASK_OUTPUT_CLEANUP_CODE,',
+                '        ' + local_python + ',\n'
+                '        "-c",\n'
+                '        TASK_OUTPUT_CLEANUP_CODE,',
+            ),
+        )
+        for old, new in anchors:
+            if content.count(old) != 1:
+                raise SystemExit("unexpected pinned task capture Python topology")
+            content = content.replace(old, new, 1)
+        dst.write_text(content)
+    if original == "src/grabowski_fleet.py":
+        content = dst.read_text()
+        imports = "import stat\nfrom typing import Any, Sequence"
+        if content.count(imports) != 1:
+            raise SystemExit("unexpected pinned fleet import topology")
+        content = content.replace(imports, "import stat\nimport sys\nfrom typing import Any, Sequence", 1)
+        old = (
+            '    if command[0] != TASK_OUTPUT_READ_PYTHON or command[1] != "-c":\n'
+            '        raise ValueError("Invalid task-output cleanup executable")'
+        )
+        new = (
+            '    expected_python = (sys.executable if host["transport"] == "local"\n'
+            '                       else TASK_OUTPUT_READ_PYTHON)\n'
+            '    if command[0] != expected_python or command[1] != "-c":\n'
+            '        raise ValueError("Invalid task-output cleanup executable")'
+        )
+        if content.count(old) != 1:
+            raise SystemExit("unexpected pinned fleet cleanup Python guard")
+        dst.write_text(content.replace(old, new, 1))
     dst.chmod(0o444)
 for item in contract.get("runtime_assets", []):
     original = item.get("source")
