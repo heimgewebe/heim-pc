@@ -550,6 +550,43 @@ for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_con
     if not (root / "lib/python3.12/site-packages" / name).is_file():
         raise SystemExit(f"missing full operator module {name}")
 PY
+            # Native attestation checks the exact root-owned store output.
+            # A user-owned module or a forged instructions digest must fail.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+from pathlib import Path
+import json
+import grabowski_mcp as runtime
+from grabowski_nixos_integrity import deployment_metadata, MANIFEST_RELATIVE
+
+root = Path("${operator}")
+manifest = json.loads((root / MANIFEST_RELATIVE).read_text())
+assert len(manifest["entrypoint_contract"]["expected_tools"]) == 203
+assert manifest["release_id"] == "${release}"
+assert manifest["repo_head"] == "${revision}"
+assert manifest["runtime_lock_sha256"] == "${lockSha256}"
+positive = runtime._deployment_metadata()
+for field in ("manifest_exists", "manifest_parse_valid", "manifest_schema_valid",
+              "repo_head_valid", "agent_instructions_identity_valid",
+              "runtime_binding_valid", "environment_compatibility_valid",
+              "artifact_integrity_valid", "provenance_valid"):
+    if positive.get(field) is not True:
+        raise SystemExit(f"native runtime attestation rejected: {field}")
+if positive.get("completion_status") != "complete":
+    raise SystemExit("NixOS canonical operator deployment is incomplete")
+if runtime.DEPLOYMENT_MANIFEST != root / MANIFEST_RELATIVE:
+    raise SystemExit("Native evidence path did not resolve into the immutable store")
+if set(manifest["entrypoint_contract"]["expected_tools"]) != set(runtime.mcp._tool_manager._tools):
+    raise SystemExit("operator registry differs from attested original 203 tools")
+wrong = deployment_metadata(Path("/tmp/grabowski_mcp.py"),
+                            expected_agent_sha256=runtime.AGENT_INSTRUCTIONS_SHA256)
+if wrong.get("completion_status") == "complete":
+    raise SystemExit("user-owned module path accepted as immutable Nix release")
+wrong_hash = deployment_metadata(Path(runtime.__file__), expected_agent_sha256="0" * 64)
+if wrong_hash.get("completion_status") == "complete":
+    raise SystemExit("forged agent instructions digest accepted")
+print("native NixOS Grabowski attestation complete; negative cases denied")
+PY
             # Runtime assembly must match the full original 203-tool MCP
             # surface, not the older 53-tool core. Register tools only; no
             # MCP listener, privileged operation or production state is used.

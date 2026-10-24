@@ -158,6 +158,17 @@ for item in contract.get("runtime_assets", []):
     target.chmod(0o444)
 PY
 
+    # Nix-native integrity: adapt only the two expected manifest discovery
+    # sites in the pinned upstream module. Everything else stays canonical.
+    install -m 0444 ${./grabowski-nixos-integrity.py} \
+      "$out/lib/python3.12/site-packages/grabowski_nixos_integrity.py"
+    PYTHONPATH="$out/lib/python3.12/site-packages" ${python}/bin/python3.12 -B - "$out" <<'PY'
+from pathlib import Path
+import sys
+from grabowski_nixos_integrity import patch_pinned_module
+path = Path(sys.argv[1]) / "lib/python3.12/site-packages/grabowski_mcp.py"
+patch_pinned_module(path)
+PY
     makeWrapper ${python}/bin/python3.12 "$out/bin/grabowski-operator" \
       --argv0 "$out/bin/grabowski-operator" \
       --set PYTHONDONTWRITEBYTECODE 1 \
@@ -177,6 +188,25 @@ PY
   "port": 18181
 }
 EOF
+    # Store-owned native attestation replaces the Pop!-specific Python 3.10
+    # deployment path contract. Its tool/module/asset hashes are checked
+    # again at each runtime status call; user-owned copies are never trusted.
+    PYTHONPATH="$out/lib/python3.12/site-packages" ${python}/bin/python3.12 -B - "$out" <<'PY'
+import json
+from pathlib import Path
+import sys
+from grabowski_nixos_integrity import build_manifest, MANIFEST_RELATIVE
+import grabowski_mcp
+root = Path(sys.argv[1])
+data = build_manifest(
+    root,
+    agent_sha256=grabowski_mcp.AGENT_INSTRUCTIONS_SHA256,
+    python_executable=sys.executable,
+)
+path = root / MANIFEST_RELATIVE
+path.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n")
+path.chmod(0o444)
+PY
     ${python}/bin/python3.12 -B -m compileall -q "$out/lib/python3.12/site-packages"
     PYTHONPATH="$out/lib/python3.12/site-packages" ${python}/bin/python3.12 -B -c '
 import importlib.metadata
