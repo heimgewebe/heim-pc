@@ -197,9 +197,18 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
         result["agent_instructions_identity_valid"] = (
             doc.get("agent_instructions_sha256") == expected_agent_sha256
         )
-        python_bin = str(Path(sys.executable).resolve(strict=True))
+        # Nix makeWrapper uses exec -a with the immutable operator wrapper
+        # as argv[0] so the original broker can authenticate MainPID/cmdline.
+        # CPython derives sys.executable from argv[0], NOT /proc/self/exe.
+        # Bind both identities: the real kernel-executed pinned interpreter
+        # and either its direct argv[0] (offline tests) or the exact wrapper
+        # argv[0] (the production systemd MainPID). Never trust argv[0] alone.
+        python_bin = str(Path("/proc/self/exe").resolve(strict=True))
+        argv0_bin = str(Path(sys.executable).resolve(strict=True))
+        wrapper_bin = str((root / "bin/grabowski-operator").resolve(strict=True))
         result["runtime_binding_valid"] = (
             doc.get("python_executable") == python_bin
+            and argv0_bin in (python_bin, wrapper_bin)
             and Path(module_path).resolve() == root / REQUIRED_MODULE
         )
         result["environment_compatibility_valid"] = (

@@ -587,6 +587,50 @@ if wrong_hash.get("completion_status") == "complete":
     raise SystemExit("forged agent instructions digest accepted")
 print("native NixOS Grabowski attestation complete; negative cases denied")
 PY
+            # A real systemd NixOS process uses makeWrapper's exec -a.
+            # CPython then derives sys.executable from argv[0], not from
+            # the kernel's /proc/self/exe. Verify this real startup identity.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path("${operator}")
+python = str(Path("${pkgs.python312}/bin/python3").resolve(strict=True))
+wrapper = str((root / "bin/grabowski-operator").resolve(strict=True))
+checker = """
+from pathlib import Path
+import sys
+import grabowski_mcp as runtime
+
+kernel_python = str(Path("/proc/self/exe").resolve(strict=True))
+expected_python = str(Path(sys.argv[2]).resolve(strict=True))
+if kernel_python != expected_python:
+    raise SystemExit("unexpected interpreter behind Nix wrapper")
+state = runtime._deployment_metadata()
+expected_complete = sys.argv[1] == "complete"
+if (state.get("completion_status") == "complete") != expected_complete:
+    raise SystemExit("native --argv0 attestation mismatch: " + repr(state))
+"""
+for argv0, expected_status in (
+    (wrapper, "complete"),
+    (str(Path("${pkgs.bash}/bin/bash").resolve(strict=True)), "incomplete"),
+):
+    result = subprocess.run(
+        ["${pkgs.bash}/bin/bash", "-c",
+         'exec -a "$1" "$2" -B -c "$3" "$4" "$5"',
+         "nixos-grabowski-argv0-proof", argv0, python, checker,
+         expected_status, python],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        text=True, capture_output=True, timeout=120, check=False,
+    )
+    if result.returncode:
+        raise SystemExit("production argv0 / forged argv0 regression failed: "
+                         + result.stderr[-2000:] + result.stdout[-500:])
+print("kernel Python and exact operator argv0 verified; forged argv0 denied")
+PY
             # Runtime assembly must match the full original 203-tool MCP
             # surface, not the older 53-tool core. Register tools only; no
             # MCP listener, privileged operation or production state is used.

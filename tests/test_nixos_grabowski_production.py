@@ -176,5 +176,22 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
+    def test_nixos_live_interpreter_identity_is_kernel_bound_and_wrapper_pinned(self):
+        identity = (MODULES / "grabowski-nixos-integrity.py").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        package = (MODULES / "grabowski-operator-package.nix").read_text()
+
+        # The operator uses exec -a for the broker MainPID/cmdline check.
+        # CPython reflects argv[0] in sys.executable, so the kernel's
+        # real /proc/self/exe must be checked independently.
+        self.assertIn('Path("/proc/self/exe").resolve(strict=True)', identity)
+        self.assertIn('argv0_bin in (python_bin, wrapper_bin)', identity)
+        self.assertIn('Path(module_path).resolve() == root / REQUIRED_MODULE', identity)
+        self.assertIn('--argv0 "$out/bin/grabowski-operator"', package)
+        self.assertIn('exec -a "$1" "$2" -B -c "$3" "$4" "$5"', flake)
+        self.assertIn('forged argv0 denied', flake)
+
+
+
 if __name__ == "__main__":
     unittest.main()
