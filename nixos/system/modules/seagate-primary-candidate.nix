@@ -42,6 +42,12 @@
   # They are explicitly forbidden in a permanent primary-system candidate.
   services.getty.autologinUser = lib.mkForce null;
   security.sudo.wheelNeedsPassword = lib.mkForce true;
+  # Allow the headless owner to administer this host without interactive sudo;
+  # retain ordinary wheel password policy for other accounts.
+  security.sudo.extraRules = [{
+    users = [ "alex" ];
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
+  }];
 
   # The base profile keeps its user manager session-bound. Only the opt-in
   # full Grabowski profile enables linger for original systemd-run --user jobs.

@@ -1048,7 +1048,7 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin"
+            "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin"
             operator.Environment;
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
           assert builtins.elem "grabowski-privileged-broker.socket"
