@@ -303,6 +303,26 @@
         ];
       };
 
+      # Incremental, deliberately non-activating migration candidate based on
+      # the physically verified unencrypted Seagate Stage0 mounts. This does
+      # not supersede the separate encrypted production storage contract.
+      nixosConfigurations.heim-pc-seagate-primary-candidate = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./modules/seagate-primary-candidate.nix
+          ({ ... }: {
+            # Candidate runtime identity must bind to the exact clean source.
+            # Source-only evaluations from a dirty checkout are not releases.
+            system.configurationRevision = sourceRevision;
+            environment.etc."heim-pc/source-revision".text = sourceRevision;
+            assertions = [{
+              assertion = builtins.match "^[0-9a-f]{40}$" sourceRevision != null;
+              message = "Seagate primary activation requires an exact clean Git revision";
+            }];
+          })
+        ];
+      };
+
       nixosConfigurations.heim-pc-vm = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -316,6 +336,72 @@
         };
         modules = hostModules;
       };
+
+      # Source-only workstation successor to the headless Seagate primary
+      # baseline. Reuses the physically tested, unencrypted Stage0 mounts and
+      # never changes BootOrder, protected WD_BLACK or production enablement.
+      # NVIDIA/Plasma hardware remains subject to a separate PHYSICAL proof.
+      nixosConfigurations.heim-pc-seagate-workstation-candidate =
+        self.nixosConfigurations.heim-pc-seagate-primary-candidate.extendModules {
+          modules = [
+            ./modules/desktop.nix
+            ./modules/nvidia.nix
+            ./modules/audio.nix
+            ./modules/development.nix
+            ./modules/containers.nix
+            ({ lib, ... }: {
+              # Stage0 deliberately has X disabled; override ONLY in this
+              # explicitly named, non-activated workstation successor.
+              services.xserver.enable = lib.mkForce true;
+              nixpkgs.config.allowUnfreePredicate = pkg:
+                lib.hasPrefix "nvidia-" (lib.getName pkg);
+              heimPc.desktop.enable = true;
+              heimPc.hardware.nvidia.enable = true;
+            })
+          ];
+        };
+
+      # Separate SOURCE-ONLY headless-agent integration. The existing Plasma
+      # candidate stays free of Nixer or other session-scoped background units.
+      # This successor uses the exact pinned upstream package but hosts its
+      # loopback MCP endpoint as a system service under unprivileged alex.
+      nixosConfigurations.heim-pc-seagate-nixer-headless-candidate =
+        self.nixosConfigurations.heim-pc-seagate-workstation-candidate.extendModules {
+          modules = [
+            nixer.nixosModules.default
+            ./modules/nixer-headless.nix
+            ({ ... }: { heimPc.nixerHeadless.enable = true; })
+          ];
+        };
+
+      # Explicit SOURCE-ONLY full-operator successor. The first three
+      # profiles and their already tested physical Stage0 boot remain unchanged.
+      # Real private Rootbroker policy is provisioned by root from /persist;
+      # on this physical host it has NOT been provisioned or accepted yet.
+      # Accordingly the policy, socket and operator must fail closed at boot
+      # until separate host authority and runtime acceptance exist.
+      nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =
+        self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
+          modules = [
+            ({ pkgs, ... }: {
+              # The original operator's bounded task/job tools call systemd-run --user.
+              # Enable this manager only for the full, explicit Grabowski successor.
+              users.users.alex.linger = pkgs.lib.mkForce true;
+              heimPc.grabowskiProduction = {
+                enable = true;
+                operatorPackage =
+                  import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+                brokerPackage = import ./modules/grabowski-broker-package.nix {
+                  inherit pkgs;
+                  lib = pkgs.lib;
+                  packageOnly = true;
+                };
+                releaseId =
+                  "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+              };
+            })
+          ];
+        };
 
       # Negative pre-deployment proof is exported as a module, not as a normal
       # nixosConfiguration. Regular `nix flake check` must remain healthy; CI
@@ -373,6 +459,15 @@
       };
 
       packages.${system} = {
+        grabowski-operator-pinned = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+        # Optional real systemd + socket + MCP VM proof. Never a physical host.
+        grabowski-headless-systemd-vm-proof =
+          import ./tests/grabowski-headless-systemd.nix { inherit pkgs; };
+        # Explicit KVM-only proof for the original Nixer MCP in system scope.
+        # One VM must deny startup without its pinned image; a second VM
+        # bypasses ONLY the test preflight to exercise the real MCP process.
+        nixer-headless-systemd-vm-proof =
+          import ./tests/nixer-headless-systemd.nix { inherit pkgs nixer; };
         heim-pc-system = self.nixosConfigurations.heim-pc.config.system.build.toplevel;
         heim-pc-stage0-system = self.nixosConfigurations.heim-pc-stage0.config.system.build.toplevel;
         heim-pc-storage-target-system = self.nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel;
@@ -396,6 +491,294 @@
       };
 
       checks.${system} = {
+        # Built artifact admission, not a live privileged-action or boot test.
+        # This check forces BOTH immutable binaries into the closure, verifies
+        # the complete locked operator startup import and compares the release
+        # manifest to the canonical broker/operator revision and runtime lock.
+        grabowski-release-artifacts =
+          let
+            operator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            broker = import ./modules/grabowski-broker-package.nix {
+              inherit (nixpkgs) lib;
+              inherit pkgs;
+              packageOnly = true;
+            };
+            release = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+            revision = "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
+            lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
+          in
+          assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
+          assert operator.passthru.sourceRevision == revision && broker.passthru.sourceRevision == revision;
+          assert operator.passthru.lockSha256 == lockSha256 && broker.passthru.lockSha256 == lockSha256;
+          pkgs.runCommand "grabowski-exact-release-artifacts" {
+            nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.python312 ];
+          } ''
+            set -euo pipefail
+            test -x ${operator}/bin/grabowski-operator
+            test -x ${broker}/bin/grabowski-privileged-broker
+            test -x ${broker}/bin/grabowski-privileged-request
+            ${broker}/bin/grabowski-privileged-request --help > "$TMPDIR/broker-request-help"
+            grep -Fq 'reference_file' "$TMPDIR/broker-request-help"
+            test -s ${broker}/libexec/grabowski-privileged-broker.py
+            printf '%s  %s\n' ${lockSha256} \
+              ${operator}/share/grabowski/requirements/runtime.lock.txt | sha256sum -c -
+            ${operator}/bin/grabowski-operator --help > "$TMPDIR/operator-help"
+            grep -Fq 'streamable-http' "$TMPDIR/operator-help"
+            # The original rootbroker checks exact /proc/<MainPID>/cmdline.
+            # The Nix-generated wrapper MUST retain its own pinned path in
+            # argv[0] when exec'ing Python; --help alone does not prove this.
+            grep -Fq 'exec -a "${operator}/bin/grabowski-operator"' \
+              "${operator}/bin/grabowski-operator"
+            ${pkgs.python312}/bin/python3 -B - <<'PY'
+import json
+from pathlib import Path
+root = Path("${operator}")
+manifest = json.loads((root / "share/grabowski/nixos-release.json").read_text())
+expected = {
+  "schema_version": 1,
+  "release_id": "${release}",
+  "source_revision": "${revision}",
+  "runtime_lock_sha256": "${lockSha256}",
+  "entrypoint": "bin/grabowski-operator",
+  "transport": "streamable-http",
+  "host": "127.0.0.1",
+  "port": 18181,
+}
+if manifest != expected:
+    raise SystemExit("operator release manifest does not match the pinned broker and lock")
+for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_contract.py"):
+    if not (root / "lib/python3.12/site-packages" / name).is_file():
+        raise SystemExit(f"missing full operator module {name}")
+PY
+            # Native attestation checks the exact root-owned store output.
+            # A user-owned module or a forged instructions digest must fail.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+from pathlib import Path
+import json
+import grabowski_mcp as runtime
+from grabowski_nixos_integrity import deployment_metadata, MANIFEST_RELATIVE
+
+root = Path("${operator}")
+manifest = json.loads((root / MANIFEST_RELATIVE).read_text())
+assert len(manifest["entrypoint_contract"]["expected_tools"]) == 203
+assert manifest["release_id"] == "${release}"
+assert manifest["repo_head"] == "${revision}"
+assert manifest["runtime_lock_sha256"] == "${lockSha256}"
+positive = runtime._deployment_metadata()
+for field in ("manifest_exists", "manifest_parse_valid", "manifest_schema_valid",
+              "repo_head_valid", "agent_instructions_identity_valid",
+              "runtime_binding_valid", "environment_compatibility_valid",
+              "artifact_integrity_valid", "provenance_valid"):
+    if positive.get(field) is not True:
+        raise SystemExit(f"native runtime attestation rejected: {field}")
+if positive.get("completion_status") != "complete":
+    raise SystemExit("NixOS canonical operator deployment is incomplete")
+if runtime.DEPLOYMENT_MANIFEST != root / MANIFEST_RELATIVE:
+    raise SystemExit("Native evidence path did not resolve into the immutable store")
+if set(manifest["entrypoint_contract"]["expected_tools"]) != set(runtime.mcp._tool_manager._tools):
+    raise SystemExit("operator registry differs from attested original 203 tools")
+wrong = deployment_metadata(Path("/tmp/grabowski_mcp.py"),
+                            expected_agent_sha256=runtime.AGENT_INSTRUCTIONS_SHA256)
+if wrong.get("completion_status") == "complete":
+    raise SystemExit("user-owned module path accepted as immutable Nix release")
+wrong_hash = deployment_metadata(Path(runtime.__file__), expected_agent_sha256="0" * 64)
+if wrong_hash.get("completion_status") == "complete":
+    raise SystemExit("forged agent instructions digest accepted")
+print("native NixOS Grabowski attestation complete; negative cases denied")
+PY
+            # A real systemd NixOS process uses makeWrapper's exec -a.
+            # CPython then derives sys.executable from argv[0], not from
+            # the kernel's /proc/self/exe. Verify this real startup identity.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path("${operator}")
+python = str(Path("${pkgs.python312}/bin/python3").resolve(strict=True))
+wrapper = str((root / "bin/grabowski-operator").resolve(strict=True))
+checker = """
+from pathlib import Path
+import sys
+import grabowski_mcp as runtime
+
+kernel_python = str(Path("/proc/self/exe").resolve(strict=True))
+expected_python = str(Path(sys.argv[2]).resolve(strict=True))
+if kernel_python != expected_python:
+    raise SystemExit("unexpected interpreter behind Nix wrapper")
+state = runtime._deployment_metadata()
+expected_complete = sys.argv[1] == "complete"
+if (state.get("completion_status") == "complete") != expected_complete:
+    raise SystemExit("native --argv0 attestation mismatch: " + repr(state))
+"""
+for argv0, expected_status in (
+    (wrapper, "complete"),
+    (str(Path("${pkgs.bash}/bin/bash").resolve(strict=True)), "incomplete"),
+):
+    result = subprocess.run(
+        ["${pkgs.bash}/bin/bash", "-c",
+         'exec -a "$1" "$2" -B -c "$3" "$4" "$5"',
+         "nixos-grabowski-argv0-proof", argv0, python, checker,
+         expected_status, python],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        text=True, capture_output=True, timeout=120, check=False,
+    )
+    if result.returncode:
+        raise SystemExit("production argv0 / forged argv0 regression failed: "
+                         + result.stderr[-2000:] + result.stdout[-500:])
+print("kernel Python and exact operator argv0 verified; forged argv0 denied")
+PY
+            # Runtime assembly must match the full original 203-tool MCP
+            # surface, not the older 53-tool core. Register tools only; no
+            # MCP listener, privileged operation or production state is used.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import importlib
+import json
+from pathlib import Path
+contract = json.loads(Path("${operator}/share/grabowski/config/runtime-entrypoint.json").read_text())
+if (contract.get("mode"), contract.get("module"), contract.get("source")) != (
+    "module", "grabowski_operator", "src/grabowski_runtime.py"
+):
+    raise SystemExit("pinned canonical runtime module/source contract changed")
+expected = contract.get("expected_tools")
+if not isinstance(expected, list) or len(expected) != 203 or len(set(expected)) != 203:
+    raise SystemExit("canonical runtime tool list is incomplete")
+actual = [
+    tool.name
+    for tool in importlib.import_module("grabowski_operator").mcp._tool_manager.list_tools()
+]
+if len(actual) != 203 or set(actual) != set(expected):
+    raise SystemExit(
+        "Nix Grabowski runtime tool surface differs from canonical 203-tool release: "
+        + str({"missing": sorted(set(expected) - set(actual)),
+               "unexpected": sorted(set(actual) - set(expected))})
+    )
+PY
+            # Prove the real executable reaches the canonical 203-tool MCP
+            # surface, not just the legacy 53-tool core. No host resources
+            # are mounted and no tools are invoked; only initialize/list.
+            PYTHONPATH="${operator}/lib/python3.12/site-packages" \
+              ${pkgs.python312}/bin/python3 -B - <<'PY'
+import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+root = Path("${operator}")
+binary = str(root / "bin/grabowski-operator")
+source_contract = json.loads(
+    (root / "share/grabowski/config/runtime-entrypoint.json").read_text()
+)
+expected = set(source_contract["expected_tools"])
+if len(expected) != 203:
+    raise SystemExit("canonical expected tool catalog is not exactly 203")
+
+with tempfile.TemporaryDirectory(prefix="nixos-grabowski-mcp-") as home:
+    env = {
+        "HOME": home,
+        "XDG_STATE_HOME": home + "/state",
+        "XDG_CONFIG_HOME": home + "/config",
+        "PYTHONPATH": os.environ["PYTHONPATH"],
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    # Kernel-observed command-line bytes are checked, not just wrapper text.
+    child = subprocess.Popen(
+        [binary, "--transport", "stdio"], cwd=home, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        prefix = [
+            binary, "-m", "grabowski_operator", "--transport",
+            "streamable-http", "--host", "127.0.0.1", "--port", "18181",
+        ]
+        seen = []
+        for _ in range(60):
+            if child.poll() is not None:
+                raise SystemExit("operator exited before /proc identity readback")
+            try:
+                raw = Path("/proc") / str(child.pid) / "cmdline"
+                seen = [part.decode("utf-8") for part in raw.read_bytes().rstrip(b"\0").split(b"\0")]
+            except OSError:
+                seen = []
+            if seen[:len(prefix)] == prefix:
+                break
+            time.sleep(0.05)
+        if seen[:len(prefix)] != prefix:
+            raise SystemExit("operator MainPID command line does not match rootbroker contract")
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+    async def handshake():
+        params = StdioServerParameters(
+            command=binary, args=["--transport", "stdio"],
+            env=env, cwd=home,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await asyncio.wait_for(session.initialize(), timeout=35)
+                catalog = await asyncio.wait_for(session.list_tools(), timeout=35)
+                observed = {tool.name for tool in catalog.tools}
+                if observed != expected:
+                    raise RuntimeError(
+                        "canonical MCP tool catalog mismatch: missing="
+                        + str(sorted(expected - observed))
+                        + " unexpected=" + str(sorted(observed - expected))
+                    )
+                print("verified canonical Grabowski MCP tools:", len(observed))
+
+    asyncio.run(handshake())
+PY
+            # Real packaged broker (not the fixture) must fail closed for
+            # forged peers, even before a root policy or socket is involved.
+            ${pkgs.python3}/bin/python3 -B - <<'PY'
+import runpy
+scope = runpy.run_path(
+    "${broker}/libexec/grabowski-privileged-broker.py",
+    run_name="nixos_broker_negative_smoke",
+)
+peer_guard = scope["_validate_blockade_lifecycle_peer"]
+unit = {
+    "main_pid": 4002,
+    "control_group": "/system.slice/grabowski-operator.service",
+}
+peer_guard.__globals__["_socket_peer_credentials"] = lambda descriptor: (4001, 1000, 1000)
+peer_guard.__globals__["_operator_system_unit_identity"] = lambda uid, unit_name: dict(unit)
+for request, fragment in (
+    ({"allowed_peer_uid": 1001, "allowed_peer_unit": "grabowski-operator.service"}, "UID"),
+    ({"allowed_peer_uid": 1000, "allowed_peer_unit": "grabowski-operator.service"}, "MainPID"),
+):
+    try:
+        peer_guard(request, descriptor=0)
+    except PermissionError as exc:
+        if fragment not in str(exc):
+            raise SystemExit(f"wrong negative broker error: {exc}")
+    else:
+        raise SystemExit("unauthorized peer was accepted")
+try:
+    scope["_operator_expected_argv"]("/home/alex")
+except PermissionError:
+    pass
+else:
+    raise SystemExit("NixOS broker accepted a missing root-owned argv binding")
+PY
+            mkdir -p "$out"
+            cp ${operator}/share/grabowski/nixos-release.json "$out/release.json"
+            printf '%s\n' ${broker} > "$out/broker-store-path"
+            printf '%s\n' ${operator} > "$out/operator-store-path"
+          '';
+
         # Evaluation-only: Stage0 must be an isolated, root-label-bound
         # console profile with the firmware/WD protections still enforced.
         stage0-no-usb-contract =
@@ -413,6 +796,266 @@
           assert cfg.services.getty.autologinUser == null;
           assert cfg.boot.initrd.luks.devices == {};
           pkgs.runCommand "heim-pc-stage0-no-usb-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Evaluation-only bridge from the physical Seagate Stage0 layout to
+        # a secure headless core. It is NOT an operator/GUI/boot acceptance.
+        seagate-primary-candidate-contract =
+          let cfg = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+          in
+          assert cfg.networking.hostName == "heim-pc";
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert builtins.match "^[0-9a-f]{40}$" cfg.system.configurationRevision != null;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/nix".options) [ "subvol=@nix" "compress=zstd" ];
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
+          assert builtins.all (option: builtins.elem option cfg.fileSystems."/persist".options) [ "subvol=@persist" "compress=zstd" ];
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert cfg.boot.loader.systemd-boot.enable;
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;
+          assert cfg.services.openssh.settings.PasswordAuthentication == false;
+          assert cfg.services.openssh.settings.KbdInteractiveAuthentication == false;
+          assert cfg.services.openssh.settings.PermitRootLogin == "no";
+          assert cfg.services.openssh.settings.AllowUsers == [ "alex" ];
+          assert cfg.services.tailscale.enable;
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.services.xserver.enable;
+          assert cfg.nix.settings.trusted-users == [ "root" ];
+          assert !cfg.nix.gc.automatic;
+          assert cfg.heimPc.day2Activation.enable;
+          assert !(builtins.hasAttr "grabowski-demo" cfg.systemd.services);
+          pkgs.runCommand "heim-pc-seagate-primary-candidate-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Real source module composition for Plasma 6, NVIDIA and PipeWire
+        # against the actual Seagate Stage0 root, not synthetic LUKS storage.
+        # A successful evaluation does NOT prove physical GPU or peripherals.
+        seagate-workstation-candidate-contract =
+          let cfg = self.nixosConfigurations.heim-pc-seagate-workstation-candidate.config;
+          in
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert cfg.services.openssh.enable && cfg.services.tailscale.enable;
+          assert cfg.services.openssh.settings.PermitRootLogin == "no";
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.desktop.enable && cfg.heimPc.hardware.nvidia.enable;
+          assert cfg.services.xserver.enable;
+          assert cfg.services.displayManager.sddm.enable;
+          assert cfg.services.desktopManager.plasma6.enable;
+          assert cfg.hardware.nvidia.modesetting.enable;
+          # The physical Stage0 console fallback remains nomodeset, but Plasma
+          # and NVIDIA DRM require the graphical successor to drop that flag.
+          assert builtins.elem "nomodeset"
+            self.nixosConfigurations.heim-pc-stage0.config.boot.kernelParams;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
+          assert cfg.services.pipewire.enable;
+          assert cfg.virtualisation.podman.enable;
+          pkgs.runCommand "heim-pc-seagate-workstation-candidate-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # The Nixer specialist is an unprivileged *system* service; the
+        # upstream session-based service is not activated and alex.linger
+        # stays disabled. No unreviewed OCI pull is performed by Nixer.
+        seagate-nixer-headless-contract =
+          let
+            cfg = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
+            unit = cfg.systemd.services.nixer-headless;
+            sc = unit.serviceConfig;
+          in
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !cfg.users.users.alex.linger;
+          assert !cfg.services.nixer.enable;
+          assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
+          assert !cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.nixerHeadless.enable;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
+          assert cfg.virtualisation.podman.enable;
+          assert unit.wantedBy == [ "multi-user.target" ];
+          assert sc.User == "alex" && sc.Group == "users";
+          assert sc.RuntimeDirectory == "nixer-headless";
+          assert sc.RuntimeDirectoryMode == "0700";
+          assert sc.UMask == "0077";
+          assert unit.environment.NIXER_CONTAINER_XDG_RUNTIME_DIR == "/run/nixer-headless";
+          assert unit.environment.NIXER_REPO_ROOT == "/home/alex/repos";
+          assert builtins.match ".*heim-pc-nixer-check-image" sc.ExecStartPre != null;
+          assert builtins.match ".*nixer --transport streamable-http --host 127[.]0[.]0[.]1 --port 18187"
+            sc.ExecStart != null;
+          pkgs.runCommand "heim-pc-seagate-nixer-headless-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # Integrate the genuine pinned Grabowski release with the already
+        # tested Nixer/Plasma successor without enabling the default host.
+        # This proves declarative service and rootbroker *admission wiring*,
+        # NOT real Seagate private policy or remote boot readiness.
+        seagate-grabowski-headless-contract =
+          let
+            baseline = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
+            cfg = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
+            op = cfg.systemd.services.grabowski-operator;
+            broker = cfg.systemd.services."grabowski-privileged-broker@";
+            socket = cfg.systemd.sockets.grabowski-privileged-broker;
+            policy = cfg.systemd.services.grabowski-private-policy-install;
+            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            originalBroker = import ./modules/grabowski-broker-package.nix {
+              inherit pkgs;
+              lib = pkgs.lib;
+              packageOnly = true;
+            };
+          in
+          assert !baseline.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.grabowskiProduction.enable;
+          assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
+          assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
+          assert cfg.heimPc.grabowskiProduction.releaseId ==
+            "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+          assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
+          assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          assert cfg.fileSystems."/persist".fsType == "btrfs";
+          assert !cfg.boot.loader.efi.canTouchEfiVariables;
+          assert !(builtins.elem "nomodeset" cfg.boot.kernelParams);
+          assert cfg.services.openssh.enable && cfg.services.tailscale.enable;
+          assert cfg.services.getty.autologinUser == null;
+          assert cfg.security.sudo.wheelNeedsPassword;
+          assert cfg.users.users.alex.linger;
+          assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
+          assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
+          assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
+          assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);
+          assert op.serviceConfig.User == "alex";
+          assert op.serviceConfig.Group == "users";
+          assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";
+          assert builtins.elem "user@1000.service" op.requires;
+          assert builtins.elem "XDG_RUNTIME_DIR=/run/user/1000" op.serviceConfig.Environment;
+          assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+            op.serviceConfig.Environment;
+          assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
+          assert builtins.elem "grabowski-private-policy-install.service" op.requires;
+          assert builtins.elem "grabowski-privileged-broker.socket" op.requires;
+          assert policy.serviceConfig.User == "root";
+          assert policy.unitConfig.AssertPathIsMountPoint == "/persist";
+          assert builtins.elem "grabowski-private-policy-install.service" socket.requires;
+          assert socket.socketConfig.SocketMode == "0660";
+          assert socket.socketConfig.SocketGroup == "grabowski";
+          assert broker.serviceConfig.User == "root";
+          assert builtins.match ".*CAP_SYS_ADMIN.*" broker.serviceConfig.CapabilityBoundingSet != null;
+          assert !(builtins.hasAttr "grabowski-demo" cfg.systemd.services);
+          pkgs.runCommand "heim-pc-seagate-grabowski-headless-contract" {} ''
+            mkdir -p "$out"
+          '';
+
+        # NixOS evaluation proof of the exact pinned pair, NEVER a deployment
+        # target. Positive unit properties require the immutable release.
+        # Negative fixtures prove that missing, unrelated and mismatched
+        # operator/broker artifacts fail before enabling either service.
+        grabowski-production-unit-contract =
+          let
+            release = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
+            inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            runProof = { op ? pinnedOperator, broker ? null, id ? release }:
+              (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  ./modules/seagate-primary-candidate.nix
+                  ({ ... }: {
+                    heimPc.grabowskiProduction = {
+                      enable = true;
+                      operatorPackage = op;
+                      releaseId = id;
+                    } // (if broker == null then { } else { brokerPackage = broker; });
+                  })
+                ];
+              }).config;
+            noPackages = runProof { op = null; id = "no-packages-must-fail"; };
+            wrongOperator = runProof { op = pkgs.coreutils; };
+            wrongBroker = runProof { broker = pkgs.coreutils; };
+            wrongRelease = runProof { id = "different-release-must-fail"; };
+            proof = runProof { };
+            socketUnit = proof.systemd.sockets.grabowski-privileged-broker;
+            sock = socketUnit.socketConfig;
+            policyUnit = proof.systemd.services.grabowski-private-policy-install;
+            policy = policyUnit.serviceConfig;
+            broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
+            operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
+          in
+          assert !inactive.heimPc.grabowskiProduction.enable;
+          assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
+          assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
+            == "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
+          assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
+          assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;
+          assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
+          assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
+          assert proof.heimPc.grabowskiProduction.releaseId == release;
+          assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
+          assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
+          assert sock.Accept && sock.SocketMode == "0660" && sock.SocketGroup == "grabowski";
+          assert builtins.elem "grabowski-private-policy-install.service" socketUnit.requires;
+          assert builtins.elem "grabowski-private-policy-install.service" socketUnit.after;
+          assert socketUnit.wantedBy == [ "multi-user.target" ];
+          assert socketUnit.unitConfig.DefaultDependencies == false;
+          assert builtins.elem "basic.target" socketUnit.after;
+          assert builtins.elem "shutdown.target" socketUnit.conflicts;
+          assert builtins.elem "grabowski-private-policy-install.service"
+            proof.systemd.services.grabowski-operator.requires;
+          assert builtins.elem "grabowski-private-policy-install.service"
+            proof.systemd.services.grabowski-operator.after;
+          assert policy.User == "root" && policy.Group == "root";
+          assert policy.Type == "oneshot" && policy.RemainAfterExit;
+          assert policy.ConfigurationDirectory == "grabowski";
+          assert policy.ConfigurationDirectoryMode == "0755";
+          assert policy.ProtectHome && policy.ProtectSystem == "strict";
+          assert policy.PrivateNetwork && policy.NoNewPrivileges;
+          assert policy.UMask == "0077";
+          assert builtins.match ".*grabowski-private-policy-install[.]py"
+            policy.ExecStart != null;
+          assert policyUnit.unitConfig.RequiresMountsFor == "/persist";
+          assert policyUnit.unitConfig.AssertPathIsMountPoint == "/persist";
+          assert builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore != null;
+          assert broker.User == "root";
+          assert broker.Environment == [
+            "GRABOWSKI_NIXOS_OPERATOR_ENTRYPOINT=${pinnedOperator}/bin/grabowski-operator"
+          ];
+          assert broker.StandardInput == "socket" && broker.StandardOutput == "socket";
+          assert broker.ProtectHome == "tmpfs" && broker.ProtectSystem == "strict";
+          assert broker.StateDirectory == "grabowski/privileged-broker";
+          assert broker.StateDirectoryMode == "0700";
+          assert builtins.match ".*CAP_SYS_ADMIN.*" broker.CapabilityBoundingSet != null;
+          assert builtins.match ".*@mount.*" broker.SystemCallFilter != null;
+          assert broker.SystemCallErrorNumber == "EPERM";
+          assert broker.RestrictNamespaces;
+          assert operator.User == "alex" && operator.Group == "users";
+          assert builtins.elem
+            "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
+            operator.Environment;
+          assert builtins.elem
+            "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin"
+            operator.Environment;
+          assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          assert builtins.elem "grabowski-privileged-broker.socket"
+            proof.systemd.services.grabowski-operator.requires;
+          assert !(builtins.elem "grabowski" proof.users.users.alex.extraGroups);
+          assert builtins.elem "grabowski" operator.SupplementaryGroups;
+          pkgs.runCommand "heim-pc-grabowski-production-unit-contract" {} ''
             mkdir -p "$out"
           '';
 
