@@ -6,7 +6,7 @@ let
     lib = pkgs.lib;
     packageOnly = true;
   };
-  revision = "81b02a588cdc-srcsetf0d4e64cf330-lock264e747ad05a-contract8414018c4b85";
+  revision = "a6d4a8b0aee3-srcseta8f37d85ac4d-lock264e747ad05a-contract8414018c4b85";
 
   # Isolated VM only: one harmless fixed command, never a production allowlist.
   benignResponse = builtins.toJSON {

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos/system/flake.nix"
 BASE = ROOT / "nixos/system/modules/seagate-primary-candidate.nix"
 PRODUCTION = ROOT / "nixos/system/modules/grabowski-production.nix"
-RELEASE = "81b02a588cdc-srcsetf0d4e64cf330-lock264e747ad05a-contract8414018c4b85"
+RELEASE = "a6d4a8b0aee3-srcseta8f37d85ac4d-lock264e747ad05a-contract8414018c4b85"
 
 
 class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
