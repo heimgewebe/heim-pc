@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "c7e506f65d2f9b9b162a0e16804c3ba1af61329615506ed278b1f564f2ff6f8f"
+SOURCE_SNAPSHOT_SHA256 = "b42db526ab0313ba673113e19f877a5cc12f010f7943437fc8e9956b2c92e21f"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -336,6 +336,18 @@ class T(unittest.TestCase):
             desktop,
         )
         self.assertNotIn("services.coredump.enable = false", desktop)
+
+    def test_xrdp_tailnet_only_and_local_wayland_unchanged(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        self.assertIn("services.xrdp = lib.mkIf config.services.tailscale.enable", desktop)
+        self.assertIn('networking.firewall.interfaces."tailscale0".allowedTCPPorts', desktop)
+        self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
+        self.assertIn("openFirewall = false;", desktop)
+        self.assertIn(
+            'defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";',
+            desktop,
+        )
+        self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
