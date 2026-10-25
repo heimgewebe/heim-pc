@@ -212,6 +212,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             flake,
         )
 
+    def test_nix_fetcher_cache_writable_in_operator_sandbox(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        self.assertIn('ProtectSystem = "strict";', operator)
+        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertIn('"-/home/alex/.cache/nix"', operator)
+        self.assertIn(
+            'builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;',
+            flake,
+        )
+
 
 class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
     """Exercise the real adapter's metadata producer, not source-text anchors."""
