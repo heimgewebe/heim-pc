@@ -23,6 +23,14 @@ let
     && cfg.brokerPackage.passthru.sourceRevision == expectedRevision
     && cfg.operatorPackage.passthru.lockSha256 == expectedLockSha256
     && cfg.brokerPackage.passthru.lockSha256 == expectedLockSha256;
+  # The packaged retention script must be byte-for-byte the independently
+  # tested fail-closed revision (Grabowski PR #1637). A newer operator may be
+  # deployed independently; it never silently inherits retention authority.
+  retentionTool = "${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py";
+  retentionToolSha256 = "460d8f6e91623435bac5015ee88975d4922a9e802eb3f44367cf886e8831ce26";
+  retentionToolDigest = pkgs.writeText "grabowski-retention-source.sha256"
+    "${retentionToolSha256}  ${retentionTool}\n";
+  retentionAdmit = admit && cfg.retentionEnable;
   # The root broker remains gated until real NixOS peer authorization and
   # private policy runtime acceptance. Evaluation is NOT activation approval.
   admit = cfg.enable && packagesPresent && releaseBound;
@@ -41,6 +49,8 @@ in
       default = null;
       description = "Pinned NixOS-compatible package providing bin/grabowski-privileged-broker";
     };
+    retentionEnable = lib.mkEnableOption
+      "five-minute Grabowski job retention using only the pinned and reviewed NixOS runtime tool";
     releaseId = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -68,6 +78,10 @@ in
       {
         assertion = !cfg.enable || config.services.getty.autologinUser == null;
         message = "production Grabowski must not depend on auto-login";
+      }
+      {
+        assertion = !cfg.retentionEnable || admit;
+        message = "Grabowski retention requires the admitted immutable production operator";
       }
     ];
 
@@ -199,6 +213,55 @@ in
       };
     };
 
+    # Only the canonical Nix-built runtime tool may run periodically. The
+    # reviewed receipt-preflight implementation is SHA-256 gated: older
+    # package pins cannot perform a reset before the receipt capacity check.
+    # No worktree hygiene: the legacy canonical checkout is absent on NixOS.
+    systemd.user.services.grabowski-runtime-retention = lib.mkIf retentionAdmit {
+      description = "Apply bounded, receipt-audited Grabowski runtime retention";
+      after = [ "default.target" ];
+      unitConfig.ConditionUser = "alex";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStartPre = [
+          "${pkgs.coreutils}/bin/sha256sum --check ${retentionToolDigest}"
+          "${cfg.operatorPackage}/bin/python3 ${retentionTool} --provision-receipt-root"
+        ];
+        ExecStart = "${cfg.operatorPackage}/bin/python3 ${retentionTool} --periodic-apply --minimum-job-age-seconds 86400 --max-archive-jobs 128";
+        WorkingDirectory = "%h";
+        Environment = [
+          "PYTHONDONTWRITEBYTECODE=1"
+          "PATH=${pkgs.systemd}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin"
+        ];
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ReadWritePaths = [ "%h/.local/state/grabowski" ];
+        InaccessiblePaths = [ "-%h/.ssh" "-%h/.gnupg" "-%h/.local/share/keyrings" ];
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        UMask = "0077";
+        MemoryMax = "512M";
+        TasksMax = 50;
+        TimeoutStartSec = "180s";
+      };
+    };
+    systemd.user.timers.grabowski-runtime-retention = lib.mkIf retentionAdmit {
+      description = "Run bounded Grabowski runtime retention every five minutes";
+      wantedBy = [ "timers.target" ];
+      unitConfig.ConditionUser = "alex";
+      timerConfig = {
+        OnBootSec = "3min";
+        OnUnitActiveSec = "5min";
+        AccuracySec = "30s";
+        RandomizedDelaySec = "30s";
+        Persistent = true;
+        Unit = "grabowski-runtime-retention.service";
+      };
+    };
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
