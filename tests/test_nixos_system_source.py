@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d66d8d0194c47d3d1ce09975366463341867dd8b6b3b3f55626e8d1f36006946"
+SOURCE_SNAPSHOT_SHA256 = "014685de4817a19068665cec116783c2e8cb5a7b98845e30be63d526a133baf6"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -321,9 +321,9 @@ class T(unittest.TestCase):
 
     def test_operator_has_native_diagnostic_tools_in_systemd_path(self):
         module = (SOURCE / "modules/grabowski-production.nix").read_text()
-        # The isolated operator must discover NixOS Tailscale, ps and ss.
+        # NixOS tools and tmux must be available without mutable user paths.
         self.assertIn(
-            "${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin",
+            "${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin",
             module,
         )
 
