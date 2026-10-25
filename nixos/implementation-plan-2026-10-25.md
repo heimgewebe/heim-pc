@@ -22,21 +22,26 @@ NixOS auf der Seagate dauerhaft zuverlässig betreiben und über ChatGPT/Grabows
 - `heimgewebe/heim-pc#240`: offen/Draft, HEAD `9311c986592463e58da1d453d922716cc80612ac` bei letzter Prüfung.
 - Grabowskis Schreibtransport war nach dem Releasewechsel zunächst wegen `transport assertion runtime binding mismatch` blockiert; bei neuer Prüfung meldete `grabowski_status` wieder `mutation_gate_open=true`. **Vor jeder Mutation aktuell prüfen und nur den vorhandenen signierten Writer verwenden.**
 
+## Nachtrag: verifizierter Bearbeitungsstand 25.10.2026
+
+- **Recovery:** Der kanonische native Restic-Nachweis meldet Snapshot `201149b1`, `restore_probe_valid=true` und `repository_check_valid=true`; `grabowski_recovery_status` ergibt alle neun Checks `true` und `ready_for_privileged_actions=true`. Die separate Rootbroker-End-to-End-Ausführung bleibt offen.
+- **Nixer:** Aus früheren Journald-OOM-Einträgen folgt die 4-GiB-Cgroup-Grenze als konkrete Ursache. Die deklarative Headless-Grenze wurde im Arbeitsbaum auf 8 GiB angehoben; die NixOS-Option und die VM-Test-Derivation lassen sich erfolgreich auswerten. Ein tatsächlicher VM-Test, produktives Deployment und Belastungstest sind noch nicht abgeschlossen.
+
 ## Ausführung und Akzeptanz
 
 ### P0.1 – Recovery vollständig konvergieren
 
 - [x] Den tatsächlich vorhandenen Restic-System-Timer feststellen und auf Grabowski-Seite erkennen lassen (bereits in der installierten neuen Grabowski-Revision sichtbar).
 - [ ] Vorhandenen Backup- und Restore-Vertrag samt Sentinel-Erzeugung ansehen; keinen zweiten konkurrierenden Timer/Backup-Pfad einführen.
-- [ ] Einen frischen nativen Restic-Lauf samt echter Wiederherstellung und Repository-Integritätsprüfung durchführen; kanonischen Erfolgsbeleg durch den dafür vorgesehenen Ablauf erzeugen.
-- [ ] `grabowski_recovery_status` unmittelbar erneut auswerten: `local_backup_fresh=true`, Timer aktiv und korrekte Ausführbarkeit nachgewiesen.
+- [x] Einen frischen nativen Restic-Lauf samt echter Wiederherstellung und Repository-Integritätsprüfung durchführen; kanonischen Erfolgsbeleg durch den dafür vorgesehenen Ablauf erzeugen.
+- [x] `grabowski_recovery_status` unmittelbar erneut auswerten: `local_backup_fresh=true`, Timer aktiv und korrekte Ausführbarkeit nachgewiesen.
 - [ ] Rootbroker- und nichtdestruktiven privilegierten Funktionsweg auf installierter Revision abnehmen.
 
 **Abnahme:** Keine veralteten Recovery-Vorbedingungen, echte Rücksicherung nachgewiesen, benötigte administrative Aktionen funktionieren.
 
 ### P0.2 – Nixer stabilisieren
 
-- [ ] Nixer-Logs und aktuelle systemd-Properties nach eventuell parallelen Änderungen frisch erfassen; OOM-Diagnose reproduzierbar gegen gemessenen Spitzenbedarf bestätigen.
+- [x] Nixer-Logs und aktuelle systemd-Properties nach eventuell parallelen Änderungen frisch erfassen; OOM-Diagnose reproduzierbar gegen gemessenen Spitzenbedarf bestätigen.
 - [ ] Die 4-GiB-Speichergrenze im zuständigen deklarativen NixOS-Modul bedarfsgerecht anpassen oder unnötige simultane Flake-Auswertungen begrenzen; zuerst die kleinere wirksame Änderung wählen.
 - [ ] Gezielte Nix-Auswertungen sowie eine repräsentative größere Flake-Prüfung ausführen, ohne Neustartschleife oder Memory-Kill.
 - [ ] Nach erfolgreicher Ursachenbehebung Startlimit zurücksetzen, Dienst kontrolliert aktivieren und Nixer-MCP-Funktion prüfen.
