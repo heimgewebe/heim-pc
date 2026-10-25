@@ -198,6 +198,20 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
+    def test_native_restic_lock_mount_writable_in_operator_sandbox(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        marker = "systemd.services.grabowski-operator = lib.mkIf admit {"
+        self.assertEqual(prod.count(marker), 1)
+        operator = prod.split(marker, 1)[1]
+        self.assertIn('ProtectSystem = "strict";', operator)
+        self.assertIn('NoNewPrivileges = false;', operator)
+        self.assertIn('"-/var/lib/heim-pc-backup"', operator)
+        self.assertIn(
+            'builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;',
+            flake,
+        )
+
 
 class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
     """Exercise the real adapter's metadata producer, not source-text anchors."""
@@ -316,7 +330,6 @@ class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
                         self.assertEqual(result["completion_status"], "incomplete")
                         self.assertIs(result["entrypoint_contract_identity_valid"], False)
                         self.assertIsNone(result["entrypoint_contract_sha256"])
-
 
 if __name__ == "__main__":
     unittest.main()
