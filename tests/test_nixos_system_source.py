@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "62e0c5cd55acb426c41f3019591e38b2c6ce858be1786364275b9898a65f9b24"
+SOURCE_SNAPSHOT_SHA256 = "d66d8d0194c47d3d1ce09975366463341867dd8b6b3b3f55626e8d1f36006946"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -319,9 +319,13 @@ class T(unittest.TestCase):
         self.assertIn('else TASK_OUTPUT_CAPTURE_PYTHON', package)
         self.assertIn('else TASK_OUTPUT_READ_PYTHON', package)
 
-    def test_operator_has_tailscale_in_native_systemd_path(self):
+    def test_operator_has_native_diagnostic_tools_in_systemd_path(self):
         module = (SOURCE / "modules/grabowski-production.nix").read_text()
-        self.assertIn("${pkgs.openssh}/bin:${pkgs.tailscale}/bin", module)
+        # The isolated operator must discover NixOS Tailscale, ps and ss.
+        self.assertIn(
+            "${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin",
+            module,
+        )
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()

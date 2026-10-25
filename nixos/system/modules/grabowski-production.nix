@@ -227,7 +227,7 @@ in
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
-          "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin"
+          "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin"
         ];
         NoNewPrivileges = true;
         PrivateTmp = true;
