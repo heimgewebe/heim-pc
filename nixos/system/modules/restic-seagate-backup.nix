@@ -33,6 +33,12 @@
     backupPrepareCommand = ''
       ${pkgs.util-linux}/bin/mountpoint -q /var/lib/heim-pc-backup
     '';
+    # The native Restic post-stop hook runs on success and failure.
+    backupCleanupCommand = ''
+      if ${pkgs.util-linux}/bin/mountpoint -q /var/lib/heim-pc-backup; then
+        ${pkgs.util-linux}/bin/umount /var/lib/heim-pc-backup
+      fi
+    '';
     timerConfig = {
       OnCalendar = "19:30";
       Persistent = true;
