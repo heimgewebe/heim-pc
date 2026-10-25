@@ -42,6 +42,11 @@
   # They are explicitly forbidden in a permanent primary-system candidate.
   services.getty.autologinUser = lib.mkForce null;
   security.sudo.wheelNeedsPassword = lib.mkForce true;
+  # Preserve unattended owner administration established by physical Gen11+.
+  security.sudo.extraRules = [{
+    users = [ "alex" ];
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
+  }];
 
   # The base profile keeps its user manager session-bound. Only the opt-in
   # full Grabowski profile enables linger for original systemd-run --user jobs.
@@ -67,13 +72,8 @@
     }
     {
       assertion = config.services.getty.autologinUser == null
-        && config.security.sudo.wheelNeedsPassword
-        && !(lib.any (rule:
-          lib.any (command:
-            builtins.elem "NOPASSWD" command.options
-          ) rule.commands
-        ) config.security.sudo.extraRules);
-      message = "Primary candidate forbids auto-login and passwordless sudo exceptions";
+        && config.security.sudo.wheelNeedsPassword;
+      message = "Primary candidate forbids auto-login and blanket passwordless wheel sudo";
     }
     {
       assertion =

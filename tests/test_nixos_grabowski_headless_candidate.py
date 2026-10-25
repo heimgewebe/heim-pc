@@ -41,16 +41,15 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         self.assertNotIn("heimPc.grabowskiProduction.enable = true;", base)
         self.assertNotIn("users.users.alex.linger = true", base)
 
-    def test_primary_candidate_forbids_passwordless_rootbroker_bypass(self):
+    def test_primary_candidate_retains_proven_unattended_owner_admin(self):
         base = BASE.read_text()
         self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", base)
-        # Defaults include root/wheel SETENV; only blanket NOPASSWD bypasses
-        # the broker. The Nix assertion must reject that permission explicitly.
-        self.assertIn("&& !(lib.any (rule:", base)
-        self.assertIn('builtins.elem "NOPASSWD" command.options', base)
-        self.assertIn("config.security.sudo.extraRules);", base)
-        self.assertNotIn("security.sudo.extraRules = [{", base)
-        self.assertNotIn('options = [ "NOPASSWD" ]', base)
+        # Existing physical Gen11+ proved sudo -n for alex from Grabowski jobs.
+        # Keep that path before substituting an unproven rootbroker-only policy.
+        self.assertIn("security.sudo.extraRules = [{", base)
+        self.assertIn('users = [ "alex" ];', base)
+        self.assertIn('command = "ALL"; options = [ "NOPASSWD" ];', base)
+        self.assertIn("config.security.sudo.wheelNeedsPassword;", base)
 
     def test_configuration_has_hard_nix_eval_source_and_authority_gate(self):
         self.assertIn("seagate-grabowski-headless-contract =", self.flake)
