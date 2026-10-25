@@ -82,7 +82,8 @@ in
         LimitCORE = 0;
         CPUWeight = 50;
         IOWeight = 50;
-        MemoryMax = "4G";
+        # Full flake checks exceeded 8 GiB on this 62 GiB host.
+        # Do not impose an artificial cgroup memory limit on Nixer.
         # Do not mount/seccomp-sandbox the parent rootless Podman caller:
         # newuidmap/newgidmap may need the NixOS privileged wrapper path.
         # The pinned Nixer backend confines the child container, binds repo

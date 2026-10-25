@@ -108,6 +108,10 @@ pkgs.testers.runNixOSTest {
         proof.succeed("test $(stat -c %U /run/nixer-headless) = alex")
         proof.succeed("test $(stat -c %a /run/nixer-headless) = 700")
         proof.succeed(
+            "systemctl show nixer-headless.service --property=MemoryMax "
+            "--value | grep -qx infinity"
+        )
+        proof.succeed(
             "systemctl show nixer-headless.service --property=User "
             "--value | grep -qx alex"
         )
