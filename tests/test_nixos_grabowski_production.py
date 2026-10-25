@@ -7,8 +7,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "dd6dc690285b6a8a0cdbb3c18d84a1681e604923"
-TARBALL_HASH = "sha256-rEsGU4mWRbti570DialOPusjZvFK1gfk7UUiI9pbrf4="
+REVISION = "81b02a588cdcf9412e61487be5f9f8cd8f825ef0"
+TARBALL_HASH = "sha256-HzXY1by/uA3PBl0Kf9Ufm7ElF/UWzG2bDfcAXhhqTAk="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc"
+        release_id = "81b02a588cdc-srcsetf0d4e64cf330-lock264e747ad05a-contract8414018c4b85"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -103,7 +103,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
         self.assertIn('len(expected) == 203', op)
-        self.assertIn('len(supporting) != 127', op)
+        self.assertIn('len(supporting) != 129', op)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
