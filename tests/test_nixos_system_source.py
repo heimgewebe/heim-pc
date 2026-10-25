@@ -13,7 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
 SOURCE_SNAPSHOT_SHA256 = "83d978d2c380feef0bbf3a04933445acac8eaff0d40b7b54be6d34a5399fb10f"
-ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
+ROOT_LOCK_SHA256 = "7ab7833c96d05cebcab7763bdc38ab82a28576841b2a5b5a8255e5d1052c9b22"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -221,7 +221,14 @@ class T(unittest.TestCase):
         self.assertIn('c.services.logind.settings.Login.IdleAction == "ignore"', flake)
 
     def test_root_lock_is_bound(self):
-        self.assertEqual(hashlib.sha256((ROOT / "flake.lock").read_bytes()).hexdigest(), ROOT_LOCK_SHA256)
+        root_lock = (ROOT / "flake.lock").read_bytes()
+        system_lock = (SOURCE / "flake.lock").read_bytes()
+        self.assertEqual(hashlib.sha256(root_lock).hexdigest(), ROOT_LOCK_SHA256)
+        root_nodes = json.loads(root_lock)["nodes"]
+        system_nodes = json.loads(system_lock)["nodes"]
+        root_nixpkgs = root_nodes["root"]["inputs"]["nixpkgs"]
+        system_nixpkgs = system_nodes["root"]["inputs"]["nixpkgs"]
+        self.assertEqual(root_nodes[root_nixpkgs]["locked"], system_nodes[system_nixpkgs]["locked"])
 
     def test_limine_secure_boot_proof_is_options_only_and_not_activatable(self):
         flake = (SOURCE / "flake.nix").read_text(encoding="utf-8")
