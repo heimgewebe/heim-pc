@@ -229,7 +229,10 @@ in
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin"
         ];
-        NoNewPrivileges = true;
+        # The native NixOS Restic restore probe uses the existing setuid sudo
+        # wrapper. NoNewPrivileges blocks it even for a passwordless operator.
+        # This is the sole operator-unit override; rootbroker remains unchanged.
+        NoNewPrivileges = false;
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
