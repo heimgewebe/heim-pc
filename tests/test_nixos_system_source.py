@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "b0a017457959d2b1396288bd059dff8ba447dcee55b0bb1057733656d0977ec0"
+SOURCE_SNAPSHOT_SHA256 = "5eaf904719e310367f76c79563bb19110f001c0e3cc28284c63c5ec6ccaa7d51"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -320,12 +320,19 @@ class T(unittest.TestCase):
         self.assertIn('else TASK_OUTPUT_READ_PYTHON', package)
 
     def test_current_nixos_source_snapshot_is_bound(self):
+        # The Nix Git flake contains tracked files only; ignored local
+        # host-specific files must not change the published source identity.
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "-z", "--", "nixos/system"], cwd=ROOT
+        )
+        files = sorted(ROOT / os.fsdecode(name)
+                       for name in tracked.split(b"\0") if name)
+        self.assertEqual(len(files), 43)
         digest = hashlib.sha256()
-        files = sorted(path for path in SOURCE.rglob("*") if path.is_file())
         for path in files:
+            self.assertTrue(path.is_file(), str(path))
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 45)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_native_restic_uses_systemd_automount_with_idle_release(self):

@@ -189,7 +189,12 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('Path(module_path).resolve() == root / REQUIRED_MODULE', identity)
         self.assertIn('--argv0 "$out/bin/grabowski-operator"', package)
         self.assertIn('exec -a "$1" "$2" -B -c "$3" "$4" "$5"', flake)
-        self.assertIn('forged argv0 denied', flake)
+        # The Nix build sandbox remaps root-owned store inputs to uid 65534:
+        # verify executable identity there, and leave the root-ownership
+        # positive/negative check to the unchanged production validator.
+        self.assertIn('if observed_argv0 != expected_argv0:', flake)
+        self.assertIn('Nix kernel Python and distinct operator/forged argv0 identities verified', flake)
+        self.assertIn('Nix sandbox full source/lock/module/asset manifest verified', flake)
 
 
 
