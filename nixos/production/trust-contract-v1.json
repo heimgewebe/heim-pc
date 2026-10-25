@@ -28,7 +28,7 @@
     "root_nixpkgs": {
       "lock_node": "nixpkgs_2",
       "required_ref": "nixos-26.05",
-      "required_revision": "c5c4a43b0e8056328ec4529f735cabdb8f1942bb"
+      "required_revision": "1f607aa79b6356ed45d3cd3c8079c196e79efa2c"
     },
     "microvm": {
       "lock_node": "microvm",
