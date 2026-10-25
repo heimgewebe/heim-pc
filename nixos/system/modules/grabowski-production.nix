@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "dd6dc690285b-srcset5c51dbd24485-lock264e747ad05a-contract2681d2593edc";
-  expectedRevision = "dd6dc690285b6a8a0cdbb3c18d84a1681e604923";
+  expectedReleaseId = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+  expectedRevision = "6a6360a92be11d24d85e9b002bb34ac2b07672d5";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -229,7 +229,10 @@ in
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
-        NoNewPrivileges = true;
+        # The native NixOS Restic restore probe uses the existing setuid sudo
+        # wrapper. NoNewPrivileges blocks it even for a passwordless operator.
+        # This is the sole operator-unit override; rootbroker remains unchanged.
+        NoNewPrivileges = false;
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
