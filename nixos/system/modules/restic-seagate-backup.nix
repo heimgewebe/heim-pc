@@ -35,6 +35,9 @@
     extraBackupArgs = [
       "--host=heim-pc-nixos"
       "--tag=nixos-seagate"
+      # A concurrent verified Restic repository check can hold the exclusive lock.
+      # Without a bounded wait the 19:30 backup fails immediately with code 11.
+      "--retry-lock=30m"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
     ];
     # stat(2) triggers the automount; never back up to an empty host path.
