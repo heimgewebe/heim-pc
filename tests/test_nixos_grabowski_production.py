@@ -198,5 +198,20 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
+    def test_native_restic_lock_mount_writable_in_operator_sandbox(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        marker = "systemd.services.grabowski-operator = lib.mkIf admit {"
+        self.assertEqual(prod.count(marker), 1)
+        operator = prod.split(marker, 1)[1]
+        self.assertIn('ProtectSystem = "strict";', operator)
+        self.assertIn('NoNewPrivileges = false;', operator)
+        self.assertIn('"-/var/lib/heim-pc-backup"', operator)
+        self.assertIn(
+            'builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;',
+            flake,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

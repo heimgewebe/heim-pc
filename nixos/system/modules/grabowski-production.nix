@@ -236,7 +236,11 @@ in
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
+        # A native Restic check/restore needs repository locks: otherwise
+        # ProtectSystem=strict remounts the HEIM_BACKUP ext4 submount read-only.
+        # Optional path keeps the operator available if the backup disk is absent.
         ReadWritePaths = [
+          "-/var/lib/heim-pc-backup"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
           "-/home/alex/repos"
