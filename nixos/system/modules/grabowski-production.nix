@@ -27,7 +27,7 @@ let
   # tested fail-closed revision (Grabowski PR #1637). A newer operator may be
   # deployed independently; it never silently inherits retention authority.
   retentionTool = "${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py";
-  retentionToolSha256 = "460d8f6e91623435bac5015ee88975d4922a9e802eb3f44367cf886e8831ce26";
+  retentionToolSha256 = "1ffe8dafc99ece6d6acc06fa2f2109d01e745675ae63fd88ab6e8d44d2ec3075";
 
   retentionAdmit = admit && cfg.retentionEnable;
   # The root broker remains gated until real NixOS peer authorization and
