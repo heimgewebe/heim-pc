@@ -1023,7 +1023,7 @@ PY
           assert retentionService.ProtectSystem == "strict";
           assert retentionService.ReadWritePaths == [ "%h/.local/state/grabowski" ];
           assert builtins.length retentionService.ExecStartPre == 2;
-          assert builtins.match ".*python3 -I -B -c .*1ffe8dafc99ece6d6acc06fa2f2109d01e745675ae63fd88ab6e8d44d2ec3075"
+          assert builtins.match ".*python3 -I -B -c .*32d061ec9b405f20ae6a4456ef53b5c1dbdaa8c1f66606bb23096a5230202cb7"
             (builtins.elemAt retentionService.ExecStartPre 0) != null;
           assert builtins.match ".*--provision-receipt-root"
             (builtins.elemAt retentionService.ExecStartPre 1) != null;

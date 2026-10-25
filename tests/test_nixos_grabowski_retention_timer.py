@@ -6,7 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos/system/modules/grabowski-production.nix"
-PATCHED_TOOL_SHA256 = "1ffe8dafc99ece6d6acc06fa2f2109d01e745675ae63fd88ab6e8d44d2ec3075"
+PATCHED_TOOL_SHA256 = "32d061ec9b405f20ae6a4456ef53b5c1dbdaa8c1f66606bb23096a5230202cb7"
 
 
 class GrabowskiRetentionTimerContractTests(unittest.TestCase):

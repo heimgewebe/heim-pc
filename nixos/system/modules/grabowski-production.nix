@@ -23,11 +23,11 @@ let
     && cfg.brokerPackage.passthru.sourceRevision == expectedRevision
     && cfg.operatorPackage.passthru.lockSha256 == expectedLockSha256
     && cfg.brokerPackage.passthru.lockSha256 == expectedLockSha256;
-  # The packaged retention script must be byte-for-byte the independently
-  # tested fail-closed revision (Grabowski PR #1637). A newer operator may be
-  # deployed independently; it never silently inherits retention authority.
+  # SHA-gate the exact fail-closed candidate script bytes from Grabowski.
+  # This is not R3/Captain release approval. A newer operator cannot silently
+  # inherit retention authority without another byte-level gate and review.
   retentionTool = "${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py";
-  retentionToolSha256 = "1ffe8dafc99ece6d6acc06fa2f2109d01e745675ae63fd88ab6e8d44d2ec3075";
+  retentionToolSha256 = "32d061ec9b405f20ae6a4456ef53b5c1dbdaa8c1f66606bb23096a5230202cb7";
 
   retentionAdmit = admit && cfg.retentionEnable;
   # The root broker remains gated until real NixOS peer authorization and
