@@ -41,6 +41,17 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         self.assertNotIn("heimPc.grabowskiProduction.enable = true;", base)
         self.assertNotIn("users.users.alex.linger = true", base)
 
+    def test_primary_candidate_forbids_passwordless_rootbroker_bypass(self):
+        base = BASE.read_text()
+        self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", base)
+        # Defaults include root/wheel SETENV; only blanket NOPASSWD bypasses
+        # the broker. The Nix assertion must reject that permission explicitly.
+        self.assertIn("&& !(lib.any (rule:", base)
+        self.assertIn('builtins.elem "NOPASSWD" command.options', base)
+        self.assertIn("config.security.sudo.extraRules);", base)
+        self.assertNotIn("security.sudo.extraRules = [{", base)
+        self.assertNotIn('options = [ "NOPASSWD" ]', base)
+
     def test_configuration_has_hard_nix_eval_source_and_authority_gate(self):
         self.assertIn("seagate-grabowski-headless-contract =", self.flake)
         proof = self.flake.split(
