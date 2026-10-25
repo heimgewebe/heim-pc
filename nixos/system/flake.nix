@@ -964,7 +964,7 @@ PY
             release = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
-            runProof = { op ? pinnedOperator, broker ? null, id ? release }:
+            runProof = { op ? pinnedOperator, broker ? null, id ? release, retention ? false }:
               (nixpkgs.lib.nixosSystem {
                 inherit system;
                 modules = [
@@ -974,6 +974,7 @@ PY
                       enable = true;
                       operatorPackage = op;
                       releaseId = id;
+                      retentionEnable = retention;
                     } // (if broker == null then { } else { brokerPackage = broker; });
                   })
                 ];
@@ -983,6 +984,9 @@ PY
             wrongBroker = runProof { broker = pkgs.coreutils; };
             wrongRelease = runProof { id = "different-release-must-fail"; };
             proof = runProof { };
+            retentionProof = runProof { retention = true; };
+            retentionService = retentionProof.systemd.user.services.grabowski-runtime-retention.serviceConfig;
+            retentionTimer = retentionProof.systemd.user.timers.grabowski-runtime-retention;
             socketUnit = proof.systemd.sockets.grabowski-privileged-broker;
             sock = socketUnit.socketConfig;
             policyUnit = proof.systemd.services.grabowski-private-policy-install;
@@ -1003,6 +1007,28 @@ PY
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
           assert proof.heimPc.grabowskiProduction.releaseId == release;
           assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
+          # The normal production profile cannot silently start maintenance.
+          assert !proof.heimPc.grabowskiProduction.retentionEnable;
+          assert !(builtins.hasAttr "grabowski-runtime-retention" proof.systemd.user.timers);
+          assert !(builtins.hasAttr "grabowski-runtime-retention" proof.systemd.user.services);
+          # Explicit opt-in installs exactly one immutable script-bound user timer.
+          assert retentionProof.heimPc.grabowskiProduction.retentionEnable;
+          assert retentionTimer.wantedBy == [ "timers.target" ];
+          assert retentionTimer.unitConfig.ConditionUser == "alex";
+          assert retentionTimer.timerConfig.OnUnitActiveSec == "5min";
+          assert retentionTimer.timerConfig.Persistent;
+          assert retentionTimer.timerConfig.Unit == "grabowski-runtime-retention.service";
+          assert retentionService.Type == "oneshot" && retentionService.NoNewPrivileges;
+          assert retentionService.ProtectHome == "read-only";
+          assert retentionService.ProtectSystem == "strict";
+          assert retentionService.ReadWritePaths == [ "%h/.local/state/grabowski" ];
+          assert builtins.length retentionService.ExecStartPre == 2;
+          assert builtins.match ".*python3 -I -B -c .*460d8f6e91623435bac5015ee88975d4922a9e802eb3f44367cf886e8831ce26"
+            (builtins.elemAt retentionService.ExecStartPre 0) != null;
+          assert builtins.match ".*--provision-receipt-root"
+            (builtins.elemAt retentionService.ExecStartPre 1) != null;
+          assert builtins.match ".*--periodic-apply.*--max-archive-jobs 128"
+            retentionService.ExecStart != null;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
           assert sock.Accept && sock.SocketMode == "0660" && sock.SocketGroup == "grabowski";
           assert builtins.elem "grabowski-private-policy-install.service" socketUnit.requires;

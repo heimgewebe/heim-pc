@@ -27,9 +27,10 @@ class GrabowskiRetentionTimerContractTests(unittest.TestCase):
         start = self.source.index("systemd.user.services.grabowski-runtime-retention")
         stop = self.source.index("systemd.user.timers.grabowski-runtime-retention")
         service = self.source[start:stop]
-        self.assertLess(service.index("sha256sum --check"), service.index("--provision-receipt-root"))
+        self.assertLess(service.index("-I -B -c"), service.index("--provision-receipt-root"))
         self.assertLess(service.index("--provision-receipt-root"), service.index("--periodic-apply"))
         self.assertIn("${cfg.operatorPackage}/bin/python3", service)
+        self.assertNotIn("pkgs.writeText", self.source)
         self.assertNotIn(".venv/bin/python", service)
         self.assertNotIn("--worktree-hygiene-repo", service)
 

@@ -28,8 +28,7 @@ let
   # deployed independently; it never silently inherits retention authority.
   retentionTool = "${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py";
   retentionToolSha256 = "460d8f6e91623435bac5015ee88975d4922a9e802eb3f44367cf886e8831ce26";
-  retentionToolDigest = pkgs.writeText "grabowski-retention-source.sha256"
-    "${retentionToolSha256}  ${retentionTool}\n";
+
   retentionAdmit = admit && cfg.retentionEnable;
   # The root broker remains gated until real NixOS peer authorization and
   # private policy runtime acceptance. Evaluation is NOT activation approval.
@@ -224,7 +223,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStartPre = [
-          "${pkgs.coreutils}/bin/sha256sum --check ${retentionToolDigest}"
+          "${pkgs.python3}/bin/python3 -I -B -c 'import hashlib, pathlib, sys; sys.exit(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2])' ${retentionTool} ${retentionToolSha256}"
           "${cfg.operatorPackage}/bin/python3 ${retentionTool} --provision-receipt-root"
         ];
         ExecStart = "${cfg.operatorPackage}/bin/python3 ${retentionTool} --periodic-apply --minimum-job-age-seconds 86400 --max-archive-jobs 128";
