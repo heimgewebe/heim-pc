@@ -25,7 +25,13 @@
   services.restic.backups."heim-pc" = {
     repository = "/var/lib/heim-pc-backup/restic/heim-pc";
     passwordFile = "/persist/secrets/restic/heim-pc-password";
-    paths = [ "/home/alex" "/persist" "/etc" ];
+    # Preserve enrolled VPN identity, network state and host recovery metadata.
+    # Do not include systemd coredumps or disposable root caches.
+    paths = [
+      "/home/alex" "/persist" "/etc"
+      "/var/lib/tailscale" "/var/lib/NetworkManager"
+      "/var/lib/nixos" "/var/lib/grabowski"
+    ];
     extraBackupArgs = [
       "--host=heim-pc-nixos"
       "--tag=nixos-seagate"

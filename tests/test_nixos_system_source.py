@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "014685de4817a19068665cec116783c2e8cb5a7b98845e30be63d526a133baf6"
+SOURCE_SNAPSHOT_SHA256 = "9f6aba1f0a90b76e767f798647c8443528806772bc832d234b129b0554ae42e8"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -348,6 +348,14 @@ class T(unittest.TestCase):
         self.assertIn('RequiresMountsFor', module)
         self.assertIn('initialize = false;', module)
         self.assertIn('pruneOpts = [ ];', module)
+        # These active identities are not covered by /home, /persist or /etc.
+        for critical in (
+            "/var/lib/tailscale", "/var/lib/NetworkManager",
+            "/var/lib/nixos", "/var/lib/grabowski",
+        ):
+            self.assertIn(f'"{critical}"', module)
+        self.assertNotIn('"/var/lib/systemd"', module)
+        self.assertNotIn('"/root"', module)
 
     def test_canonical_source_layout(self):
         for relative in (
