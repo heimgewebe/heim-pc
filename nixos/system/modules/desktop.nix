@@ -7,6 +7,14 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.wayland.enable = true;
     services.desktopManager.plasma6.enable = true;
 
+    # A headless systemd --user manager has no Qt display. Without this guard,
+    # one Node crash recursively launched 3600 aborting DrKonqi instances.
+    # Preserve graphical DrKonqi when Plasma imports its display environment.
+    systemd.user.services."drkonqi-coredump-launcher@" = {
+      overrideStrategy = "asDropin";
+      unitConfig.ConditionEnvironment = [ "|DISPLAY" "|WAYLAND_DISPLAY" ];
+    };
+
     # Prevent idle-triggered sleep/shutdown while preserving explicit suspend.
     # Manual suspend is required by the physical GPU/audio acceptance gates.
     services.logind.settings.Login.IdleAction = "ignore";

@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9f6aba1f0a90b76e767f798647c8443528806772bc832d234b129b0554ae42e8"
+SOURCE_SNAPSHOT_SHA256 = "1bc96abb86ee274b4853fedc481336578533aa959d8c2ed863d231c77a39862e"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -326,6 +326,16 @@ class T(unittest.TestCase):
             "${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin",
             module,
         )
+
+    def test_drkonqi_requires_a_graphical_user_session(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        self.assertIn('systemd.user.services."drkonqi-coredump-launcher@"', desktop)
+        self.assertIn('overrideStrategy = "asDropin";', desktop)
+        self.assertIn(
+            'unitConfig.ConditionEnvironment = [ "|DISPLAY" "|WAYLAND_DISPLAY" ];',
+            desktop,
+        )
+        self.assertNotIn("services.coredump.enable = false", desktop)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()
