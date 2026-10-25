@@ -185,7 +185,9 @@ in
         # Systemd creates it before executing the trusted request instance.
         StateDirectory = "grabowski/privileged-broker";
         StateDirectoryMode = "0700";
-        ReadWritePaths = [ "/var/lib/grabowski/privileged-broker" "/run/grabowski" ];
+        # Recovery publication creates the canonical file and its sibling .lock
+        # below this parent. Rootbroker policy still restricts allowed actions.
+        ReadWritePaths = [ "/var/lib/grabowski" "/run/grabowski" ];
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectKernelLogs = true;
