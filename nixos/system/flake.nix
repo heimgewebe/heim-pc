@@ -383,6 +383,7 @@
       nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
           modules = [
+            ./modules/restic-seagate-backup.nix
             ({ pkgs, ... }: {
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.

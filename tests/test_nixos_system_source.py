@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "e6ae3dbf0567bc9852680f6572953bd1290885b461f21007f34b4bd2689f34e3"
+SOURCE_SNAPSHOT_SHA256 = "d0ef380ea70bd82e107c5638e2303d20b31671b11ae15b54c15a87557920332d"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -325,8 +325,21 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 42)
+        self.assertEqual(len(files), 43)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
+
+    def test_native_restic_uses_systemd_automount_with_idle_release(self):
+        module = (SOURCE / "modules/restic-seagate-backup.nix").read_text()
+        self.assertIn('"x-systemd.automount"', module)
+        self.assertIn('"x-systemd.idle-timeout=60s"', module)
+        self.assertNotIn('"noauto"', module)
+        self.assertNotIn("backupCleanupCommand", module)
+        self.assertIn(
+            "test -f /var/lib/heim-pc-backup/restic/heim-pc/config", module
+        )
+        self.assertIn('RequiresMountsFor', module)
+        self.assertIn('initialize = false;', module)
+        self.assertIn('pruneOpts = [ ];', module)
 
     def test_canonical_source_layout(self):
         for relative in (
@@ -335,7 +348,7 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nix-lifecycle.nix", "modules/nix-trust.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
