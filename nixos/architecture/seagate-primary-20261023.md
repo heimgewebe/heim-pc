@@ -4,6 +4,18 @@
 
 **Scope:** `heimgewebe/heim-pc`, NixOS on the existing Seagate NVMe, existing Pop!_OS on the protected WD_BLACK NVMe. Supersedes the earlier architecture assumption that NixOS is merely an optional secondary OS. The two OS installations remain independently bootable.
 
+## Operating priority: functionality first (2026-10-25)
+
+**Binding decision for this NixOS host:** Proven working functionality, availability, uninterrupted operator access and ease of administration outrank speculative security hardening and internal process formalities. Security controls are justified by the operational failures they prevent, not by their number or strictness.
+
+1. **Make things work:** Prioritize working hardware, desktop, SSH, services, backups, restore and real workload parity. Verify on the running target rather than treating plans, green CI or policy declarations as proof.
+2. **Keep the operator effective:** Grabowski, as the sole authorized writer, performs already-authorized repeatable administration unattended. Do not add per-command human approvals, redundant gatekeepers, duplicate brokers, manual shell handoffs or opaque self-imposed locks when an existing typed capability can safely complete the task. Fix a stale or mismatched NixOS policy/configuration at its source rather than asking for operator workarounds.
+3. **Favor the smallest working solution:** Reuse NixOS/systemd, existing Grabowski capabilities and standard recovery mechanisms. Introduce no extra framework, control plane, review round or state projection without a concrete, observed need; remove demonstrably ineffective restrictions and redundant dependencies.
+4. **Keep failures recoverable:** Preserve real backups with periodic restore evidence, last-known-good NixOS generation, auditable outcomes, usable remote administration, and independently bootable Pop!_OS on WD_BLACK. Do not trade away these functional recovery capabilities for short-term convenience.
+5. **Apply proportionate controls:** Add or retain a gate only for a named, credible high-impact risk (for example wrong-disk writes, irreversible data loss, credential exposure or loss of recovery) where a lower-friction alternative is insufficient. Routine reversible changes should proceed within the user's existing authority, with targeted checks and rollback instead of open-ended blocking. A failed legacy check is a defect to repair, not a reason to invent bypass evidence.
+
+When requirements conflict, choose the option that maximizes *demonstrated* day-to-day usability and recoverability with the fewest independent moving parts. Document any remaining friction by its concrete prevented failure, and remove it when that benefit no longer applies. This priority does not itself grant additional access rights, authorize destructive disk changes or establish production acceptance.
+
 ## Non-negotiable outcome and authority
 
 - **Seagate / NixOS:** Normal UEFI boot target and permanent productive host for interactive workstation, development, local AI, automation, Grabowski, and required heimgewebe services.
