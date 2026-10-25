@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "3ec9689ea4eeb7ee5ff5edd3b102a217ce56c03b4c4b52e1f6c7bf105126a858"
+SOURCE_SNAPSHOT_SHA256 = "b0a017457959d2b1396288bd059dff8ba447dcee55b0bb1057733656d0977ec0"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -325,7 +325,7 @@ class T(unittest.TestCase):
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 43)
+        self.assertEqual(len(files), 45)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_native_restic_uses_systemd_automount_with_idle_release(self):
