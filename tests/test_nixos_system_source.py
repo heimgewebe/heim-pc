@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "d0ef380ea70bd82e107c5638e2303d20b31671b11ae15b54c15a87557920332d"
+SOURCE_SNAPSHOT_SHA256 = "83828478d05b6d89582b6a92f14fe6e2281150a5f8f2cf88399f1038b9cc264b"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -318,6 +318,10 @@ class T(unittest.TestCase):
         self.assertIn('unexpected pinned fleet cleanup Python guard', package)
         self.assertIn('else TASK_OUTPUT_CAPTURE_PYTHON', package)
         self.assertIn('else TASK_OUTPUT_READ_PYTHON', package)
+
+    def test_operator_has_tailscale_in_native_systemd_path(self):
+        module = (SOURCE / "modules/grabowski-production.nix").read_text()
+        self.assertIn("${pkgs.openssh}/bin:${pkgs.tailscale}/bin", module)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()
