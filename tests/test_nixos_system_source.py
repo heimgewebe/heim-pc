@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "137149b9d37a14d088cad880e3019d3d960997ed72a1cae804e117537444ec2e"
+SOURCE_SNAPSHOT_SHA256 = "3ec9689ea4eeb7ee5ff5edd3b102a217ce56c03b4c4b52e1f6c7bf105126a858"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -327,6 +327,19 @@ class T(unittest.TestCase):
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
         self.assertEqual(len(files), 43)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
+
+    def test_native_restic_uses_systemd_automount_with_idle_release(self):
+        module = (SOURCE / "modules/restic-seagate-backup.nix").read_text()
+        self.assertIn('"x-systemd.automount"', module)
+        self.assertIn('"x-systemd.idle-timeout=60s"', module)
+        self.assertNotIn('"noauto"', module)
+        self.assertNotIn("backupCleanupCommand", module)
+        self.assertIn(
+            "test -f /var/lib/heim-pc-backup/restic/heim-pc/config", module
+        )
+        self.assertIn('RequiresMountsFor', module)
+        self.assertIn('initialize = false;', module)
+        self.assertIn('pruneOpts = [ ];', module)
 
     def test_canonical_source_layout(self):
         for relative in (

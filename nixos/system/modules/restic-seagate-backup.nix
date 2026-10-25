@@ -1,14 +1,15 @@
 { pkgs, ... }:
 {
   # The Seagate host boots without the external backup disk. The mount is
-  # pulled in only for a backup; a missing disk must never redirect backups
-  # into the root filesystem.
+  # mounted on demand and released after idle; a missing disk must never
+  # redirect backups into the root filesystem.
   fileSystems."/var/lib/heim-pc-backup" = {
     device = "/dev/disk/by-uuid/9b626294-7913-4be0-88fa-96b314e96ee5";
     fsType = "ext4";
     options = [
-      "noauto"
       "nofail"
+      "x-systemd.automount"
+      "x-systemd.idle-timeout=60s"
       "nosuid"
       "nodev"
       "noexec"
@@ -30,14 +31,9 @@
       "--tag=nixos-seagate"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
     ];
+    # stat(2) triggers the automount; never back up to an empty host path.
     backupPrepareCommand = ''
-      ${pkgs.util-linux}/bin/mountpoint -q /var/lib/heim-pc-backup
-    '';
-    # The native Restic post-stop hook runs on success and failure.
-    backupCleanupCommand = ''
-      if ${pkgs.util-linux}/bin/mountpoint -q /var/lib/heim-pc-backup; then
-        ${pkgs.util-linux}/bin/umount /var/lib/heim-pc-backup
-      fi
+      test -f /var/lib/heim-pc-backup/restic/heim-pc/config
     '';
     timerConfig = {
       OnCalendar = "19:30";
