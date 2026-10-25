@@ -72,5 +72,30 @@ class T(unittest.TestCase):
         self.assertIn("no Nix-relevant change", reason)
 
 
+    def test_draft_pr_defers_full_nix_until_review_ready(self):
+        # Draft checks are skipped, not proof of a successful Nix build.
+        from pathlib import Path
+
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "heim-pc-nix.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "types: [opened, reopened, synchronize, ready_for_review]",
+            workflow,
+        )
+        nix_header = workflow.split("\n  nix:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        self.assertIn(
+            "(github.event_name != 'pull_request' || !github.event.pull_request.draft) &&",
+            nix_header,
+        )
+        self.assertIn("needs.detect.result != 'success'", nix_header)
+        self.assertIn("needs.detect.outputs.nix_changed != 'false'", nix_header)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("branches: [ main ]", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

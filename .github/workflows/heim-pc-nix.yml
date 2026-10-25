@@ -4,6 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -100,8 +101,11 @@ jobs:
 
   nix:
     needs: detect
+    # Draft PRs cannot merge; defer expensive ISO, VM and closure builds until
+    # ready_for_review. Main pushes and manual dispatch keep the full gate.
     if: >-
       always() &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (needs.detect.result != 'success' ||
        needs.detect.outputs.control_changed != 'false' ||
        needs.detect.outputs.nix_changed != 'false')
