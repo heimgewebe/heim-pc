@@ -9,7 +9,7 @@ It provides a complete overview of the canonical documentation zones and their c
 
 | ID | File | Status | Last Reviewed | Depends On |
 |---|---|---|---|---|
-| agents.entry | [./AGENTS.md](./AGENTS.md) | canonical | 2026-09-07 | operatorium-entry, home-entry, security |
+| agents.entry | [./AGENTS.md](./AGENTS.md) | canonical | 2026-10-25 | operatorium-entry, home-entry, security |
 
 ## Zone: norm
 
