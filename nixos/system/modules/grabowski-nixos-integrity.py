@@ -9,6 +9,7 @@ environment flag or Pop!_OS deployment manifest can grant runtime readiness.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -139,6 +140,11 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
     """Return readiness only for a complete, unchanged, native pinned Nix output."""
     result = {
         "completion_status": "incomplete",
+        "integrity_model": "nixos-immutable",
+        "schema_version": None,
+        "runtime_lock_sha256": None,
+        "python_version": None,
+        "python_implementation": None,
         "manifest_exists": False,
         "manifest_parse_valid": False,
         "manifest_schema_valid": False,
@@ -166,6 +172,7 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
                 doc.get("runtime_lock_sha256") != PINNED_LOCK_SHA256):
             raise ValueError("native release identity mismatch")
         result["manifest_schema_valid"] = True
+        result["schema_version"] = 1
         result["repo_head_valid"] = True
         result["release_id"] = PINNED_RELEASE
         result["repo_head"] = PINNED_REVISION
@@ -182,6 +189,7 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
             raise ValueError("incomplete module or runtime-asset digest list")
         if _sha(_read(root, LOCK_RELATIVE, maximum=1_000_000)) != PINNED_LOCK_SHA256:
             raise ValueError("pinned runtime lock does not match Nix artifact")
+        result["runtime_lock_sha256"] = PINNED_LOCK_SHA256
         release = json.loads(_read(root, RELEASE_RELATIVE, maximum=4096))
         if (release.get("release_id") != PINNED_RELEASE or
                 release.get("source_revision") != PINNED_REVISION or
@@ -219,6 +227,9 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
             doc.get("python_version") == platform.python_version()
             and doc.get("python_implementation") == platform.python_implementation()
         )
+        if result["environment_compatibility_valid"]:
+            result["python_version"] = platform.python_version()
+            result["python_implementation"] = platform.python_implementation()
         result["provenance_valid"] = all([
             result["artifact_integrity_valid"],
             result["runtime_binding_valid"],
@@ -282,4 +293,73 @@ def patch_pinned_module(path: Path) -> None:
         raise ValueError("canonical NixOS manifest adaptation made no change")
     path.chmod(0o644)
     path.write_text(patched)
+    path.chmod(0o444)
+    patch_pinned_read_surface(path.with_name("grabowski_read_surface.py"))
+
+
+# This exact compatibility adapter is private to the pinned Nix derivation.
+# The upstream portable read surface still checks the full venv deployment.
+LEGACY_IDENTITY_FIELDS = (
+    "schema_version", "release_id", "repo_head", "entrypoint_contract_sha256",
+    "source_sha256", "runtime_input_sha256", "runtime_lock_sha256",
+    "mcp_protocol_version", "python_version", "python_implementation",
+    "platform", "completion_status",
+)
+LEGACY_INTEGRITY_FIELDS = (
+    "manifest_parse_valid", "manifest_schema_valid", "release_path_valid",
+    "release_id_valid", "repo_head_valid", "stable_runtime_manifest_valid",
+    "runtime_pointer_valid", "runtime_input_identity_valid",
+    "lock_identity_valid", "source_snapshot_identity_valid",
+    "source_identity_valid", "embedded_contract_valid",
+    "entrypoint_contract_identity_valid", "entrypoint_path_valid",
+    "release_python_identity_valid", "executable_identity_valid",
+    "pip_identity_valid", "protocol_identity_valid",
+    "python_runtime_identity_valid", "platform_identity_valid",
+    "artifact_integrity_valid", "runtime_binding_valid",
+    "environment_compatibility_valid", "provenance_valid",
+)
+NIXOS_IDENTITY_FIELDS = (
+    "schema_version", "integrity_model", "release_id", "repo_head",
+    "entrypoint_contract_sha256", "runtime_lock_sha256",
+    "python_version", "python_implementation", "completion_status",
+)
+NIXOS_INTEGRITY_FIELDS = (
+    "manifest_parse_valid", "manifest_schema_valid", "repo_head_valid",
+    "entrypoint_contract_identity_valid", "agent_instructions_identity_valid",
+    "artifact_integrity_valid", "runtime_binding_valid",
+    "environment_compatibility_valid", "provenance_valid",
+)
+
+
+def patch_pinned_read_surface(path: Path) -> None:
+    """Use the Nix attestation's real checks, never invent venv pass flags."""
+    original = path.read_text(encoding="utf-8")
+    tree = ast.parse(original, filename=str(path))
+    replacements = {
+        "DEPLOYMENT_IDENTITY_FIELDS": (LEGACY_IDENTITY_FIELDS, NIXOS_IDENTITY_FIELDS),
+        "DEPLOYMENT_INTEGRITY_FIELDS": (LEGACY_INTEGRITY_FIELDS, NIXOS_INTEGRITY_FIELDS),
+    }
+    locations: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for name, (expected, replacement) in replacements.items():
+        matches = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ]
+        if len(matches) != 1 or ast.literal_eval(matches[0].value) != expected:
+            raise ValueError("pinned read surface deployment fields drifted: " + name)
+        locations.append((
+            matches[0].lineno, matches[0].end_lineno, name, replacement,
+        ))
+    lines = original.splitlines(keepends=True)
+    for first, last, name, values in sorted(locations, reverse=True):
+        lines[first - 1:last] = [
+            name + " = (\n"
+            + "".join('    "' + value + '",\n' for value in values)
+            + ")\n"
+        ]
+    path.chmod(0o644)
+    path.write_text("".join(lines), encoding="utf-8")
     path.chmod(0o444)

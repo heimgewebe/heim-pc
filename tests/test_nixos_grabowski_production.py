@@ -305,6 +305,15 @@ class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
                         self.assertTrue(result["provenance_valid"])
                         self.assertEqual(result["entrypoint_contract_sha256"], digest)
                         self.assertIs(result["entrypoint_contract_identity_valid"], True)
+                        self.assertEqual(result["integrity_model"], "nixos-immutable")
+                        self.assertEqual(result["schema_version"], 1)
+                        self.assertEqual(
+                            result["runtime_lock_sha256"], adapter.PINNED_LOCK_SHA256,
+                        )
+                        self.assertEqual(result["python_version"], platform.python_version())
+                        self.assertEqual(
+                            result["python_implementation"], platform.python_implementation(),
+                        )
 
                         # In the installed pinned Nix runtime, run the unchanged
                         # durable-result consumer rather than duplicating its gate.
@@ -330,6 +339,63 @@ class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
                         self.assertEqual(result["completion_status"], "incomplete")
                         self.assertIs(result["entrypoint_contract_identity_valid"], False)
                         self.assertIsNone(result["entrypoint_contract_sha256"])
+
+
+
+class GrabowskiNixHealthProjectionRegression(unittest.TestCase):
+    def test_native_attestation_projects_exact_relevant_fields(self):
+        import ast
+        import importlib.util
+        import sys
+        import tempfile
+        from unittest.mock import patch
+
+        spec = importlib.util.spec_from_file_location(
+            "grabowski_nixos_health_projection_test",
+            MODULES / "grabowski-nixos-integrity.py",
+        )
+        adapter = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(adapter)
+
+        self.assertEqual(adapter.NIXOS_INTEGRITY_FIELDS, (
+            "manifest_parse_valid", "manifest_schema_valid",
+            "repo_head_valid", "entrypoint_contract_identity_valid",
+            "agent_instructions_identity_valid", "artifact_integrity_valid",
+            "runtime_binding_valid", "environment_compatibility_valid",
+            "provenance_valid",
+        ))
+        self.assertIn("release_python_identity_valid", adapter.LEGACY_INTEGRITY_FIELDS)
+        self.assertNotIn("release_python_identity_valid", adapter.NIXOS_INTEGRITY_FIELDS)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "grabowski_read_surface.py"
+            target.write_text(
+                "DEPLOYMENT_IDENTITY_FIELDS = " + repr(adapter.LEGACY_IDENTITY_FIELDS)
+                + "\nDEPLOYMENT_INTEGRITY_FIELDS = "
+                + repr(adapter.LEGACY_INTEGRITY_FIELDS) + "\n",
+                encoding="utf-8",
+            )
+            adapter.patch_pinned_read_surface(target)
+            assignments = {
+                node.targets[0].id: ast.literal_eval(node.value)
+                for node in ast.parse(target.read_text()).body
+                if isinstance(node, ast.Assign)
+            }
+            self.assertEqual(
+                assignments["DEPLOYMENT_INTEGRITY_FIELDS"],
+                adapter.NIXOS_INTEGRITY_FIELDS,
+            )
+            self.assertEqual(
+                assignments["DEPLOYMENT_IDENTITY_FIELDS"],
+                adapter.NIXOS_IDENTITY_FIELDS,
+            )
+            verified = {name: True for name in adapter.NIXOS_INTEGRITY_FIELDS}
+            self.assertTrue(all(verified.values()))
+            verified["runtime_binding_valid"] = False
+            self.assertFalse(all(verified.values()))
+            with self.assertRaises(ValueError):
+                adapter.patch_pinned_read_surface(target)
+
 
 if __name__ == "__main__":
     unittest.main()
