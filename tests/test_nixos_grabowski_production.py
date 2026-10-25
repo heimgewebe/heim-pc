@@ -193,5 +193,125 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
+
+class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
+    """Exercise the real adapter's metadata producer, not source-text anchors."""
+
+    def test_verified_entrypoint_contract_is_exposed_and_mismatch_is_rejected(self):
+        import hashlib
+        import importlib.util
+        import json
+        import platform
+        import sys
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        spec = importlib.util.spec_from_file_location(
+            "grabowski_nixos_integrity_under_test",
+            MODULES / "grabowski-nixos-integrity.py",
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        adapter = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(adapter)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module_relative = adapter.REQUIRED_MODULE
+            module_path = root / module_relative
+            module_path.parent.mkdir(parents=True)
+            module_bytes = b"synthetic immutable module bytes"
+            module_path.write_bytes(module_bytes)
+            wrapper = root / "bin/grabowski-operator"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_bytes(b"synthetic wrapper")
+            contract_bytes = b'{"kind":"synthetic pinned entrypoint contract"}'
+            contract = json.loads(contract_bytes)
+            digest = hashlib.sha256(contract_bytes).hexdigest()
+            pinned_lock = b"synthetic pinned lock"
+            agent_sha = "a" * 64
+            release_bytes = json.dumps({
+                "release_id": adapter.PINNED_RELEASE,
+                "source_revision": adapter.PINNED_REVISION,
+                "runtime_lock_sha256": adapter.PINNED_LOCK_SHA256,
+                "entrypoint": "bin/grabowski-operator",
+            }).encode()
+            doc = {
+                "schema_version": 1,
+                "kind": "grabowski-nixos-immutable-runtime-integrity",
+                "release_id": adapter.PINNED_RELEASE,
+                "repo_head": adapter.PINNED_REVISION,
+                "runtime_lock_sha256": adapter.PINNED_LOCK_SHA256,
+                "entrypoint_contract_sha256": digest,
+                "entrypoint_contract": contract,
+                "module_sha256s": {"grabowski_mcp": hashlib.sha256(module_bytes).hexdigest()},
+                "runtime_asset_sha256s": {},
+                "agent_instructions_sha256": agent_sha,
+                "python_executable": str(Path("/proc/self/exe").resolve(strict=True)),
+                "python_version": platform.python_version(),
+                "python_implementation": platform.python_implementation(),
+            }
+            for matches in (True, False):
+                with self.subTest(contract_matches=matches):
+                    current_doc = dict(doc)
+                    if not matches:
+                        current_doc["entrypoint_contract_sha256"] = "0" * 64
+                    files = {
+                        adapter.MANIFEST_RELATIVE: json.dumps(current_doc).encode(),
+                        adapter.CONTRACT_RELATIVE: contract_bytes,
+                        adapter.LOCK_RELATIVE: pinned_lock,
+                        adapter.RELEASE_RELATIVE: release_bytes,
+                        module_relative: module_bytes,
+                    }
+
+                    def fixture_hash(payload):
+                        if payload == pinned_lock:
+                            return adapter.PINNED_LOCK_SHA256
+                        return hashlib.sha256(payload).hexdigest()
+
+                    with (
+                        patch.object(adapter, "store_root", return_value=root),
+                        patch.object(adapter, "_read", side_effect=lambda _root, path, **_kw: files[path]),
+                        patch.object(adapter, "_sha", side_effect=fixture_hash),
+                        patch.object(adapter, "_contract_entries", return_value=({"grabowski_mcp": module_relative}, {})),
+                        patch.object(adapter.importlib.util, "find_spec", return_value=SimpleNamespace(origin=str(module_path))),
+                    ):
+                        result = adapter.deployment_metadata(
+                            module_path, expected_agent_sha256=agent_sha
+                        )
+                    if matches:
+                        self.assertEqual(result["completion_status"], "complete")
+                        self.assertTrue(result["provenance_valid"])
+                        self.assertEqual(result["entrypoint_contract_sha256"], digest)
+                        self.assertIs(result["entrypoint_contract_identity_valid"], True)
+
+                        # In the installed pinned Nix runtime, run the unchanged
+                        # durable-result consumer rather than duplicating its gate.
+                        # Source-only CI lacks this separately built runtime.
+                        try:
+                            import grabowski_mcp as pinned_consumer
+                        except ImportError:
+                            pinned_consumer = None
+                        if pinned_consumer is not None:
+                            serving = {
+                                "matches_deployed_manifest": True,
+                                "process_release_id": adapter.PINNED_RELEASE,
+                                "process_repo_head": adapter.PINNED_REVISION,
+                            }
+                            with (
+                                patch.object(pinned_consumer, "_deployment_metadata", return_value=result),
+                                patch.object(pinned_consumer.grabowski_serving_process, "identity", return_value=serving),
+                            ):
+                                binding, blocker = pinned_consumer._grip_result_readback_runtime_preflight()
+                            self.assertIsNone(blocker)
+                            self.assertEqual(binding["entrypoint_contract_sha256"], digest)
+                    else:
+                        self.assertEqual(result["completion_status"], "incomplete")
+                        self.assertIs(result["entrypoint_contract_identity_valid"], False)
+                        self.assertIsNone(result["entrypoint_contract_sha256"])
+
+
 if __name__ == "__main__":
     unittest.main()

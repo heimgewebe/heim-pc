@@ -142,6 +142,8 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
         "manifest_exists": False,
         "manifest_parse_valid": False,
         "manifest_schema_valid": False,
+        "entrypoint_contract_sha256": None,
+        "entrypoint_contract_identity_valid": False,
         "repo_head_valid": False,
         "agent_instructions_identity_valid": False,
         "runtime_binding_valid": False,
@@ -172,6 +174,8 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
         if (doc.get("entrypoint_contract_sha256") != _sha(contract_data) or
                 doc.get("entrypoint_contract") != contract):
             raise ValueError("entrypoint contract does not match installed pinned source")
+        result["entrypoint_contract_sha256"] = _sha(contract_data)
+        result["entrypoint_contract_identity_valid"] = True
         modules, assets = _contract_entries(contract)
         if (set(doc.get("module_sha256s", {})) != set(modules) or
                 set(doc.get("runtime_asset_sha256s", {})) != set(assets)):
