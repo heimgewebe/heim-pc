@@ -1052,6 +1052,9 @@ PY
           # ProtectSystem=strict needs writable mounts for Restic locks and Nix fetcher SQLite caches.
           assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
           assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
+          # Optional ReadWritePaths is ineffective if the target is missing on cold start.
+          assert builtins.elem "d /home/alex/.cache 0755 alex users -" proof.systemd.tmpfiles.rules;
+          assert builtins.elem "d /home/alex/.cache/nix 0755 alex users -" proof.systemd.tmpfiles.rules;
           assert builtins.elem "grabowski-privileged-broker.socket"
             proof.systemd.services.grabowski-operator.requires;
           assert !(builtins.elem "grabowski" proof.users.users.alex.extraGroups);
