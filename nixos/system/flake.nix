@@ -1081,8 +1081,9 @@ PY
           # The existing NixOS Restic proof invokes the setuid sudo wrapper;
           # NNP=yes makes that path categorically unusable for the operator.
           assert !operator.NoNewPrivileges && operator.ProtectSystem == "strict";
-          # ProtectSystem=strict needs a writable HEIM_BACKUP mount for Restic locks.
+          # ProtectSystem=strict needs writable mounts for Restic locks and Nix fetcher SQLite caches.
           assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
+          assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
           assert builtins.elem "grabowski-privileged-broker.socket"
             proof.systemd.services.grabowski-operator.requires;
           assert !(builtins.elem "grabowski" proof.users.users.alex.extraGroups);
