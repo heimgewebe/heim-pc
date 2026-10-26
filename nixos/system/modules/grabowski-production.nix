@@ -79,6 +79,10 @@ in
     # Only the canonical system service gets this supplementary group.
     systemd.tmpfiles.rules = lib.optionals admit [
       "d /run/grabowski 0750 root grabowski -"
+      # ProtectHome=read-only permits the Nix fetcher only through ReadWritePaths.
+      # The directory and its parent must exist before the service namespace is built.
+      "d /home/alex/.cache 0755 alex users -"
+      "d /home/alex/.cache/nix 0755 alex users -"
     ];
 
     # This service contains no policy payload: the root-owned 0600 source on
