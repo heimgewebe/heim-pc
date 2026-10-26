@@ -11,8 +11,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "6a6360a92be11d24d85e9b002bb34ac2b07672d5"
-TARBALL_HASH = "sha256-qxPpTXFUQ7m7ZCX3eGiy26rDoMyVpmjnzgSgmgKcmdk="
+REVISION = "57f3310ff63cc3218def6da0b424c8390f1dd5f9"
+TARBALL_HASH = "sha256-MQMQP0jcFdVkX0uLmmuUOfWIi2ID/1LBMMmN9FEVOU8="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -84,7 +84,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85"
+        release_id = "57f3310ff63c-srcsetc54299092f97-lock264e747ad05a-contract650f923c4cfb"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -97,7 +97,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("PYTHONPATH", op)
         self.assertIn('GRABOWSKI_NIXOS_GIT_BIN', op)
         self.assertIn('GRABOWSKI_NIXOS_GH_BIN', op)
-        self.assertIn('"src/grabowski_operator.py": (4, 1)', op)
+        self.assertIn('"src/grabowski_operator.py": (1, 1)', op)
         self.assertIn('"src/grabowski_self_deploy.py": (2, 0)', op)
         self.assertIn('makeWrapper ${pkgs.git}/bin/git', op)
         self.assertIn('makeWrapper ${pkgs.gh}/bin/gh', op)
@@ -107,7 +107,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
         self.assertIn('len(expected) == 203', op)
-        self.assertIn('len(supporting) != 129', op)
+        self.assertIn('len(supporting) != 130', op)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
