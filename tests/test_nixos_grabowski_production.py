@@ -3,6 +3,10 @@
 These static tests complement actual isolated Nix builds and MCP protocol checks.
 """
 from pathlib import Path
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +227,53 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             'builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;',
             flake,
         )
+
+
+    def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        rule_block = prod.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
+        expected = (
+            "d /home/alex/.cache 0755 alex users -",
+            "d /home/alex/.cache/nix 0755 alex users -",
+        )
+        for rule in expected:
+            self.assertIn(f'"{rule}"', rule_block)
+        self.assertLess(rule_block.index(expected[0]), rule_block.index(expected[1]))
+
+        tmpfiles = shutil.which("systemd-tmpfiles")
+        if tmpfiles is None:
+            self.skipTest("systemd-tmpfiles is not installed on this test host")
+        with tempfile.TemporaryDirectory(prefix="grabowski-cache-coldstart-") as tmp:
+            scratch = Path(tmp)
+            root = scratch / "root"
+            (root / "etc").mkdir(parents=True)
+            # --root resolves users/groups inside this isolated synthetic fixture;
+            # never mutate the real cache, passwd, group, or running service.
+            uid, gid = os.getuid(), os.getgid()
+            (root / "etc/passwd").write_text(
+                f"root:x:0:0:root:/root:/bin/sh\nalex:x:{uid}:{gid}:alex:/home/alex:/bin/sh\n"
+            )
+            (root / "etc/group").write_text(
+                f"root:x:0:\nusers:x:{gid}:alex\n"
+            )
+            config = scratch / "cache-tmpfiles.conf"
+            config.write_text("\n".join(expected) + "\n")
+            directories = (
+                root / "home/alex/.cache",
+                root / "home/alex/.cache/nix",
+            )
+            self.assertTrue(all(not directory.exists() for directory in directories))
+            argv = [tmpfiles, "--root=" + str(root), "--create", str(config)]
+            for _ in range(2):
+                completed = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=30, check=False
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for directory in directories:
+                    self.assertTrue(directory.is_dir(), str(directory))
+                    stats = directory.stat()
+                    self.assertEqual((stats.st_uid, stats.st_gid), (uid, gid))
+                    self.assertEqual(stats.st_mode & 0o777, 0o755)
 
 
 class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
