@@ -42,8 +42,20 @@ let
     text = ''
       set -eu
       export PATH="/run/wrappers/bin:$PATH"
-      # This must work under NNP before systemd may start the MCP process.
-      setpriv --no-new-privs -- podman unshare true
+      # Type=exec starts ExecStartPost before the holder has completed
+      # rootless Podman's pause namespace initialization. Wait for readiness
+      # instead of racing newuidmap and killing an otherwise valid holder.
+      # Do not accept mere process liveness as proof of NNP compatibility.
+      attempt=1
+      while [ "$attempt" -le 60 ]; do
+        if setpriv --no-new-privs -- podman unshare true >/dev/null 2>&1; then
+          exit 0
+        fi
+        sleep 0.5
+        attempt=$((attempt + 1))
+      done
+      echo "Nixer Podman namespace did not become NNP-usable" >&2
+      exit 1
     '';
   };
 in
