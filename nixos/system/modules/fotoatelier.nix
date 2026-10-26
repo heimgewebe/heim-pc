@@ -11,6 +11,19 @@ let
   tools = lib.makeBinPath [ pkgs.openssh pkgs.git pkgs.python3 pkgs.coreutils ];
 in
 {
+  # Provision the exact writable roots before the user manager starts the
+  # sandboxed jobs. Scripts cannot create a missing ReadWritePaths mountpoint.
+  # No original photo source or public Git checkout is created here.
+  systemd.tmpfiles.rules = [
+    "d ${home}/.local 0700 alex users -"
+    "d ${home}/.local/share 0700 alex users -"
+    "d ${home}/.local/share/fotoatelier 0700 alex users -"
+    "d ${home}/.local/share/fotoatelier/backups 0700 alex users -"
+    "d ${home}/.local/share/fotoatelier/backups/current 0700 alex users -"
+    "d ${home}/.local/state 0700 alex users -"
+    "d ${stateRoot} 0700 alex users -"
+  ];
+
   systemd.user.services.fotoatelier-backup = {
     description = "Fotoatelier off-machine backup";
     after = [ "network-online.target" ];
@@ -47,6 +60,8 @@ in
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     unitConfig.ConditionUser = "alex";
+    # No auto-created empty Git checkout: missing publisher source is a skip.
+    unitConfig.ConditionPathExists = "${publicRepo}/.git";
     serviceConfig = {
       Type = "oneshot";
       WorkingDirectory = source;
