@@ -24,6 +24,28 @@ let
       fi
     '';
   };
+  # Rootless Podman needs setuid newuidmap/newgidmap exactly once on a cold
+  # runtime. Keep that fixed bootstrap in a separate user-owned system unit;
+  # never relax NoNewPrivileges on the network-facing Nixer MCP process.
+  holdNamespace = pkgs.writeShellApplication {
+    name = "heim-pc-nixer-hold-namespace";
+    runtimeInputs = [ pkgs.coreutils pkgs.podman ];
+    text = ''
+      set -eu
+      export PATH="/run/wrappers/bin:$PATH"
+      exec podman unshare sleep infinity
+    '';
+  };
+  checkNamespace = pkgs.writeShellApplication {
+    name = "heim-pc-nixer-check-namespace";
+    runtimeInputs = [ pkgs.coreutils pkgs.podman pkgs.util-linux ];
+    text = ''
+      set -eu
+      export PATH="/run/wrappers/bin:$PATH"
+      # This must work under NNP before systemd may start the MCP process.
+      setpriv --no-new-privs -- podman unshare true
+    '';
+  };
 in
 {
   options.heimPc.nixerHeadless.enable = lib.mkEnableOption
@@ -48,17 +70,45 @@ in
     # Scope is system, execution identity remains unprivileged. The /run
     # RuntimeDirectory exists without systemd --user, linger or a local login,
     # and belongs only to this service account for rootless Podman state.
+    # The holder is a fixed local command, with no network listener or MCP
+    # tools. Its private, short-lived runtime is shared only with Nixer.
+    systemd.services.nixer-podman-namespace = {
+      description = "Initialize and hold rootless Podman user namespace for Nixer";
+      wantedBy = [ "multi-user.target" ];
+      unitConfig.Upholds = "nixer-headless.service";
+      environment = {
+        HOME = "/home/alex";
+        XDG_RUNTIME_DIR = "/run/nixer-headless";
+      };
+      serviceConfig = {
+        Type = "exec";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        RuntimeDirectory = "nixer-headless";
+        RuntimeDirectoryMode = "0700";
+        RuntimeDirectoryPreserve = "yes";
+        ExecStart = "${holdNamespace}/bin/heim-pc-nixer-hold-namespace";
+        ExecStartPost = "${checkNamespace}/bin/heim-pc-nixer-check-namespace";
+        NoNewPrivileges = false;
+        Restart = "on-failure";
+        RestartSec = "2s";
+        UMask = "0077";
+      };
+    };
     systemd.services.nixer-headless = {
       description = "Nixer Nix specialist (headless system scope)";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
+      bindsTo = [ "nixer-podman-namespace.service" ];
+      after = [ "network-online.target" "nixer-podman-namespace.service" ];
       unitConfig = {
         StartLimitIntervalSec = "600s";
         StartLimitBurst = 3;
       };
       environment = {
         HOME = "/home/alex";
+        XDG_RUNTIME_DIR = "/run/nixer-headless";
         PYTHONDONTWRITEBYTECODE = "1";
         NIXER_REPO_ROOT = "/home/alex/repos";
         NIXER_DOCKER_BIN = "${pkgs.podman}/bin/podman";
@@ -77,6 +127,7 @@ in
         WorkingDirectory = "/home/alex";
         RuntimeDirectory = "nixer-headless";
         RuntimeDirectoryMode = "0700";
+        RuntimeDirectoryPreserve = "yes";
         ExecStartPre = "${checkImage}/bin/heim-pc-nixer-check-image";
         ExecStart =
           "${nixerPackage}/bin/nixer --transport streamable-http --host 127.0.0.1 --port 18187";
