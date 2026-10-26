@@ -1049,6 +1049,14 @@ PY
           # The existing NixOS Restic proof invokes the setuid sudo wrapper;
           # NNP=yes makes that path categorically unusable for the operator.
           assert !operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # A dedicated systemd-owned 0700 cache keeps gh log downloads functional
+          # without making the protected home directory writable.
+          assert operator.ProtectHome == "read-only";
+          assert operator.CacheDirectory == "grabowski-gh";
+          assert operator.CacheDirectoryMode == "0700";
+          assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-gh" operator.Environment;
+          assert !(builtins.elem "/home/alex" operator.ReadWritePaths);
+          assert !(builtins.elem "-/home/alex/.cache/gh" operator.ReadWritePaths);
           # ProtectSystem=strict needs writable mounts for Restic locks and Nix fetcher SQLite caches.
           assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
           assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;

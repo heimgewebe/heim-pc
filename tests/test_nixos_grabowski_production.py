@@ -16,6 +16,21 @@ TARBALL_HASH = "sha256-MQMQP0jcFdVkX0uLmmuUOfWIi2ID/1LBMMmN9FEVOU8="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
+    def test_systemd_gh_cache_is_private_with_protected_home(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn('CacheDirectory = "grabowski-gh";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-gh"', operator)
+        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertNotIn("ProtectHome = false;", operator)
+        writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
+        self.assertNotIn('"/home/alex"', writable)
+        self.assertNotIn('"/home/alex/.cache/gh"', writable)
+        self.assertIn('assert operator.CacheDirectory == "grabowski-gh";', flake)
+        self.assertIn('assert operator.CacheDirectoryMode == "0700";', flake)
+
     def test_exact_existing_broker_source_is_pinned(self):
         source = (MODULES / "grabowski-broker-package.nix").read_text()
         self.assertIn(f'sourceRevision = "{REVISION}";', source)

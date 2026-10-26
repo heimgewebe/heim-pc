@@ -216,6 +216,10 @@ in
         SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
+        # systemd owns this private persistent cache; never open all of $HOME.
+        # gh Actions logs require a write even for a read-only API request.
+        CacheDirectory = "grabowski-gh";
+        CacheDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = "2s";
         TimeoutStartSec = "20s";
@@ -227,6 +231,7 @@ in
         # original CLI on PATH. NixOS must supply the real immutable package.
         Environment = [
           "HOME=/home/alex"
+          "XDG_CACHE_HOME=/var/cache/grabowski-gh"
           "XDG_RUNTIME_DIR=/run/user/1000"
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
