@@ -77,6 +77,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('Group = "users";', production)
         self.assertIn("XDG_RUNTIME_DIR=/run/user/1000", production)
         self.assertIn("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", production)
+        self.assertIn("GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64", production)
 
 
     def test_full_operator_is_hash_locked_and_release_identity_is_shared(self):
