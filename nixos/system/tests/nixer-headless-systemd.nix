@@ -51,8 +51,6 @@ let
       home = "/home/alex";
       createHome = true;
       linger = false;
-      subUidRanges = [{ startUid = 100000; count = 65536; }];
-      subGidRanges = [{ startGid = 100000; count = 65536; }];
     };
     services.getty.autologinUser = null;
     virtualisation.podman.enable = true;
@@ -81,6 +79,8 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     missing.start()
     missing.wait_for_unit("multi-user.target", timeout=180)
+    missing.succeed("test $(grep -xc 'alex:100000:65536' /etc/subuid) = 1")
+    missing.succeed("test $(grep -xc 'alex:100000:65536' /etc/subgid) = 1")
     missing.wait_until_succeeds("systemctl is-active nixer-podman-namespace.service", timeout=180)
     missing.succeed("systemctl show nixer-podman-namespace.service --property=NoNewPrivileges --value | grep -qx no")
     with subtest("missing pinned OCI image denies headless Nixer start"):
