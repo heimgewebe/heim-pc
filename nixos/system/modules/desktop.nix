@@ -7,6 +7,14 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.wayland.enable = true;
     services.desktopManager.plasma6.enable = true;
 
+    # SDDM already uses kwallet-pam through its PAM login include. XRDP has
+    # a separate PAM stack; unlock only after password authentication there.
+    # Headless SSH/RustDesk startup must not require or persist this password.
+    security.pam.services.xrdp-sesman.kwallet = lib.mkIf config.services.xrdp.enable {
+      enable = true;
+      forceRun = true;
+    };
+
     # Start a separate Plasma X11 desktop through XRDP; keep local Wayland.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
