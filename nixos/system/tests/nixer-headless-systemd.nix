@@ -43,11 +43,11 @@ let
     ];
     system.stateVersion = "26.05";
     networking.hostName = "nixer-headless-proof";
-    users.groups.alex = { };
     users.users.alex = {
       isNormalUser = true;
       uid = 1000;
-      group = "alex";
+      # Match the physical host primary GID: newuidmap validates passwd GID.
+      group = "users";
       home = "/home/alex";
       createHome = true;
       linger = false;

@@ -52,6 +52,11 @@ in
     "Nixer as a system-owned, login-independent, unprivileged specialist";
 
   config = lib.mkIf cfg.enable {
+    # Preserve the host-verified subordinate-ID ranges under NixOS rebuilds.
+    # They are required by rootless Podman and match /etc/subuid/subgid.
+    users.users.alex.subUidRanges = [{ startUid = 100000; count = 65536; }];
+    users.users.alex.subGidRanges = [{ startGid = 100000; count = 65536; }];
+
     assertions = [
       {
         assertion = config.virtualisation.podman.enable;
