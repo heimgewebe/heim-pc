@@ -158,6 +158,12 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('"$out/bin/grabowski-privileged-request"', broker)
         self.assertIn("GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker", prod)
         self.assertIn('PATH=${cfg.brokerPackage}/bin:', prod)
+        self.assertIn('"GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"', prod)
+        self.assertIn('"GRABOWSKI_CODEX_BIN=${pkgs.codex}/bin/codex"', prod)
+        self.assertNotIn('"GRABOWSKI_BWRAP_BIN=/usr/bin/bwrap"', prod)
+        self.assertNotIn('"GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"', prod)
+        self.assertIn("GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap", (ROOT / "nixos/system/flake.nix").read_text())
+        self.assertIn("GRABOWSKI_CODEX_BIN=${pkgs.codex}/bin/codex", (ROOT / "nixos/system/flake.nix").read_text())
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-request", (ROOT / "nixos/system/flake.nix").read_text())
         for original_peer_gate in (
             "systemd_main_pid != pid",

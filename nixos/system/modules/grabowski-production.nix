@@ -289,6 +289,11 @@ in
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
+          # Root-owned immutable Nix-store tools for the existing exact-route
+          # independent R3 reviewer sandbox. Host /usr/bin does not exist on
+          # NixOS; user-writable PATH shims cannot establish review provenance.
+          "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
+          "GRABOWSKI_CODEX_BIN=${pkgs.codex}/bin/codex"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # The native NixOS Restic restore probe uses the existing setuid sudo
