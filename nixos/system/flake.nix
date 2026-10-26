@@ -1049,17 +1049,21 @@ PY
           # The existing NixOS Restic proof invokes the setuid sudo wrapper;
           # NNP=yes makes that path categorically unusable for the operator.
           assert !operator.NoNewPrivileges && operator.ProtectSystem == "strict";
-          # A dedicated systemd-owned 0700 cache keeps gh log downloads functional
-          # without making the protected home directory writable.
+          # Private 0700 systemd cache supports all XDG-aware CLI tools;
+          # Nix and gh must not silently reopen protected home caches.
           assert operator.ProtectHome == "read-only";
-          assert operator.CacheDirectory == "grabowski-gh";
+          assert operator.CacheDirectory == "grabowski-xdg";
           assert operator.CacheDirectoryMode == "0700";
-          assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-gh" operator.Environment;
-          assert !(builtins.elem "/home/alex" operator.ReadWritePaths);
-          assert !(builtins.elem "-/home/alex/.cache/gh" operator.ReadWritePaths);
-          # ProtectSystem=strict needs writable mounts for Restic locks and Nix fetcher SQLite caches.
+          assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-xdg" operator.Environment;
+          assert builtins.all
+            (entry:
+              let normalized = nixpkgs.lib.removePrefix "-" entry;
+              in normalized != "/home/alex"
+                && !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
+            operator.ReadWritePaths;
+          # ProtectSystem=strict still needs the backup repository lock mount.
           assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
-          assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
+          assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);
           # Optional ReadWritePaths is ineffective if the target is missing on cold start.
           assert builtins.elem "d /home/alex/.cache 0755 alex users -" proof.systemd.tmpfiles.rules;
           assert builtins.elem "d /home/alex/.cache/nix 0755 alex users -" proof.systemd.tmpfiles.rules;
