@@ -49,6 +49,14 @@ in
   };
 
   config = {
+    # Keep the exact derivation-backed executable available in both the
+    # system Grabowski service and headless user-systemd review jobs.
+    # /home is intentionally read-only, so user environment.d must live
+    # under the declarative /etc tree, not in ~/.config.
+    environment.etc."environment.d/60-grabowski-bwrap.conf" = lib.mkIf admit {
+      text = "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap\n";
+    };
+
     assertions = [
       {
         assertion = !cfg.enable || packagesPresent;
@@ -232,6 +240,7 @@ in
           "PYTHONUNBUFFERED=1"
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
+          "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # The native NixOS Restic restore probe uses the existing setuid sudo

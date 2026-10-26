@@ -39,6 +39,10 @@
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
       "--retry-lock=30m"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
+      # Even a dump created after backupPrepareCommand must never enter Restic.
+      # The owner-private exclude file can contain negations; this immutable
+      # rule therefore comes LAST and protects the snapshot itself.
+      "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-plaintext-excludes" "**/*.sql.gz\n"}"
     ];
     # stat(2) triggers the automount; never back up to an empty host path.
     backupPrepareCommand = ''
