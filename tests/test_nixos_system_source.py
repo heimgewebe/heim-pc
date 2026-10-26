@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "4aeb11dc76daf7bca2593c395a7aafd740e34e562303761ee2e1d7865c575d5f"
+SOURCE_SNAPSHOT_SHA256 = "ce18db5be5f50d02d32b666541f87905eee870288c9bf6063eb18854ceb8719d"
 ROOT_LOCK_SHA256 = "55953b401cbea6c10dead4f86b6a59ec2b83a845ff3312a1b5746aef75014ee7"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -289,13 +289,34 @@ class T(unittest.TestCase):
             proof,
         )
 
+    def test_stage0_no_usb_is_nonproductive_and_isolated(self):
+        flake = (SOURCE / "flake.nix").read_text()
+        stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
+        self.assertIn("nixosConfigurations.heim-pc-stage0", flake)
+        self.assertIn("stage0-no-usb-contract", flake)
+        self.assertIn("heim-pc-stage0-system", flake)
+        self.assertIn('rootDevice = "/dev/disk/by-label/NIXOS_STAGE0_ROOT";', stage0)
+        self.assertIn('device = "/dev/disk/by-label/NIXOS2_EFI";', stage0)
+        self.assertIn("boot.loader.efi.canTouchEfiVariables = false;", stage0)
+        self.assertIn("services.openssh.enable = false;", stage0)
+        self.assertIn("users.mutableUsers = true;", stage0)
+        self.assertIn("security.sudo.wheelNeedsPassword = true;", stage0)
+        self.assertNotIn("autologinUser =", stage0)
+        self.assertNotIn("initialPassword", stage0)
+        self.assertNotIn("hashedPassword =", stage0)
+        self.assertNotIn("nvme0n1", stage0)
+        self.assertNotIn("nvme1n1", stage0)
+        self.assertNotIn("mkfs", stage0)
+        self.assertNotIn("tpm2", stage0.lower())
+        self.assertNotIn("nixos_production_install", stage0)
+
     def test_current_nixos_source_snapshot_is_bound(self):
         digest = hashlib.sha256()
         files = sorted(path for path in SOURCE.rglob("*") if path.is_file())
         for path in files:
             relative = str(path.relative_to(SOURCE)).encode()
             digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(len(files), 31)
+        self.assertEqual(len(files), 32)
         self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_canonical_source_layout(self):
