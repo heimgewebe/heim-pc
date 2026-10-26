@@ -211,12 +211,51 @@ in
       };
     };
 
+    # An independently root-governed Nix source pins the contract schema.
+    # An environment.etc symlink is NOT an acceptable recovery trust anchor:
+    # the portable verifier demands a root-owned, regular single-link inode.
+    systemd.services.grabowski-runtime-schema-install = lib.mkIf admit {
+      description = "Install pinned root-owned Grabowski contract validator";
+      requires = [ "grabowski-private-policy-install.service" ];
+      after = [ "local-fs.target" "grabowski-private-policy-install.service" ];
+      before = [ "grabowski-operator.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "root";
+        Group = "root";
+        ExecStart = "${pkgs.python312}/bin/python3 -I -B ${./grabowski-runtime-schema-install.py} ${cfg.operatorPackage}/lib/python3.12/site-packages/grabowski_runtime_contract.py";
+        ConfigurationDirectory = "grabowski";
+        ConfigurationDirectoryMode = "0755";
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateNetwork = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/etc/grabowski" ];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        RestrictNamespaces = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = "~@mount @module @reboot @swap";
+        SystemCallErrorNumber = "EPERM";
+        CapabilityBoundingSet =
+          "~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME";
+      };
+    };
+
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];
-      after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-privileged-broker.socket" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];
+      after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "grabowski-privileged-broker.socket" ];
       serviceConfig = {
         Type = "simple";
         User = "alex";
