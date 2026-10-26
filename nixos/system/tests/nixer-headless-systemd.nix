@@ -8,7 +8,8 @@ let
 
     expected = {
         "nixer_status", "flake_metadata", "flake_show", "flake_check",
-        "eval_attr", "nixos_option", "derivation_show", "build_dry_run",
+        "eval_attr", "nixos_option", "nixos_options",
+        "derivation_show", "build_dry_run",
     }
 
     async def main():
@@ -88,6 +89,10 @@ pkgs.testers.runNixOSTest {
             "--value | grep -qx alex"
         )
         missing.succeed(
+            "systemctl show nixer-headless.service --property=NoNewPrivileges "
+            "--value | grep -qx yes"
+        )
+        missing.succeed(
             "systemctl show nixer-headless.service --property=ExecStartPre "
             "| grep -Fq heim-pc-nixer-check-image"
         )
@@ -115,7 +120,11 @@ pkgs.testers.runNixOSTest {
             "systemctl show nixer-headless.service --property=User "
             "--value | grep -qx alex"
         )
-    with subtest("original eight-tool Nixer MCP initializes on localhost"):
+        proof.succeed(
+            "systemctl show nixer-headless.service --property=NoNewPrivileges "
+            "--value | grep -qx yes"
+        )
+    with subtest("original nine-tool Nixer MCP initializes on localhost"):
         proof.wait_until_succeeds(
             "PYTHONDONTWRITEBYTECODE=1 "
             "${clientPython}/bin/python -B ${verifyMcp}",

@@ -70,6 +70,10 @@ in
         Type = "simple";
         User = "alex";
         Group = "users";
+        # Prevent sudo/setuid privilege gain from this unprivileged specialist.
+        # Real pinned Podman flake metadata and nixos_options batch evaluations
+        # succeed under NoNewPrivileges, while a sudo root attempt is denied.
+        NoNewPrivileges = true;
         WorkingDirectory = "/home/alex";
         RuntimeDirectory = "nixer-headless";
         RuntimeDirectoryMode = "0700";
@@ -84,10 +88,10 @@ in
         IOWeight = 50;
         # Full flake checks exceeded 8 GiB on this 62 GiB host.
         # Do not impose an artificial cgroup memory limit on Nixer.
-        # Do not mount/seccomp-sandbox the parent rootless Podman caller:
-        # newuidmap/newgidmap may need the NixOS privileged wrapper path.
-        # The pinned Nixer backend confines the child container, binds repo
-        # mounts read-only, and never accepts arbitrary shell commands.
+        # Keep the working parent filesystem/sandbox unchanged: rootless
+        # Podman still needs its namespace helpers and read-only repo mounts.
+        # The pinned Nixer child container has its own no-new-privileges gate
+        # and never accepts arbitrary shell commands.
       };
     };
   };

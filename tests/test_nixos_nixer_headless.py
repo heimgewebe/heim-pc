@@ -21,6 +21,8 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', text)
         self.assertIn('User = "alex";', text)
         self.assertIn('Group = "users";', text)
+        self.assertIn("NoNewPrivileges = true;", text)
+        self.assertNotIn("NoNewPrivileges = false;", text)
         self.assertIn('RuntimeDirectory = "nixer-headless";', text)
         self.assertIn('RuntimeDirectoryMode = "0700";', text)
         self.assertNotIn('!config.users.users.alex.linger', text)
@@ -66,10 +68,12 @@ class NixerHeadlessSourceTests(unittest.TestCase):
             proof,
         )
         self.assertIn(
-            'with subtest("original eight-tool Nixer MCP initializes on localhost")',
+            'with subtest("original nine-tool Nixer MCP initializes on localhost")',
             proof,
         )
         self.assertIn('"nixer_status"', proof)
+        self.assertIn('"nixos_options"', proof)
+        self.assertEqual(proof.count("--property=NoNewPrivileges"), 2)
         self.assertNotIn("systemd.user.services.nixer =", proof)
 
     def test_separate_nixer_candidate_cannot_change_headless_base(self):
