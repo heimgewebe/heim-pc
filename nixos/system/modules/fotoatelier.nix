@@ -89,8 +89,8 @@ in
     wantedBy = [ "timers.target" ];
     unitConfig.ConditionUser = "alex";
     timerConfig = {
-      OnBootSec = "1min";
-      OnUnitActiveSec = "5min";
+      # Calendar re-arms even when ConditionPathExists skips the first start.
+      OnCalendar = "*-*-* *:00/5:00";
       AccuracySec = "30s";
       Persistent = true;
       Unit = "fotoatelier-public-sync.service";

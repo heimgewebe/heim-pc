@@ -123,8 +123,10 @@ class FotoatelierNixOSSourceTests(unittest.TestCase):
         self.assertEqual(source.count('wantedBy = [ "timers.target" ];'), 2)
         self.assertIn('OnCalendar = "*-*-* 08,12,16,20:20:00";', source)
         self.assertIn('RandomizedDelaySec = "20min";', source)
-        self.assertIn('OnUnitActiveSec = "5min";', source)
-        self.assertIn('OnBootSec = "1min";', source)
+        # Calendar triggers keep firing even when ConditionPathExists skips the first run.
+        self.assertIn('OnCalendar = "*-*-* *:00/5:00";', source)
+        self.assertNotIn('OnUnitActiveSec = ', source)
+        self.assertNotIn('OnBootSec = ', source)
         self.assertIn('GIT_SSH_COMMAND=${pkgs.openssh}/bin/ssh -F ${sshConfig}', source)
         self.assertIn('FOTOATELIER_SSH_CONFIG=${sshConfig}', source)
         self.assertEqual(source.count('Persistent = true;'), 2)
