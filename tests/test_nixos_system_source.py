@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "bd7ccb3cab46ba4289ef4962d90049b4f770a98fbb6c0a6615d778cca15a42f0"
+SOURCE_SNAPSHOT_SHA256 = "bf9359cf039aa912c6e264646597ac1bffde410fdc0785c7c67deed092aaed62"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -399,6 +399,9 @@ class T(unittest.TestCase):
         self.assertIn('TimeoutStartSec = "75min"', module)
         operator = (SOURCE / "modules/grabowski-production.nix").read_text()
         self.assertNotIn('NoNewPrivileges = false;', operator)
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('rootResticProof = cfg.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;', flake)
+        self.assertIn('assert cfg.security.polkit.enable;', flake)
         self.assertNotIn('"-/var/lib/heim-pc-backup"', operator)
 
     def test_canonical_source_layout(self):

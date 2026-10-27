@@ -251,9 +251,10 @@ in
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
-        # Privileged Restic runs only inside the fixed root-owned systemd unit.
-        # An exact-unit polkit grant handles its start; operator descendants
-        # cannot promote privileges via a setuid sudo wrapper.
+        # Polkit starts only the fixed root-owned Restic proof. NNP prevents
+        # setuid escalation in this system service's own process tree. Jobs
+        # launched separately by systemd-run --user remain under the existing
+        # alex host sudo policy; they are NOT constrained by this NNP setting.
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";

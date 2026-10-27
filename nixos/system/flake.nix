@@ -906,6 +906,7 @@ PY
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
+            rootResticProof = cfg.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
               inherit pkgs;
@@ -941,6 +942,25 @@ PY
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
           assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
+          # The NNP service loses sudo fallback: assert the exact polkit grant,
+          # root-owned executable, safe cache and complete unit time budget.
+          assert cfg.security.polkit.enable;
+          assert nixpkgs.lib.hasInfix
+            "action.lookup(\"unit\") === \"heim-pc-restic-recovery-probe.service\""
+            cfg.security.polkit.extraConfig;
+          assert nixpkgs.lib.hasInfix
+            "action.lookup(\"verb\") === \"start\""
+            cfg.security.polkit.extraConfig;
+          assert nixpkgs.lib.hasInfix "subject.user === \"alex\""
+            cfg.security.polkit.extraConfig;
+          assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
+          assert rootResticProof.TimeoutStartSec == "75min";
+          assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;
+          assert rootResticProof.CacheDirectory == "heim-pc-restic-recovery-probe";
+          assert builtins.elem "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"
+            rootResticProof.Environment;
+          assert builtins.elem "CAP_DAC_READ_SEARCH" rootResticProof.CapabilityBoundingSet;
+          assert !(builtins.elem "CAP_SYS_ADMIN" rootResticProof.CapabilityBoundingSet);
           assert builtins.elem "grabowski-private-policy-install.service" op.requires;
           assert builtins.elem "grabowski-privileged-broker.socket" op.requires;
           assert policy.serviceConfig.User == "root";
@@ -1046,9 +1066,9 @@ PY
           assert builtins.elem
             "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
-          # The native proof now runs as a fixed root-owned systemd unit with
-          # exact polkit admission. Operator privileges cannot be elevated by
-          # setuid sudo, nor write directly to the Restic repository.
+          # This system service's own process tree cannot gain root via
+          # setuid sudo. Separately launched user units retain the explicitly
+          # configured host sudo policy; this check does not claim otherwise.
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
           assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);
           assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
