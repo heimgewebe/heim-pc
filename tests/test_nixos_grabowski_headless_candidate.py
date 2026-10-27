@@ -45,9 +45,10 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         base = BASE.read_text()
         self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", base)
         self.assertIn("config.security.sudo.wheelNeedsPassword;", base)
-        self.assertNotIn("security.sudo.extraRules = [{", base)
-        self.assertNotIn('command = "ALL"; options = [ "NOPASSWD" ];', base)
-        self.assertIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', base)
+        self.assertIn("security.sudo.extraRules = [{", base)
+        self.assertIn('users = [ "alex" ];', base)
+        self.assertIn('command = "ALL"; options = [ "NOPASSWD" ];', base)
+        self.assertNotIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', base)
         # Existing SSH and rootbroker recovery paths remain configured.
         self.assertIn("PermitRootLogin = \"no\";", base)
         self.assertIn("AllowUsers = [ \"alex\" ];", base)
