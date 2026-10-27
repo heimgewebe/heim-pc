@@ -195,7 +195,7 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                 with patch.object(probe, "_command", side_effect=["", "", output]) as command:
                     if should_succeed:
                         self.assertEqual(probe._backup_timer_ready(), (
-                            "a" * 32, now - 120, now - 60, 27211406222))
+                            "a" * 32, now - 120, now - 60, 27174979444, 27211406222))
                     else:
                         with self.assertRaisesRegex(RuntimeError, "has not succeeded"):
                             probe._backup_timer_ready()
@@ -205,20 +205,72 @@ class RootOwnedResticProbeTests(unittest.TestCase):
     def test_snapshot_must_belong_to_completed_backup_run(self) -> None:
         now = int(probe.time.time())
         row = snapshot_row(datetime.fromtimestamp(now - 600, timezone.utc))
+        run = ("a" * 32, now - 1200, now - 300, 1_000_000, 10_000_000)
         with patch.object(probe, "_restic", return_value=json.dumps([row])):
-            run = ("a" * 32, now - 1200, now - 300, 27211406222)
-            self.assertEqual(probe._snapshot_for_backup_run(now, run),
-                             (row["id"], now - 600))
-            with self.assertRaisesRegex(RuntimeError, "not from the successful"):
-                probe._snapshot_for_backup_run(
-                    now, ("b" * 32, now - 200, now - 100, 27211406222))
+            with patch.object(probe, "_require_backup_snapshot_in_journal") as journal:
+                self.assertEqual(probe._snapshot_for_backup_run(now, run),
+                                 (row["id"], now - 600))
+                journal.assert_called_once_with(row["id"], run)
+                with self.assertRaisesRegex(RuntimeError, "not from the successful"):
+                    probe._snapshot_for_backup_run(
+                        now, ("b" * 32, now - 200, now - 100, 1_000_000, 10_000_000))
+                journal.assert_called_once()
+
+    def test_snapshot_journal_marker_is_bound_to_real_service_invocation(self) -> None:
+        now = int(probe.time.time())
+        run = ("a" * 32, now - 1200, now - 300, 1_000_000, 10_000_000)
+        full_id = "cef8366c" + "1" * 56
+        event = {
+            "_SYSTEMD_INVOCATION_ID": run[0],
+            "_SYSTEMD_UNIT": "restic-backups-heim-pc.service",
+            "MESSAGE": "snapshot cef8366c saved",
+            "__REALTIME_TIMESTAMP": str((now - 600) * 1_000_000 + 19),
+            "__MONOTONIC_TIMESTAMP": "5500000",
+        }
+        expected_command = [
+            "journalctl", "--system", "--no-pager", "--output=json", "-n", "300",
+            "_SYSTEMD_INVOCATION_ID=" + run[0],
+        ]
+        cases = (
+            ("actual_journal_marker", [event], True),
+            ("no_markers", [{**event, "MESSAGE": "processed files"}], False),
+            ("wrong_snapshot", [{**event, "MESSAGE": "snapshot deadbeef saved"}], False),
+            ("wrong_invocation", [{**event, "_SYSTEMD_INVOCATION_ID": "b" * 32}], False),
+            ("other_unit", [{**event, "_SYSTEMD_UNIT": "foreign.service"}], False),
+            ("before_start", [{**event, "__REALTIME_TIMESTAMP":
+                               str((now - 1300) * 1_000_000)}], False),
+            ("after_exit", [{**event, "__REALTIME_TIMESTAMP":
+                             str((now - 200) * 1_000_000)}], False),
+            ("before_mono", [{**event, "__MONOTONIC_TIMESTAMP": "999999"}], False),
+            ("after_mono", [{**event, "__MONOTONIC_TIMESTAMP": "11000000"}], False),
+            ("non_numeric_mono", [{**event, "__MONOTONIC_TIMESTAMP": "+5500000"}], False),
+            ("missing_realtime", [{k: v for k, v in event.items()
+                                   if k != "__REALTIME_TIMESTAMP"}], False),
+            ("double_marker", [event, event], False),
+            ("foreign_row", [event, {**event, "_SYSTEMD_UNIT": "foreign.service"}], False),
+            ("no_rows", [], False),
+        )
+        for label, rows, should_succeed in cases:
+            with self.subTest(label=label):
+                output = "\n".join(json.dumps(row) for row in rows)
+                with patch.object(probe, "_command", return_value=output) as call:
+                    if should_succeed:
+                        probe._require_backup_snapshot_in_journal(full_id, run)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            probe._require_backup_snapshot_in_journal(full_id, run)
+                    call.assert_called_once_with(expected_command, timeout=30)
+        with patch.object(probe, "_command", return_value="{broken") as call:
+            with self.assertRaisesRegex(RuntimeError, "journal evidence is malformed"):
+                probe._require_backup_snapshot_in_journal(full_id, run)
+            call.assert_called_once_with(expected_command, timeout=30)
 
     def test_recovery_rejects_changed_systemd_invocation_before_publishing(self) -> None:
-        expected = ("a" * 32, 100, 200, 300000)
+        expected = ("a" * 32, 100, 200, 100000, 300000)
         with patch.object(probe, "_backup_timer_ready", return_value=expected):
             probe._require_backup_run_unchanged(expected)
         with patch.object(probe, "_backup_timer_ready",
-                          return_value=("b" * 32, 100, 200, 300000)):
+                          return_value=("b" * 32, 100, 200, 100000, 300000)):
             with self.assertRaisesRegex(RuntimeError, "invocation changed"):
                 probe._require_backup_run_unchanged(expected)
 
