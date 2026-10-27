@@ -277,6 +277,68 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
                     self.assertEqual(stats.st_mode & 0o777, 0o755)
 
 
+    def test_operator_writable_paths_exist_on_fresh_home_before_sandbox(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        rules = production.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
+        operator = production.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        expected = (
+            ("d /home/alex/.local 0755 alex users -", 0o755),
+            ("d /home/alex/.local/state 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/grabowski 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/bureau 0700 alex users -", 0o700),
+            ("d /home/alex/repos 0755 alex users -", 0o755),
+            ("d /home/alex/grabowski-workspace 0700 alex users -", 0o700),
+            ("d /home/alex/worktrees 0700 alex users -", 0o700),
+        )
+        # The operator's real writable home paths must all be provisioned.
+        self.assertIn('ProtectHome = "read-only";', operator)
+        for line, _mode in expected:
+            absolute = line.split()[1]
+            self.assertIn(f'"{line}"', rules)
+            if absolute in {
+                "/home/alex/.local/state/grabowski",
+                "/home/alex/.local/state/bureau",
+                "/home/alex/repos",
+                "/home/alex/grabowski-workspace",
+                "/home/alex/worktrees",
+            }:
+                self.assertIn(f'"-{absolute}"', operator)
+        self.assertLess(rules.index(expected[0][0]), rules.index(expected[1][0]))
+        self.assertLess(rules.index(expected[1][0]), rules.index(expected[2][0]))
+
+        tmpfiles = shutil.which("systemd-tmpfiles")
+        if tmpfiles is None:
+            self.skipTest("systemd-tmpfiles not installed on test host")
+        # Real systemd-tmpfiles --root; never create/change a real user home.
+        with tempfile.TemporaryDirectory(prefix="grabowski-fresh-home-") as tmp:
+            root = Path(tmp) / "root"
+            (root / "etc").mkdir(parents=True)
+            uid, gid = os.getuid(), os.getgid()
+            (root / "etc/passwd").write_text(
+                f"root:x:0:0:root:/root:/bin/sh\n"
+                f"alex:x:{uid}:{gid}:alex:/home/alex:/bin/sh\n"
+            )
+            (root / "etc/group").write_text(
+                f"root:x:0:\nusers:x:{gid}:alex\n"
+            )
+            config_file = Path(tmp) / "operator-tmpfiles.conf"
+            config_file.write_text("\n".join(line for line, _mode in expected) + "\n")
+            paths = [(root / line.split()[1].lstrip("/"), mode) for line, mode in expected]
+            self.assertTrue(all(not path.exists() for path, _mode in paths))
+            for _ in range(2):
+                result = subprocess.run(
+                    [tmpfiles, f"--root={root}", "--create", str(config_file)],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, mode in paths:
+                    self.assertTrue(path.is_dir(), str(path))
+                    info = path.stat()
+                    self.assertEqual((info.st_uid, info.st_gid), (uid, gid))
+                    self.assertEqual(info.st_mode & 0o777, mode)
+
+
+
 class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
     """Exercise the real adapter's metadata producer, not source-text anchors."""
 
