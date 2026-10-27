@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 {
   # The Seagate host boots without the external backup disk. The mount is
   # mounted on demand and released after idle; a missing disk must never
@@ -62,4 +62,41 @@
     unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" ];
     serviceConfig.TimeoutStartSec = "0";
   };
+
+  # Fixed, root-owned restore evidence. The operator can trigger exactly this
+  # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
+  systemd.services."heim-pc-restic-recovery-probe" = {
+    description = "Root-owned NixOS Restic restore and repository-integrity proof";
+    unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+      Group = "root";
+      ExecStart = "${pkgs.python3}/bin/python3 -I -B ${./heim-pc-restic-recovery-probe.py}";
+      Environment = [
+        "PATH=${lib.makeBinPath [ pkgs.restic pkgs.util-linux pkgs.systemd pkgs.coreutils ]}"
+        "LC_ALL=C"
+      ];
+      StateDirectory = "heim-pc-restic-recovery-probe";
+      StateDirectoryMode = "0755";
+      UMask = "0022";
+      TimeoutStartSec = "45min";
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      ReadWritePaths = [ "/var/lib/heim-pc-backup" "/var/lib/heim-pc-restic-recovery-probe" ];
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      RestrictNamespaces = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
+      SystemCallArchitectures = "native";
+    };
+  };
+
 }
