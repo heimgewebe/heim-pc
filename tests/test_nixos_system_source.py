@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "8f21c1237c0c24066c5aacceeb812c7bcf2509bbdc0b383809853a6da43f60cb"
+SOURCE_SNAPSHOT_SHA256 = "6b59604ceed64081415f2c421047d2dbd2d561c8f33c5458986d3e03fba17d4c"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -396,6 +396,9 @@ class T(unittest.TestCase):
         self.assertNotIn('polkit.addRule', module)
         self.assertIn('CacheDirectory = "heim-pc-restic-recovery-probe"', module)
         self.assertIn('TimeoutStartSec = "75min"', module)
+        vm = (SOURCE / "tests/grabowski-headless-systemd.nix").read_text()
+        self.assertIn("completed systemd unit has numeric unix invocation timestamps", vm)
+        self.assertIn('"systemctl --system --timestamp=unix show "', vm)
         operator = (SOURCE / "modules/grabowski-production.nix").read_text()
         self.assertNotIn('NoNewPrivileges = false;', operator)
         flake = (SOURCE / "flake.nix").read_text()
