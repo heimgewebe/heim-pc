@@ -1046,11 +1046,11 @@ PY
           assert builtins.elem
             "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
-          # The existing NixOS Restic proof invokes the setuid sudo wrapper;
-          # NNP=yes makes that path categorically unusable for the operator.
-          assert !operator.NoNewPrivileges && operator.ProtectSystem == "strict";
-          # ProtectSystem=strict needs writable mounts for Restic locks and Nix fetcher SQLite caches.
-          assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
+          # The native proof now runs as a fixed root-owned systemd unit with
+          # exact polkit admission. Operator privileges cannot be elevated by
+          # setuid sudo, nor write directly to the Restic repository.
+          assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);
           assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
           # Optional ReadWritePaths is ineffective if the target is missing on cold start.
           assert builtins.elem "d /home/alex/.cache 0755 alex users -" proof.systemd.tmpfiles.rules;
