@@ -149,6 +149,43 @@ class RootOwnedResticProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "restore type or size"):
                 probe._read_regular_restored_bytes(str(stage), probe.SOURCE, len(payload))
 
+    def test_backup_timer_requires_completed_successful_service_invocation(self) -> None:
+        show = [
+            "systemctl", "show", "-p", "Result", "-p", "ExecMainStatus",
+            "-p", "ExecMainCode", "-p", "ExecMainExitTimestampMonotonic",
+            "restic-backups-heim-pc.service",
+        ]
+        good = {
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "ExecMainCode": "1",
+            "ExecMainExitTimestampMonotonic": "27211406222",
+        }
+        cases = (
+            ("real_completed_backup", good, True),
+            ("never_executed", {**good, "ExecMainCode": "0",
+                                "ExecMainExitTimestampMonotonic": "0"}, False),
+            ("missing_completion_time", {**good, "ExecMainExitTimestampMonotonic": "0"}, False),
+            ("missing_exit_code", {key: value for key, value in good.items()
+                                   if key != "ExecMainCode"}, False),
+            ("failed_exit", {**good, "ExecMainStatus": "1"}, False),
+            ("signalled", {**good, "ExecMainCode": "2"}, False),
+            ("failed_result", {**good, "Result": "exit-code"}, False),
+            ("non_numeric_time", {**good, "ExecMainExitTimestampMonotonic": ""}, False),
+            ("duplicate_result", {**good, "Other": "success"}, False),
+        )
+        for case, fields, should_succeed in cases:
+            with self.subTest(case=case):
+                output = "\n".join(f"{key}={value}" for key, value in fields.items()) + "\n"
+                with patch.object(probe, "_command", side_effect=["", "", output]) as command:
+                    if should_succeed:
+                        probe._backup_timer_ready()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "has not succeeded"):
+                            probe._backup_timer_ready()
+                    self.assertEqual(command.call_count, 3)
+                    self.assertEqual(command.call_args_list[2].args[0], show)
+
     def test_root_receipt_atomic_write_and_no_secret_content(self) -> None:
         record = {"schema_version":1,"kind":"heim_pc.nixos_restic_recovery_root_proof",
                   "restore_sha256":"b"*64}

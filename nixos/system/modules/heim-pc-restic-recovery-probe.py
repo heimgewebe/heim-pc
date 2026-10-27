@@ -170,9 +170,25 @@ def _restore_digest(snapshot_id: str) -> str:
 def _backup_timer_ready() -> None:
     for operation in ("is-enabled", "is-active"):
         _command(["systemctl", operation, "--quiet", "restic-backups-heim-pc.timer"])
-    status = _command(["systemctl", "show", "-p", "Result", "-p", "ExecMainStatus",
-                       "restic-backups-heim-pc.service"]).splitlines()
-    if "Result=success" not in status or "ExecMainStatus=0" not in status:
+    status = _command([
+        "systemctl", "show", "-p", "Result", "-p", "ExecMainStatus",
+        "-p", "ExecMainCode", "-p", "ExecMainExitTimestampMonotonic",
+        "restic-backups-heim-pc.service",
+    ]).splitlines()
+    # A never-started oneshot may report Result=success and ExecMainStatus=0.
+    # Only a normally exited process with a real completion timestamp counts.
+    completed = [
+        line.partition("=")[2]
+        for line in status
+        if line.startswith("ExecMainExitTimestampMonotonic=")
+    ]
+    if (
+        len(status) != 4
+        or not {"Result=success", "ExecMainStatus=0", "ExecMainCode=1"}.issubset(status)
+        or len(completed) != 1
+        or re.fullmatch(r"[0-9]+", completed[0]) is None
+        or int(completed[0]) == 0
+    ):
         raise RuntimeError("native Restic system backup service has not succeeded")
 
 
