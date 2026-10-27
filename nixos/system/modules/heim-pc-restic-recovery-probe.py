@@ -167,29 +167,63 @@ def _restore_digest(snapshot_id: str) -> str:
         return restored_sha
 
 
-def _backup_timer_ready() -> None:
+def _backup_timer_ready() -> tuple[str, int, int, int]:
+    """Identify one completed successful service invocation, not stale unit defaults."""
     for operation in ("is-enabled", "is-active"):
         _command(["systemctl", operation, "--quiet", "restic-backups-heim-pc.timer"])
-    status = _command([
-        "systemctl", "show", "-p", "Result", "-p", "ExecMainStatus",
-        "-p", "ExecMainCode", "-p", "ExecMainExitTimestampMonotonic",
+    properties = (
+        "LoadState", "Result", "ExecMainStatus", "ExecMainCode",
+        "ExecMainStartTimestamp", "ExecMainExitTimestamp",
+        "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic",
+        "InvocationID",
+    )
+    output = _command([
+        "systemctl", "--timestamp=unix", "show",
+        *[part for key in properties for part in ("-p", key)],
         "restic-backups-heim-pc.service",
-    ]).splitlines()
-    # A never-started oneshot may report Result=success and ExecMainStatus=0.
-    # Only a normally exited process with a real completion timestamp counts.
-    completed = [
-        line.partition("=")[2]
-        for line in status
-        if line.startswith("ExecMainExitTimestampMonotonic=")
-    ]
+    ])
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key not in properties or key in values:
+            raise RuntimeError("native Restic system backup service has not succeeded")
+        values[key] = value
     if (
-        len(status) != 4
-        or not {"Result=success", "ExecMainStatus=0", "ExecMainCode=1"}.issubset(status)
-        or len(completed) != 1
-        or re.fullmatch(r"[0-9]+", completed[0]) is None
-        or int(completed[0]) == 0
+        set(values) != set(properties)
+        or values["LoadState"] != "loaded"
+        or values["Result"] != "success"
+        or values["ExecMainStatus"] != "0"
+        or values["ExecMainCode"] != "1"
+        or re.fullmatch(r"[0-9a-f]{32}", values["InvocationID"]) is None
     ):
         raise RuntimeError("native Restic system backup service has not succeeded")
+    try:
+        started_mono = int(values["ExecMainStartTimestampMonotonic"])
+        exited_mono = int(values["ExecMainExitTimestampMonotonic"])
+        # --timestamp=unix produces @<seconds>; empty/n/a timestamps fail closed.
+        if (re.fullmatch(r"@[0-9]+", values["ExecMainStartTimestamp"]) is None
+                or re.fullmatch(r"@[0-9]+", values["ExecMainExitTimestamp"]) is None):
+            raise ValueError("missing unix timestamps")
+        started = int(values["ExecMainStartTimestamp"][1:])
+        exited = int(values["ExecMainExitTimestamp"][1:])
+    except ValueError as exc:
+        raise RuntimeError("native Restic system backup service has not succeeded") from exc
+    if not (0 < started_mono < exited_mono
+            and 0 < started <= exited <= int(time.time()) + 2):
+        raise RuntimeError("native Restic system backup service has not succeeded")
+    return values["InvocationID"], started, exited, exited_mono
+
+
+def _snapshot_for_backup_run(now: int, backup_run: tuple[str, int, int, int]) -> tuple[str, int]:
+    snapshot_id, snapshot_time = _snapshot(now)
+    if not backup_run[1] <= snapshot_time <= backup_run[2]:
+        raise RuntimeError("native Restic snapshot is not from the successful backup service run")
+    return snapshot_id, snapshot_time
+
+
+def _require_backup_run_unchanged(backup_run: tuple[str, int, int, int]) -> None:
+    if _backup_timer_ready() != backup_run:
+        raise RuntimeError("native Restic backup service invocation changed during recovery")
 
 
 def _write_proof(record: dict[str, object]) -> None:
@@ -222,12 +256,13 @@ def main() -> int:
     PROOF.unlink(missing_ok=True)
     started_at = int(time.time())
     mounted_device = _mount_identity()
-    _backup_timer_ready()
-    snapshot_id, snapshot_time = _snapshot(started_at)
+    backup_run = _backup_timer_ready()
+    snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
     restored_sha = _restore_digest(snapshot_id)
     _restic("check", "--read-data-subset=" + CHECK_SUBSET, "--retry-lock", "30m", timeout=2100)
     if _mount_identity() != mounted_device:
         raise RuntimeError("backup mount identity changed while proving recovery")
+    _require_backup_run_unchanged(backup_run)
     completed = int(time.time())
     if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
         raise RuntimeError("snapshot stale after Restic check")

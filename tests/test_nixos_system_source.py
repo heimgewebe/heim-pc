@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2d3cfb0cf9ce454d67d6fec6a5c59789fe7beb7c1f95b1ce02d4012447edd2e8"
+SOURCE_SNAPSHOT_SHA256 = "8f21c1237c0c24066c5aacceeb812c7bcf2509bbdc0b383809853a6da43f60cb"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -392,16 +392,16 @@ class T(unittest.TestCase):
             self.assertIn(f'"{critical}"', module)
         self.assertNotIn('"/var/lib/systemd"', module)
         self.assertNotIn('"/root"', module)
-        self.assertIn('security.polkit.extraConfig', module)
-        self.assertIn('action.lookup("unit") === "heim-pc-restic-recovery-probe.service"', module)
-        self.assertIn('action.lookup("verb") === "start"', module)
+        self.assertNotIn('security.polkit.extraConfig', module)
+        self.assertNotIn('polkit.addRule', module)
         self.assertIn('CacheDirectory = "heim-pc-restic-recovery-probe"', module)
         self.assertIn('TimeoutStartSec = "75min"', module)
         operator = (SOURCE / "modules/grabowski-production.nix").read_text()
         self.assertNotIn('NoNewPrivileges = false;', operator)
         flake = (SOURCE / "flake.nix").read_text()
         self.assertIn('rootResticProof = cfg.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;', flake)
-        self.assertIn('assert cfg.security.polkit.enable;', flake)
+        self.assertIn('assert !(nixpkgs.lib.hasInfix', flake)
+        self.assertIn('"heim-pc-restic-recovery-probe.service"', flake)
         self.assertNotIn('"-/var/lib/heim-pc-backup"', operator)
 
     def test_canonical_source_layout(self):

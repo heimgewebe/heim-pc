@@ -942,17 +942,11 @@ PY
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
           assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
-          # The NNP service loses sudo fallback: assert the exact polkit grant,
-          # root-owned executable, safe cache and complete unit time budget.
-          assert cfg.security.polkit.enable;
-          assert nixpkgs.lib.hasInfix
-            "action.lookup(\"unit\") === \"heim-pc-restic-recovery-probe.service\""
-            cfg.security.polkit.extraConfig;
-          assert nixpkgs.lib.hasInfix
-            "action.lookup(\"verb\") === \"start\""
-            cfg.security.polkit.extraConfig;
-          assert nixpkgs.lib.hasInfix "subject.user === \"alex\""
-            cfg.security.polkit.extraConfig;
+          # The only privileged entrypoint is the root-controlled broker,
+          # never a Polkit manage-units grant to any alex process.
+          assert !(nixpkgs.lib.hasInfix
+            "heim-pc-restic-recovery-probe.service"
+            cfg.security.polkit.extraConfig);
           assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
           assert rootResticProof.TimeoutStartSec == "75min";
           assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;

@@ -221,9 +221,9 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             'assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);',
             flake,
         )
-        self.assertIn('security.polkit.extraConfig', restic)
-        self.assertIn('action.lookup("unit") === "heim-pc-restic-recovery-probe.service"', restic)
-        self.assertIn('action.lookup("verb") === "start"', restic)
+        self.assertNotIn('security.polkit.extraConfig', restic)
+        self.assertNotIn('polkit.addRule', restic)
+        self.assertIn('authenticated and tightly scoped Grabowski Rootbroker', restic)
         self.assertIn('StateDirectory = "heim-pc-restic-recovery-probe";', restic)
 
     def test_nix_fetcher_cache_writable_in_operator_sandbox(self):

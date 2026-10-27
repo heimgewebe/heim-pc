@@ -63,19 +63,8 @@
     serviceConfig.TimeoutStartSec = "0";
   };
 
-  # The dedicated recovery launcher works without sudo or a password prompt.
-  # This does NOT alter the host's existing interactive sudo policy: the
-  # narrower system-service grant ensures the operator needs no root shell.
-  security.polkit.extraConfig = ''
-    polkit.addRule(function(action, subject) {
-      if (action.id === "org.freedesktop.systemd1.manage-units"
-          && subject.user === "alex"
-          && action.lookup("unit") === "heim-pc-restic-recovery-probe.service"
-          && action.lookup("verb") === "start") {
-        return polkit.Result.YES;
-      }
-    });
-  '';
+  # No Polkit grant for alex: even a fixed root-owned unit must only be
+  # started by the authenticated and tightly scoped Grabowski Rootbroker.
 
   # Fixed, root-owned restore evidence. The operator can trigger exactly this
   # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
