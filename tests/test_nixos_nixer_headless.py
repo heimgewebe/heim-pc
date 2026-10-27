@@ -22,6 +22,7 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('User = "alex";', text)
         self.assertIn('Group = "users";', text)
         self.assertEqual(text.count("NoNewPrivileges = true;"), 1)
+        self.assertIn("assertion = config.systemd.services.nixer-headless.serviceConfig.NoNewPrivileges;", text)
         self.assertEqual(text.count("NoNewPrivileges = false;"), 1)
         main = text.split("systemd.services.nixer-headless = {", 1)[1]
         self.assertIn("NoNewPrivileges = true;", main)
@@ -114,6 +115,9 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('assert !cfg.heimPc.grabowskiProduction.enable;', flake)
         self.assertIn('assert !cfg.boot.loader.efi.canTouchEfiVariables;', flake)
         self.assertIn('users.users.alex.linger = false;', primary)
+        self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", primary)
+        self.assertNotIn("security.sudo.extraRules = [{", primary)
+        self.assertIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', primary)
         baseline = flake.split(
             'nixosConfigurations.heim-pc-seagate-primary-candidate =', 1
         )[1].split('nixosConfigurations.heim-pc-vm =', 1)[0]

@@ -82,6 +82,10 @@ in
         assertion = !(builtins.elem "grabowski" config.users.users.alex.extraGroups);
         message = "Nixer must not grant interactive alex rootbroker socket membership";
       }
+      {
+        assertion = config.systemd.services.nixer-headless.serviceConfig.NoNewPrivileges;
+        message = "Nixer MCP requires NoNewPrivileges to close alex sudo escalation";
+      }
     ];
 
     # Scope is system, execution identity remains unprivileged. The /run
