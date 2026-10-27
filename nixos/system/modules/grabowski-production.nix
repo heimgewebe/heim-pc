@@ -263,9 +263,9 @@ in
         SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
-        # systemd owns this private persistent cache; never open all of $HOME.
-        # gh Actions logs require a write even for a read-only API request.
-        CacheDirectory = "grabowski-gh";
+        # systemd owns this private shared XDG cache for gh logs, Nix fetchers
+        # and other XDG-aware tools; never make all of HOME writable.
+        CacheDirectory = "grabowski-xdg";
         CacheDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = "2s";
@@ -278,7 +278,7 @@ in
         # original CLI on PATH. NixOS must supply the real immutable package.
         Environment = [
           "HOME=/home/alex"
-          "XDG_CACHE_HOME=/var/cache/grabowski-gh"
+          "XDG_CACHE_HOME=/var/cache/grabowski-xdg"
           "XDG_RUNTIME_DIR=/run/user/1000"
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
@@ -296,10 +296,10 @@ in
         # A native Restic check/restore needs repository locks: otherwise
         # ProtectSystem=strict remounts the HEIM_BACKUP ext4 submount read-only.
         # Optional path keeps the operator available if the backup disk is absent.
-        # Nix flake evaluation also needs a writable SQLite fetcher cache.
+        # XDG caches live in the private systemd CacheDirectory; the legacy
+        # home Nix cache is intentionally no longer a writable exception.
         ReadWritePaths = [
           "-/var/lib/heim-pc-backup"
-          "-/home/alex/.cache/nix"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
           "-/home/alex/repos"

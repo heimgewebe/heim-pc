@@ -9,6 +9,7 @@ import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SCRIPT = ROOT / "nixos/system/modules/grabowski-runtime-schema-install.py"
@@ -128,6 +129,36 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.destination.exists())
 
+    def test_existing_anchor_replaced_during_staging_is_not_overwritten(self) -> None:
+        self.install()
+        replacement = b"new-root-owned-schema-from-concurrent-authority"
+        mkstemp = anchor.tempfile.mkstemp
+
+        def switch_existing_anchor(*args, **kwargs):
+            self.destination.unlink()
+            self.destination.write_bytes(replacement)
+            self.destination.chmod(0o644)
+            return mkstemp(*args, **kwargs)
+
+        with mock.patch.object(anchor.tempfile, "mkstemp", side_effect=switch_existing_anchor):
+            with self.assertRaisesRegex(PermissionError, "changed"):
+                self.install()
+        self.assertEqual(self.destination.read_bytes(), replacement)
+
+    def test_new_anchor_appearing_during_staging_is_not_overwritten(self) -> None:
+        replacement = b"new-root-owned-anchor-created-in-parallel"
+        mkstemp = anchor.tempfile.mkstemp
+
+        def create_competing_anchor(*args, **kwargs):
+            self.destination.write_bytes(replacement)
+            self.destination.chmod(0o644)
+            return mkstemp(*args, **kwargs)
+
+        with mock.patch.object(anchor.tempfile, "mkstemp", side_effect=create_competing_anchor):
+            with self.assertRaisesRegex(PermissionError, "appeared"):
+                self.install()
+        self.assertEqual(self.destination.read_bytes(), replacement)
+
     def test_nixos_operator_requires_validated_root_anchor(self) -> None:
         module = (ROOT / "nixos/system/modules/grabowski-production.nix").read_text()
         self.assertIn(
@@ -149,7 +180,7 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
             'environment.etc."grabowski/runtime-contract-schema.py"',
             module,
         )
-        self.assertIn('CacheDirectory = "grabowski-gh";', module)
+        self.assertIn('CacheDirectory = "grabowski-xdg";', module)
         # Rootbroker publication/Restic semantics are separate invariants.
         self.assertIn("NoNewPrivileges = false;", module)
 

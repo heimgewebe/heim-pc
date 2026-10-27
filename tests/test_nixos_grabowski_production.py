@@ -4,6 +4,7 @@ These static tests complement actual isolated Nix builds and MCP protocol checks
 """
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,16 +21,20 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         production = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
-        self.assertIn('CacheDirectory = "grabowski-gh";', operator)
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
         self.assertIn('CacheDirectoryMode = "0700";', operator)
-        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-gh"', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
         self.assertIn('ProtectHome = "read-only";', operator)
         self.assertNotIn("ProtectHome = false;", operator)
         writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
-        self.assertNotIn('"/home/alex"', writable)
-        self.assertNotIn('"/home/alex/.cache/gh"', writable)
-        self.assertIn('assert operator.CacheDirectory == "grabowski-gh";', flake)
+        normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertNotIn("/home/alex", normalized)
+        self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
+        self.assertNotIn('BindPaths = ', operator)
+        self.assertIn('assert operator.CacheDirectory == "grabowski-xdg";', flake)
         self.assertIn('assert operator.CacheDirectoryMode == "0700";', flake)
+        self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
+        self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
 
     def test_exact_existing_broker_source_is_pinned(self):
         source = (MODULES / "grabowski-broker-package.nix").read_text()
@@ -156,7 +161,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)
@@ -231,15 +236,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             flake,
         )
 
-    def test_nix_fetcher_cache_writable_in_operator_sandbox(self):
+    def test_nix_fetcher_uses_systemd_xdg_cache_outside_protected_home(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
         self.assertIn('ProtectSystem = "strict";', operator)
         self.assertIn('ProtectHome = "read-only";', operator)
-        self.assertIn('"-/home/alex/.cache/nix"', operator)
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
+        self.assertNotIn('"-/home/alex/.cache/nix"', operator)
         self.assertIn(
-            'builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;',
+            'assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);',
             flake,
         )
 

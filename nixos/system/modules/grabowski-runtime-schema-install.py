@@ -140,14 +140,33 @@ def install(
         if stat.S_IMODE(parent.lstat().st_mode) != 0o755:
             raise PermissionError("runtime schema destination changed")
         if old is not None:
-            now = destination.lstat()
+            try:
+                now = destination.lstat()
+            except FileNotFoundError as exc:
+                raise PermissionError("runtime schema destination changed during install") from exc
             if (
                 not stat.S_ISREG(now.st_mode)
                 or now.st_uid != authority_uid
                 or now.st_nlink != 1
                 or now.st_mode & 0o022
+                or (
+                    old.st_dev, old.st_ino, old.st_mode, old.st_uid,
+                    old.st_gid, old.st_nlink, old.st_size,
+                    old.st_mtime_ns, old.st_ctime_ns,
+                ) != (
+                    now.st_dev, now.st_ino, now.st_mode, now.st_uid,
+                    now.st_gid, now.st_nlink, now.st_size,
+                    now.st_mtime_ns, now.st_ctime_ns,
+                )
             ):
-                raise PermissionError("runtime schema destination changed unsafely")
+                raise PermissionError("runtime schema destination changed during install")
+        else:
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise PermissionError("runtime schema destination appeared concurrently")
         os.replace(temporary, destination)
         directory_fd = os.open(
             parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
