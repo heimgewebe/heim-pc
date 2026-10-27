@@ -91,6 +91,15 @@ in
       # The directory and its parent must exist before the service namespace is built.
       "d /home/alex/.cache 0755 alex users -"
       "d /home/alex/.cache/nix 0755 alex users -"
+      # `-/path` does not create missing paths. A clean Seagate home must have
+      # these user-owned parents before the operator's mount namespace starts.
+      "d /home/alex/.local 0755 alex users -"
+      "d /home/alex/.local/state 0700 alex users -"
+      "d /home/alex/.local/state/grabowski 0700 alex users -"
+      "d /home/alex/.local/state/bureau 0700 alex users -"
+      "d /home/alex/repos 0755 alex users -"
+      "d /home/alex/grabowski-workspace 0700 alex users -"
+      "d /home/alex/worktrees 0700 alex users -"
     ];
 
     # This service contains no policy payload: the root-owned 0600 source on
