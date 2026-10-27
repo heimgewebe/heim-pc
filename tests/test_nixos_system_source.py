@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "c4fedf3cdaecda09cc21f5adc2840d5938e8a1fdafd50f64e3df796cf4f25166"
+SOURCE_SNAPSHOT_SHA256 = "3565ce2437cf7260df1c5bbf746891af404b14ef1f48fa42aeab3b1d872fb24c"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
