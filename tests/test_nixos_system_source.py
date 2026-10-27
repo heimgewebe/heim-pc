@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "b6a92985b26214b40c25d906b2ce7d9e161031075f3d98b22b29ca99d669bb9f"
+SOURCE_SNAPSHOT_SHA256 = "be6b40cfd9826254ad43ff1be40d199bc31d4e3173614f914d190691a1fa51ac"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -426,7 +426,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 45)
+        self.assertEqual(len(files), 46)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -454,6 +454,20 @@ class T(unittest.TestCase):
             self.assertIn(f'"{critical}"', module)
         self.assertNotIn('"/var/lib/systemd"', module)
         self.assertNotIn('"/root"', module)
+        self.assertNotIn('security.polkit.extraConfig', module)
+        self.assertNotIn('polkit.addRule', module)
+        self.assertIn('CacheDirectory = "heim-pc-restic-recovery-probe"', module)
+        self.assertIn('TimeoutStartSec = "75min"', module)
+        vm = (SOURCE / "tests/grabowski-headless-systemd.nix").read_text()
+        self.assertIn("completed systemd unit has numeric unix invocation timestamps", vm)
+        self.assertIn('"systemctl --system --timestamp=unix show "', vm)
+        operator = (SOURCE / "modules/grabowski-production.nix").read_text()
+        self.assertNotIn('NoNewPrivileges = false;', operator)
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('rootResticProof = cfg.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;', flake)
+        self.assertIn('assert !(nixpkgs.lib.hasInfix', flake)
+        self.assertIn('"heim-pc-restic-recovery-probe.service"', flake)
+        self.assertNotIn('"-/var/lib/heim-pc-backup"', operator)
 
     def test_canonical_source_layout(self):
         for relative in (
@@ -463,6 +477,7 @@ class T(unittest.TestCase):
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix",
+            "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",

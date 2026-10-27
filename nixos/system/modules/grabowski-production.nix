@@ -296,20 +296,19 @@ in
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
-        # The native NixOS Restic restore probe uses the existing setuid sudo
-        # wrapper. NoNewPrivileges blocks it even for a passwordless operator.
-        # This is the sole operator-unit override; rootbroker remains unchanged.
-        NoNewPrivileges = false;
+        # Only the root-owned broker can start the fixed Restic proof unit.
+        # NNP prevents setuid escalation in this service's process tree. Jobs
+        # launched separately by systemd-run --user remain under the existing
+        # alex host sudo policy; they are NOT constrained by this NNP setting.
+        NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
-        # A native Restic check/restore needs repository locks: otherwise
-        # ProtectSystem=strict remounts the HEIM_BACKUP ext4 submount read-only.
-        # Optional path keeps the operator available if the backup disk is absent.
+        # The root-owned Restic unit owns its own repository lock path;
+        # operator state/development paths remain independently writable.
         # XDG caches live in the private systemd CacheDirectory; the legacy
         # home Nix cache is intentionally no longer a writable exception.
         ReadWritePaths = [
-          "-/var/lib/heim-pc-backup"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
           "-/home/alex/repos"

@@ -243,8 +243,13 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
             module,
         )
         self.assertIn('CacheDirectory = "grabowski-xdg";', module)
-        # Rootbroker publication/Restic semantics are separate invariants.
-        self.assertIn("NoNewPrivileges = false;", module)
+        # The fixed root-owned Restic proof is separate from the unprivileged
+        # operator; a no-new-privileges escape is not permitted in this unit.
+        operator = module.split(
+            "systemd.services.grabowski-operator = lib.mkIf admit {", 1
+        )[1]
+        self.assertIn("NoNewPrivileges = true;", operator)
+        self.assertNotIn("NoNewPrivileges = false;", operator)
 
 
 if __name__ == "__main__":
