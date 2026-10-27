@@ -43,6 +43,10 @@ in
         assertion = !(builtins.elem "grabowski" config.users.users.alex.extraGroups);
         message = "Nixer must not grant interactive alex rootbroker socket membership";
       }
+      {
+        assertion = config.systemd.services.nixer-headless.serviceConfig.NoNewPrivileges;
+        message = "Nixer MCP requires NoNewPrivileges to close alex sudo escalation";
+      }
     ];
 
     # Scope is system, execution identity remains unprivileged. The /run
@@ -70,6 +74,9 @@ in
         Type = "simple";
         User = "alex";
         Group = "users";
+        # This network-facing MCP process must not gain root via sudo or setuid.
+        # NixOS rootless Podman compatibility is tested separately.
+        NoNewPrivileges = true;
         WorkingDirectory = "/home/alex";
         RuntimeDirectory = "nixer-headless";
         RuntimeDirectoryMode = "0700";

@@ -21,6 +21,8 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', text)
         self.assertIn('User = "alex";', text)
         self.assertIn('Group = "users";', text)
+        self.assertEqual(text.count("NoNewPrivileges = true;"), 1)
+        self.assertIn("assertion = config.systemd.services.nixer-headless.serviceConfig.NoNewPrivileges;", text)
         self.assertIn('RuntimeDirectory = "nixer-headless";', text)
         self.assertIn('RuntimeDirectoryMode = "0700";', text)
         self.assertNotIn('!config.users.users.alex.linger', text)
@@ -66,10 +68,11 @@ class NixerHeadlessSourceTests(unittest.TestCase):
             proof,
         )
         self.assertIn(
-            'with subtest("original eight-tool Nixer MCP initializes on localhost")',
+            'with subtest("original nine-tool Nixer MCP initializes on localhost")',
             proof,
         )
         self.assertIn('"nixer_status"', proof)
+        self.assertIn('"nixos_options"', proof)
         self.assertNotIn("systemd.user.services.nixer =", proof)
 
     def test_separate_nixer_candidate_cannot_change_headless_base(self):
@@ -88,6 +91,9 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('assert !cfg.heimPc.grabowskiProduction.enable;', flake)
         self.assertIn('assert !cfg.boot.loader.efi.canTouchEfiVariables;', flake)
         self.assertIn('users.users.alex.linger = false;', primary)
+        self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", primary)
+        self.assertNotIn("security.sudo.extraRules = [{", primary)
+        self.assertIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', primary)
         baseline = flake.split(
             'nixosConfigurations.heim-pc-seagate-primary-candidate =', 1
         )[1].split('nixosConfigurations.heim-pc-vm =', 1)[0]
