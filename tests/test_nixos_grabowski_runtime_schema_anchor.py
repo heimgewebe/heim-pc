@@ -66,12 +66,18 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.destination.exists())
 
-    def test_source_hardlinks_are_denied(self) -> None:
-        extra = self.source.parent / "extra-hardlink"
-        os.link(self.source, extra)
-        with self.assertRaises(PermissionError):
-            self.install()
-        self.assertFalse(self.destination.exists())
+    def test_nix_deduplicated_store_source_hardlinks_are_admitted(self) -> None:
+        # Nix store optimisation may hardlink identical immutable files to
+        # /nix/store/.links/. Only the installed /etc anchor must be single-link.
+        links = self.store / ".links"
+        links.mkdir(mode=0o755)
+        os.link(self.source, links / "deduplicated-schema")
+        self.assertEqual(self.source.stat().st_nlink, 2)
+        digest = self.install()
+        self.assertEqual(digest, hashlib.sha256(CANONICAL).hexdigest())
+        self.assertEqual(self.destination.read_bytes(), CANONICAL)
+        self.assertEqual(self.destination.stat().st_nlink, 1)
+        self.assertEqual(self.install(), digest)
 
     def test_source_writable_by_others_is_denied(self) -> None:
         self.source.chmod(0o666)

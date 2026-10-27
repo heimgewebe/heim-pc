@@ -94,14 +94,17 @@ def _read_pinned_source(
     fd = os.open(source, flags)
     try:
         before = os.fstat(fd)
+        # Nix store optimisation may hardlink a root-owned immutable source
+        # through /nix/store/.links. Only the installed /etc anchor requires
+        # exactly one link; a vanished source inode remains forbidden.
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_uid != uid
-            or before.st_nlink != 1
+            or before.st_nlink < 1
             or before.st_mode & 0o022
             or not 0 < before.st_size <= MAX_BYTES
         ):
-            raise PermissionError("validator source must be a single root-owned regular file")
+            raise PermissionError("validator source must be a root-owned nonwritable regular file")
         chunks: list[bytes] = []
         size = 0
         while size <= MAX_BYTES:
