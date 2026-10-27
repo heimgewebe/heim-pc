@@ -85,6 +85,62 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
             self.install()
         self.assertFalse(self.destination.exists())
 
+    def test_nixos_root_nixbld_sticky_store_is_admitted(self) -> None:
+        # Synthetic test runs as the ordinary test UID; model the host's
+        # root:nixbld 01775 exception without changing real root metadata.
+        self.store.chmod(0o1775)
+        allowed_gid = self.store.stat().st_gid
+        with mock.patch.object(
+            anchor.grp, "getgrnam",
+            return_value=SimpleNamespace(gr_gid=allowed_gid),
+        ) as lookup:
+            self.assertEqual(
+                self.install(), hashlib.sha256(CANONICAL).hexdigest()
+            )
+        lookup.assert_called_once_with("nixbld")
+        self.assertEqual(self.destination.read_bytes(), CANONICAL)
+
+    def test_sticky_store_with_untrusted_group_is_denied(self) -> None:
+        self.store.chmod(0o1775)
+        with mock.patch.object(
+            anchor.grp, "getgrnam",
+            return_value=SimpleNamespace(gr_gid=self.store.stat().st_gid + 1),
+        ):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertFalse(self.destination.exists())
+
+    def test_store_without_sticky_bit_cannot_use_group_exception(self) -> None:
+        self.store.chmod(0o775)
+        with mock.patch.object(
+            anchor.grp, "getgrnam",
+            return_value=SimpleNamespace(gr_gid=self.store.stat().st_gid),
+        ):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertFalse(self.destination.exists())
+
+    def test_sticky_store_world_writable_remains_denied(self) -> None:
+        self.store.chmod(0o1777)
+        with mock.patch.object(
+            anchor.grp, "getgrnam",
+            return_value=SimpleNamespace(gr_gid=self.store.stat().st_gid),
+        ):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertFalse(self.destination.exists())
+
+    def test_group_writable_package_dir_is_denied_inside_sticky_store(self) -> None:
+        self.store.chmod(0o1775)
+        self.source.parent.chmod(0o775)
+        with mock.patch.object(
+            anchor.grp, "getgrnam",
+            return_value=SimpleNamespace(gr_gid=self.store.stat().st_gid),
+        ):
+            with self.assertRaises(PermissionError):
+                self.install()
+        self.assertFalse(self.destination.exists())
+
     def test_source_must_be_in_expected_nix_package_slot(self) -> None:
         wrong = self.store / "untrusted-package" / "lib/python3.12/site-packages"
         wrong.mkdir(parents=True)

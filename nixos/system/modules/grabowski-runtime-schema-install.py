@@ -7,6 +7,7 @@ variable; those inputs cannot establish recovery trust.
 """
 from __future__ import annotations
 
+import grp
 import hashlib
 import os
 from pathlib import Path
@@ -21,8 +22,31 @@ MAX_BYTES = 512 * 1024
 _PACKAGE = re.compile(r"[a-z0-9]{32}-grabowski-operator-[a-zA-Z0-9._-]+")
 
 
-def _check_directories(path: Path, *, uid: int, boundary: Path) -> None:
-    """Check the entire root-owned, non-symlink ancestor chain."""
+def _trusted_nix_store_group_write(
+    current: Path, info: os.stat_result, nix_store_root: Path | None
+) -> bool:
+    """Admit only NixOS's root:nixbld 01775 sticky store entry directory.
+
+    Sticky-bit semantics prevent unprivileged build users from replacing the
+    root-owned pinned package directory. All package ancestors below the store
+    and the /etc destination must still be strictly non-writable.
+    """
+    if (
+        nix_store_root is None
+        or current != nix_store_root
+        or stat.S_IMODE(info.st_mode) != 0o1775
+    ):
+        return False
+    try:
+        return info.st_gid == grp.getgrnam("nixbld").gr_gid
+    except KeyError:
+        return False
+
+
+def _check_directories(
+    path: Path, *, uid: int, boundary: Path, nix_store_root: Path | None = None
+) -> None:
+    """Reject mutable ancestors except the single NixOS sticky store root."""
     if boundary != path and boundary not in path.parents:
         raise PermissionError("validator path escapes the trusted ownership boundary")
     current = path.parent
@@ -31,7 +55,11 @@ def _check_directories(path: Path, *, uid: int, boundary: Path) -> None:
         if (
             not stat.S_ISDIR(info.st_mode)
             or info.st_uid != uid
-            or info.st_mode & 0o022
+            or info.st_mode & 0o002
+            or (
+                info.st_mode & 0o020
+                and not _trusted_nix_store_group_write(current, info, nix_store_root)
+            )
         ):
             raise PermissionError(f"validator directory is not root-controlled: {current}")
         if current == boundary:
@@ -59,7 +87,9 @@ def _read_pinned_source(
         )
     ):
         raise PermissionError("validator source is not the pinned operator module")
-    _check_directories(source, uid=uid, boundary=boundary)
+    _check_directories(
+        source, uid=uid, boundary=boundary, nix_store_root=store_root
+    )
     flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(source, flags)
     try:
