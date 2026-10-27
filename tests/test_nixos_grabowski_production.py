@@ -4,6 +4,7 @@ These static tests complement actual isolated Nix builds and MCP protocol checks
 """
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,11 +12,30 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "6a6360a92be11d24d85e9b002bb34ac2b07672d5"
-TARBALL_HASH = "sha256-qxPpTXFUQ7m7ZCX3eGiy26rDoMyVpmjnzgSgmgKcmdk="
+REVISION = "57f3310ff63cc3218def6da0b424c8390f1dd5f9"
+TARBALL_HASH = "sha256-MQMQP0jcFdVkX0uLmmuUOfWIi2ID/1LBMMmN9FEVOU8="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
+    def test_systemd_gh_cache_is_private_with_protected_home(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
+        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertNotIn("ProtectHome = false;", operator)
+        writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
+        normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertNotIn("/home/alex", normalized)
+        self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
+        self.assertNotIn('BindPaths = ', operator)
+        self.assertIn('assert operator.CacheDirectory == "grabowski-xdg";', flake)
+        self.assertIn('assert operator.CacheDirectoryMode == "0700";', flake)
+        self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
+        self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
+
     def test_exact_existing_broker_source_is_pinned(self):
         source = (MODULES / "grabowski-broker-package.nix").read_text()
         self.assertIn(f'sourceRevision = "{REVISION}";', source)
@@ -85,7 +105,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85"
+        release_id = "57f3310ff63c-srcsetc54299092f97-lock264e747ad05a-contract650f923c4cfb"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -98,7 +118,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("PYTHONPATH", op)
         self.assertIn('GRABOWSKI_NIXOS_GIT_BIN', op)
         self.assertIn('GRABOWSKI_NIXOS_GH_BIN', op)
-        self.assertIn('"src/grabowski_operator.py": (4, 1)', op)
+        self.assertIn('"src/grabowski_operator.py": (1, 1)', op)
         self.assertIn('"src/grabowski_self_deploy.py": (2, 0)', op)
         self.assertIn('makeWrapper ${pkgs.git}/bin/git', op)
         self.assertIn('makeWrapper ${pkgs.gh}/bin/gh', op)
@@ -108,7 +128,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
         self.assertIn('len(expected) == 203', op)
-        self.assertIn('len(supporting) != 129', op)
+        self.assertIn('len(supporting) != 130', op)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
@@ -142,7 +162,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)
@@ -217,15 +237,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             flake,
         )
 
-    def test_nix_fetcher_cache_writable_in_operator_sandbox(self):
+    def test_nix_fetcher_uses_systemd_xdg_cache_outside_protected_home(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
         self.assertIn('ProtectSystem = "strict";', operator)
         self.assertIn('ProtectHome = "read-only";', operator)
-        self.assertIn('"-/home/alex/.cache/nix"', operator)
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
+        self.assertNotIn('"-/home/alex/.cache/nix"', operator)
         self.assertIn(
-            'builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;',
+            'assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);',
             flake,
         )
 
