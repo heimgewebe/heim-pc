@@ -36,6 +36,19 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
         self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
 
+    def test_operator_path_prefers_real_nixos_sudo_wrapper(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
+        self.assertIn("NoNewPrivileges = false;", production)
+
+    def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
+        desktop = (MODULES / "desktop.nix").read_text()
+        self.assertIn(
+            "security.pam.services.xrdp-sesman.kwallet = lib.mkIf config.services.xrdp.enable {",
+            desktop,
+        )
+        self.assertIn("forceRun = true;", desktop)
+
     def test_exact_existing_broker_source_is_pinned(self):
         source = (MODULES / "grabowski-broker-package.nix").read_text()
         self.assertIn(f'sourceRevision = "{REVISION}";', source)
@@ -182,7 +195,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("extracted/tools/grabowski_privileged_request.py", broker)
         self.assertIn('"$out/bin/grabowski-privileged-request"', broker)
         self.assertIn("GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker", prod)
-        self.assertIn('PATH=${cfg.brokerPackage}/bin:', prod)
+        self.assertIn('PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', prod)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-request", (ROOT / "nixos/system/flake.nix").read_text())
         for original_peer_gate in (
             "systemd_main_pid != pid",
