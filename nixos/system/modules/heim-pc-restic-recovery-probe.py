@@ -97,6 +97,50 @@ def _snapshot(now: int) -> tuple[str, int]:
     return max(candidates)[1], max(candidates)[0]
 
 
+def _read_regular_restored_bytes(stage: str, source: str, expected_size: int) -> bytes:
+    # O_NOFOLLOW on every path segment: a symlink restored from an otherwise
+    # valid snapshot must not make the root reader leave its private stage.
+    parts = Path(source.lstrip("/")).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise RuntimeError("root-owned Restic restore path is invalid")
+    parent_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child_fd = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = child_fd
+        file_fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        try:
+            metadata = os.fstat(file_fd)
+            if (not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_size != expected_size
+                    or metadata.st_nlink != 1):
+                raise RuntimeError("root-owned Restic restore type or size mismatch")
+            remaining = expected_size
+            chunks: list[bytes] = []
+            while remaining:
+                chunk = os.read(file_fd, remaining)
+                if not chunk:
+                    raise RuntimeError("root-owned Restic restore ended early")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(file_fd, 1):
+                raise RuntimeError("root-owned Restic restore grew during read")
+            return b"".join(chunks)
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        raise RuntimeError("root-owned Restic restore type or size mismatch") from exc
+    finally:
+        os.close(parent_fd)
+
+
 def _restore_digest(snapshot_id: str) -> str:
     rows = [_line for _line in _restic(
         "ls", "--json", snapshot_id, SOURCE).splitlines() if _line.strip()]
@@ -113,14 +157,9 @@ def _restore_digest(snapshot_id: str) -> str:
     with tempfile.TemporaryDirectory(prefix="root-restic-restore-", dir=str(STATE)) as stage:
         _restic("restore", snapshot_id, "--target", stage,
                 "--include", SOURCE, "--verify", timeout=1200)
-        restored = Path(stage) / SOURCE.lstrip("/")
-        file_info = restored.lstat()
-        if not stat.S_ISREG(file_info.st_mode) or file_info.st_size != size or file_info.st_nlink != 1:
-            raise RuntimeError("root-owned Restic restore type or size mismatch")
-        restored_bytes = restored.read_bytes()
-        if len(restored_bytes) != size:
-            raise RuntimeError("root-owned Restic restore size changed")
-        restored_sha = hashlib.sha256(restored_bytes).hexdigest()
+        restored_sha = hashlib.sha256(
+            _read_regular_restored_bytes(stage, SOURCE, size)
+        ).hexdigest()
         # Never log or publish the content of the root-only probe file.
         dump = _restic("dump", snapshot_id, SOURCE, timeout=300, binary=True)
         if len(dump) != size or hashlib.sha256(dump).hexdigest() != restored_sha:

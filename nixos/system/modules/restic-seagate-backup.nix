@@ -63,6 +63,20 @@
     serviceConfig.TimeoutStartSec = "0";
   };
 
+  # The dedicated recovery launcher works without sudo or a password prompt.
+  # This does NOT alter the host's existing interactive sudo policy: the
+  # narrower system-service grant ensures the operator needs no root shell.
+  security.polkit.extraConfig = ''
+    polkit.addRule(function(action, subject) {
+      if (action.id === "org.freedesktop.systemd1.manage-units"
+          && subject.user === "alex"
+          && action.lookup("unit") === "heim-pc-restic-recovery-probe.service"
+          && action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+      }
+    });
+  '';
+
   # Fixed, root-owned restore evidence. The operator can trigger exactly this
   # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
   systemd.services."heim-pc-restic-recovery-probe" = {
@@ -76,12 +90,25 @@
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.restic pkgs.util-linux pkgs.systemd pkgs.coreutils ]}"
         "LC_ALL=C"
+        "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"
       ];
+      CacheDirectory = "heim-pc-restic-recovery-probe";
+      CacheDirectoryMode = "0700";
       StateDirectory = "heim-pc-restic-recovery-probe";
       StateDirectoryMode = "0755";
       UMask = "0022";
-      TimeoutStartSec = "45min";
+      # Allows restore and a 1/10 repository check without outliving the caller.
+      TimeoutStartSec = "75min";
       NoNewPrivileges = true;
+      RestrictSUIDSGID = true;
+      RestrictRealtime = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+      ProtectProc = "invisible";
+      CapabilityBoundingSet = [
+        "CAP_CHOWN" "CAP_DAC_OVERRIDE" "CAP_DAC_READ_SEARCH"
+        "CAP_FOWNER" "CAP_FSETID" "CAP_SETUID" "CAP_SETGID"
+      ];
       PrivateTmp = true;
       PrivateNetwork = true;
       ProtectSystem = "strict";

@@ -242,19 +242,17 @@ in
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
           "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
-        # The native NixOS Restic restore probe uses the existing setuid sudo
-        # wrapper. NoNewPrivileges blocks it even for a passwordless operator.
-        # This is the sole operator-unit override; rootbroker remains unchanged.
-        NoNewPrivileges = false;
+        # Privileged Restic runs only inside the fixed root-owned systemd unit.
+        # An exact-unit polkit grant handles its start; operator descendants
+        # cannot promote privileges via a setuid sudo wrapper.
+        NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
-        # A native Restic check/restore needs repository locks: otherwise
-        # ProtectSystem=strict remounts the HEIM_BACKUP ext4 submount read-only.
-        # Optional path keeps the operator available if the backup disk is absent.
+        # Root-owned recovery uses its own sandbox and repository lock.
+        # Keep only ordinary operator development/state paths writable.
         # Nix flake evaluation also needs a writable SQLite fetcher cache.
         ReadWritePaths = [
-          "-/var/lib/heim-pc-backup"
           "-/home/alex/.cache/nix"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"

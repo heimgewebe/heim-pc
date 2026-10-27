@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
@@ -114,6 +115,39 @@ class RootOwnedResticProbeTests(unittest.TestCase):
             with patch.object(probe, "STATE", Path(state)), patch.object(probe, "_restic", side_effect=restic):
                 with self.assertRaisesRegex(RuntimeError, "restore type or size"):
                     probe._restore_digest("a" * 64)
+
+    def test_restored_parent_symlink_cannot_escape_private_stage(self) -> None:
+        payload = b"outside-stage"
+        with tempfile.TemporaryDirectory() as private:
+            root = Path(private)
+            stage = root / "stage"
+            stage.mkdir()
+            outside = root / "outside"
+            (outside / "secrets" / "restic").mkdir(parents=True)
+            (outside / "secrets" / "restic" / "heim-pc-excludes").write_bytes(payload)
+            (stage / "persist").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "restore type or size"):
+                probe._read_regular_restored_bytes(
+                    str(stage), probe.SOURCE, len(payload)
+                )
+
+    def test_direct_descriptor_read_rejects_symlink_or_hardlink(self) -> None:
+        with tempfile.TemporaryDirectory() as private:
+            root = Path(private)
+            stage = root / "stage"
+            stage.mkdir()
+            restored = stage / probe.SOURCE.lstrip("/")
+            restored.parent.mkdir(parents=True)
+            payload = b"fixed"
+            target = root / "target"
+            target.write_bytes(payload)
+            restored.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "restore type or size"):
+                probe._read_regular_restored_bytes(str(stage), probe.SOURCE, len(payload))
+            restored.unlink()
+            os.link(target, restored)
+            with self.assertRaisesRegex(RuntimeError, "restore type or size"):
+                probe._read_regular_restored_bytes(str(stage), probe.SOURCE, len(payload))
 
     def test_root_receipt_atomic_write_and_no_secret_content(self) -> None:
         record = {"schema_version":1,"kind":"heim_pc.nixos_restic_recovery_root_proof",
