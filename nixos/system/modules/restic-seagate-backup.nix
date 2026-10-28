@@ -39,6 +39,12 @@
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
       "--retry-lock=30m"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
+      # XRDP drive redirection can be a user-only FUSE mount that root cannot
+      # stat. Never turn one unreadable transient session mount into backup
+      # exit 3; exclude only this path, not the rest of /home/alex.
+      # A private exclude file may contain negations, so this hard rule
+      # must follow it. The plaintext-dump rule must remain LAST.
+      "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-xrdp-excludes" "/home/alex/thinclient_drives\n"}"
       # Even a dump created after backupPrepareCommand must never enter Restic.
       # The owner-private exclude file can contain negations; this immutable
       # rule therefore comes LAST and protects the snapshot itself.
@@ -49,7 +55,9 @@
       test -f /var/lib/heim-pc-backup/restic/heim-pc/config
     '';
     timerConfig = {
-      OnCalendar = "19:30";
+      # Two daily opportunities leave margin below the 24h recovery-freshness
+      # threshold even with the bounded randomized trigger delay.
+      OnCalendar = "*-*-* 07,19:30:00";
       Persistent = true;
       RandomizedDelaySec = "10m";
     };
