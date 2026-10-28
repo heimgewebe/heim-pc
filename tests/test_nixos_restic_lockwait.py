@@ -30,7 +30,8 @@ class SeagateNativeResticLockWaitTests(unittest.TestCase):
         self.assertIn("--tag=nixos-seagate", args)
 
     def test_wait_is_finite_and_the_native_timer_is_preserved(self) -> None:
-        self.assertIn('OnCalendar = "19:30";', self.module)
+        self.assertIn('OnCalendar = "*-*-* 07,19:30:00";', self.module)
+        self.assertNotIn('OnCalendar = "19:30";', self.module)
         self.assertIn('RandomizedDelaySec = "10m";', self.module)
         self.assertIn('Persistent = true;', self.module)
         self.assertIn('initialize = false;', self.module)
