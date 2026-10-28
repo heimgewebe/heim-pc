@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "57f3310ff63cc3218def6da0b424c8390f1dd5f9";
-  releaseId = "57f3310ff63c-srcsetc54299092f97-lock264e747ad05a-contract650f923c4cfb";
+  sourceRevision = "c6a74e8ce76096f5a7f8380f3618ac7d30df6509";
+  releaseId = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-MQMQP0jcFdVkX0uLmmuUOfWIi2ID/1LBMMmN9FEVOU8=";
+    hash = "sha256-U8fPstsXY20/n/aM3mDzTUR+7ACCfnMmdarg3kEXnpU=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -17,7 +17,7 @@ let
   # occur during the subsequent ordinary, sandboxed operator build.
   wheelhouse = pkgs.stdenvNoCC.mkDerivation {
     pname = "grabowski-locked-runtime-wheels";
-    version = "57f3310f";
+    version = "c6a74e8c";
     dontUnpack = true;
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -40,7 +40,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "57f3310f";
+  version = "c6a74e8c";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
