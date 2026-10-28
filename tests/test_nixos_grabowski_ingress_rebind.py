@@ -30,6 +30,12 @@ class ProductionSourceTests(unittest.TestCase):
         production = PRODUCTION.read_text()
         self.assertIn("extracted/tools/grabowski_transport_ingress.py", package)
         self.assertIn("grabowski_transport_ingress.py", package)
+        self.assertIn(
+            "install -m 0444 extracted/tools/grabowski_transport_ingress.py "
+            + chr(92) + "\n"
+            + '      "$out/lib/python3.12/site-packages/grabowski_transport_ingress.py"',
+            package,
+        )
         self.assertIn("ExecStartPost =", production)
         self.assertIn("grabowski-ingress-rebind.py", production)
         self.assertIn("nixos-integrity-manifest.json", production)
