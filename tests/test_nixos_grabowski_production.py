@@ -36,10 +36,10 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
         self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
 
-    def test_operator_path_prefers_real_nixos_sudo_wrapper(self):
+    def test_operator_path_is_available_without_setuid_escalation(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
-        self.assertIn("NoNewPrivileges = false;", production)
+        self.assertIn("NoNewPrivileges = true;", production)
 
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()
@@ -236,19 +236,29 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
-    def test_native_restic_lock_mount_writable_in_operator_sandbox(self):
+    def test_native_restic_root_probe_is_separate_from_unprivileged_operator(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
+        restic = (MODULES / "restic-seagate-backup.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         marker = "systemd.services.grabowski-operator = lib.mkIf admit {"
         self.assertEqual(prod.count(marker), 1)
         operator = prod.split(marker, 1)[1]
         self.assertIn('ProtectSystem = "strict";', operator)
-        self.assertIn('NoNewPrivileges = false;', operator)
-        self.assertIn('"-/var/lib/heim-pc-backup"', operator)
+        self.assertIn('NoNewPrivileges = true;', operator)
+        self.assertNotIn('NoNewPrivileges = false;', operator)
+        self.assertNotIn('"-/var/lib/heim-pc-backup"', operator)
         self.assertIn(
-            'builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;',
+            'assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";',
             flake,
         )
+        self.assertIn(
+            'assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);',
+            flake,
+        )
+        self.assertNotIn('security.polkit.extraConfig', restic)
+        self.assertNotIn('polkit.addRule', restic)
+        self.assertIn('authenticated and tightly scoped Grabowski Rootbroker', restic)
+        self.assertIn('StateDirectory = "heim-pc-restic-recovery-probe";', restic)
 
     def test_nix_fetcher_uses_systemd_xdg_cache_outside_protected_home(self):
         prod = (MODULES / "grabowski-production.nix").read_text()

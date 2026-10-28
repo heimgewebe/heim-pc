@@ -989,6 +989,8 @@ PY
             policy = policyUnit.serviceConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            rootResticCandidate = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
+            rootResticProof = rootResticCandidate.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
           in
           assert !inactive.heimPc.grabowskiProduction.enable;
@@ -1021,6 +1023,17 @@ PY
           assert policy.ConfigurationDirectoryMode == "0755";
           assert policy.ProtectHome && policy.ProtectSystem == "strict";
           assert policy.PrivateNetwork && policy.NoNewPrivileges;
+          # Exactly one root-owned restore probe; no direct unprivileged Polkit grant.
+          assert !(nixpkgs.lib.hasInfix "heim-pc-restic-recovery-probe.service"
+            rootResticCandidate.security.polkit.extraConfig);
+          assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
+          assert rootResticProof.TimeoutStartSec == "75min";
+          assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;
+          assert rootResticProof.CacheDirectory == "heim-pc-restic-recovery-probe";
+          assert builtins.elem "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"
+            rootResticProof.Environment;
+          assert builtins.elem "CAP_DAC_READ_SEARCH" rootResticProof.CapabilityBoundingSet;
+          assert !(builtins.elem "CAP_SYS_ADMIN" rootResticProof.CapabilityBoundingSet);
           assert policy.UMask == "0077";
           assert builtins.match ".*grabowski-private-policy-install[.]py"
             policy.ExecStart != null;
@@ -1046,9 +1059,9 @@ PY
           assert builtins.elem
             "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
-          # The existing NixOS Restic proof invokes the setuid sudo wrapper;
-          # NNP=yes makes that path categorically unusable for the operator.
-          assert !operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # The fixed root-owned Restic proof is broker-only. The operator
+          # cannot acquire privilege through a setuid sudo wrapper.
+          assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
           assert operator.ProtectHome == "read-only";
@@ -1061,8 +1074,8 @@ PY
               in normalized != "/home/alex"
                 && !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
             operator.ReadWritePaths;
-          # ProtectSystem=strict still needs the backup repository lock mount.
-          assert builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;
+          # The Restic repository lock mount is available only to the root probe.
+          assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);
           assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);
           # Optional ReadWritePaths is ineffective if the target is missing on cold start.
           assert builtins.elem "d /home/alex/.cache 0755 alex users -" proof.systemd.tmpfiles.rules;
