@@ -29,6 +29,9 @@ let cfg = config.heimPc.desktop; in {
     systemd.user.services."drkonqi-coredump-launcher@" = {
       overrideStrategy = "asDropin";
       unitConfig.ConditionEnvironment = [ "|DISPLAY" "|WAYLAND_DISPLAY" ];
+      # Non-KDE crashes can leave GUI reporters open indefinitely and exhaust
+      # the socket's 16 slots. Keep interactive reporting, but bound its lifetime.
+      serviceConfig.RuntimeMaxSec = "15min";
     };
 
     # Prevent idle-triggered sleep/shutdown while preserving explicit suspend.
