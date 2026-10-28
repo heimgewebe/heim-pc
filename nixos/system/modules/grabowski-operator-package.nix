@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "6a6360a92be11d24d85e9b002bb34ac2b07672d5";
-  releaseId = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+  sourceRevision = "c6a74e8ce76096f5a7f8380f3618ac7d30df6509";
+  releaseId = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-qxPpTXFUQ7m7ZCX3eGiy26rDoMyVpmjnzgSgmgKcmdk=";
+    hash = "sha256-U8fPstsXY20/n/aM3mDzTUR+7ACCfnMmdarg3kEXnpU=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -17,7 +17,7 @@ let
   # occur during the subsequent ordinary, sandboxed operator build.
   wheelhouse = pkgs.stdenvNoCC.mkDerivation {
     pname = "grabowski-locked-runtime-wheels";
-    version = "6a6360a9";
+    version = "c6a74e8c";
     dontUnpack = true;
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -40,7 +40,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "6a6360a9";
+  version = "c6a74e8c";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -108,7 +108,7 @@ if not (isinstance(expected, list) and len(expected) == 203
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
-if not isinstance(supporting, list) or len(supporting) != 129:
+if not isinstance(supporting, list) or len(supporting) != 130:
     raise SystemExit("canonical runtime module mapping changed")
 entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
 seen = set()
@@ -131,7 +131,7 @@ for entry in entries:
     # Adapt ONLY the known immutable executable selectors in the pinned
     # upstream revision. Mismatched occurrences fail the Nix build closed.
     expected_paths = {
-        "src/grabowski_operator.py": (4, 1),
+        "src/grabowski_operator.py": (1, 1),
         "src/grabowski_self_deploy.py": (2, 0),
     }
     if original in expected_paths:
@@ -250,6 +250,11 @@ for item in contract.get("runtime_assets", []):
     shutil.copyfile(src, target)
     target.chmod(0o444)
 PY
+
+    # The existing source-pinned ingress CAS publisher is reused by the native
+    # operator post-start rebind; it is not a second tunnel daemon.
+    install -m 0444 extracted/tools/grabowski_transport_ingress.py \
+      "$out/lib/python3.12/site-packages/grabowski_transport_ingress.py"
 
     # Nix-native integrity: adapt only the two expected manifest discovery
     # sites in the pinned upstream module. Everything else stays canonical.

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos/system/flake.nix"
 BASE = ROOT / "nixos/system/modules/seagate-primary-candidate.nix"
 PRODUCTION = ROOT / "nixos/system/modules/grabowski-production.nix"
-RELEASE = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85"
+RELEASE = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb"
 
 
 class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
@@ -45,9 +45,10 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         base = BASE.read_text()
         self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", base)
         self.assertIn("config.security.sudo.wheelNeedsPassword;", base)
-        self.assertNotIn("security.sudo.extraRules = [{", base)
-        self.assertNotIn('command = "ALL"; options = [ "NOPASSWD" ];', base)
-        self.assertIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', base)
+        self.assertIn("security.sudo.extraRules = [{", base)
+        self.assertIn('users = [ "alex" ];', base)
+        self.assertIn('command = "ALL"; options = [ "NOPASSWD" ];', base)
+        self.assertNotIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', base)
         # Existing SSH and rootbroker recovery paths remain configured.
         self.assertIn("PermitRootLogin = \"no\";", base)
         self.assertIn("AllowUsers = [ \"alex\" ];", base)
