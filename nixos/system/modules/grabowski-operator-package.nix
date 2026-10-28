@@ -251,6 +251,11 @@ for item in contract.get("runtime_assets", []):
     target.chmod(0o444)
 PY
 
+    # The existing source-pinned ingress CAS publisher is reused by the native
+    # operator post-start rebind; it is not a second tunnel daemon.
+    install -m 0444 extracted/tools/grabowski_transport_ingress.py \\
+      "$out/lib/python3.12/site-packages/grabowski_transport_ingress.py"
+
     # Nix-native integrity: adapt only the two expected manifest discovery
     # sites in the pinned upstream module. Everything else stays canonical.
     install -m 0444 ${./grabowski-nixos-integrity.py} \

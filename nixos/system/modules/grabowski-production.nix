@@ -272,6 +272,10 @@ in
         SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
+        # The persistent tunnel belongs to the user and may still assert the
+        # predecessor runtime after a native NixOS switch. Use its existing
+        # CAS publisher to rebind only an installed canonical route.
+        ExecStartPost = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-ingress-rebind.py} ${cfg.operatorPackage}/share/grabowski/nixos-integrity-manifest.json";
         # systemd owns this private shared XDG cache for gh logs, Nix fetchers
         # and other XDG-aware tools; never make all of HOME writable.
         CacheDirectory = "grabowski-xdg";

@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "318ae2d9d5f06b74de7c8c518a72bf2d485692a48cfcca926c7a75285ab9e9a9"
+SOURCE_SNAPSHOT_SHA256 = "c710946b981db2e6fcb1d80b58f0f76bf14a0bb20c45230d1705c48499130a7c"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -426,7 +426,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 45)
+        self.assertEqual(len(files), 46)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
