@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "641d6e53a7fee33443d9a7120a63f4be8c5b8921c5712899945d2b0826b74328"
+SOURCE_SNAPSHOT_SHA256 = "9db8047ed221704a1671f14223aa38fe142f3a56b46e8423af8688893d3840b3"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -426,7 +426,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 46)
+        self.assertEqual(len(files), 47)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -454,6 +454,13 @@ class T(unittest.TestCase):
             self.assertIn(f'"{critical}"', module)
         self.assertNotIn('"/var/lib/systemd"', module)
         self.assertNotIn('"/root"', module)
+        # Only the independent fixed root-owned service may restore data.
+        self.assertIn('systemd.services."heim-pc-restic-recovery-probe" = {', module)
+        self.assertIn('User = "root";', module)
+        self.assertIn('NoNewPrivileges = true;', module)
+        self.assertIn('StateDirectory = "heim-pc-restic-recovery-probe";', module)
+        self.assertNotIn('security.polkit.extraConfig', module)
+        self.assertNotIn('polkit.addRule', module)
 
     def test_canonical_source_layout(self):
         for relative in (
@@ -462,7 +469,7 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
