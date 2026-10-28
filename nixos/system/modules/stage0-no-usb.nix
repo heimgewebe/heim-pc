@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ config, lib, pkgs, ... }:
 let
   # Explicitly nonproduction: unencrypted Btrfs on the independent Seagate.
   # The installer must first validate that this label belongs uniquely to
@@ -36,9 +36,12 @@ in
   boot.loader.efi.efiSysMountPoint = "/boot";
   boot.loader.efi.canTouchEfiVariables = false;
 
-  # Conservative graphical fallback on the physical NVIDIA-only workstation;
-  # Stage0 is intentionally text-only and does not load a GPU display manager.
-  boot.kernelParams = [ "nomodeset" ];
+  # Preserve the proven console-only Stage0 fallback. The source-only Plasma
+  # workstation successor enables X/SDDM and needs DRM modesetting; do not
+  # carry the Stage0 'nomodeset' inhibitor into that graphical profile.
+  # Make this conditional instead of mkForce, preserving other Nixpkgs params.
+  boot.kernelParams =
+    lib.optionals (!config.services.xserver.enable) [ "nomodeset" ];
   boot.blacklistedKernelModules = [ "nouveau" ];
   boot.initrd.availableKernelModules = [ "nvme" "ahci" "xhci_pci" ];
 

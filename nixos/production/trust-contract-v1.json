@@ -28,7 +28,7 @@
     "root_nixpkgs": {
       "lock_node": "nixpkgs_2",
       "required_ref": "nixos-26.05",
-      "required_revision": "c5c4a43b0e8056328ec4529f735cabdb8f1942bb"
+      "required_revision": "1f607aa79b6356ed45d3cd3c8079c196e79efa2c"
     },
     "microvm": {
       "lock_node": "microvm",
@@ -37,7 +37,8 @@
     },
     "nixer": {
       "lock_node": "nixer",
-      "required_revision": "c0b75cfd580c221f8a5095fbf802c4f6386a017e",
+      "required_revision": "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5",
+      "required_nar_hash": "sha256-FFfUnJF0AnzAivNlWaDaTcfdD6VrbLNWyXY/lJV5Fhs=",
       "owns_runtime_nixpkgs": true,
       "runtime_nixpkgs_lock_node": "nixpkgs",
       "runtime_nixpkgs_required_revision": "ef34387ddd751e1ab8857adf4676492d32eb24ec"
