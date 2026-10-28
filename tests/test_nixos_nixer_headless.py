@@ -116,8 +116,9 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('assert !cfg.boot.loader.efi.canTouchEfiVariables;', flake)
         self.assertIn('users.users.alex.linger = false;', primary)
         self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", primary)
-        self.assertNotIn("security.sudo.extraRules = [{", primary)
-        self.assertIn('!lib.hasInfix "NOPASSWD" config.security.sudo.configFile', primary)
+        self.assertIn("security.sudo.extraRules = [{", primary)
+        self.assertIn('users = [ "alex" ];', primary)
+        self.assertIn('command = "ALL"; options = [ "NOPASSWD" ];', primary)
         baseline = flake.split(
             'nixosConfigurations.heim-pc-seagate-primary-candidate =', 1
         )[1].split('nixosConfigurations.heim-pc-vm =', 1)[0]

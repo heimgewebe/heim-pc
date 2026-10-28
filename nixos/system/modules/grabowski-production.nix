@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
-  expectedRevision = "6a6360a92be11d24d85e9b002bb34ac2b07672d5";
+  expectedReleaseId = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
+  expectedRevision = "c6a74e8ce76096f5a7f8380f3618ac7d30df6509";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -220,12 +220,51 @@ in
       };
     };
 
+    # An independently root-governed Nix source pins the contract schema.
+    # An environment.etc symlink is NOT an acceptable recovery trust anchor:
+    # the portable verifier demands a root-owned, regular single-link inode.
+    systemd.services.grabowski-runtime-schema-install = lib.mkIf admit {
+      description = "Install pinned root-owned Grabowski contract validator";
+      requires = [ "grabowski-private-policy-install.service" ];
+      after = [ "local-fs.target" "grabowski-private-policy-install.service" ];
+      before = [ "grabowski-operator.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "root";
+        Group = "root";
+        ExecStart = "${pkgs.python312}/bin/python3 -I -B ${./grabowski-runtime-schema-install.py} ${cfg.operatorPackage}/lib/python3.12/site-packages/grabowski_runtime_contract.py";
+        ConfigurationDirectory = "grabowski";
+        ConfigurationDirectoryMode = "0755";
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateNetwork = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/etc/grabowski" ];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        RestrictNamespaces = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = "~@mount @module @reboot @swap";
+        SystemCallErrorNumber = "EPERM";
+        CapabilityBoundingSet =
+          "~CAP_SYS_ADMIN CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_PTRACE CAP_SYS_BOOT CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME";
+      };
+    };
+
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];
-      after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-privileged-broker.socket" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];
+      after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "grabowski-privileged-broker.socket" ];
       serviceConfig = {
         Type = "simple";
         User = "alex";
@@ -233,6 +272,14 @@ in
         SupplementaryGroups = [ "grabowski" ];
         WorkingDirectory = "/home/alex";
         ExecStart = "${cfg.operatorPackage}/bin/grabowski-operator";
+        # The persistent tunnel belongs to the user and may still assert the
+        # predecessor runtime after a native NixOS switch. Use its existing
+        # CAS publisher to rebind only an installed canonical route.
+        ExecStartPost = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-ingress-rebind.py} ${cfg.operatorPackage}/share/grabowski/nixos-integrity-manifest.json";
+        # systemd owns this private shared XDG cache for gh logs, Nix fetchers
+        # and other XDG-aware tools; never make all of HOME writable.
+        CacheDirectory = "grabowski-xdg";
+        CacheDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = "2s";
         TimeoutStartSec = "20s";
@@ -244,13 +291,14 @@ in
         # original CLI on PATH. NixOS must supply the real immutable package.
         Environment = [
           "HOME=/home/alex"
+          "XDG_CACHE_HOME=/var/cache/grabowski-xdg"
           "XDG_RUNTIME_DIR=/run/user/1000"
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
           "PYTHONUNBUFFERED=1"
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
-          "PATH=${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # The native NixOS Restic restore probe uses the existing setuid sudo
         # wrapper. NoNewPrivileges blocks it even for a passwordless operator.
@@ -262,10 +310,10 @@ in
         # A native Restic check/restore needs repository locks: otherwise
         # ProtectSystem=strict remounts the HEIM_BACKUP ext4 submount read-only.
         # Optional path keeps the operator available if the backup disk is absent.
-        # Nix flake evaluation also needs a writable SQLite fetcher cache.
+        # XDG caches live in the private systemd CacheDirectory; the legacy
+        # home Nix cache is intentionally no longer a writable exception.
         ReadWritePaths = [
           "-/var/lib/heim-pc-backup"
-          "-/home/alex/.cache/nix"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
           "-/home/alex/repos"
