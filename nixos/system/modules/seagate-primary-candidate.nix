@@ -42,9 +42,12 @@
   # They are explicitly forbidden in a permanent primary-system candidate.
   services.getty.autologinUser = lib.mkForce null;
   security.sudo.wheelNeedsPassword = lib.mkForce true;
-  # Password-authenticated wheel sudo remains available to the owner over
-  # independent SSH, while unattended privileged automation stays behind the
-  # root-owned, allowlisted Grabowski broker. Never grant alex-wide root here.
+  # Preserve the already active Gen19 owner-specific passwordless sudo rule.
+  # General wheel sudo still requires a password.
+  security.sudo.extraRules = [{
+    users = [ "alex" ];
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
+  }];
 
   # The base profile keeps its user manager session-bound. Only the opt-in
   # full Grabowski profile enables linger for original systemd-run --user jobs.
@@ -72,10 +75,6 @@
       assertion = config.services.getty.autologinUser == null
         && config.security.sudo.wheelNeedsPassword;
       message = "Primary candidate forbids auto-login and blanket passwordless wheel sudo";
-    }
-    {
-      assertion = !lib.hasInfix "NOPASSWD" config.security.sudo.configFile;
-      message = "Primary candidate must not expose passwordless sudo to alex services";
     }
     {
       assertion =

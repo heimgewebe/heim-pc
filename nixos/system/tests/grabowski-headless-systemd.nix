@@ -6,7 +6,7 @@ let
     lib = pkgs.lib;
     packageOnly = true;
   };
-  revision = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+  revision = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
 
   # Isolated VM only: one harmless fixed command, never a production allowlist.
   benignResponse = builtins.toJSON {
@@ -380,6 +380,32 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test $(stat -c %U /run/grabowski/privileged-broker.sock) = root")
         machine.succeed("test $(stat -c %G /run/grabowski/privileged-broker.sock) = grabowski")
         machine.fail("id -nG alex | grep -qw grabowski")
+    with subtest("completed systemd unit has numeric unix invocation timestamps"):
+        # Real guest-systemd contract for the recovery probe's --timestamp=unix
+        # parser: a mocked systemctl show output alone would miss version drift.
+        output = machine.succeed(
+            "systemctl --system --timestamp=unix show "
+            "-p LoadState -p Result -p ExecMainStatus -p ExecMainCode "
+            "-p ExecMainStartTimestamp -p ExecMainExitTimestamp "
+            "-p ExecMainStartTimestampMonotonic -p ExecMainExitTimestampMonotonic "
+            "-p InvocationID grabowski-private-policy-install.service"
+        )
+        actual = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        assert (actual.get("LoadState"), actual.get("Result"),
+                actual.get("ExecMainStatus"), actual.get("ExecMainCode")) == (
+                    "loaded", "success", "0", "1"), actual
+        started, exited = (actual["ExecMainStartTimestamp"],
+                           actual["ExecMainExitTimestamp"])
+        assert started.startswith("@") and started[1:].isdigit(), actual
+        assert exited.startswith("@") and exited[1:].isdigit(), actual
+        assert 0 < int(started[1:]) <= int(exited[1:]), actual
+        start_mono = actual["ExecMainStartTimestampMonotonic"]
+        exit_mono = actual["ExecMainExitTimestampMonotonic"]
+        assert start_mono.isdigit() and exit_mono.isdigit(), actual
+        assert 0 < int(start_mono) < int(exit_mono), actual
+        identity = actual["InvocationID"]
+        assert len(identity) == 32 and all(c in "0123456789abcdef" for c in identity), actual
+        print("real KVM systemd Unix timestamp and InvocationID format verified")
     with subtest("real headless MCP initialize/list_tools"):
         machine.wait_until_succeeds(
             "PYTHONPATH=${operator}/lib/python3.12/site-packages "

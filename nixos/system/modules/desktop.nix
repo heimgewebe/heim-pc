@@ -7,6 +7,12 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.wayland.enable = true;
     services.desktopManager.plasma6.enable = true;
 
+    # Retain the active Gen19 XRDP password-login KWallet unlock.
+    security.pam.services.xrdp-sesman.kwallet = lib.mkIf config.services.xrdp.enable {
+      enable = true;
+      forceRun = true;
+    };
+
     # Start a separate Plasma X11 desktop through XRDP; keep local Wayland.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {

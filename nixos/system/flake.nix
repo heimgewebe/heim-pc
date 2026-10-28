@@ -398,7 +398,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+                  "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
               };
             })
           ];
@@ -504,8 +504,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
-            revision = "6a6360a92be11d24d85e9b002bb34ac2b07672d5";
+            release = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
+            revision = "c6a74e8ce76096f5a7f8380f3618ac7d30df6509";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -906,7 +906,6 @@ PY
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
-            rootResticProof = cfg.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
               inherit pkgs;
@@ -919,7 +918,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+            "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -942,25 +941,6 @@ PY
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
           assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];
-          # The NNP service loses sudo fallback: assert the exact polkit grant,
-          # root-owned executable, safe cache and complete unit time budget.
-          assert cfg.security.polkit.enable;
-          assert nixpkgs.lib.hasInfix
-            "action.lookup(\"unit\") === \"heim-pc-restic-recovery-probe.service\""
-            cfg.security.polkit.extraConfig;
-          assert nixpkgs.lib.hasInfix
-            "action.lookup(\"verb\") === \"start\""
-            cfg.security.polkit.extraConfig;
-          assert nixpkgs.lib.hasInfix "subject.user === \"alex\""
-            cfg.security.polkit.extraConfig;
-          assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
-          assert rootResticProof.TimeoutStartSec == "75min";
-          assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;
-          assert rootResticProof.CacheDirectory == "heim-pc-restic-recovery-probe";
-          assert builtins.elem "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"
-            rootResticProof.Environment;
-          assert builtins.elem "CAP_DAC_READ_SEARCH" rootResticProof.CapabilityBoundingSet;
-          assert !(builtins.elem "CAP_SYS_ADMIN" rootResticProof.CapabilityBoundingSet);
           assert builtins.elem "grabowski-private-policy-install.service" op.requires;
           assert builtins.elem "grabowski-privileged-broker.socket" op.requires;
           assert policy.serviceConfig.User == "root";
@@ -981,7 +961,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85";
+            release = "c6a74e8ce760-srcset80bd825be2dc-lock264e747ad05a-contract650f923c4cfb";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
@@ -1009,12 +989,14 @@ PY
             policy = policyUnit.serviceConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            rootResticCandidate = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
+            rootResticProof = rootResticCandidate.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
           in
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "6a6360a92be11d24d85e9b002bb34ac2b07672d5";
+            == "c6a74e8ce76096f5a7f8380f3618ac7d30df6509";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
@@ -1041,6 +1023,17 @@ PY
           assert policy.ConfigurationDirectoryMode == "0755";
           assert policy.ProtectHome && policy.ProtectSystem == "strict";
           assert policy.PrivateNetwork && policy.NoNewPrivileges;
+          # Exactly one root-owned restore probe; no direct unprivileged Polkit grant.
+          assert !(nixpkgs.lib.hasInfix "heim-pc-restic-recovery-probe.service"
+            rootResticCandidate.security.polkit.extraConfig);
+          assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
+          assert rootResticProof.TimeoutStartSec == "75min";
+          assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;
+          assert rootResticProof.CacheDirectory == "heim-pc-restic-recovery-probe";
+          assert builtins.elem "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"
+            rootResticProof.Environment;
+          assert builtins.elem "CAP_DAC_READ_SEARCH" rootResticProof.CapabilityBoundingSet;
+          assert !(builtins.elem "CAP_SYS_ADMIN" rootResticProof.CapabilityBoundingSet);
           assert policy.UMask == "0077";
           assert builtins.match ".*grabowski-private-policy-install[.]py"
             policy.ExecStart != null;
@@ -1064,14 +1057,26 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
-          # This system service's own process tree cannot gain root via
-          # setuid sudo. Separately launched user units retain the explicitly
-          # configured host sudo policy; this check does not claim otherwise.
+          # The fixed root-owned Restic proof is broker-only. The operator
+          # cannot acquire privilege through a setuid sudo wrapper.
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # Private 0700 systemd cache supports all XDG-aware CLI tools;
+          # Nix and gh must not silently reopen protected home caches.
+          assert operator.ProtectHome == "read-only";
+          assert operator.CacheDirectory == "grabowski-xdg";
+          assert operator.CacheDirectoryMode == "0700";
+          assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-xdg" operator.Environment;
+          assert builtins.all
+            (entry:
+              let normalized = nixpkgs.lib.removePrefix "-" entry;
+              in normalized != "/home/alex"
+                && !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
+            operator.ReadWritePaths;
+          # The Restic repository lock mount is available only to the root probe.
           assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);
-          assert builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths;
+          assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);
           # Optional ReadWritePaths is ineffective if the target is missing on cold start.
           assert builtins.elem "d /home/alex/.cache 0755 alex users -" proof.systemd.tmpfiles.rules;
           assert builtins.elem "d /home/alex/.cache/nix 0755 alex users -" proof.systemd.tmpfiles.rules;
@@ -1369,10 +1374,13 @@ PY
             contract = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
             sourceRoot = ../..;
             lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+            systemLock = builtins.fromJSON (builtins.readFile ./flake.lock);
             rootNode = builtins.getAttr lock.root lock.nodes;
+            systemRootNode = builtins.getAttr systemLock.root systemLock.nodes;
             rootNixpkgsNode = builtins.getAttr contract.inputs.root_nixpkgs.lock_node lock.nodes;
             microvmNode = builtins.getAttr contract.inputs.microvm.lock_node lock.nodes;
             nixerNode = builtins.getAttr contract.inputs.nixer.lock_node lock.nodes;
+            systemNixerNode = builtins.getAttr contract.inputs.nixer.lock_node systemLock.nodes;
             nixerRuntimeNixpkgsNode =
               builtins.getAttr contract.inputs.nixer.runtime_nixpkgs_lock_node lock.nodes;
             target = self.nixosConfigurations.heim-pc-storage-target.config;
@@ -1394,7 +1402,11 @@ PY
           assert contract.inputs.microvm.nixpkgs_follows_root;
           assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
           assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
+          assert systemRootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
+          assert systemNixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert systemNixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
           assert contract.inputs.nixer.owns_runtime_nixpkgs;
           assert nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node;
           assert nixerRuntimeNixpkgsNode.locked.rev

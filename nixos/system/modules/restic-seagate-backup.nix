@@ -39,6 +39,12 @@
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
       "--retry-lock=30m"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
+      # XRDP drive redirection can be a user-only FUSE mount that root cannot
+      # stat. Never turn one unreadable transient session mount into backup
+      # exit 3; exclude only this path, not the rest of /home/alex.
+      # A private exclude file may contain negations, so this hard rule
+      # must follow it. The plaintext-dump rule must remain LAST.
+      "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-xrdp-excludes" "/home/alex/thinclient_drives\n"}"
       # Even a dump created after backupPrepareCommand must never enter Restic.
       # The owner-private exclude file can contain negations; this immutable
       # rule therefore comes LAST and protects the snapshot itself.
@@ -49,7 +55,9 @@
       test -f /var/lib/heim-pc-backup/restic/heim-pc/config
     '';
     timerConfig = {
-      OnCalendar = "19:30";
+      # Two daily opportunities leave margin below the 24h recovery-freshness
+      # threshold even with the bounded randomized trigger delay.
+      OnCalendar = "*-*-* 07,19:30:00";
       Persistent = true;
       RandomizedDelaySec = "10m";
     };
@@ -63,19 +71,8 @@
     serviceConfig.TimeoutStartSec = "0";
   };
 
-  # The dedicated recovery launcher works without sudo or a password prompt.
-  # This does NOT alter the host's existing interactive sudo policy: the
-  # narrower system-service grant ensures the operator needs no root shell.
-  security.polkit.extraConfig = ''
-    polkit.addRule(function(action, subject) {
-      if (action.id === "org.freedesktop.systemd1.manage-units"
-          && subject.user === "alex"
-          && action.lookup("unit") === "heim-pc-restic-recovery-probe.service"
-          && action.lookup("verb") === "start") {
-        return polkit.Result.YES;
-      }
-    });
-  '';
+  # No Polkit grant for alex: even a fixed root-owned unit must only be
+  # started by the authenticated and tightly scoped Grabowski Rootbroker.
 
   # Fixed, root-owned restore evidence. The operator can trigger exactly this
   # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
