@@ -1349,10 +1349,13 @@ PY
             contract = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
             sourceRoot = ../..;
             lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+            systemLock = builtins.fromJSON (builtins.readFile ./flake.lock);
             rootNode = builtins.getAttr lock.root lock.nodes;
+            systemRootNode = builtins.getAttr systemLock.root systemLock.nodes;
             rootNixpkgsNode = builtins.getAttr contract.inputs.root_nixpkgs.lock_node lock.nodes;
             microvmNode = builtins.getAttr contract.inputs.microvm.lock_node lock.nodes;
             nixerNode = builtins.getAttr contract.inputs.nixer.lock_node lock.nodes;
+            systemNixerNode = builtins.getAttr contract.inputs.nixer.lock_node systemLock.nodes;
             nixerRuntimeNixpkgsNode =
               builtins.getAttr contract.inputs.nixer.runtime_nixpkgs_lock_node lock.nodes;
             target = self.nixosConfigurations.heim-pc-storage-target.config;
@@ -1374,7 +1377,11 @@ PY
           assert contract.inputs.microvm.nixpkgs_follows_root;
           assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
           assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
+          assert systemRootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
+          assert systemNixerNode.locked.rev == contract.inputs.nixer.required_revision;
+          assert systemNixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;
           assert contract.inputs.nixer.owns_runtime_nixpkgs;
           assert nixerNode.inputs.nixpkgs == contract.inputs.nixer.runtime_nixpkgs_lock_node;
           assert nixerRuntimeNixpkgsNode.locked.rev

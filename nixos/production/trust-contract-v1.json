@@ -38,6 +38,7 @@
     "nixer": {
       "lock_node": "nixer",
       "required_revision": "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5",
+      "required_nar_hash": "sha256-FFfUnJF0AnzAivNlWaDaTcfdD6VrbLNWyXY/lJV5Fhs=",
       "owns_runtime_nixpkgs": true,
       "runtime_nixpkgs_lock_node": "nixpkgs",
       "runtime_nixpkgs_required_revision": "ef34387ddd751e1ab8857adf4676492d32eb24ec"

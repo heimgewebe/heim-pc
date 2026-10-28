@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9e1df578b24eef975f28c6ec3fb1b3eb9a02376b20cd69c92c6efed03607471c"
+SOURCE_SNAPSHOT_SHA256 = "f7fc670990c7a80789d47f47a0af6e6f4f36f8eb5be0352d880145a4a07c65ec"
 ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -35,6 +35,68 @@ class T(unittest.TestCase):
             'nixer.url = "github:heimgewebe/nixer/f66d0a38ef3c75833fa20db8aa6bd9202c9608a5";',
             nested,
         )
+
+    def test_nixer_nar_contract_binds_both_root_and_system_locks(self):
+        # The reviewed source NAR is a separate, immutable trust decision.
+        # Equality of two mutable lockfiles alone is not that decision.
+        trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
+        root_lock = json.loads((ROOT / "flake.lock").read_text())
+        system_lock = json.loads((SOURCE / "flake.lock").read_text())
+        pin = trust["inputs"]["nixer"]
+        nar = "sha256-FFfUnJF0AnzAivNlWaDaTcfdD6VrbLNWyXY/lJV5Fhs="
+        rev = "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5"
+        self.assertEqual(pin["required_nar_hash"], nar)
+        self.assertEqual(pin["required_revision"], rev)
+        self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
+
+        flake = (SOURCE / "flake.nix").read_text()
+        for assertion in (
+            "systemLock = builtins.fromJSON (builtins.readFile ./flake.lock);",
+            "systemRootNode.inputs.nixer == contract.inputs.nixer.lock_node;",
+            "nixerNode.locked.rev == contract.inputs.nixer.required_revision;",
+            "nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;",
+            "systemNixerNode.locked.rev == contract.inputs.nixer.required_revision;",
+            "systemNixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;",
+        ):
+            self.assertIn(assertion, flake)
+
+        def bound(contract, root, system):
+            nixer = contract["inputs"]["nixer"]
+            name = nixer["lock_node"]
+            return all((
+                root["nodes"][root["root"]]["inputs"]["nixer"] == name,
+                system["nodes"][system["root"]]["inputs"]["nixer"] == name,
+                root["nodes"][name]["locked"]["rev"] == nixer["required_revision"],
+                root["nodes"][name]["locked"]["narHash"] == nixer["required_nar_hash"],
+                system["nodes"][name]["locked"]["rev"] == nixer["required_revision"],
+                system["nodes"][name]["locked"]["narHash"] == nixer["required_nar_hash"],
+            ))
+        self.assertTrue(bound(trust, root_lock, system_lock))
+
+        for attack in (
+            "contract_nar", "root_nar", "system_nar",
+            "root_rev", "system_rev", "root_edge", "system_edge",
+        ):
+            altered_trust = json.loads(json.dumps(trust))
+            altered_root = json.loads(json.dumps(root_lock))
+            altered_system = json.loads(json.dumps(system_lock))
+            name = pin["lock_node"]
+            if attack == "contract_nar":
+                altered_trust["inputs"]["nixer"]["required_nar_hash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "root_nar":
+                altered_root["nodes"][name]["locked"]["narHash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "system_nar":
+                altered_system["nodes"][name]["locked"]["narHash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "root_rev":
+                altered_root["nodes"][name]["locked"]["rev"] = "0" * 40
+            elif attack == "system_rev":
+                altered_system["nodes"][name]["locked"]["rev"] = "0" * 40
+            elif attack == "root_edge":
+                altered_root["nodes"][altered_root["root"]]["inputs"]["nixer"] = "microvm"
+            else:
+                altered_system["nodes"][altered_system["root"]]["inputs"]["nixer"] = "microvm"
+            with self.subTest(attack=attack):
+                self.assertFalse(bound(altered_trust, altered_root, altered_system))
 
     def test_nixer_image_preparation_has_bounded_network_retry(self):
         module = (SOURCE / "modules/nixer.nix").read_text()
@@ -1997,7 +2059,6 @@ class T(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("shadow database identity is unsafe", result.stderr)
             self.assertEqual(self._chpasswd_call_count(log), 0)
-
     def test_firstboot_marker_rejects_root_rollback_without_replay(self):
         for rolled_back_hash in (
             "",
