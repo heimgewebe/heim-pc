@@ -26,17 +26,17 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1792965841,
-        "narHash": "sha256-FFfUnJF0AnzAivNlWaDaTcfdD6VrbLNWyXY/lJV5Fhs=",
+        "lastModified": 1793220845,
+        "narHash": "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0=",
         "owner": "heimgewebe",
         "repo": "nixer",
-        "rev": "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5",
+        "rev": "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
         "type": "github"
       },
       "original": {
         "owner": "heimgewebe",
         "repo": "nixer",
-        "rev": "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5",
+        "rev": "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
         "type": "github"
       }
     },
