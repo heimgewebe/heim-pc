@@ -42,7 +42,8 @@
   # They are explicitly forbidden in a permanent primary-system candidate.
   services.getty.autologinUser = lib.mkForce null;
   security.sudo.wheelNeedsPassword = lib.mkForce true;
-  # Preserve unattended owner administration established by physical Gen11+.
+  # Preserve the already active Gen19 owner-specific passwordless sudo rule.
+  # General wheel sudo still requires a password.
   security.sudo.extraRules = [{
     users = [ "alex" ];
     commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];

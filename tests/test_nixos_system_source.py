@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "846dc7045c41bdf4783c2a137a810a2a282e9719d540d9cd5d4813399c9751b6"
-ROOT_LOCK_SHA256 = "7ab7833c96d05cebcab7763bdc38ab82a28576841b2a5b5a8255e5d1052c9b22"
+SOURCE_SNAPSHOT_SHA256 = "1de49b58556f3c8c3b031e12c710667963f54caf16c4c568bb23ae4e2959a6d5"
+ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,9 +32,71 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/c0b75cfd580c221f8a5095fbf802c4f6386a017e";',
+            'nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";',
             nested,
         )
+
+    def test_nixer_nar_contract_binds_both_root_and_system_locks(self):
+        # The reviewed source NAR is a separate, immutable trust decision.
+        # Equality of two mutable lockfiles alone is not that decision.
+        trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
+        root_lock = json.loads((ROOT / "flake.lock").read_text())
+        system_lock = json.loads((SOURCE / "flake.lock").read_text())
+        pin = trust["inputs"]["nixer"]
+        nar = "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0="
+        rev = "6c1fae3936e441c43d19a7924f2f26f3539fb1d3"
+        self.assertEqual(pin["required_nar_hash"], nar)
+        self.assertEqual(pin["required_revision"], rev)
+        self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
+
+        flake = (SOURCE / "flake.nix").read_text()
+        for assertion in (
+            "systemLock = builtins.fromJSON (builtins.readFile ./flake.lock);",
+            "systemRootNode.inputs.nixer == contract.inputs.nixer.lock_node;",
+            "nixerNode.locked.rev == contract.inputs.nixer.required_revision;",
+            "nixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;",
+            "systemNixerNode.locked.rev == contract.inputs.nixer.required_revision;",
+            "systemNixerNode.locked.narHash == contract.inputs.nixer.required_nar_hash;",
+        ):
+            self.assertIn(assertion, flake)
+
+        def bound(contract, root, system):
+            nixer = contract["inputs"]["nixer"]
+            name = nixer["lock_node"]
+            return all((
+                root["nodes"][root["root"]]["inputs"]["nixer"] == name,
+                system["nodes"][system["root"]]["inputs"]["nixer"] == name,
+                root["nodes"][name]["locked"]["rev"] == nixer["required_revision"],
+                root["nodes"][name]["locked"]["narHash"] == nixer["required_nar_hash"],
+                system["nodes"][name]["locked"]["rev"] == nixer["required_revision"],
+                system["nodes"][name]["locked"]["narHash"] == nixer["required_nar_hash"],
+            ))
+        self.assertTrue(bound(trust, root_lock, system_lock))
+
+        for attack in (
+            "contract_nar", "root_nar", "system_nar",
+            "root_rev", "system_rev", "root_edge", "system_edge",
+        ):
+            altered_trust = json.loads(json.dumps(trust))
+            altered_root = json.loads(json.dumps(root_lock))
+            altered_system = json.loads(json.dumps(system_lock))
+            name = pin["lock_node"]
+            if attack == "contract_nar":
+                altered_trust["inputs"]["nixer"]["required_nar_hash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "root_nar":
+                altered_root["nodes"][name]["locked"]["narHash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "system_nar":
+                altered_system["nodes"][name]["locked"]["narHash"] = "sha256-" + "A" * 43 + "="
+            elif attack == "root_rev":
+                altered_root["nodes"][name]["locked"]["rev"] = "0" * 40
+            elif attack == "system_rev":
+                altered_system["nodes"][name]["locked"]["rev"] = "0" * 40
+            elif attack == "root_edge":
+                altered_root["nodes"][altered_root["root"]]["inputs"]["nixer"] = "microvm"
+            else:
+                altered_system["nodes"][altered_system["root"]]["inputs"]["nixer"] = "microvm"
+            with self.subTest(attack=attack):
+                self.assertFalse(bound(altered_trust, altered_root, altered_system))
 
     def test_nixer_image_preparation_has_bounded_network_retry(self):
         module = (SOURCE / "modules/nixer.nix").read_text()
@@ -364,7 +426,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 45)
+        self.assertEqual(len(files), 48)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -392,6 +454,13 @@ class T(unittest.TestCase):
             self.assertIn(f'"{critical}"', module)
         self.assertNotIn('"/var/lib/systemd"', module)
         self.assertNotIn('"/root"', module)
+        # Only the independent fixed root-owned service may restore data.
+        self.assertIn('systemd.services."heim-pc-restic-recovery-probe" = {', module)
+        self.assertIn('User = "root";', module)
+        self.assertIn('NoNewPrivileges = true;', module)
+        self.assertIn('StateDirectory = "heim-pc-restic-recovery-probe";', module)
+        self.assertNotIn('security.polkit.extraConfig', module)
+        self.assertNotIn('polkit.addRule', module)
 
     def test_canonical_source_layout(self):
         for relative in (
@@ -400,7 +469,7 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/fotoatelier.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/fotoatelier.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
@@ -729,7 +798,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "c0b75cfd580c221f8a5095fbf802c4f6386a017e",
+            "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
@@ -1997,7 +2066,6 @@ class T(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("shadow database identity is unsafe", result.stderr)
             self.assertEqual(self._chpasswd_call_count(log), 0)
-
     def test_firstboot_marker_rejects_root_rollback_without_replay(self):
         for rolled_back_hash in (
             "",

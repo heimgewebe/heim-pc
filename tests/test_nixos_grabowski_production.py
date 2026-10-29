@@ -3,15 +3,52 @@
 These static tests complement actual isolated Nix builds and MCP protocol checks.
 """
 from pathlib import Path
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "6a6360a92be11d24d85e9b002bb34ac2b07672d5"
-TARBALL_HASH = "sha256-qxPpTXFUQ7m7ZCX3eGiy26rDoMyVpmjnzgSgmgKcmdk="
+REVISION = "374d747153f4a266d80dc8ec34a51ca41cdb6a98"
+TARBALL_HASH = "sha256-HOjW8mHAFZvU53mP2G7QDP8k3Zga+0cmOBS0LZV9VWQ="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
+    def test_systemd_gh_cache_is_private_with_protected_home(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
+        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertNotIn("ProtectHome = false;", operator)
+        writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
+        normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertNotIn("/home/alex", normalized)
+        self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
+        self.assertNotIn('BindPaths = ', operator)
+        self.assertIn('assert operator.CacheDirectory == "grabowski-xdg";', flake)
+        self.assertIn('assert operator.CacheDirectoryMode == "0700";', flake)
+        self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
+        self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
+
+    def test_operator_path_is_available_without_setuid_escalation(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
+        self.assertIn("NoNewPrivileges = true;", production)
+
+    def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
+        desktop = (MODULES / "desktop.nix").read_text()
+        self.assertIn(
+            "security.pam.services.xrdp-sesman.kwallet = lib.mkIf config.services.xrdp.enable {",
+            desktop,
+        )
+        self.assertIn("forceRun = true;", desktop)
+
     def test_exact_existing_broker_source_is_pinned(self):
         source = (MODULES / "grabowski-broker-package.nix").read_text()
         self.assertIn(f'sourceRevision = "{REVISION}";', source)
@@ -73,6 +110,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('Group = "users";', production)
         self.assertIn("XDG_RUNTIME_DIR=/run/user/1000", production)
         self.assertIn("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", production)
+        self.assertIn("GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64", production)
 
 
     def test_full_operator_is_hash_locked_and_release_identity_is_shared(self):
@@ -80,7 +118,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "6a6360a92be1-srcset8a29601ce885-lock264e747ad05a-contract8414018c4b85"
+        release_id = "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -93,7 +131,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("PYTHONPATH", op)
         self.assertIn('GRABOWSKI_NIXOS_GIT_BIN', op)
         self.assertIn('GRABOWSKI_NIXOS_GH_BIN', op)
-        self.assertIn('"src/grabowski_operator.py": (4, 1)', op)
+        self.assertIn('"src/grabowski_operator.py": (1, 1)', op)
         self.assertIn('"src/grabowski_self_deploy.py": (2, 0)', op)
         self.assertIn('makeWrapper ${pkgs.git}/bin/git', op)
         self.assertIn('makeWrapper ${pkgs.gh}/bin/gh', op)
@@ -103,7 +141,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
         self.assertIn('len(expected) == 203', op)
-        self.assertIn('len(supporting) != 129', op)
+        self.assertIn('len(supporting) != 130', op)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
@@ -137,7 +175,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)
@@ -157,7 +195,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("extracted/tools/grabowski_privileged_request.py", broker)
         self.assertIn('"$out/bin/grabowski-privileged-request"', broker)
         self.assertIn("GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker", prod)
-        self.assertIn('PATH=${cfg.brokerPackage}/bin:', prod)
+        self.assertIn('PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', prod)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-request", (ROOT / "nixos/system/flake.nix").read_text())
         for original_peer_gate in (
             "systemd_main_pid != pid",
@@ -198,19 +236,153 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
 
 
 
-    def test_native_restic_lock_mount_writable_in_operator_sandbox(self):
+    def test_native_restic_root_probe_is_separate_from_unprivileged_operator(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
+        restic = (MODULES / "restic-seagate-backup.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         marker = "systemd.services.grabowski-operator = lib.mkIf admit {"
         self.assertEqual(prod.count(marker), 1)
         operator = prod.split(marker, 1)[1]
         self.assertIn('ProtectSystem = "strict";', operator)
-        self.assertIn('NoNewPrivileges = false;', operator)
-        self.assertIn('"-/var/lib/heim-pc-backup"', operator)
+        self.assertIn('NoNewPrivileges = true;', operator)
+        self.assertNotIn('NoNewPrivileges = false;', operator)
+        self.assertNotIn('"-/var/lib/heim-pc-backup"', operator)
         self.assertIn(
-            'builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths;',
+            'assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";',
             flake,
         )
+        self.assertIn(
+            'assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);',
+            flake,
+        )
+        self.assertNotIn('security.polkit.extraConfig', restic)
+        self.assertNotIn('polkit.addRule', restic)
+        self.assertIn('authenticated and tightly scoped Grabowski Rootbroker', restic)
+        self.assertIn('StateDirectory = "heim-pc-restic-recovery-probe";', restic)
+
+    def test_nix_fetcher_uses_systemd_xdg_cache_outside_protected_home(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        self.assertIn('ProtectSystem = "strict";', operator)
+        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
+        self.assertIn('CacheDirectoryMode = "0700";', operator)
+        self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
+        self.assertNotIn('"-/home/alex/.cache/nix"', operator)
+        self.assertIn(
+            'assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);',
+            flake,
+        )
+
+
+    def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        rule_block = prod.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
+        expected = (
+            "d /home/alex/.cache 0755 alex users -",
+            "d /home/alex/.cache/nix 0755 alex users -",
+        )
+        for rule in expected:
+            self.assertIn(f'"{rule}"', rule_block)
+        self.assertLess(rule_block.index(expected[0]), rule_block.index(expected[1]))
+
+        tmpfiles = shutil.which("systemd-tmpfiles")
+        if tmpfiles is None:
+            self.skipTest("systemd-tmpfiles is not installed on this test host")
+        with tempfile.TemporaryDirectory(prefix="grabowski-cache-coldstart-") as tmp:
+            scratch = Path(tmp)
+            root = scratch / "root"
+            (root / "etc").mkdir(parents=True)
+            # --root resolves users/groups inside this isolated synthetic fixture;
+            # never mutate the real cache, passwd, group, or running service.
+            uid, gid = os.getuid(), os.getgid()
+            (root / "etc/passwd").write_text(
+                f"root:x:0:0:root:/root:/bin/sh\nalex:x:{uid}:{gid}:alex:/home/alex:/bin/sh\n"
+            )
+            (root / "etc/group").write_text(
+                f"root:x:0:\nusers:x:{gid}:alex\n"
+            )
+            config = scratch / "cache-tmpfiles.conf"
+            config.write_text("\n".join(expected) + "\n")
+            directories = (
+                root / "home/alex/.cache",
+                root / "home/alex/.cache/nix",
+            )
+            self.assertTrue(all(not directory.exists() for directory in directories))
+            argv = [tmpfiles, "--root=" + str(root), "--create", str(config)]
+            for _ in range(2):
+                completed = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=30, check=False
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                for directory in directories:
+                    self.assertTrue(directory.is_dir(), str(directory))
+                    stats = directory.stat()
+                    self.assertEqual((stats.st_uid, stats.st_gid), (uid, gid))
+                    self.assertEqual(stats.st_mode & 0o777, 0o755)
+
+
+    def test_operator_writable_paths_exist_on_fresh_home_before_sandbox(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        rules = production.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
+        operator = production.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        expected = (
+            ("d /home/alex/.local 0755 alex users -", 0o755),
+            ("d /home/alex/.local/state 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/grabowski 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/bureau 0700 alex users -", 0o700),
+            ("d /home/alex/repos 0755 alex users -", 0o755),
+            ("d /home/alex/grabowski-workspace 0700 alex users -", 0o700),
+            ("d /home/alex/worktrees 0700 alex users -", 0o700),
+        )
+        # The operator's real writable home paths must all be provisioned.
+        self.assertIn('ProtectHome = "read-only";', operator)
+        for line, _mode in expected:
+            absolute = line.split()[1]
+            self.assertIn(f'"{line}"', rules)
+            if absolute in {
+                "/home/alex/.local/state/grabowski",
+                "/home/alex/.local/state/bureau",
+                "/home/alex/repos",
+                "/home/alex/grabowski-workspace",
+                "/home/alex/worktrees",
+            }:
+                self.assertIn(f'"-{absolute}"', operator)
+        self.assertLess(rules.index(expected[0][0]), rules.index(expected[1][0]))
+        self.assertLess(rules.index(expected[1][0]), rules.index(expected[2][0]))
+
+        tmpfiles = shutil.which("systemd-tmpfiles")
+        if tmpfiles is None:
+            self.skipTest("systemd-tmpfiles not installed on test host")
+        # Real systemd-tmpfiles --root; never create/change a real user home.
+        with tempfile.TemporaryDirectory(prefix="grabowski-fresh-home-") as tmp:
+            root = Path(tmp) / "root"
+            (root / "etc").mkdir(parents=True)
+            uid, gid = os.getuid(), os.getgid()
+            (root / "etc/passwd").write_text(
+                f"root:x:0:0:root:/root:/bin/sh\n"
+                f"alex:x:{uid}:{gid}:alex:/home/alex:/bin/sh\n"
+            )
+            (root / "etc/group").write_text(
+                f"root:x:0:\nusers:x:{gid}:alex\n"
+            )
+            config_file = Path(tmp) / "operator-tmpfiles.conf"
+            config_file.write_text("\n".join(line for line, _mode in expected) + "\n")
+            paths = [(root / line.split()[1].lstrip("/"), mode) for line, mode in expected]
+            self.assertTrue(all(not path.exists() for path, _mode in paths))
+            for _ in range(2):
+                result = subprocess.run(
+                    [tmpfiles, f"--root={root}", "--create", str(config_file)],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for path, mode in paths:
+                    self.assertTrue(path.is_dir(), str(path))
+                    info = path.stat()
+                    self.assertEqual((info.st_uid, info.st_gid), (uid, gid))
+                    self.assertEqual(info.st_mode & 0o777, mode)
+
 
 
 class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):

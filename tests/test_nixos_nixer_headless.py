@@ -21,6 +21,22 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', text)
         self.assertIn('User = "alex";', text)
         self.assertIn('Group = "users";', text)
+        self.assertEqual(text.count("NoNewPrivileges = true;"), 1)
+        self.assertIn("assertion = config.systemd.services.nixer-headless.serviceConfig.NoNewPrivileges;", text)
+        self.assertEqual(text.count("NoNewPrivileges = false;"), 1)
+        main = text.split("systemd.services.nixer-headless = {", 1)[1]
+        self.assertIn("NoNewPrivileges = true;", main)
+        self.assertIn("systemd.services.nixer-podman-namespace = {", text)
+        self.assertIn('ExecStartPost = "${checkNamespace}/bin/heim-pc-nixer-check-namespace";', text)
+        self.assertIn("setpriv --no-new-privs -- podman unshare true", text)
+        self.assertIn('while [ "$attempt" -le 60 ]; do', text)
+        self.assertIn("sleep 0.5", text)
+        self.assertIn("Nixer Podman namespace did not become NNP-usable", text)
+        self.assertIn('bindsTo = [ "nixer-podman-namespace.service" ];', main)
+        self.assertIn('XDG_RUNTIME_DIR = "/run/nixer-headless";', main)
+        self.assertIn('unitConfig.Upholds = "nixer-headless.service";', text)
+        self.assertIn('subUidRanges = [{ startUid = 100000; count = 65536; }];', text)
+        self.assertIn('subGidRanges = [{ startGid = 100000; count = 65536; }];', text)
         self.assertIn('RuntimeDirectory = "nixer-headless";', text)
         self.assertIn('RuntimeDirectoryMode = "0700";', text)
         self.assertNotIn('!config.users.users.alex.linger', text)
@@ -66,10 +82,21 @@ class NixerHeadlessSourceTests(unittest.TestCase):
             proof,
         )
         self.assertIn(
-            'with subtest("original eight-tool Nixer MCP initializes on localhost")',
+            'with subtest("original nine-tool Nixer MCP initializes on localhost")',
             proof,
         )
         self.assertIn('"nixer_status"', proof)
+        self.assertIn('"nixos_options"', proof)
+        self.assertNotIn("subUidRanges = [{ startUid = 100000; count = 65536; }];", proof)
+        self.assertNotIn("subGidRanges = [{ startGid = 100000; count = 65536; }];", proof)
+        self.assertIn("grep -xc", proof)
+        self.assertIn('group = "users";', proof)
+        self.assertNotIn('group = "alex";', proof)
+        self.assertIn('with subtest("cold Podman namespace initializes before NoNewPrivileges MCP")', proof)
+        self.assertIn('with subtest("Nixer restarts after namespace-holder restart")', proof)
+        self.assertIn("heim-pc-nixer-check-namespace", proof)
+        self.assertIn("systemctl is-active nixer-podman-namespace.service", proof)
+        self.assertEqual(proof.count("--property=NoNewPrivileges"), 4)
         self.assertNotIn("systemd.user.services.nixer =", proof)
 
     def test_separate_nixer_candidate_cannot_change_headless_base(self):
@@ -88,6 +115,10 @@ class NixerHeadlessSourceTests(unittest.TestCase):
         self.assertIn('assert !cfg.heimPc.grabowskiProduction.enable;', flake)
         self.assertIn('assert !cfg.boot.loader.efi.canTouchEfiVariables;', flake)
         self.assertIn('users.users.alex.linger = false;', primary)
+        self.assertIn("security.sudo.wheelNeedsPassword = lib.mkForce true;", primary)
+        self.assertIn("security.sudo.extraRules = [{", primary)
+        self.assertIn('users = [ "alex" ];', primary)
+        self.assertIn('command = "ALL"; options = [ "NOPASSWD" ];', primary)
         baseline = flake.split(
             'nixosConfigurations.heim-pc-seagate-primary-candidate =', 1
         )[1].split('nixosConfigurations.heim-pc-vm =', 1)[0]

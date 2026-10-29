@@ -8,7 +8,8 @@ let
 
     expected = {
         "nixer_status", "flake_metadata", "flake_show", "flake_check",
-        "eval_attr", "nixos_option", "derivation_show", "build_dry_run",
+        "eval_attr", "nixos_option", "nixos_options",
+        "derivation_show", "build_dry_run",
     }
 
     async def main():
@@ -42,11 +43,11 @@ let
     ];
     system.stateVersion = "26.05";
     networking.hostName = "nixer-headless-proof";
-    users.groups.alex = { };
     users.users.alex = {
       isNormalUser = true;
       uid = 1000;
-      group = "alex";
+      # Match the physical host primary GID: newuidmap validates passwd GID.
+      group = "users";
       home = "/home/alex";
       createHome = true;
       linger = false;
@@ -78,6 +79,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     missing.start()
     missing.wait_for_unit("multi-user.target", timeout=180)
+    missing.succeed("test $(grep -xc 'alex:100000:65536' /etc/subuid) = 1")
+    missing.succeed("test $(grep -xc 'alex:100000:65536' /etc/subgid) = 1")
+    missing.wait_until_succeeds("systemctl is-active nixer-podman-namespace.service", timeout=180)
+    missing.succeed("systemctl show nixer-podman-namespace.service --property=NoNewPrivileges --value | grep -qx no")
     with subtest("missing pinned OCI image denies headless Nixer start"):
         missing.wait_until_succeeds(
             "systemctl is-failed nixer-headless.service", timeout=150,
@@ -88,6 +93,10 @@ pkgs.testers.runNixOSTest {
             "--value | grep -qx alex"
         )
         missing.succeed(
+            "systemctl show nixer-headless.service --property=NoNewPrivileges "
+            "--value | grep -qx yes"
+        )
+        missing.succeed(
             "systemctl show nixer-headless.service --property=ExecStartPre "
             "| grep -Fq heim-pc-nixer-check-image"
         )
@@ -95,6 +104,11 @@ pkgs.testers.runNixOSTest {
 
     proof.start()
     proof.wait_for_unit("multi-user.target", timeout=180)
+    with subtest("cold Podman namespace initializes before NoNewPrivileges MCP"):
+        proof.wait_until_succeeds("systemctl is-active nixer-podman-namespace.service", timeout=180)
+        proof.succeed("systemctl show nixer-podman-namespace.service --property=NoNewPrivileges --value | grep -qx no")
+        proof.succeed("systemctl show nixer-podman-namespace.service --property=ExecStartPost | grep -Fq heim-pc-nixer-check-namespace")
+        proof.succeed("systemctl show nixer-headless.service --property=BindsTo | grep -Fq nixer-podman-namespace.service")
     with subtest("original Nixer starts as headless unprivileged system MainPID"):
         proof.wait_until_succeeds(
             "systemctl is-active nixer-headless.service", timeout=150,
@@ -115,7 +129,15 @@ pkgs.testers.runNixOSTest {
             "systemctl show nixer-headless.service --property=User "
             "--value | grep -qx alex"
         )
-    with subtest("original eight-tool Nixer MCP initializes on localhost"):
+        proof.succeed(
+            "systemctl show nixer-headless.service --property=NoNewPrivileges "
+            "--value | grep -qx yes"
+        )
+    with subtest("Nixer restarts after namespace-holder restart"):
+        proof.succeed("systemctl restart nixer-podman-namespace.service", timeout=180)
+        proof.wait_until_succeeds("systemctl is-active nixer-podman-namespace.service", timeout=180)
+        proof.wait_until_succeeds("systemctl is-active nixer-headless.service", timeout=180)
+    with subtest("original nine-tool Nixer MCP initializes on localhost"):
         proof.wait_until_succeeds(
             "PYTHONDONTWRITEBYTECODE=1 "
             "${clientPython}/bin/python -B ${verifyMcp}",

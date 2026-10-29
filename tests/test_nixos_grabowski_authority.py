@@ -37,7 +37,7 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.fragment = self.sysunits / "grabowski-operator.service"
         self.fragment.symlink_to(self.unit_file)
         self.uid = os.getuid()
-        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-6a6360a9")
+        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-374d7471")
         (self.operator_pkg / "bin").mkdir(parents=True, mode=0o700)
         self.entry = self.operator_pkg / "bin" / "grabowski-operator"
         self.entry.write_text("#!/bin/sh\nexit 0\n")
