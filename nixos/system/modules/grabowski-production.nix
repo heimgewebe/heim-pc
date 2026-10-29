@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
-  expectedRevision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+  expectedReleaseId = "89eafe9c2fb7-srcset53e9c4894e0f-lock264e747ad05a-contract650f923c4cfb";
+  expectedRevision = "89eafe9c2fb7a323cd20c586838e6a3b324c19cc";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -321,7 +321,8 @@ in
         ];
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # Node.js/V8 needs executable JIT pages; MDWE causes reproducible SIGTRAP.
+        MemoryDenyWriteExecute = false;
         RestrictRealtime = true;
         LimitCORE = 0;
         SystemCallArchitectures = "native";
