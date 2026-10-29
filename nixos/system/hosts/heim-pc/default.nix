@@ -43,7 +43,7 @@ in
   nixpkgs.config.allowUnfree = true;
   # CVE-2026-111497: patch the decoder only; keep the nixpkgs input locked.
   # Brotli 1.2.1 hash matches the reviewed nixos-26.05 backport.
-  nixpkgs.overlays = [
+  nixpkgs.overlays = lib.mkDefault [
     (final: prev: {
       brotli = prev.brotli.overrideAttrs (_: {
         version = "1.2.1";
