@@ -46,6 +46,16 @@ class FotoatelierNixOSSourceTests(unittest.TestCase):
         self.assertNotIn('User = "root";', source)
         self.assertNotIn('ProtectHome = false', source)
 
+    def test_public_sync_offline_detection_has_tailscale_in_service_path(self):
+        source = MODULE.read_text(encoding="utf-8")
+        tools = source.split("tools = lib.makeBinPath [", 1)[1].split("];", 1)[0]
+        self.assertIn("pkgs.tailscale", tools)
+        public_sync = source.split(
+            "systemd.user.services.fotoatelier-public-sync =", 1
+        )[1].split("systemd.user.timers.fotoatelier-public-sync =", 1)[0]
+        self.assertIn('"PATH=${tools}"', public_sync)
+        self.assertIn('ExecStart = "${python} ${source}/ops/public-sync.py";', public_sync)
+
     def test_missing_state_is_provisioned_before_sandbox_without_broadening_writes(self):
         source = MODULE.read_text(encoding="utf-8")
         self.assertIn("systemd.tmpfiles.rules = [", source)

@@ -8,7 +8,8 @@ let
   stateRoot = "${home}/.local/state/fotoatelier-public-sync";
   sshConfig = "${home}/.ssh/config";
   python = "${pkgs.python3}/bin/python3";
-  tools = lib.makeBinPath [ pkgs.openssh pkgs.git pkgs.python3 pkgs.coreutils ];
+  # Offline FOTOLABOR detection in public-sync.py executes `tailscale status --json`.
+  tools = lib.makeBinPath [ pkgs.openssh pkgs.git pkgs.python3 pkgs.coreutils pkgs.tailscale ];
 in
 {
   # Provision the exact writable roots before the user manager starts the
