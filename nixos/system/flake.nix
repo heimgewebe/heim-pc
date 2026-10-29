@@ -398,7 +398,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+                  "89eafe9c2fb7-srcset53e9c4894e0f-lock264e747ad05a-contract650f923c4cfb";
               };
             })
           ];
@@ -504,8 +504,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
-            revision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+            release = "89eafe9c2fb7-srcset53e9c4894e0f-lock264e747ad05a-contract650f923c4cfb";
+            revision = "89eafe9c2fb7a323cd20c586838e6a3b324c19cc";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -937,7 +937,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+            "89eafe9c2fb7-srcset53e9c4894e0f-lock264e747ad05a-contract650f923c4cfb";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -980,7 +980,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+            release = "89eafe9c2fb7-srcset53e9c4894e0f-lock264e747ad05a-contract650f923c4cfb";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
@@ -1015,7 +1015,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+            == "89eafe9c2fb7a323cd20c586838e6a3b324c19cc";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
@@ -1081,6 +1081,9 @@ PY
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # Node.js/V8 JIT must not be trapped by operator-only MDWE hardening.
+          assert !operator.MemoryDenyWriteExecute;
+          assert broker.MemoryDenyWriteExecute;
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
           assert operator.ProtectHome == "read-only";
