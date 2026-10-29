@@ -399,7 +399,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb";
+                  "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
               };
             })
           ];
@@ -505,8 +505,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb";
-            revision = "374d747153f4a266d80dc8ec34a51ca41cdb6a98";
+            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+            revision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -551,6 +551,25 @@ if manifest != expected:
 for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_contract.py"):
     if not (root / "lib/python3.12/site-packages" / name).is_file():
         raise SystemExit(f"missing full operator module {name}")
+# Inspect the packaged launcher, not the checkout: generic jobs must collect
+# terminal units; reserved deployments must retain their observable units.
+import ast
+source = root / "lib/python3.12/site-packages/grabowski_operator_core.py"
+launchers = [node.value for node in ast.walk(ast.parse(source.read_text()))
+             if isinstance(node, ast.Assign)
+             and any(isinstance(target, ast.Name) and target.id == "systemd_argv"
+                     for target in node.targets)
+             and isinstance(node.value, ast.List)
+             and any(isinstance(value, ast.Constant) and value.value == "systemd-run"
+                     for value in node.value.elts)]
+if len(launchers) != 1:
+    raise SystemExit("expected one canonical generic-job systemd launcher")
+conditional_collect = [value.value for value in launchers[0].elts
+                       if isinstance(value, ast.Starred)
+                       and isinstance(value.value, ast.IfExp)]
+if len(conditional_collect) != 1 or ast.unparse(conditional_collect[0]) != (
+        "['--collect'] if finalization_expected_head is None else []"):
+    raise SystemExit("generic-job collection or reserved-deployment retention regressed")
 PY
             # Nix sandboxes remap host-root-owned store inputs to uid 65534.
             # A build cannot certify the live root-ownership/argv0 gate. Instead
@@ -919,7 +938,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb";
+            "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -962,7 +981,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb";
+            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
@@ -997,7 +1016,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "374d747153f4a266d80dc8ec34a51ca41cdb6a98";
+            == "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
