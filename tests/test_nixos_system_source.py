@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "64e60505159898b81f906ccd0034bd890a953ecfddbc1f63be3e3e5e9277371d"
-ROOT_LOCK_SHA256 = "cbe7cf42ca3bf9106583ec68abacedb168fff474792e826e96e97b70d8143997"
+SOURCE_SNAPSHOT_SHA256 = "d1c776664d0907e67b54cb7e189e2727653863e6d7f79f88221dd2d8af542e75"
+ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +32,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/f66d0a38ef3c75833fa20db8aa6bd9202c9608a5";',
+            'nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";',
             nested,
         )
 
@@ -43,8 +43,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-FFfUnJF0AnzAivNlWaDaTcfdD6VrbLNWyXY/lJV5Fhs="
-        rev = "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5"
+        nar = "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0="
+        rev = "6c1fae3936e441c43d19a7924f2f26f3539fb1d3"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -798,7 +798,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "f66d0a38ef3c75833fa20db8aa6bd9202c9608a5",
+            "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
