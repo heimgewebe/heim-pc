@@ -41,6 +41,21 @@ in
   imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ];
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
+  # CVE-2026-111497: patch the decoder only; keep the nixpkgs input locked.
+  # Brotli 1.2.1 hash matches the reviewed nixos-26.05 backport.
+  nixpkgs.overlays = [
+    (final: prev: {
+      brotli = prev.brotli.overrideAttrs (_: {
+        version = "1.2.1";
+        src = prev.fetchFromGitHub {
+          owner = "google";
+          repo = "brotli";
+          tag = "v1.2.1";
+          hash = "sha256-llY72cYffDv0ugsH0p89xIPEbElV4L8u7U/Fe8hT3gI=";
+        };
+      });
+    })
+  ];
 
   # Canonical local interaction policy for the physical workstation.  Reuse the
   # XKB definition for the early console so LUKS and SDDM see the same layout.
