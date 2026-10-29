@@ -550,6 +550,25 @@ if manifest != expected:
 for name in ("grabowski_operator.py", "grabowski_mcp.py", "grabowski_runtime_contract.py"):
     if not (root / "lib/python3.12/site-packages" / name).is_file():
         raise SystemExit(f"missing full operator module {name}")
+# Inspect the packaged launcher, not the checkout: generic jobs must collect
+# terminal units; reserved deployments must retain their observable units.
+import ast
+source = root / "lib/python3.12/site-packages/grabowski_operator_core.py"
+launchers = [node.value for node in ast.walk(ast.parse(source.read_text()))
+             if isinstance(node, ast.Assign)
+             and any(isinstance(target, ast.Name) and target.id == "systemd_argv"
+                     for target in node.targets)
+             and isinstance(node.value, ast.List)
+             and any(isinstance(value, ast.Constant) and value.value == "systemd-run"
+                     for value in node.value.elts)]
+if len(launchers) != 1:
+    raise SystemExit("expected one canonical generic-job systemd launcher")
+conditional_collect = [value.value for value in launchers[0].elts
+                       if isinstance(value, ast.Starred)
+                       and isinstance(value.value, ast.IfExp)]
+if len(conditional_collect) != 1 or ast.unparse(conditional_collect[0]) != (
+        "['--collect'] if finalization_expected_head is None else []"):
+    raise SystemExit("generic-job collection or reserved-deployment retention regressed")
 PY
             # Nix sandboxes remap host-root-owned store inputs to uid 65534.
             # A build cannot certify the live root-ownership/argv0 gate. Instead
