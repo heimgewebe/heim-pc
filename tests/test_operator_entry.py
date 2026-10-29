@@ -33,6 +33,13 @@ class OperatorEntryTests(unittest.TestCase):
         self.assertEqual(contract["host"]["role"], "primary_local_operator_host")
         self.assertEqual(contract["host"]["installedEntryFile"], "${HOME}/.config/heimgewebe/operator-entry.v1.json")
         self.assertEqual(contract["host"]["repositoriesAgentPointer"], "${HOME}/repos/AGENTS.md")
+        self.assertEqual(contract["host"]["personalWorkspaceRoot"], "${HOME}/Arbeitsraum")
+        self.assertEqual(
+            contract["host"]["personalWorkspaceAgentEntry"], "${HOME}/Arbeitsraum/AGENTS.md"
+        )
+        self.assertEqual(
+            contract["host"]["personalWorkspaceIndex"], "${HOME}/Arbeitsraum/START.md"
+        )
         transcription = contract["capabilityLocators"]["audioTranscription"]
         self.assertEqual(transcription["schemaVersion"], 1)
         self.assertEqual(
