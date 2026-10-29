@@ -2,16 +2,16 @@
 let
   # Exact Git revision of the last verified Pop!_OS operator release.
   # This publicly verifiable source archive contains no live host credentials.
-  sourceRevision = "329f08ce7853dcaffc728184f1af8db4da5470ad";
-  releaseId = "329f08ce7853-srcseta7246702cd71-lock264e747ad05a-contract650f923c4cfb";
+  sourceRevision = "374d747153f4a266d80dc8ec34a51ca41cdb6a98";
+  releaseId = "374d747153f4-srcset21fdaac5adf4-lock264e747ad05a-contract650f923c4cfb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-W5c1wrKiYDyoRvAlCk3LcQY3ZcTlwexB0ZLEdmf/mL8=";
+    hash = "sha256-HOjW8mHAFZvU53mP2G7QDP8k3Zga+0cmOBS0LZV9VWQ=";
   };
 
   # Build the EXISTING root-owned production broker, not a second API.
-  brokerPackage = pkgs.runCommand "grabowski-rootbroker-source-329f08ce" {
+  brokerPackage = pkgs.runCommand "grabowski-rootbroker-source-374d7471" {
     nativeBuildInputs = [ pkgs.makeWrapper pkgs.gnutar pkgs.gzip ];
     passthru = {
       inherit sourceRevision releaseId lockSha256;
