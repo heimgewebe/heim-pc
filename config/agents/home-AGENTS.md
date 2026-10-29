@@ -12,6 +12,10 @@ Lies zuerst:
 
 Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`.
 
+## Persönliche Projekte, Wissen und Quellen
+
+Bei Aufgaben zur persönlichen Ablage zunächst `~/Arbeitsraum/AGENTS.md` und danach `~/Arbeitsraum/START.md` lesen. Dortige Projekt-`AGENTS.md` und -`README.md` gehen für das jeweilige Vorhaben vor. Nur relevante Struktur- und Regeländerungen dokumentieren, keine flüchtigen Dateibestände hierher kopieren.
+
 ## Rollen
 
 - ChatGPT über Grabowski ist der Operator für Prüfung und Ausführung.
