@@ -155,8 +155,20 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
         "installedEntryFile",
         "agentPointer",
         "repositoriesAgentPointer",
+        "personalWorkspaceRoot",
+        "personalWorkspaceAgentEntry",
+        "personalWorkspaceIndex",
     ):
         _require_host_path(host.get(field), f"host.{field}", errors)
+
+    expected_personal_workspace = {
+        "personalWorkspaceRoot": "${HOME}/Arbeitsraum",
+        "personalWorkspaceAgentEntry": "${HOME}/Arbeitsraum/AGENTS.md",
+        "personalWorkspaceIndex": "${HOME}/Arbeitsraum/START.md",
+    }
+    for field, expected in expected_personal_workspace.items():
+        if host.get(field) != expected:
+            errors.append(f"host.{field} must equal {expected!r}")
 
     capability_locators = _require_object(
         contract.get("capabilityLocators"), "capabilityLocators", errors
