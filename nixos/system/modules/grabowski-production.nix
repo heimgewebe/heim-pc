@@ -321,7 +321,8 @@ in
         ];
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # Node.js/V8 needs executable JIT pages; MDWE causes reproducible SIGTRAP.
+        MemoryDenyWriteExecute = false;
         RestrictRealtime = true;
         LimitCORE = 0;
         SystemCallArchitectures = "native";

@@ -36,6 +36,27 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
         self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
 
+    def test_node_v8_jit_is_allowed_only_in_unprivileged_operator(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split(
+            "systemd.services.grabowski-operator = lib.mkIf admit {", 1
+        )[1]
+        self.assertIn("MemoryDenyWriteExecute = false;", operator)
+        self.assertNotIn("MemoryDenyWriteExecute = true;", operator)
+        for service in (
+            "grabowski-private-policy-install",
+            '"grabowski-privileged-broker@"',
+            "grabowski-runtime-schema-install",
+        ):
+            marker = f"systemd.services.{service} = lib.mkIf admit {{"
+            section = production.split(marker, 1)[1].split(
+                "systemd.services.", 1
+            )[0]
+            self.assertIn("MemoryDenyWriteExecute = true;", section)
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        self.assertIn("assert !operator.MemoryDenyWriteExecute;", flake)
+        self.assertIn("assert broker.MemoryDenyWriteExecute;", flake)
+
     def test_operator_path_is_available_without_setuid_escalation(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)

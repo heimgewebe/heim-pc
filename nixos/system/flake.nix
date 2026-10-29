@@ -1081,6 +1081,9 @@ PY
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # Node.js/V8 JIT must not be trapped by operator-only MDWE hardening.
+          assert !operator.MemoryDenyWriteExecute;
+          assert broker.MemoryDenyWriteExecute;
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
           assert operator.ProtectHome == "read-only";
