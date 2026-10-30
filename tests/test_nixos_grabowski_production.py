@@ -62,6 +62,16 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
 
+    def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn(
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"',
+            operator,
+        )
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
+
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()
         self.assertIn(
