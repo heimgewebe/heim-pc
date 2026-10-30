@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos/system/flake.nix"
 BASE = ROOT / "nixos/system/modules/seagate-primary-candidate.nix"
 PRODUCTION = ROOT / "nixos/system/modules/grabowski-production.nix"
-RELEASE = "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb"
+RELEASE = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea"
 
 
 class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
@@ -29,6 +29,10 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         )
         self.assertIn("heimPc.grabowskiProduction = {", self.candidate)
         self.assertIn("users.users.alex.linger = pkgs.lib.mkForce true;", self.candidate)
+        self.assertIn(
+            "users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];",
+            self.candidate,
+        )
         self.assertIn("enable = true;", self.candidate)
         self.assertIn(f'releaseId =\n                  "{RELEASE}";', self.candidate)
         self.assertIn("import ./modules/grabowski-operator-package.nix", self.candidate)
@@ -71,6 +75,8 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
             'assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";',
             'assert op.serviceConfig.Group == "users";',
             'assert cfg.users.users.alex.linger;',
+            "assert builtins.any",
+            "cfg.users.users.alex.packages;",
             'assert builtins.elem "user@1000.service" op.requires;',
             'assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);',
             'assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];',
