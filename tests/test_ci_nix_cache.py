@@ -315,6 +315,8 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
         "if [ \"$1\" = \"config\" ] && [ \"$2\" = \"show\" ]; then\n"
         "  echo 'require-sigs = true'\n"
         "  echo 'fallback = true'\n"
+        "  echo 'max-jobs = 1'\n"
+        "  echo 'cores = 2'\n"
         "  echo 'substituters = https://cache.nixos.org/'\n"
         "  echo 'trusted-public-keys = cache.nixos.org-1:test'\n"
         "  exit 0\n"
