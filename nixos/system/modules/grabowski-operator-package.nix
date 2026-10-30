@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "72cc7119fabe1a0108a32da9fd38cbcefb9aff22";
-  releaseId = "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb";
+  sourceRevision = "4dd7436439c305ac36f0946e1ba109fe9a17b2e6";
+  releaseId = "4dd7436439c3-srcset1b18dfb8e32a-lock264e747ad05a-contract23851f3e6dea";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-lr0kHa1KdsZ9fNy6MyJalvI6P2bzeuiT9yXzvtkSvTQ=";
+    hash = "sha256-BdFAJr3xDvdUZUSHg0cwMxxL3pHu9hJAASEof+XD/vc=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -17,7 +17,7 @@ let
   # occur during the subsequent ordinary, sandboxed operator build.
   wheelhouse = pkgs.stdenvNoCC.mkDerivation {
     pname = "grabowski-locked-runtime-wheels";
-    version = "72cc7119";
+    version = "4dd74364";
     dontUnpack = true;
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -40,7 +40,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "72cc7119";
+  version = "4dd74364";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -77,7 +77,7 @@ pkgs.stdenvNoCC.mkDerivation {
     export GRABOWSKI_NIXOS_GIT_BIN="$out/bin/git"
     export GRABOWSKI_NIXOS_GH_BIN="$out/bin/gh"
 
-    # Reproduce the ORIGINAL canonical 203-tool deployment entrypoint.
+    # Reproduce the ORIGINAL canonical 206-tool deployment entrypoint.
     # The source file name differs from the Python module name: the public
     # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
     # grabowski_operator and src/grabowski_operator.py to
@@ -104,11 +104,11 @@ if not (
 ):
     raise SystemExit("unexpected upstream canonical runtime entrypoint")
 expected = contract.get("expected_tools")
-if not (isinstance(expected, list) and len(expected) == 203
+if not (isinstance(expected, list) and len(expected) == 206
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
-if not isinstance(supporting, list) or len(supporting) != 130:
+if not isinstance(supporting, list) or len(supporting) != 132:
     raise SystemExit("canonical runtime module mapping changed")
 entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
 seen = set()
@@ -143,7 +143,7 @@ for entry in entries:
         content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
         content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
         dst.write_text(content)
-    # The copied full upstream runtime is still the canonical 203-tool
+    # The copied full upstream runtime is still the canonical 206-tool
     # entrypoint. Repair only Nix-specific argv0 and catalog discovery.
     if original == "src/grabowski_runtime.py":
         content = dst.read_text()
