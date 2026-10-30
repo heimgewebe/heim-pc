@@ -358,8 +358,10 @@
               # Stage0 deliberately has X disabled; override ONLY in this
               # explicitly named, non-activated workstation successor.
               services.xserver.enable = lib.mkForce true;
+              # Admit only NVIDIA and the exact Chrome operator package downstream.
               nixpkgs.config.allowUnfreePredicate = pkg:
-                lib.hasPrefix "nvidia-" (lib.getName pkg);
+                lib.hasPrefix "nvidia-" (lib.getName pkg)
+                || lib.getName pkg == "google-chrome";
               heimPc.desktop.enable = true;
               heimPc.hardware.nvidia.enable = true;
             })
