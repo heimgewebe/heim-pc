@@ -1,0 +1,11 @@
+[Unit]
+Description=Independent LAN Wake-on-LAN recovery for heim-pc
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=alex
+StateDirectory=heim-pc-wol-recovery
+ExecStart=/usr/bin/python3 /usr/local/libexec/heim-pc-wol-recovery.py
+TimeoutStartSec=20
