@@ -1,4 +1,9 @@
 { config, lib, ... }:
+let
+  # Some flake proof variants intentionally omit host protection entirely.
+  # Those profiles must not acquire physical NIC or watchdog policy.
+  physicalHost = lib.attrByPath [ "heimPc" "hostProtection" "enable" ] false config;
+in
 {
   networking.networkmanager.enable = true;
   networking.firewall = {
@@ -7,12 +12,11 @@
     allowedUDPPorts = [ ];
   };
 
-  # Enabled only on the actual physical host, not on proof/VM profiles.
-  # The independent heimberry host sends LAN magic packets.
+  # Enabled only on the real physical host; heimberry emits magic packets.
   networking.interfaces.enp7s0.wakeOnLan.enable =
-    lib.mkIf config.heimPc.hostProtection.enable true;
+    lib.mkIf physicalHost true;
 
-  # PID 1 feeds the physical SP5100 TCO hardware watchdog.
+  # PID 1 feeds the SP5100 TCO hardware watchdog.
   systemd.settings.Manager.RuntimeWatchdogSec =
-    lib.mkIf config.heimPc.hostProtection.enable "2min";
+    lib.mkIf physicalHost "2min";
 }
