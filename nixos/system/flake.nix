@@ -153,7 +153,12 @@
             physicalGates = false;
           };
         };
-        modules = hostModules;
+        # This default output is an intentionally non-installable prototype
+        # without SSH/Tailscale. Never include switch-to-configuration in its
+        # closure: a test switch would remove the host's remote recovery access.
+        modules = hostModules ++ [
+          ({ ... }: { system.switch.enable = false; })
+        ];
       };
 
       # Build-only closure for T011/T003. Unlike the deliberately impossible
@@ -388,6 +393,9 @@
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.
               users.users.alex.linger = pkgs.lib.mkForce true;
+              # Bureau user services invoke python3; the prototype host profile
+              # is not imported by this actual headless operator candidate.
+              users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -398,7 +406,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb";
+                  "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -504,8 +512,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb";
-            revision = "72cc7119fabe1a0108a32da9fd38cbcefb9aff22";
+            release = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
+            revision = "02c70ad4fe97dea1e03e9bfa1d37980e620747ee";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -646,7 +654,7 @@ for argv0 in (
                          + result.stderr[-2000:] + result.stdout[-500:])
 print("Nix kernel Python and distinct operator/forged argv0 identities verified")
 PY
-            # Runtime assembly must match the full original 203-tool MCP
+            # Runtime assembly must match the full original 206-tool MCP
             # surface, not the older 53-tool core. Register tools only; no
             # MCP listener, privileged operation or production state is used.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -660,20 +668,20 @@ if (contract.get("mode"), contract.get("module"), contract.get("source")) != (
 ):
     raise SystemExit("pinned canonical runtime module/source contract changed")
 expected = contract.get("expected_tools")
-if not isinstance(expected, list) or len(expected) != 203 or len(set(expected)) != 203:
+if not isinstance(expected, list) or len(expected) != 206 or len(set(expected)) != 206:
     raise SystemExit("canonical runtime tool list is incomplete")
 actual = [
     tool.name
     for tool in importlib.import_module("grabowski_operator").mcp._tool_manager.list_tools()
 ]
-if len(actual) != 203 or set(actual) != set(expected):
+if len(actual) != 206 or set(actual) != set(expected):
     raise SystemExit(
-        "Nix Grabowski runtime tool surface differs from canonical 203-tool release: "
+        "Nix Grabowski runtime tool surface differs from canonical 206-tool release: "
         + str({"missing": sorted(set(expected) - set(actual)),
                "unexpected": sorted(set(actual) - set(expected))})
     )
 PY
-            # Prove the real executable reaches the canonical 203-tool MCP
+            # Prove the real executable reaches the canonical 206-tool MCP
             # surface, not just the legacy 53-tool core. No host resources
             # are mounted and no tools are invoked; only initialize/list.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -694,8 +702,8 @@ source_contract = json.loads(
     (root / "share/grabowski/config/runtime-entrypoint.json").read_text()
 )
 expected = set(source_contract["expected_tools"])
-if len(expected) != 203:
-    raise SystemExit("canonical expected tool catalog is not exactly 203")
+if len(expected) != 206:
+    raise SystemExit("canonical expected tool catalog is not exactly 206")
 
 with tempfile.TemporaryDirectory(prefix="nixos-grabowski-mcp-") as home:
     env = {
@@ -792,6 +800,23 @@ PY
             cp ${operator}/share/grabowski/nixos-release.json "$out/release.json"
             printf '%s\n' ${broker} > "$out/broker-store-path"
             printf '%s\n' ${operator} > "$out/operator-store-path"
+          '';
+
+        # A buildable prototype must not be live-switchable: its placeholder
+        # root and absent remote services were responsible for a host lockout.
+        # The real Seagate primary candidate retains normal switch support.
+        prototype-non-switchable-contract =
+          let
+            prototype = self.nixosConfigurations.heim-pc.config;
+            primary = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+          in
+          assert prototype.fileSystems."/".device == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
+          assert !prototype.system.switch.enable;
+          assert !prototype.services.openssh.enable && !prototype.services.tailscale.enable;
+          assert primary.system.switch.enable;
+          assert primary.services.openssh.enable && primary.services.tailscale.enable;
+          pkgs.runCommand "heim-pc-prototype-non-switchable-contract" {} ''
+            mkdir -p "$out"
           '';
 
         # Evaluation-only: Stage0 must be an isolated, root-label-bound
@@ -937,7 +962,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb";
+            "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -948,6 +973,9 @@ PY
           assert cfg.services.getty.autologinUser == null;
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
+          assert builtins.any
+            (package: package.outPath == (pkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
@@ -980,7 +1008,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "72cc7119fabe-srcsete8cd97d6073c-lock264e747ad05a-contract650f923c4cfb";
+            release = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
@@ -1015,7 +1043,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "72cc7119fabe1a0108a32da9fd38cbcefb9aff22";
+            == "02c70ad4fe97dea1e03e9bfa1d37980e620747ee";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
