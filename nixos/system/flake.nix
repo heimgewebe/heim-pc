@@ -977,7 +977,7 @@ PY
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
           assert builtins.any
-            (package: package.outPath == (pkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
             cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
