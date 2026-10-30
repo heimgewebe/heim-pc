@@ -1,8 +1,8 @@
 { config, lib, ... }:
 let
-  # Some flake proof variants intentionally omit host protection entirely.
-  # Those profiles must not acquire physical NIC or watchdog policy.
-  physicalHost = lib.attrByPath [ "heimPc" "hostProtection" "enable" ] false config;
+  # The installed physical Seagate and workstation profiles share day2Activation.
+  # VMs and stripped proof variants default to false.
+  physicalHost = lib.attrByPath [ "heimPc" "day2Activation" "enable" ] false config;
 in
 {
   networking.networkmanager.enable = true;
