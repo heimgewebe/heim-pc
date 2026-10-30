@@ -153,7 +153,12 @@
             physicalGates = false;
           };
         };
-        modules = hostModules;
+        # This default output is an intentionally non-installable prototype
+        # without SSH/Tailscale. Never include switch-to-configuration in its
+        # closure: a test switch would remove the host's remote recovery access.
+        modules = hostModules ++ [
+          ({ ... }: { system.switch.enable = false; })
+        ];
       };
 
       # Build-only closure for T011/T003. Unlike the deliberately impossible
@@ -792,6 +797,23 @@ PY
             cp ${operator}/share/grabowski/nixos-release.json "$out/release.json"
             printf '%s\n' ${broker} > "$out/broker-store-path"
             printf '%s\n' ${operator} > "$out/operator-store-path"
+          '';
+
+        # A buildable prototype must not be live-switchable: its placeholder
+        # root and absent remote services were responsible for a host lockout.
+        # The real Seagate primary candidate retains normal switch support.
+        prototype-non-switchable-contract =
+          let
+            prototype = self.nixosConfigurations.heim-pc.config;
+            primary = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+          in
+          assert prototype.fileSystems."/".device == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
+          assert !prototype.system.switch.enable;
+          assert !prototype.services.openssh.enable && !prototype.services.tailscale.enable;
+          assert primary.system.switch.enable;
+          assert primary.services.openssh.enable && primary.services.tailscale.enable;
+          pkgs.runCommand "heim-pc-prototype-non-switchable-contract" {} ''
+            mkdir -p "$out"
           '';
 
         # Evaluation-only: Stage0 must be an isolated, root-label-bound
