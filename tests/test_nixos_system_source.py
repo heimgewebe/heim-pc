@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "234bbf57ee941cc156c6984af4e34c3ed62bbc2e2fd5ef2a4d09a6f56bf48a64"
+SOURCE_SNAPSHOT_SHA256 = "9b7dcb5022838bd9b0ec21410cb6583dcde22f302a34d7eb2a6a0a75fe0315e1"
 ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -418,6 +418,18 @@ class T(unittest.TestCase):
         )
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
 
+    def test_grosser_adler_nixos_declares_independent_observer(self):
+        module = (SOURCE / "modules/grosser-adler.nix").read_text()
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        self.assertIn('heimPc.grosserAdler.enable = heimPcProfile.physical or false;', host)
+        self.assertIn('systemd.user.services."grosser-adler-mcp" = {', module)
+        self.assertIn('systemd.user.services."tunnel-client-grosser-adler" = {', module)
+        self.assertIn('unitConfig.ConditionUser = "alex";', module)
+        self.assertIn('"d /home/alex/labs 0700 alex users -"', module)
+        self.assertIn('/home/alex/.local/bin/tunnel-client run --profile grosser-adler', module)
+        self.assertIn('ProtectHome = "read-only";', module)
+        self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
+
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
         # host-specific files must not change the published source identity.
@@ -426,7 +438,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 47)
+        self.assertEqual(len(files), 48)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -468,7 +480,7 @@ class T(unittest.TestCase):
             "hosts/heim-pc/firstboot-credentials.py",
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
-            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
+            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/grosser-adler.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
