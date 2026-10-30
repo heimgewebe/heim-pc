@@ -950,10 +950,13 @@ PY
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
-            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            # CVE-patched Brotli changes transitive store IDs. Compare the
+            # original package expressions under this candidate's exact pkgs.
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            originalOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
-              inherit pkgs;
-              lib = pkgs.lib;
+              pkgs = candidatePkgs;
+              lib = candidatePkgs.lib;
               packageOnly = true;
             };
           in
