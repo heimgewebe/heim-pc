@@ -7,5 +7,5 @@ After=network-online.target
 Type=oneshot
 User=alex
 StateDirectory=heim-pc-wol-recovery
-ExecStart=/usr/bin/python3 /usr/local/libexec/heim-pc-wol-recovery.py
+ExecStart=/usr/bin/python3 /usr/local/libexec/heim-pc-wol-recovery.py --config /etc/heim-pc-wol-recovery.json
 TimeoutStartSec=20
