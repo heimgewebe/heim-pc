@@ -860,7 +860,9 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
     assert "\n    timeout-minutes: 5\n" in detect
     nix_header = nix_job.split("\n    steps:\n", 1)[0]
     # Bounded increase, not disabling any expensive security checks.
-    assert "\n    timeout-minutes: 120\n" in nix_header
+    assert "\n    timeout-minutes: 240\n" in nix_header
+    assert "max-jobs = 1" in nix_job
+    assert "cores = 2" in nix_job
     steps = [
         "- name: Verify source identity",
         "- name: Evaluate complete flake without building checks",
