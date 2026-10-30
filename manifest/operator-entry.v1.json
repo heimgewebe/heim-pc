@@ -19,6 +19,9 @@
     "installedEntryFile": "${HOME}/.config/heimgewebe/operator-entry.v1.json",
     "agentPointer": "${HOME}/AGENTS.md",
     "repositoriesAgentPointer": "${HOME}/repos/AGENTS.md",
+    "personalWorkspaceRoot": "${HOME}/Arbeitsraum",
+    "personalWorkspaceAgentEntry": "${HOME}/Arbeitsraum/AGENTS.md",
+    "personalWorkspaceIndex": "${HOME}/Arbeitsraum/START.md",
     "role": "primary_local_operator_host"
   },
   "capabilityLocators": {
