@@ -1,7 +1,7 @@
 { pkgs, sourceRevision }:
 let
   hostModule = ../hosts/heim-pc;
-  expectedHostSha256 = "6a1c8e5848330c2b0861beb097acd629b1d595666e900f36b0a28e4e7479f581";
+  expectedHostSha256 = "7f73b11508f6958645a414f447029042e0d2896211a7f2488e7ca43b2267fa90";
   expectedHelperSha256 = "eddc72630fa2d5c5d1a298d6352eb97d80515101a589db2ddc6fd0b44e5e24b7";
 
   stageTool = pkgs.writeShellApplication {
