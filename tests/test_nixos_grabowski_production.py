@@ -79,6 +79,11 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         )[0]
         self.assertIn('lib.hasPrefix "nvidia-" (lib.getName pkg)', workstation)
         self.assertIn('|| lib.getName pkg == "google-chrome";', workstation)
+        unit_proof = flake.split("grabowski-production-unit-contract =", 1)[1]
+        self.assertIn(
+            'nixpkgs.config.allowUnfreePredicate = pkg:\n                      lib.getName pkg == "google-chrome";',
+            unit_proof,
+        )
 
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()

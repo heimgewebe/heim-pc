@@ -1018,7 +1018,10 @@ PY
                 inherit system;
                 modules = [
                   ./modules/seagate-primary-candidate.nix
-                  ({ ... }: {
+                  ({ lib, ... }: {
+                    # The isolated unit proof needs only the operator Chrome license.
+                    nixpkgs.config.allowUnfreePredicate = pkg:
+                      lib.getName pkg == "google-chrome";
                     heimPc.grabowskiProduction = {
                       enable = true;
                       operatorPackage = op;
