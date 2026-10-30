@@ -1013,7 +1013,8 @@ PY
           let
             release = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
-            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
               (nixpkgs.lib.nixosSystem {
                 inherit system;
@@ -1107,7 +1108,7 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${candidatePkgs.coreutils}/bin:${candidatePkgs.git}/bin:${candidatePkgs.systemd}/bin:${candidatePkgs.openssh}/bin:${candidatePkgs.tailscale}/bin:${candidatePkgs.procps}/bin:${candidatePkgs.iproute2}/bin:${candidatePkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
