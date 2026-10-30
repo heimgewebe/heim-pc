@@ -29,6 +29,10 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         )
         self.assertIn("heimPc.grabowskiProduction = {", self.candidate)
         self.assertIn("users.users.alex.linger = pkgs.lib.mkForce true;", self.candidate)
+        self.assertIn(
+            "users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];",
+            self.candidate,
+        )
         self.assertIn("enable = true;", self.candidate)
         self.assertIn(f'releaseId =\n                  "{RELEASE}";', self.candidate)
         self.assertIn("import ./modules/grabowski-operator-package.nix", self.candidate)
@@ -71,6 +75,8 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
             'assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";',
             'assert op.serviceConfig.Group == "users";',
             'assert cfg.users.users.alex.linger;',
+            "assert builtins.any",
+            "cfg.users.users.alex.packages;",
             'assert builtins.elem "user@1000.service" op.requires;',
             'assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);',
             'assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];',

@@ -388,6 +388,9 @@
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.
               users.users.alex.linger = pkgs.lib.mkForce true;
+              # Bureau user services invoke python3; the prototype host profile
+              # is not imported by this actual headless operator candidate.
+              users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -948,6 +951,9 @@ PY
           assert cfg.services.getty.autologinUser == null;
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
+          assert builtins.any
+            (package: package.outPath == (pkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
