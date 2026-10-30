@@ -1,4 +1,4 @@
-{ lib, heimPcProfile ? { }, ... }:
+{ config, lib, ... }:
 {
   networking.networkmanager.enable = true;
   networking.firewall = {
@@ -7,13 +7,12 @@
     allowedUDPPorts = [ ];
   };
 
-  # The physical workstation must remain wakeable after a clean shutdown.
-  # WoL packets are emitted on the LAN by the independent heimberry host.
+  # Enabled only on the actual physical host, not on proof/VM profiles.
+  # The independent heimberry host sends LAN magic packets.
   networking.interfaces.enp7s0.wakeOnLan.enable =
-    lib.mkIf (heimPcProfile.physical or false) true;
+    lib.mkIf config.heimPc.hostProtection.enable true;
 
-  # The ASUS B550-F exposes an SP5100 TCO hardware watchdog at /dev/watchdog0.
-  # PID 1 feeds it; a complete OS hang triggers a hardware reset.
+  # PID 1 feeds the physical SP5100 TCO hardware watchdog.
   systemd.settings.Manager.RuntimeWatchdogSec =
-    lib.mkIf (heimPcProfile.physical or false) "2min";
+    lib.mkIf config.heimPc.hostProtection.enable "2min";
 }
