@@ -182,6 +182,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
         self.assertIn('builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore', flake)
 
+    def test_bureau_executor_uses_source_pinned_nix_findmnt(self):
+        operator = (MODULES / "grabowski-operator-package.nix").read_text()
+        self.assertIn("if original == 'src/grabowski_bureau_runtime_refresh_executor.py':", operator)
+        self.assertIn('CANONICAL_FINDMNT = Path("/usr/bin/findmnt")', operator)
+        self.assertIn('CANONICAL_FINDMNT = Path("${pkgs.util-linux}/bin/findmnt")', operator)
+        self.assertIn("pinned Bureau findmnt source topology changed", operator)
+
     def test_private_root_policy_is_not_a_nix_store_secret(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         installer = (MODULES / "grabowski-private-policy-install.py").read_text()

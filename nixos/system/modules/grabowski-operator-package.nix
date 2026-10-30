@@ -212,6 +212,14 @@ for entry in entries:
                 raise SystemExit("unexpected pinned task capture Python topology")
             content = content.replace(old, new, 1)
         dst.write_text(content)
+    if original == 'src/grabowski_bureau_runtime_refresh_executor.py':
+        content = dst.read_text()
+        # Adapt only the exact pinned FHS binary to an immutable NixOS output.
+        old = 'CANONICAL_FINDMNT = Path("/usr/bin/findmnt")'
+        new = 'CANONICAL_FINDMNT = Path("${pkgs.util-linux}/bin/findmnt")'
+        if content.count(old) != 1:
+            raise SystemExit("pinned Bureau findmnt source topology changed")
+        dst.write_text(content.replace(old, new, 1))
     if original == "src/grabowski_fleet.py":
         content = dst.read_text()
         imports = "import stat\nfrom typing import Any, Sequence"
