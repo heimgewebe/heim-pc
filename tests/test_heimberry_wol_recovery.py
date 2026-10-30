@@ -43,6 +43,16 @@ class TestHeimberryWolRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):
             recovery.load_config(self.config_file)
 
+    def test_manual_wake_dry_run_sends_no_packet(self):
+        argv = ["recovery", "--config", str(self.config_file), "--wake", "--dry-run"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(recovery, "wake") as wake,
+        ):
+            recovery.main()
+            wake.assert_not_called()
+        self.assertFalse(self.state_file.exists())
+
     def test_missing_config_never_sends_magic_packet(self):
         self.config_file.unlink()
         with mock.patch.object(recovery, "wake") as wake:

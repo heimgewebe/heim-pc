@@ -89,7 +89,10 @@ def main():
 
     config = load_config(args.config)
     if args.wake:
-        print(wake(config))
+        if args.dry_run:
+            print("dry-run: magic packet not sent")
+        else:
+            print(wake(config))
         return
 
     state = load(args.state)
