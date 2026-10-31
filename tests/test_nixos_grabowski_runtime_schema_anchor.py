@@ -26,7 +26,7 @@ class RuntimeSchemaAnchorTests(unittest.TestCase):
         self.uid = os.getuid()
         self.store = self.boundary / "nix" / "store"
         self.source = (
-            self.store / (("a" * 32) + "-grabowski-operator-02c70ad4")
+            self.store / (("a" * 32) + "-grabowski-operator-c48479e0")
             / "lib" / "python3.12" / "site-packages"
             / "grabowski_runtime_contract.py"
         )
