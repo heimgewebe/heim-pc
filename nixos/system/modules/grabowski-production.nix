@@ -298,6 +298,9 @@ in
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
+          # The reviewer CLI exists in the Nix profile. Expose only its
+          # exact executable, leaving the system-service PATH constrained.
+          "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
           "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
