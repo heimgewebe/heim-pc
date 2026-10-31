@@ -316,7 +316,7 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
         "  echo 'require-sigs = true'\n"
         "  echo 'fallback = true'\n"
         "  echo 'max-jobs = 1'\n"
-        "  echo 'cores = 2'\n"
+        "  echo 'cores = 4'\n"
         "  echo 'substituters = https://cache.nixos.org/'\n"
         "  echo 'trusted-public-keys = cache.nixos.org-1:test'\n"
         "  exit 0\n"
@@ -862,9 +862,9 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
     assert "\n    timeout-minutes: 5\n" in detect
     nix_header = nix_job.split("\n    steps:\n", 1)[0]
     # Bounded increase, not disabling any expensive security checks.
-    assert "\n    timeout-minutes: 240\n" in nix_header
+    assert "\n    timeout-minutes: 360\n" in nix_header
     assert "max-jobs = 1" in nix_job
-    assert "cores = 2" in nix_job
+    assert "cores = 4" in nix_job
     steps = [
         "- name: Verify source identity",
         "- name: Evaluate complete flake without building checks",
