@@ -358,8 +358,10 @@
               # Stage0 deliberately has X disabled; override ONLY in this
               # explicitly named, non-activated workstation successor.
               services.xserver.enable = lib.mkForce true;
+              # Admit only NVIDIA and the exact Chrome operator package downstream.
               nixpkgs.config.allowUnfreePredicate = pkg:
-                lib.hasPrefix "nvidia-" (lib.getName pkg);
+                lib.hasPrefix "nvidia-" (lib.getName pkg)
+                || lib.getName pkg == "google-chrome";
               heimPc.desktop.enable = true;
               heimPc.hardware.nvidia.enable = true;
             })
@@ -389,6 +391,7 @@
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
           modules = [
             ./modules/restic-seagate-backup.nix
+            ./modules/grosser-adler.nix
             ({ pkgs, ... }: {
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.
@@ -396,6 +399,7 @@
               # Bureau user services invoke python3; the prototype host profile
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
+              heimPc.grosserAdler.enable = true;
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -1020,7 +1024,10 @@ PY
                 inherit system;
                 modules = [
                   ./modules/seagate-primary-candidate.nix
-                  ({ ... }: {
+                  ({ lib, ... }: {
+                    # The isolated unit proof needs only the operator Chrome license.
+                    nixpkgs.config.allowUnfreePredicate = pkg:
+                      lib.getName pkg == "google-chrome";
                     heimPc.grabowskiProduction = {
                       enable = true;
                       operatorPackage = op;
