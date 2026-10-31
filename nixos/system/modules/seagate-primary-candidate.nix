@@ -21,7 +21,7 @@
   fileSystems."/mnt/wd-black/pop-os" = {
     device = "/dev/disk/by-uuid/d25d44aa-5334-4b9d-9cc2-2475e9123776";
     fsType = "ext4";
-    options = [ "ro" "noload" "nofail" "x-systemd.automount" ];
+    options = [ "ro" "noload" "nosuid" "nodev" "nofail" "x-systemd.automount" ];
     noCheck = true;
   };
   fileSystems."/mnt/wd-black/efi" = {
