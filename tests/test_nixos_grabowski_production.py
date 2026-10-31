@@ -331,6 +331,17 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         )
 
 
+    def test_codex_review_preflight_receives_exact_binary_without_extra_path(self):
+        prod = (MODULES / "grabowski-production.nix").read_text()
+        operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        environment = operator.split("Environment = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(
+            environment.count('"GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"'), 1,
+        )
+        self.assertIn('"GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"', environment)
+        self.assertNotIn('"PATH=/home/alex/.nix-profile/bin:', environment)
+        self.assertIn('ProtectHome = "read-only";', operator)
+
     def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
         rule_block = prod.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
