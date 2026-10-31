@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "5b90cf6a52d9494ec12a0ec9fb955be60ee3ac64f974cbceb0fccbcdc29653ef"
+SOURCE_SNAPSHOT_SHA256 = "b90c7721f08599865d6aa5057b6d071691cd8613e1e21249b0960e2f730f7b85"
 ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -422,6 +422,18 @@ class T(unittest.TestCase):
         module = (SOURCE / "modules/grosser-adler.nix").read_text()
         host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
         self.assertIn('heimPc.grosserAdler.enable = heimPcProfile.physical or false;', host)
+        # PR #290's physical prototype import alone does not reach the
+        # active Seagate Grabowski production profile.
+        flake = (SOURCE / "flake.nix").read_text()
+        seagate_operator = flake.split(
+            "nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =", 1
+        )[1].split("# Negative pre-deployment proof", 1)[0]
+        self.assertIn("./modules/grosser-adler.nix", seagate_operator)
+        self.assertIn("heimPc.grosserAdler.enable = true;", seagate_operator)
+        self.assertNotIn(
+            "grosser-adler.nix",
+            (SOURCE / "modules/seagate-primary-candidate.nix").read_text(),
+        )
         self.assertIn('systemd.user.services."grosser-adler-mcp" = {', module)
         self.assertIn('systemd.user.services."tunnel-client-grosser-adler" = {', module)
         self.assertIn('unitConfig.ConditionUser = "alex";', module)
