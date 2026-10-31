@@ -298,6 +298,8 @@ in
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
+          # Expose only the installed reviewer executable to the system service.
+          "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
           # Admit only the immutable Chrome binary pinned by this NixOS generation.
           "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"
           "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
