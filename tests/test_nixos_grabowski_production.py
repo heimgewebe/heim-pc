@@ -62,6 +62,29 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
 
+    def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn(
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"',
+            operator,
+        )
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        workstation = flake.split(
+            "nixosConfigurations.heim-pc-seagate-workstation-candidate =", 1
+        )[1].split(
+            "nixosConfigurations.heim-pc-seagate-nixer-headless-candidate =", 1
+        )[0]
+        self.assertIn('lib.hasPrefix "nvidia-" (lib.getName pkg)', workstation)
+        self.assertIn('|| lib.getName pkg == "google-chrome";', workstation)
+        unit_proof = flake.split("grabowski-production-unit-contract =", 1)[1]
+        self.assertIn(
+            'nixpkgs.config.allowUnfreePredicate = pkg:\n                      lib.getName pkg == "google-chrome";',
+            unit_proof,
+        )
+
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()
         self.assertIn(
