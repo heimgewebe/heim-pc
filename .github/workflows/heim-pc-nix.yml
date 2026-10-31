@@ -110,9 +110,11 @@ jobs:
        needs.detect.outputs.control_changed != 'false' ||
        needs.detect.outputs.nix_changed != 'false')
     runs-on: ubuntu-latest
-    # PR233 run 39459985355 reached the 90-minute cap during ISO builds.
-    # Keep every mandatory closure, VM and signature check in this job.
-    timeout-minutes: 120
+    # Runs 39459985355 (90m) and 41052537896 (120m) exhausted the
+    # heavy build budget; the latter also hit Python thread exhaustion.
+    # Run 41141193775 exhausted 240m while Node/V8 remained unbuilt.
+    # Keep all closure, VM and signature gates; use the 4-vCPU public runner.
+    timeout-minutes: 360
     env:
       EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       # Fresh derivations: the CI evaluator cache retained an unrealized drv
@@ -137,6 +139,10 @@ jobs:
           extra-conf: |
             require-sigs = true
             fallback = true
+            # Configure the Nix daemon, not only the client NIX_CONFIG.
+            # Shared GitHub runners cannot sustain unbounded parallel builders.
+            max-jobs = 1
+            cores = 4
             extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
             extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
 
@@ -144,7 +150,9 @@ jobs:
         run: |
           set -euo pipefail
           nix --version
-          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback) ='
+          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback|max-jobs|cores) ='
+          test "$(nix config show | sed -n 's/^max-jobs = //p')" = 1
+          test "$(nix config show | sed -n 's/^cores = //p')" = 4
           # An HTTP health.txt 200 does not establish a valid Nix binary cache.
           # Do not conflate protocol metadata with trusted NAR signatures or
           # availability of the expensive Ollama/CUDA derivations.
