@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=KRDP iPad virtual display test
+Exec=/nix/store/wifpfadx5szwncfgmyw77l440vssz8dv-krdp-6.6.6/bin/krdpserver
+NoDisplay=true
+Terminal=false
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1
