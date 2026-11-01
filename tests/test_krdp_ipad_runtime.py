@@ -34,8 +34,8 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("rdpei_server_context_new", patch)
         self.assertIn('KRDP_RDPEI_TOUCH', patch)
         self.assertIn("onTouchEvent", patch)
-        # The active server must not enable an unverified client input mode.
-        self.assertNotIn("KRDP_RDPEI_TOUCH", service)
+        # FreeRDP +multitouch/Qt Contact tests are successful before opt-in.
+        self.assertIn("KRDP_RDPEI_TOUCH=1", service)
 
     def test_runtime_unit_and_kwin_registration_match_binary(self):
         import re
@@ -47,7 +47,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
-        self.assertIn("rgldrc8llk7k44b70946lhhzh3rn4w1l-krdp-6.7.0", binary.group(1))
+        self.assertIn("nxpqvrpxqg69rszhbw222hyagkkwh9nb-krdp-6.7.0", binary.group(1))
         self.assertIn("--virtual-monitor 1168x812@1", service)
 
     def test_pointer_fixes_are_reproducible(self):

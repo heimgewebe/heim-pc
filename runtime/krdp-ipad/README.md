@@ -135,9 +135,48 @@ Variante ignoriert; Pinch- und Zwei-Finger-Scroll-Gesten sind noch nicht
 implementiert. Die bisherigen normalen RDP-Maus-/Tastatureingaben bleiben
 unverändert.
 
-Der Kanal wird ausschließlich mit KRDP_RDPEI_TOUCH=1 eröffnet. Der
-produktive Systemd-Userdienst enthält diese Variable **noch nicht**:
-Es fehlen ein erfolgreiches Channel-Handshake-/Touch-PDU-Gegentestsignal
-von einem RDPEI-fähigen Client und die reale iPad-Endabnahme.
-Die Kompilierung und reguläre Maus-/Videofunktion wurden zunächst isoliert
-gegen KDE/KWin 6.6.6 geprüft, ohne den produktiven Port 3390 zu verändern.
+Der Kanal wird ausschließlich mit KRDP_RDPEI_TOUCH=1 eröffnet. Die
+produktive Systemd-User-Unit aktiviert ihn auf einem gesondert gepinnten
+KRDP-6.7.0-Build mit neun Patches.
+Technische Vorabprüfungen:
+- grabowski-job-1043bb0de0d9 und grabowski-job-b7914544ac6a:
+  FreeRDP +multitouch sendet/öffnet den Microsoft-RDPEI-DVC; KWin-Video,
+  gewöhnliche Maus-/Tastatureingaben und DP-2-Restore funktionieren weiter.
+  Die Qt-Meldungen liegen im USER-Journal statt stdout: um 17:46:24 Uhr
+  erschienen RDPEI_OPEN_CODE 0, RDP touch channel started und
+  RDP touch input ready (job c1e8a6437d73).
+- grabowski-job-ccdd315b086f und grabowski-job-851e1f10c545:
+  Gegen das tatsächlich gebaute KRdp.so gelinkter C++-Qt-Test. Zwei
+  nacheinander aktive Finger lieferten exakt neun erwartete QMouseEvents
+  (Down, Move, Up, Koordinaten und Buttonzustände), zusätzliche Kontakte
+  bei bereits gedrücktem Primärfinger wurden ignoriert. Test im
+  isolierten Nix-Build, ohne Benutzerdesktop zu verändern.
+- Die exakte Nix-Ableitung wurde erneut über build.sh reproduziert:
+  /nix/store/nxpqvrpxqg69rszhbw222hyagkkwh9nb-krdp-6.7.0.
+
+Noch nicht bewiesen: ein echter iPad-Fingertipp nach dieser Aktivierung.
+Die Verbindung des Clients und die isolierte C++-Eingabeabnahme ersetzen
+keinen tatsächlichen iPad-Windows-App-Test. Mehrfinger-Gesten, Pinch-Zoom
+und Zwei-Finger-Scrollen sind mit diesem Patch nicht implementiert.
+
+
+## RDPEI produktive Abnahme nach Aktivierung
+
+- grabowski-job-446679e9a865: KRDP 6.7.0 mit neun Patches von der
+  genau reproduzierten Nix-Quelle nxpqvrpxqg69rszhbw222hyagkkwh9nb
+  aktiviert; gleiche ausführbare Datei in systemd-User-Unit und gezielter
+  KWin-Desktopberechtigung, KRDP_RDPEI_TOUCH=1 im tatsächlichen
+  Prozessenvironment, GC-Root krdp-ipad-native-v7 und vorheriges v6-Override
+  samt Desktop-Preimage als Rückfall gesichert. Kein NixOS-Switch.
+- grabowski-job-3dfdfc0462b3: Echte Verbindungsabnahme auf dem produktiven
+  Port 3390 mit +multitouch und Progressive Encoding: RDPEI-Kanal bereit
+  laut User-Journal, 412673 Pixel Fensteränderung, 40128 Pixel Textänderung,
+  exakte Eingabe in eine bereits unter alex laufende KDE-Wayland-Sitzung,
+  Trennung und Wiederherstellung von DP-2 ohne Preimage.
+- grabowski-job-ccdd315b086f: aus dem gleichen KRdp-Build gelinkter
+  Qt-QMouseEvent-Abnahmetest bestanden. Touch DOWN/UPDATE/UP, korrekte
+  absolute Koordinaten, Button-Zustandsfolge und Ignorieren zusätzlicher
+  Finger: neun von neun erwarteten Ereignissen.
+- Eine reale Touch-Eingabe der iPad-Windows-App wurde noch nicht
+  automatisiert bestätigt und bleibt ausdrücklich offen. Multi-Finger-Gesten
+  sind in dieser minimalen Implementierung nicht unterstützt.
