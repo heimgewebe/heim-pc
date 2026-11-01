@@ -201,6 +201,56 @@ jobs:
             exit "$thread_status"
           fi
 
+      # The hosted runner's single i686 clone3 succeeds outside Nix.
+      # Keep the original filelock test mandatory; only observe whether
+      # 20 simultaneously held i686 threads work inside the Nix builder.
+      - name: Diagnose concurrent i686 threads inside Nix builder
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/i686-nix-thread-probe.nix" <<'NIX'
+          let
+            f = builtins.getFlake (toString ./.);
+            p = f.nixosConfigurations.heim-pc.pkgs;
+            py32 = p.pkgsi686Linux.python3;
+          in p.runCommand "i686-nix-builder-concurrent-probe-v1" {
+            nativeBuildInputs = [ p.strace py32 ];
+          } ''
+            set -e
+            echo "I686_PROBE_PHASE=nix-builder"
+            cat /proc/self/limits
+            for f in /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current; do
+              if test -r "$f"; then echo "$f"; cat "$f"; fi
+            done
+            set +e
+            ${p.strace}/bin/strace -f -e trace=clone,clone3 -o "$TMPDIR/clone.trace" ${py32}/bin/python3 - <<'PY'
+          import threading
+          gate = threading.Event()
+          threads = [threading.Thread(target=gate.wait) for _ in range(20)]
+          started = []
+          try:
+              for thread in threads:
+                  thread.start()
+                  started.append(thread)
+              print("I686_CONCURRENT_THREAD_COUNT", len(started), flush=True)
+          finally:
+              gate.set()
+              for thread in started:
+                  thread.join()
+          PY
+            rc=$?
+            set -e
+            echo "I686_NIX_CONCURRENT_THREAD_STATUS=$rc"
+            if test -f "$TMPDIR/clone.trace"; then
+              tail -n 50 "$TMPDIR/clone.trace"
+            else
+              echo "I686_NIX_TRACE_UNAVAILABLE"
+            fi
+            touch "$out"
+          ''
+          NIX
+          nix build --impure --no-link --no-update-lock-file --print-out-paths --print-build-logs \
+            --expr "$(cat "$RUNNER_TEMP/i686-nix-thread-probe.nix")"
+
       - name: Prebuild i686 filelock threading tests
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs

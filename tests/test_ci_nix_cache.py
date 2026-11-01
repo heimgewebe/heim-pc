@@ -870,6 +870,7 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
         "- name: Evaluate complete flake without building checks",
         "- name: Prove evaluated Heim-PC contracts",
         "- name: Probe i686 Python clone syscalls on hosted runner",
+        "- name: Diagnose concurrent i686 threads inside Nix builder",
         "- name: Prebuild i686 filelock threading tests",
         "- name: Build storage, VM and physical-gate closures",
         "- name: Build live-gate and inventory ISOs",
@@ -879,6 +880,9 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
     ]
     assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock" in nix_job
     assert "strace" in nix_job and "trace=clone,clone3" in nix_job
+    assert "I686_NIX_CONCURRENT_THREAD_STATUS" in nix_job
+    assert "I686_CONCURRENT_THREAD_COUNT" in nix_job
+    assert "nativeBuildInputs = [ p.strace py32 ]" in nix_job
     assert ".#nixosConfigurations.heim-pc.pkgs.strace^out" in nix_job
     assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python3^out" in nix_job
     indices = [nix_job.index(step) for step in steps]
