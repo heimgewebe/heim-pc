@@ -180,3 +180,49 @@ und Zwei-Finger-Scrollen sind mit diesem Patch nicht implementiert.
 - Eine reale Touch-Eingabe der iPad-Windows-App wurde noch nicht
   automatisiert bestätigt und bleibt ausdrücklich offen. Multi-Finger-Gesten
   sind in dieser minimalen Implementierung nicht unterstützt.
+
+
+## Fotolabor: echter Windows-FreeRDP-Zugang, 1. November 2026
+
+Die bisherige native Windows-11-MSTSC-Verbindung zu KRDP auf Port
+3390 scheiterte beim TLS-only-Credential-Transfer. Ein Windows-
+Prozessabsturz wurde nicht bestätigt. Das bisherige Desktopprofil
+Fotolabor-Heim-PC-KRDP.rdp ist nach
+%LOCALAPPDATA%\Heim-PC\rdp-backups\Fotolabor-Heim-PC-KRDP-retired-20261101.rdp
+verschoben worden, damit es nicht mit dem funktionierenden Client
+verwechselt wird.
+
+Der neue primäre Desktoplink lautet Heim-PC KDE (FreeRDP).lnk und
+startet %LOCALAPPDATA%\Heim-PC\clients\start-kde-rdp.cmd.
+Es nutzt die lokal installierte FreeRDP-3.32.3-dev0-SDL-Binärdatei
+sdl-freerdp-2114.exe mit SHA256
+088F90B26C07CD55E1C95AB1923B1FF058B2CB7CFECB9761AF645192A30AA3C3.
+Diese offizielle FreeRDP-CI-Nightly-Datei ist nicht digital signiert;
+sie wurde nicht in Git oder das NixOS-Systemprofil übernommen.
+Der Desktop-Link nutzt die Argumente
+/v:heim-pc.tail6dbb90.ts.net:3390 /u:alex /from-stdin:force
+/sec:tls /cert:ignore /w:1168 /h:812 /log-level:WARN.
+Das Kennwort wird manuell im Konsolenfenster eingegeben und nicht
+in Link oder Startskript abgelegt. Die ursprünglich verwendete
+/gfx:progressive:on,AVC420:off,AVC444:off-Option ist in dieser
+Windows-Variante nicht gültig; sie verursachte Exitcode -1000
+vor der Netzwerkverbindung und wurde entfernt.
+
+Tatsächlicher Windows-Test: FreeRDP auf fotolabor lief in der
+interaktiven Windows-Sitzung 15 mit erfolgreicher Verbindung zum
+echten KDE-Arbeitsplatz alex; das FreeRDP-GUI-Fenster war sichtbar
+(Titel FreeRDP und Größe 1184x851). 32 synthetisch von diesem
+Windows-Fenster versandte Zeichen erreichten eine xterm-Anwendung
+im echten KDE-Konto. Vier automatisch gesendete Unterstriche
+wurden als Fragezeichen empfangen; die übrigen Zeichen kamen
+unverändert an. Dies ist eine Einschränkung der getesteten
+SendKeys-Tastaturbelegung, kein Nachweis eines Fehlers bei
+manueller Windows-Tastatureingabe.
+Ein separater Pixelvergleich der Windows-Clientbilder fehlt.
+Nach Trennung wurde DP-2 physisch wiederhergestellt.
+
+Der Desktoplink wurde anschließend ohne ein vorgespeichertes
+Kennwort gestartet; der FreeRDP-Clientprozess startete. Der
+vollständige Weg mit der künftig manuellen Kennworteingabe am
+Vater-PC ist noch nicht unabhängig durch einen Nutzer bestätigt.
+Die iPad-Windows-App-Touch-Abnahme bleibt ebenfalls offen.
