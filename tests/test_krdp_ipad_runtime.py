@@ -33,6 +33,8 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         binary = re.search(r"^ExecStart=(/nix/store/[^ ]+/bin/krdpserver) ", service, re.M)
         self.assertIsNotNone(binary)
         self.assertIn("Exec=" + binary.group(1), desktop)
+        self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
+        self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("--virtual-monitor 1168x812@1", service)
 
     def test_pointer_fixes_are_reproducible(self):
@@ -51,6 +53,23 @@ class TestIpadKrdpRuntime(unittest.TestCase):
                 self.assertIn(marker, content)
                 self.assertIn("--- a/", content)
                 self.assertIn("+++ b/", content)
+
+    def test_progressive_source_pin_and_cleanup(self):
+        package = (FEATURE / "package.nix").read_text()
+        self.assertIn('version = "6.7.0";', package)
+        self.assertIn("b1a49644aed95132ac0d2eee19780040c061fdaa", package)
+        self.assertIn("sha256-PLOOAIKz3YVPFipC0gndLaeLk2Sq6nNmJsyLiut7+8s=", package)
+        self.assertIn("pkgs.kdePackages.kirigami-addons", package)
+        expected = {
+            "krdp-6.7.0-virtual-output-pointer-offset-v1.patch": "geometry().topLeft()",
+            "krdp-6.7.0-embedded-pointer-v1.patch": "KRDP_EMBED_CURSOR",
+            "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch": "Qt::BlockingQueuedConnection",
+        }
+        for name, marker in expected.items():
+            self.assertIn(name, package)
+            self.assertIn(marker, (FEATURE / "patches" / name).read_text())
+        self.assertIn("FreeRDP_ExtSecurity, false", (FEATURE / "patches" / "krdp-6.6.6-disable-ext-security-v1.patch").read_text())
+        self.assertIn("krdp-6.6.6-embedded-pointer-v3.patch", (FEATURE / "package-krdp-6.6.6.nix").read_text())
 
     def test_exclusive_takeover_restores_physical_preimage(self):
         source = FEATURE / "controller.py"

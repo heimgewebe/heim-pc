@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=KRDP iPad virtual display test
-Exec=/nix/store/kf94k4j767cm0spfx75y8c910xkjpg4v-krdp-6.6.6/bin/krdpserver
+Name=KRDP native iPad and Windows remote desktop
+Exec=/nix/store/7rmym4cqlr327y2yij2fjbnd5dzx5zr4-krdp-6.7.0/bin/krdpserver
 NoDisplay=true
 Terminal=false
 X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1
