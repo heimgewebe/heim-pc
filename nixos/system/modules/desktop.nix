@@ -19,6 +19,7 @@ let cfg = config.heimPc.desktop; in {
       isNormalUser = true;
       uid = 1001;
       description = "Independent remote desktop (ander)";
+      packages = [ pkgs.firefox ]; # Browser only in the remote user profile.
     };
 
     # Retain the active Gen19 XRDP password-login KWallet unlock.
