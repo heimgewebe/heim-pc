@@ -122,3 +122,22 @@ Die produktive User-Unit enthält deshalb TimeoutStopSec=15s: künftig wird der 
 Wichtig: Der sichtbare iPad-Desktop wurde vom tatsächlichen Nutzer nach der Progressive-Umstellung bereits bestätigt, jedoch **vor** dem neuen Click-PDU-Patch als nicht anklickbar gemeldet. Die erneute Touch-App-Endabnahme nach der v6-Aktivierung ist offen. Die FreeRDP-Regression mit Maus-MOVE vor Button beweist keine direkte iPad-Tap-Akzeptanz. Ein bloßes Weiterleiten von RDPEI-Multitouch-PDUs ist von diesem kleinen Button-PDU-Fix ebenfalls nicht abgedeckt.
 
 Fotolabor (Windows 11) erreichte am 1. November um 15:52 über das bestehende RDP-Profil die produktive Verbindung und handelte TLS aus; der Server verweigerte anschließend wegen pam_authenticate failure den Login von alex. Der Windows-Ereignisbericht dokumentiert einen Abbruch der Verbindung, nicht den Absturz von mstsc.exe. Auf dem Windows-Konto wurden keine gespeicherten TERMSRV-Credentials für dieses Ziel gefunden. Daher sind das dort eingegebene Passwort und die erfolgreiche Windows-Endnutzeranmeldung nicht bestätigt. Keine Passwörter in Git/PR oder Testlogs ablegen.
+
+
+## RDPEI-Touch (experimentell)
+
+FreeRDP 3.32 enthält einen RDPEI-Multitouch-Server, den KRDP 6.7 bislang
+nicht nutzt. Der optionale Quellpatch krdp-6.7.0-rdpei-touch-input-v1.patch
+bindet dessen Dynamic Virtual Channel ein und überträgt den ersten aktiven
+Finger als absolute Qt-Mausbewegungen, Tastendruck und Loslassen an den
+bestehenden KWin-FakeInput-Pfad. Weitere Finger werden in dieser ersten
+Variante ignoriert; Pinch- und Zwei-Finger-Scroll-Gesten sind noch nicht
+implementiert. Die bisherigen normalen RDP-Maus-/Tastatureingaben bleiben
+unverändert.
+
+Der Kanal wird ausschließlich mit KRDP_RDPEI_TOUCH=1 eröffnet. Der
+produktive Systemd-Userdienst enthält diese Variable **noch nicht**:
+Es fehlen ein erfolgreiches Channel-Handshake-/Touch-PDU-Gegentestsignal
+von einem RDPEI-fähigen Client und die reale iPad-Endabnahme.
+Die Kompilierung und reguläre Maus-/Videofunktion wurden zunächst isoliert
+gegen KDE/KWin 6.6.6 geprüft, ohne den produktiven Port 3390 zu verändern.

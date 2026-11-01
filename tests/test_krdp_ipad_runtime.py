@@ -26,6 +26,17 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1", desktop)
         self.assertTrue((FEATURE / "krdp-unit-before-native-v1.conf").is_file())
 
+    def test_rdpei_touch_is_explicit_opt_in(self):
+        package = (FEATURE / "package.nix").read_text()
+        patch = (FEATURE / "patches" / "krdp-6.7.0-rdpei-touch-input-v1.patch").read_text()
+        service = (FEATURE / "krdp-native-override.conf").read_text()
+        self.assertIn("krdp-6.7.0-rdpei-touch-input-v1.patch", package)
+        self.assertIn("rdpei_server_context_new", patch)
+        self.assertIn('KRDP_RDPEI_TOUCH', patch)
+        self.assertIn("onTouchEvent", patch)
+        # The active server must not enable an unverified client input mode.
+        self.assertNotIn("KRDP_RDPEI_TOUCH", service)
+
     def test_runtime_unit_and_kwin_registration_match_binary(self):
         import re
         service = (FEATURE / "krdp-native-override.conf").read_text()
@@ -67,6 +78,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
             "krdp-6.7.0-embedded-pointer-v1.patch": "KRDP_EMBED_CURSOR",
             "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch": "Qt::BlockingQueuedConnection",
             "krdp-6.7.0-position-before-mouse-button-v1.patch": "Q_EMIT inputEvent(motion);",
+            "krdp-6.7.0-rdpei-touch-input-v1.patch": "rdpei_server_context_new",
         }
         for name, marker in expected.items():
             self.assertIn(name, package)
