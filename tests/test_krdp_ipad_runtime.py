@@ -35,6 +35,8 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("Exec=" + binary.group(1), desktop)
         self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
+        self.assertIn("TimeoutStopSec=15s", service)
+        self.assertIn("rgldrc8llk7k44b70946lhhzh3rn4w1l-krdp-6.7.0", binary.group(1))
         self.assertIn("--virtual-monitor 1168x812@1", service)
 
     def test_pointer_fixes_are_reproducible(self):
@@ -64,11 +66,20 @@ class TestIpadKrdpRuntime(unittest.TestCase):
             "krdp-6.7.0-virtual-output-pointer-offset-v1.patch": "geometry().topLeft()",
             "krdp-6.7.0-embedded-pointer-v1.patch": "KRDP_EMBED_CURSOR",
             "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch": "Qt::BlockingQueuedConnection",
+            "krdp-6.7.0-position-before-mouse-button-v1.patch": "Q_EMIT inputEvent(motion);",
         }
         for name, marker in expected.items():
             self.assertIn(name, package)
             self.assertIn(marker, (FEATURE / "patches" / name).read_text())
         self.assertIn("FreeRDP_ExtSecurity, false", (FEATURE / "patches" / "krdp-6.6.6-disable-ext-security-v1.patch").read_text())
+        # Absolute RDP button events must first move the KWin cursor:
+        # Windows App on iPad can send a button without preceding MOVE.
+        click_fix = (FEATURE / "patches" / "krdp-6.7.0-position-before-mouse-button-v1.patch").read_text()
+        self.assertIn("button != Qt::NoButton", click_fix)
+        self.assertIn("!(flags & PTR_FLAGS_MOVE)", click_fix)
+        self.assertLess(click_fix.index("Q_EMIT inputEvent(motion);"),
+                        click_fix.index("std::shared_ptr<QMouseEvent> event;"))
+
         self.assertIn("krdp-6.6.6-embedded-pointer-v3.patch", (FEATURE / "package-krdp-6.6.6.nix").read_text())
 
     def test_exclusive_takeover_restores_physical_preimage(self):

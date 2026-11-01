@@ -87,3 +87,38 @@ Der gepinnte KRDP-6.7.0-Quellstand enthält Progressive Encoding für RDP-Client
 - Das bestehende KRDP-6.6-v4-Override und seine Desktop-Registrierung sind lokal unter ~/.local/share/krdpserver/krdp-unit-before-progressive-20261101.conf und krdp-desktop-before-progressive-20261101.desktop gesichert. Ältere Auto-GC-Roots bleiben erhalten.
 
 **Grenze der Nachweise:** Diese Abnahme nutzt FreeRDP-Clients unter Xvfb auf dem produktiven Host. Die iPad-Windows-App muss weiterhin eigenständig auf tatsächliche Oberfläche, absoluten Zeiger, Gesten, Scrollen und Drag sowie den Neustartpfad geprüft werden. Der Windows-MSTSC-Client auf fotolabor ist als Profil eingerichtet, seine frühere fehlgeschlagene PAM-Anmeldung wurde nicht durch einen realen neuen Windows-Logintest ersetzt. Die zusätzlichen Nachweise sind nicht mit einer vollständigen iPad-/Fotolabor-Abnahme zu verwechseln.
+
+
+
+## iPad-Fingertipp und RDP-Button-Position
+
+Die Windows-App auf iPadOS kann einen Fingertipp als RDP-Pointer-Button-PDU mit Koordinaten, jedoch ohne vorgeschaltetes MOVE-PDU senden. KRDP 6.7.0 leitete im InputHandler nur den Button an FakeInput weiter: KWin betätigte damit die bisherige Zeigerposition statt der Tap-Position. Das erklärt den Befund: korrektes KDE-Bild, aber Fingertipps scheinbar wirkungslos. Der Fehler ist unabhängig von TLS/PAM und H.264/Progressive Encoding.
+
+krdp-6.7.0-position-before-mouse-button-v1.patch emittiert vor jedem regulären Button-PDU eine absolute QMouseMove-Aktion mit den aus dem RDP-Paket empfangenen (x,y)-Koordinaten, danach unverändert den Down-/Up-Button. Der vorhandene Wayland-Fixed-Point- und Virtual-Output-Offset-Code wird unverändert wiederverwendet. Eine ähnliche Ursachenanalyse wurde für iPad-Touch-PDUs ohne MOVE in Devolutions/IronRDP Issue #1466 dokumentiert. Dies ist ein gezielter KRDP-Fix und keine nachträgliche Bild-/Maus-Skalierung. Die User-Unit und die registrierte KDE-Anwendung müssen auf denselben daraus gebauten Nix-Store-Pfad zeigen.
+
+- Der acht-Patch-Build liefert /nix/store/rgldrc8llk7k44b70946lhhzh3rn4w1l-krdp-6.7.0.
+- Geprüft: Nix-Kompilierung gegen das unveränderte KWin 6.6.6 und KRDP-Quellregressionen (grabowski-job-0877a0632610).
+- Der zuvor geprüfte sieben-Patch-Build liegt weiterhin unter /nix/store/7rmym4cqlr327y2yij2fjbnd5dzx5zr4-krdp-6.7.0 samt GC-Root v5 als Rückfall.
+- Noch keine iPad-Touch-Endabnahme allein durch den Build: Reale Tap- und Drag-Funktion muss erneut mit der Windows-App geprüft werden. Standard-FreeRDP-Klicks mit vorgeschalteter Mausbewegung sind dafür nicht repräsentativ.
+
+
+
+### KRDP-Stop-Hänger bei aktiver iPad-Sitzung
+
+Beim Umstieg auf den Klick-Fix am 1. November 2026 reagierte die alte KRDP-6.7.0-Prozessinstanz während einer noch aktiven iPad-Verbindung nicht auf systemd SIGTERM. Die standardmäßige Stop-Frist von 90 Sekunden wurde ausgeschöpft; systemd beendete den alten Prozess anschließend mit SIGKILL und stellte DP-2 wieder her. Die Transaktion wurde wegen eines zu kurzen 60-Sekunden-Client-Timeouts korrekt auf die vorherige v5-Version zurückgesetzt. Das ist ein Stopp-/Join-Hänger, kein KWin-Absturz.
+
+Die produktive User-Unit enthält deshalb TimeoutStopSec=15s: künftig wird der KRDP-Prozess bei einem derartigen Stopp begrenzt beendet und das Wayland-Ausgabegerät freigegeben. Die KDE-Sitzung von alex, der physische Monitor und die v5-Rückfallkonfiguration bleiben unabhängig erhalten. Kein zusätzlicher Watcher oder Controller wird eingeführt.
+
+
+
+## Produktive Abnahme des iPad-Tap-Fixes – 1. November 2026
+
+- grabowski-job-0877a0632610: gezielter Quellpatch für RDP-Button-PDUs ohne MOVE erfolgreich auf die acht-Patch-Ableitung kompiliert.
+- grabowski-job-48d782ad790c: KRDP-Regressions- und 59 NixOS-Systemquelltests bestanden; gepinnter Nix-Build reproduziert exakt /nix/store/rgldrc8llk7k44b70946lhhzh3rn4w1l-krdp-6.7.0, GC-Root ~/.local/share/krdpserver/krdp-ipad-native-v6 registriert.
+- grabowski-job-2b0d4da19da5: erster Versuch während einer noch aktiven iPad-Sitzung blockierte beim alten KRDP-SIGTERM bis zum 90-Sekunden-Systemd-Timeout; der Job rollte korrekt zur vorherigen Version zurück, die physische Ausgabe DP-2 wurde wiederhergestellt.
+- grabowski-job-297fb116431b: nach Beendigung der offenen RDP-Sitzung wurde der identische acht-Patch-Build erfolgreich auf dem produktiven Userdienst/Port3390 aktiviert. Nur KRDP wurde neu gestartet, keine KDE-Abmeldung und kein NixOS-Reboot; KWin-Desktopberechtigung, Userunit und GC-Root sind auf denselben Storepfad gebunden. Der 15s-Stop-Timeout ist live gesetzt und DP-2 lokal wieder aktiv.
+- grabowski-job-2d587ee86e8f: wiederholter echter Test auf produktivem Port3390 mit vollständigem TLS-RDP-Login und normalem Maus-/Tastaturweg. Progressive-Client ohne AVC420: 380239 neue Fensterpixel und 30360 Textpixel, exakter Text. H.264-Client: 373335 Fensterpixel und 38091 Textpixel, exakter Text. Nach jeder Trennung kehrte der physische Monitor zurück, ohne gespeichertes Preimage.
+
+Wichtig: Der sichtbare iPad-Desktop wurde vom tatsächlichen Nutzer nach der Progressive-Umstellung bereits bestätigt, jedoch **vor** dem neuen Click-PDU-Patch als nicht anklickbar gemeldet. Die erneute Touch-App-Endabnahme nach der v6-Aktivierung ist offen. Die FreeRDP-Regression mit Maus-MOVE vor Button beweist keine direkte iPad-Tap-Akzeptanz. Ein bloßes Weiterleiten von RDPEI-Multitouch-PDUs ist von diesem kleinen Button-PDU-Fix ebenfalls nicht abgedeckt.
+
+Fotolabor (Windows 11) erreichte am 1. November um 15:52 über das bestehende RDP-Profil die produktive Verbindung und handelte TLS aus; der Server verweigerte anschließend wegen pam_authenticate failure den Login von alex. Der Windows-Ereignisbericht dokumentiert einen Abbruch der Verbindung, nicht den Absturz von mstsc.exe. Auf dem Windows-Konto wurden keine gespeicherten TERMSRV-Credentials für dieses Ziel gefunden. Daher sind das dort eingegebene Passwort und die erfolgreiche Windows-Endnutzeranmeldung nicht bestätigt. Keine Passwörter in Git/PR oder Testlogs ablegen.
