@@ -15,10 +15,10 @@ let cfg = config.heimPc.desktop; in {
     # A separate UID is required: concurrent graphical sessions of the same
     # systemd user share the session bus, clipboard services, and focus state.
     # Never put a password into this public NixOS source or the Nix store.
-    users.users.ipad = {
+    users.users.ander = {
       isNormalUser = true;
       uid = 1001;
-      description = "Independent iPad remote desktop";
+      description = "Independent remote desktop (ander)";
     };
 
     # Retain the active Gen19 XRDP password-login KWallet unlock.
