@@ -869,6 +869,7 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
         "- name: Verify source identity",
         "- name: Evaluate complete flake without building checks",
         "- name: Prove evaluated Heim-PC contracts",
+        "- name: Probe i686 Python clone syscalls on hosted runner",
         "- name: Prebuild i686 filelock threading tests",
         "- name: Build storage, VM and physical-gate closures",
         "- name: Build live-gate and inventory ISOs",
@@ -877,6 +878,7 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
         "- name: Prove untrusted signatures are rejected by substitution",
     ]
     assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock" in nix_job
+    assert "strace" in nix_job and "trace=clone,clone3" in nix_job
     indices = [nix_job.index(step) for step in steps]
     assert indices == sorted(indices)
     assert "require-sigs = true" in nix_job
