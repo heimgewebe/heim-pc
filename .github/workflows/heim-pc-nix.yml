@@ -187,8 +187,8 @@ jobs:
       - name: Probe i686 Python clone syscalls on hosted runner
         run: |
           set -euo pipefail
-          py32="$(nix build --no-link --no-update-lock-file --print-out-paths .#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python3)"
-          trace="$(nix build --no-link --no-update-lock-file --print-out-paths .#nixosConfigurations.heim-pc.pkgs.strace)"
+          py32="$(nix build --no-link --no-update-lock-file --print-out-paths .#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python3^out)"
+          trace="$(nix build --no-link --no-update-lock-file --print-out-paths .#nixosConfigurations.heim-pc.pkgs.strace^out)"
           set +e
           "$trace/bin/strace" -f -e trace=clone,clone3 -o "$RUNNER_TEMP/i686-thread.trace" \
             "$py32/bin/python3" -c 'import threading; t=threading.Thread(target=lambda: None); t.start(); t.join()'
@@ -197,7 +197,7 @@ jobs:
           printf 'i686_thread_probe_status=%s\n' "$thread_status"
           tail -n 24 "$RUNNER_TEMP/i686-thread.trace" || true
           if test "$thread_status" -ne 0; then
-            echo 'Hosted runner cannot create an i686 Python thread before filelock checks' >&2
+            echo 'i686 traced-thread probe failed; inspect syscall trace and strace availability' >&2
             exit "$thread_status"
           fi
 

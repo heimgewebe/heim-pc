@@ -879,6 +879,8 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
     ]
     assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock" in nix_job
     assert "strace" in nix_job and "trace=clone,clone3" in nix_job
+    assert ".#nixosConfigurations.heim-pc.pkgs.strace^out" in nix_job
+    assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python3^out" in nix_job
     indices = [nix_job.index(step) for step in steps]
     assert indices == sorted(indices)
     assert "require-sigs = true" in nix_job
