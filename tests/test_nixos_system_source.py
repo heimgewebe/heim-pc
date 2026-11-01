@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "5296f2ede41303a900712e5825e1532c298a1e4145367444b702c79723d0056b"
+SOURCE_SNAPSHOT_SHA256 = "f1dfd9548a8ae2ece543ad01c5fdb1e7cda977e12685c7509b6aa7e6364b39c8"
 ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -413,10 +413,16 @@ class T(unittest.TestCase):
         self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
         self.assertIn("openFirewall = false;", desktop)
         self.assertIn(
-            'defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";',
+            'defaultWindowManager = "${pkgs.xfce4-session}/bin/startxfce4";',
             desktop,
         )
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+        self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
+        self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
+        self.assertIn("users.users.ander = {", desktop)
+        remote_user = desktop.split("users.users.ander = {", 1)[1].split("};", 1)[0]
+        self.assertIn("uid = 1001;", remote_user)
+        self.assertIn("packages = [ pkgs.firefox ];", remote_user)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
         module = (SOURCE / "modules/grosser-adler.nix").read_text()
