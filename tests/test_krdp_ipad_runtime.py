@@ -26,6 +26,15 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1", desktop)
         self.assertTrue((FEATURE / "krdp-unit-before-native-v1.conf").is_file())
 
+    def test_runtime_unit_and_kwin_registration_match_binary(self):
+        import re
+        service = (FEATURE / "krdp-native-override.conf").read_text()
+        desktop = (FEATURE / "org.kde.krdpserver-ipad-test.desktop").read_text()
+        binary = re.search(r"^ExecStart=(/nix/store/[^ ]+/bin/krdpserver) ", service, re.M)
+        self.assertIsNotNone(binary)
+        self.assertIn("Exec=" + binary.group(1), desktop)
+        self.assertIn("--virtual-monitor 1168x812@1", service)
+
     def test_pointer_fixes_are_reproducible(self):
         patches = FEATURE / "patches"
         expected = {
@@ -34,6 +43,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
             "krdp-6.6.6-fakeinput-auth-v1.patch": "authenticate(",
             "krdp-6.6.6-virtual-output-pointer-offset-v1.patch": "geometry().topLeft()",
             "krdp-6.6.6-embedded-pointer-v3.patch": "State::Streaming",
+            "krdp-6.6.6-disable-ext-security-v1.patch": "FreeRDP_ExtSecurity, false",
         }
         for name, marker in expected.items():
             with self.subTest(patch=name):

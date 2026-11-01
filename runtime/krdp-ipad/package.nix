@@ -7,5 +7,6 @@ pkgs.kdePackages.krdp.overrideAttrs (old: {
     ./patches/krdp-6.6.6-fakeinput-auth-v1.patch
     ./patches/krdp-6.6.6-virtual-output-pointer-offset-v1.patch
     ./patches/krdp-6.6.6-embedded-pointer-v3.patch
+    ./patches/krdp-6.6.6-disable-ext-security-v1.patch
   ];
 })
