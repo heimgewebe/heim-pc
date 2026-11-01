@@ -180,6 +180,14 @@ jobs:
           .#checks.x86_64-linux.intentional-break-rejected
           .#checks.x86_64-linux.agent-zone-contract
 
+      # GitHub nix job 124637990940: i686 filelock's installCheck
+      # failed to start threads after heavy Node/V8 tests. Execute that
+      # unchanged 32-bit package test before the heavy closure builds.
+      - name: Prebuild i686 filelock threading tests
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock
+
       - name: Record heavy-derivation substitution plan
         run: |
           set -o pipefail
