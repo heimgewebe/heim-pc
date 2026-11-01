@@ -10,6 +10,20 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
+  # One-time, manually invoked helper: neither an enabled systemd unit nor a
+  # broker authority grant. Both Python sources enter the immutable Nix store.
+  rootbrokerBootstrapPackage = pkgs.runCommand "grabowski-nixos-rootbroker-bootstrap" {
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+  } ''
+    mkdir -p "$out/bin" "$out/share/grabowski"
+    install -m 0444 ${./grabowski-rootbroker-bootstrap.py} \
+      "$out/share/grabowski/grabowski-rootbroker-bootstrap.py"
+    install -m 0444 ${./grabowski-private-policy-install.py} \
+      "$out/share/grabowski/grabowski-private-policy-install.py"
+    makeWrapper "${pkgs.python3}/bin/python3" \
+      "$out/bin/grabowski-nixos-rootbroker-bootstrap" \
+      --add-flags "-I -B $out/share/grabowski/grabowski-rootbroker-bootstrap.py"
+  '';
   expectedReleaseId = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
   expectedRevision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
@@ -49,6 +63,10 @@ in
   };
 
   config = {
+    # Installing the binary never changes the private root policy. Explicit
+    # --apply and current root-owned preimage binding remain mandatory.
+    environment.systemPackages = lib.optionals admit [ rootbrokerBootstrapPackage ];
+
     # Keep the exact derivation-backed executable available in both the
     # system Grabowski service and headless user-systemd review jobs.
     # /home is intentionally read-only, so user environment.d must live
