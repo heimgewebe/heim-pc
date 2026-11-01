@@ -28,11 +28,19 @@ let cfg = config.heimPc.desktop; in {
       forceRun = true;
     };
 
-    # Run an Xfce X11 desktop under the dedicated ipad UID; leave local Plasma untouched.
+    # Reuse the original XRDP Plasma/X11 login for alex; ander keeps Xfce.
+    # A remote Plasma session for alex must not be used concurrently with
+    # the local Wayland session: the same UID shares its KDE user services.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
       enable = true;
-      defaultWindowManager = "${pkgs.xfce4-session}/bin/startxfce4";
+      defaultWindowManager = "${pkgs.writeShellScript "xrdp-window-manager-by-user" ''
+        if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then
+          exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11
+        else
+          exec ${pkgs.xfce4-session}/bin/startxfce4
+        fi
+      ''}";
       openFirewall = false;
     };
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
