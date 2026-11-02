@@ -9,6 +9,7 @@
 - Stabile Ökosystemsemantik: `~/repos/systemkatalog`
 - Aufgaben, Claims und Receipts: `~/repos/bureau`
 - Ausführung, Leases und Runtime: Grabowski
+- Persönliche Projekte, Wissen und Quellen: `~/Arbeitsraum/START.md` (Agentenregeln: `~/Arbeitsraum/AGENTS.md`)
 
 ChatGPT über Grabowski ist der Operator. Der Mensch soll nicht als Shell-Ausführer dienen.
 

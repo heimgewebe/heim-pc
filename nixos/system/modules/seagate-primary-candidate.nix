@@ -6,6 +6,7 @@
   # This profile is an evaluation/build candidate, NOT a productive cutover.
   imports = [
     ./stage0-no-usb.nix
+    ./brotli-security.nix
     ./networking.nix
     ./nix-trust.nix
     ./nix-lifecycle.nix
@@ -14,6 +15,28 @@
     ./grabowski-production.nix
     ./grabowski-broker-package.nix
   ];
+
+  # The WD_BLACK remains the independent bootable Pop!_OS fallback. Expose all
+  # its data partitions without writes, journal replay or boot-time dependency.
+  # The swap partition is intentionally not activated.
+  fileSystems."/mnt/wd-black/pop-os" = {
+    device = "/dev/disk/by-uuid/d25d44aa-5334-4b9d-9cc2-2475e9123776";
+    fsType = "ext4";
+    options = [ "ro" "noload" "nosuid" "nodev" "nofail" "x-systemd.automount" ];
+    noCheck = true;
+  };
+  fileSystems."/mnt/wd-black/efi" = {
+    device = "/dev/disk/by-uuid/78FD-6130";
+    fsType = "vfat";
+    options = [ "ro" "nofail" "x-systemd.automount" "uid=1000" "gid=100" "umask=0077" ];
+    noCheck = true;
+  };
+  fileSystems."/mnt/wd-black/recovery" = {
+    device = "/dev/disk/by-uuid/78FD-60C8";
+    fsType = "vfat";
+    options = [ "ro" "nofail" "x-systemd.automount" "uid=1000" "gid=100" "umask=0077" ];
+    noCheck = true;
+  };
 
   networking.hostName = lib.mkForce "heim-pc";
   networking.firewall.enable = true;

@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
-  releaseId = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+  sourceRevision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
+  releaseId = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-+wI18lL8gcyeBQXAIi0iWdylykBikuK8aGpF46G1fiQ=";
+    hash = "sha256-99dRTvg1KOZ//Y3NHoMjJgi01xgqRM5fldFwSllPTqU=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -17,7 +17,7 @@ let
   # occur during the subsequent ordinary, sandboxed operator build.
   wheelhouse = pkgs.stdenvNoCC.mkDerivation {
     pname = "grabowski-locked-runtime-wheels";
-    version = "586a6fc8";
+    version = "3fbe93d2";
     dontUnpack = true;
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -40,7 +40,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "586a6fc8";
+  version = "3fbe93d2";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -77,7 +77,7 @@ pkgs.stdenvNoCC.mkDerivation {
     export GRABOWSKI_NIXOS_GIT_BIN="$out/bin/git"
     export GRABOWSKI_NIXOS_GH_BIN="$out/bin/gh"
 
-    # Reproduce the ORIGINAL canonical 203-tool deployment entrypoint.
+    # Reproduce the ORIGINAL canonical 206-tool deployment entrypoint.
     # The source file name differs from the Python module name: the public
     # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
     # grabowski_operator and src/grabowski_operator.py to
@@ -104,11 +104,11 @@ if not (
 ):
     raise SystemExit("unexpected upstream canonical runtime entrypoint")
 expected = contract.get("expected_tools")
-if not (isinstance(expected, list) and len(expected) == 203
+if not (isinstance(expected, list) and len(expected) == 206
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
-if not isinstance(supporting, list) or len(supporting) != 130:
+if not isinstance(supporting, list) or len(supporting) != 132:
     raise SystemExit("canonical runtime module mapping changed")
 entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
 seen = set()
@@ -143,7 +143,7 @@ for entry in entries:
         content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
         content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
         dst.write_text(content)
-    # The copied full upstream runtime is still the canonical 203-tool
+    # The copied full upstream runtime is still the canonical 206-tool
     # entrypoint. Repair only Nix-specific argv0 and catalog discovery.
     if original == "src/grabowski_runtime.py":
         content = dst.read_text()
@@ -212,6 +212,14 @@ for entry in entries:
                 raise SystemExit("unexpected pinned task capture Python topology")
             content = content.replace(old, new, 1)
         dst.write_text(content)
+    if original == 'src/grabowski_bureau_runtime_refresh_executor.py':
+        content = dst.read_text()
+        # Adapt only the exact pinned FHS binary to an immutable NixOS output.
+        old = 'CANONICAL_FINDMNT = Path("/usr/bin/findmnt")'
+        new = 'CANONICAL_FINDMNT = Path("${pkgs.util-linux}/bin/findmnt")'
+        if content.count(old) != 1:
+            raise SystemExit("pinned Bureau findmnt source topology changed")
+        dst.write_text(content.replace(old, new, 1))
     if original == "src/grabowski_fleet.py":
         content = dst.read_text()
         imports = "import stat\nfrom typing import Any, Sequence"

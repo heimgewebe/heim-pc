@@ -7,7 +7,7 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";
+    nixer.url = "github:heimgewebe/nixer/c252b62b0fcd0bd5442681bb68d809a4b5984c61";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
@@ -153,7 +153,12 @@
             physicalGates = false;
           };
         };
-        modules = hostModules;
+        # This default output is an intentionally non-installable prototype
+        # without SSH/Tailscale. Never include switch-to-configuration in its
+        # closure: a test switch would remove the host's remote recovery access.
+        modules = hostModules ++ [
+          ({ ... }: { system.switch.enable = false; })
+        ];
       };
 
       # Build-only closure for T011/T003. Unlike the deliberately impossible
@@ -353,8 +358,10 @@
               # Stage0 deliberately has X disabled; override ONLY in this
               # explicitly named, non-activated workstation successor.
               services.xserver.enable = lib.mkForce true;
+              # Admit only NVIDIA and the exact Chrome operator package downstream.
               nixpkgs.config.allowUnfreePredicate = pkg:
-                lib.hasPrefix "nvidia-" (lib.getName pkg);
+                lib.hasPrefix "nvidia-" (lib.getName pkg)
+                || lib.getName pkg == "google-chrome";
               heimPc.desktop.enable = true;
               heimPc.hardware.nvidia.enable = true;
             })
@@ -385,10 +392,23 @@
           modules = [
             ./modules/restic-seagate-backup.nix
             ./modules/fotoatelier.nix
+            ./modules/grosser-adler.nix
             ({ pkgs, ... }: {
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.
               users.users.alex.linger = pkgs.lib.mkForce true;
+              # Bureau user services invoke python3; the prototype host profile
+              # is not imported by this actual headless operator candidate.
+              users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
+              heimPc.grosserAdler.enable = true;
+              # Keep a bounded compressed swap fallback on the real Seagate
+              # Grabowski candidate; avoid another OOM-driven desktop build failure.
+              zramSwap = {
+                enable = true;
+                algorithm = "zstd";
+                memoryPercent = 25;
+                priority = 1000;
+              };
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -399,7 +419,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+                  "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -505,8 +525,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
-            revision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+            release = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
+            revision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -647,7 +667,7 @@ for argv0 in (
                          + result.stderr[-2000:] + result.stdout[-500:])
 print("Nix kernel Python and distinct operator/forged argv0 identities verified")
 PY
-            # Runtime assembly must match the full original 203-tool MCP
+            # Runtime assembly must match the full original 206-tool MCP
             # surface, not the older 53-tool core. Register tools only; no
             # MCP listener, privileged operation or production state is used.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -661,20 +681,20 @@ if (contract.get("mode"), contract.get("module"), contract.get("source")) != (
 ):
     raise SystemExit("pinned canonical runtime module/source contract changed")
 expected = contract.get("expected_tools")
-if not isinstance(expected, list) or len(expected) != 203 or len(set(expected)) != 203:
+if not isinstance(expected, list) or len(expected) != 206 or len(set(expected)) != 206:
     raise SystemExit("canonical runtime tool list is incomplete")
 actual = [
     tool.name
     for tool in importlib.import_module("grabowski_operator").mcp._tool_manager.list_tools()
 ]
-if len(actual) != 203 or set(actual) != set(expected):
+if len(actual) != 206 or set(actual) != set(expected):
     raise SystemExit(
-        "Nix Grabowski runtime tool surface differs from canonical 203-tool release: "
+        "Nix Grabowski runtime tool surface differs from canonical 206-tool release: "
         + str({"missing": sorted(set(expected) - set(actual)),
                "unexpected": sorted(set(actual) - set(expected))})
     )
 PY
-            # Prove the real executable reaches the canonical 203-tool MCP
+            # Prove the real executable reaches the canonical 206-tool MCP
             # surface, not just the legacy 53-tool core. No host resources
             # are mounted and no tools are invoked; only initialize/list.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -695,8 +715,8 @@ source_contract = json.loads(
     (root / "share/grabowski/config/runtime-entrypoint.json").read_text()
 )
 expected = set(source_contract["expected_tools"])
-if len(expected) != 203:
-    raise SystemExit("canonical expected tool catalog is not exactly 203")
+if len(expected) != 206:
+    raise SystemExit("canonical expected tool catalog is not exactly 206")
 
 with tempfile.TemporaryDirectory(prefix="nixos-grabowski-mcp-") as home:
     env = {
@@ -793,6 +813,23 @@ PY
             cp ${operator}/share/grabowski/nixos-release.json "$out/release.json"
             printf '%s\n' ${broker} > "$out/broker-store-path"
             printf '%s\n' ${operator} > "$out/operator-store-path"
+          '';
+
+        # A buildable prototype must not be live-switchable: its placeholder
+        # root and absent remote services were responsible for a host lockout.
+        # The real Seagate primary candidate retains normal switch support.
+        prototype-non-switchable-contract =
+          let
+            prototype = self.nixosConfigurations.heim-pc.config;
+            primary = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
+          in
+          assert prototype.fileSystems."/".device == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
+          assert !prototype.system.switch.enable;
+          assert !prototype.services.openssh.enable && !prototype.services.tailscale.enable;
+          assert primary.system.switch.enable;
+          assert primary.services.openssh.enable && primary.services.tailscale.enable;
+          pkgs.runCommand "heim-pc-prototype-non-switchable-contract" {} ''
+            mkdir -p "$out"
           '';
 
         # Evaluation-only: Stage0 must be an isolated, root-label-bound
@@ -926,10 +963,13 @@ PY
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
-            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            # CVE-patched Brotli changes transitive store IDs. Compare the
+            # original package expressions under this candidate's exact pkgs.
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            originalOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
-              inherit pkgs;
-              lib = pkgs.lib;
+              pkgs = candidatePkgs;
+              lib = candidatePkgs.lib;
               packageOnly = true;
             };
           in
@@ -938,7 +978,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+            "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -949,6 +989,9 @@ PY
           assert cfg.services.getty.autologinUser == null;
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
+          assert builtins.any
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
@@ -981,15 +1024,19 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+            release = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
-            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
               (nixpkgs.lib.nixosSystem {
                 inherit system;
                 modules = [
                   ./modules/seagate-primary-candidate.nix
-                  ({ ... }: {
+                  ({ lib, ... }: {
+                    # The isolated unit proof needs only the operator Chrome license.
+                    nixpkgs.config.allowUnfreePredicate = pkg:
+                      lib.getName pkg == "google-chrome";
                     heimPc.grabowskiProduction = {
                       enable = true;
                       operatorPackage = op;
@@ -1016,7 +1063,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+            == "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
@@ -1077,11 +1124,14 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${candidatePkgs.coreutils}/bin:${candidatePkgs.git}/bin:${candidatePkgs.systemd}/bin:${candidatePkgs.openssh}/bin:${candidatePkgs.tailscale}/bin:${candidatePkgs.procps}/bin:${candidatePkgs.iproute2}/bin:${candidatePkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
           assert operator.NoNewPrivileges && operator.ProtectSystem == "strict";
+          # Node.js/V8 JIT must not be trapped by operator-only MDWE hardening.
+          assert !operator.MemoryDenyWriteExecute;
+          assert broker.MemoryDenyWriteExecute;
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
           assert operator.ProtectHome == "read-only";

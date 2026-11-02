@@ -20,10 +20,10 @@ import stat
 import sys
 from typing import Any
 
-PINNED_RELEASE = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb"
-PINNED_REVISION = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6"
+PINNED_RELEASE = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea"
+PINNED_REVISION = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f"
 PINNED_LOCK_SHA256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
-ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-586a6fc8\Z")
+ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-3fbe93d2\Z")
 REQUIRED_MODULE = "lib/python3.12/site-packages/grabowski_mcp.py"
 MANIFEST_RELATIVE = "share/grabowski/nixos-integrity-manifest.json"
 CONTRACT_RELATIVE = "share/grabowski/config/runtime-entrypoint.json"
@@ -79,10 +79,10 @@ def _contract_entries(contract: dict[str, Any]) -> tuple[dict[str, str], dict[st
             contract.get("source") != "src/grabowski_runtime.py"):
         raise ValueError("unrecognized canonical entrypoint")
     tools = contract.get("expected_tools")
-    if not isinstance(tools, list) or len(tools) != 203 or len(set(tools)) != 203:
-        raise ValueError("203-tool contract absent")
+    if not isinstance(tools, list) or len(tools) != 206 or len(set(tools)) != 206:
+        raise ValueError("206-tool contract absent")
     supporting = contract.get("supporting_sources")
-    if not isinstance(supporting, list) or len(supporting) != 130:
+    if not isinstance(supporting, list) or len(supporting) != 132:
         raise ValueError("canonical source mapping incomplete")
     modules = {}
     for entry in [{"module": contract["module"], "source": contract["source"]}, *supporting]:
@@ -234,7 +234,7 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
 def patch_pinned_module(path: Path) -> None:
     """Adapt only two exact, expected manifest-discovery sites in pinned source.
 
-    The 203-tool implementation, broker policy, tool signatures and signed
+    The 206-tool implementation, broker policy, tool signatures and signed
     connector transport are not altered. Unknown upstream revisions fail build.
     """
     text = path.read_text()

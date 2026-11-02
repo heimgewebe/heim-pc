@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6"
-TARBALL_HASH = "sha256-+wI18lL8gcyeBQXAIi0iWdylykBikuK8aGpF46G1fiQ="
+REVISION = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f"
+TARBALL_HASH = "sha256-99dRTvg1KOZ//Y3NHoMjJgi01xgqRM5fldFwSllPTqU="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -36,10 +36,54 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
         self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
 
+    def test_node_v8_jit_is_allowed_only_in_unprivileged_operator(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split(
+            "systemd.services.grabowski-operator = lib.mkIf admit {", 1
+        )[1]
+        self.assertIn("MemoryDenyWriteExecute = false;", operator)
+        self.assertNotIn("MemoryDenyWriteExecute = true;", operator)
+        for service in (
+            "grabowski-private-policy-install",
+            '"grabowski-privileged-broker@"',
+            "grabowski-runtime-schema-install",
+        ):
+            marker = f"systemd.services.{service} = lib.mkIf admit {{"
+            section = production.split(marker, 1)[1].split(
+                "systemd.services.", 1
+            )[0]
+            self.assertIn("MemoryDenyWriteExecute = true;", section)
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        self.assertIn("assert !operator.MemoryDenyWriteExecute;", flake)
+        self.assertIn("assert broker.MemoryDenyWriteExecute;", flake)
+
     def test_operator_path_is_available_without_setuid_escalation(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
+
+    def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn(
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"',
+            operator,
+        )
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        workstation = flake.split(
+            "nixosConfigurations.heim-pc-seagate-workstation-candidate =", 1
+        )[1].split(
+            "nixosConfigurations.heim-pc-seagate-nixer-headless-candidate =", 1
+        )[0]
+        self.assertIn('lib.hasPrefix "nvidia-" (lib.getName pkg)', workstation)
+        self.assertIn('|| lib.getName pkg == "google-chrome";', workstation)
+        unit_proof = flake.split("grabowski-production-unit-contract =", 1)[1]
+        self.assertIn(
+            'nixpkgs.config.allowUnfreePredicate = pkg:\n                      lib.getName pkg == "google-chrome";',
+            unit_proof,
+        )
 
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()
@@ -118,7 +162,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb"
+        release_id = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -140,8 +184,12 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # The deployment manifest maps runtime.py to grabowski_operator and
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
-        self.assertIn('len(expected) == 203', op)
-        self.assertIn('len(supporting) != 130', op)
+        self.assertIn('len(expected) == 206', op)
+        self.assertIn('len(supporting) != 132', op)
+        integrity = (MODULES / 'grabowski-nixos-integrity.py').read_text()
+        self.assertIn('len(tools) != 206', integrity)
+        self.assertIn('len(set(tools)) != 206', integrity)
+        self.assertIn('len(actual) != 206', flake)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
@@ -155,11 +203,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;", flake)
         self.assertIn("grabowski-release-artifacts =", flake)
         self.assertIn('if observed != expected:', flake)
-        self.assertIn('if len(expected) != 203:', flake)
+        self.assertIn('if len(expected) != 206:', flake)
         self.assertIn('"cmdline"', flake)
         self.assertIn("test -x ${operator}/bin/grabowski-operator", flake)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
         self.assertIn('builtins.match "/nix/store/[0-9a-z]{32}-unit-grabowski-operator[.]service" unitStore', flake)
+
+    def test_bureau_executor_uses_source_pinned_nix_findmnt(self):
+        operator = (MODULES / "grabowski-operator-package.nix").read_text()
+        self.assertIn("if original == 'src/grabowski_bureau_runtime_refresh_executor.py':", operator)
+        self.assertIn('CANONICAL_FINDMNT = Path("/usr/bin/findmnt")', operator)
+        self.assertIn('CANONICAL_FINDMNT = Path("${pkgs.util-linux}/bin/findmnt")', operator)
+        self.assertIn("pinned Bureau findmnt source topology changed", operator)
 
     def test_private_root_policy_is_not_a_nix_store_secret(self):
         production = (MODULES / "grabowski-production.nix").read_text()
@@ -275,6 +330,17 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             flake,
         )
 
+
+    def test_codex_review_preflight_receives_exact_binary_without_extra_path(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        environment = operator.split("Environment = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(
+            environment.count('"GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"'), 1,
+        )
+        self.assertIn('"GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"', environment)
+        self.assertNotIn('"PATH=/home/alex/.nix-profile/bin:', environment)
+        self.assertIn('ProtectHome = "read-only";', operator)
 
     def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
         prod = (MODULES / "grabowski-production.nix").read_text()

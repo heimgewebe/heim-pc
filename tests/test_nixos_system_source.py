@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9b8e31a03e0ce018b800f7529f00ad4440871f15469054ca9f506d4a7b187a8c"
-ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
+SOURCE_SNAPSHOT_SHA256 = "bd399a3f7856db4f0d8ee7ff0a3c8f23aceabda39d51637f07689d96c9e93558"
+ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +32,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";',
+            'nixer.url = "github:heimgewebe/nixer/c252b62b0fcd0bd5442681bb68d809a4b5984c61";',
             nested,
         )
 
@@ -43,8 +43,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0="
-        rev = "6c1fae3936e441c43d19a7924f2f26f3539fb1d3"
+        nar = "sha256-aaDoiW4Eg/0/kE+I3qGUzFzwnH/7DRMStC8h5FcUSDE="
+        rev = "c252b62b0fcd0bd5442681bb68d809a4b5984c61"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -412,11 +412,47 @@ class T(unittest.TestCase):
         self.assertIn('networking.firewall.interfaces."tailscale0".allowedTCPPorts', desktop)
         self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
         self.assertIn("openFirewall = false;", desktop)
-        self.assertIn(
-            'defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";',
-            desktop,
-        )
+        self.assertIn('defaultWindowManager = "${pkgs.writeShellScript ', desktop)
+        self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
+        self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
+        self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
+        self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
+        self.assertIn("users.users.ander = {", desktop)
+        self.assertIn("uid = 1001;", desktop)
+        self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
+        self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+
+    def test_grosser_adler_nixos_declares_independent_observer(self):
+        module = (SOURCE / "modules/grosser-adler.nix").read_text()
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        self.assertIn('heimPc.grosserAdler.enable = heimPcProfile.physical or false;', host)
+        # PR #290's physical prototype import alone does not reach the
+        # active Seagate Grabowski production profile.
+        flake = (SOURCE / "flake.nix").read_text()
+        seagate_operator = flake.split(
+            "nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =", 1
+        )[1].split("# Negative pre-deployment proof", 1)[0]
+        self.assertIn("./modules/grosser-adler.nix", seagate_operator)
+        self.assertIn("heimPc.grosserAdler.enable = true;", seagate_operator)
+        # This physical release candidate needs compressed swap under high
+        # Nix/Qt compile pressure; the storage fallback stays untouched.
+        self.assertIn("zramSwap = {", seagate_operator)
+        self.assertIn('algorithm = "zstd";', seagate_operator)
+        self.assertIn("memoryPercent = 25;", seagate_operator)
+        self.assertIn("priority = 1000;", seagate_operator)
+        self.assertNotIn(
+            "grosser-adler.nix",
+            (SOURCE / "modules/seagate-primary-candidate.nix").read_text(),
+        )
+        self.assertIn('systemd.user.services."grosser-adler-mcp" = {', module)
+        self.assertIn('systemd.user.services."tunnel-client-grosser-adler" = {', module)
+        self.assertIn('unitConfig.ConditionUser = "alex";', module)
+        self.assertIn('"d /home/alex/labs 0700 alex users -"', module)
+        self.assertIn('/home/alex/.local/bin/tunnel-client run --profile grosser-adler', module)
+        self.assertIn('ProtectHome = "read-only";', module)
+        self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
@@ -426,7 +462,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 48)
+        self.assertEqual(len(files), 50)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -468,7 +504,7 @@ class T(unittest.TestCase):
             "hosts/heim-pc/firstboot-credentials.py",
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
-            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
+            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/grosser-adler.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
             "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/fotoatelier.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
@@ -798,7 +834,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
+            "c252b62b0fcd0bd5442681bb68d809a4b5984c61",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)

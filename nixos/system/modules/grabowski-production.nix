@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
-  expectedRevision = "586a6fc8461935d4383a83e9ae1a2ab6f36beec6";
+  expectedReleaseId = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
+  expectedRevision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -298,6 +298,10 @@ in
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
+          # Expose only the installed reviewer executable to the system service.
+          "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
+          # Admit only the immutable Chrome binary pinned by this NixOS generation.
+          "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"
           "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
@@ -321,7 +325,8 @@ in
         ];
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # Node.js/V8 needs executable JIT pages; MDWE causes reproducible SIGTRAP.
+        MemoryDenyWriteExecute = false;
         RestrictRealtime = true;
         LimitCORE = 0;
         SystemCallArchitectures = "native";

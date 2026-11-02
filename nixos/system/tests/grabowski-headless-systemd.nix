@@ -6,7 +6,7 @@ let
     lib = pkgs.lib;
     packageOnly = true;
   };
-  revision = "586a6fc84619-srcset9cf8e6c8781c-lock264e747ad05a-contract650f923c4cfb";
+  revision = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
 
   # Isolated VM only: one harmless fixed command, never a production allowlist.
   benignResponse = builtins.toJSON {
@@ -109,7 +109,7 @@ let
     expected = set(json.loads(
         Path("${operator}/share/grabowski/config/runtime-entrypoint.json").read_text()
     )["expected_tools"])
-    assert len(expected) == 203
+    assert len(expected) == 206
 
     async def main():
         async with streamablehttp_client(
@@ -125,7 +125,7 @@ let
                         + str(sorted(expected - observed))
                         + " unexpected=" + str(sorted(observed - expected))
                     )
-                print("verified all 203 MCP tools in systemd-run NixOS")
+                print("verified all 206 MCP tools in systemd-run NixOS")
                 # Use the unchanged original operator MainPID and the only
                 # allowlisted VM command: immutable coreutils cat.
                 answer = await asyncio.wait_for(session.call_tool(
