@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "d4d44d6951ec59a7556c1de42c7fd424a504d7fc"
-TARBALL_HASH = "sha256-g5FbYvn16qJqFVP63uSwlcFGiif61eDSn8Zg9FnnkeA="
+REVISION = "37bdcbb2c38a1e8df310634c1e21dc6688b8921d"
+TARBALL_HASH = "sha256-u6R1VlUVKnBxDWHJNgiEX3xexjjD535UsCdIDBLYOxk="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -162,7 +162,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea"
+        release_id = "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
