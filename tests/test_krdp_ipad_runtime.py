@@ -45,6 +45,8 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIsNotNone(binary)
         self.assertIn("Exec=" + binary.group(1), desktop)
         self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
+        self.assertIn("ExecCondition=/run/current-system/sw/bin/test -S /run/user/1000/wayland-0", service)
+        self.assertLess(service.index("ExecCondition="), service.index("ExecStartPre="))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
         self.assertIn("nxpqvrpxqg69rszhbw222hyagkkwh9nb-krdp-6.7.0", binary.group(1))
