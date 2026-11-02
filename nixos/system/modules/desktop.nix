@@ -28,9 +28,8 @@ let cfg = config.heimPc.desktop; in {
       forceRun = true;
     };
 
-    # Reuse the original XRDP Plasma/X11 login for alex; ander keeps Xfce.
-    # A remote Plasma session for alex must not be used concurrently with
-    # the local Wayland session: the same UID shares its KDE user services.
+    # Preserve alex's original XRDP Plasma/X11 fallback; ander uses isolated Xfce.
+    # Concurrent alex Wayland/X11 sessions share KDE user services and are not advised.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
       enable = true;
