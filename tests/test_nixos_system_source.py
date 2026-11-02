@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "08f525cc3c3fb23aa8a59d5c45934a7ffdae1ac9cc7bd46e19ebe0ebb894cf4e"
+SOURCE_SNAPSHOT_SHA256 = "b57e36a1a60d1dba58558c9b3d2af65f915e4757c811a40bfda9b5eacc4644ed"
 ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -416,6 +416,15 @@ class T(unittest.TestCase):
         self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
         self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        # The alex/X11 fallback must never start a competing KDE compositor
+        # while the real alex/Wayland desktop is active.
+        guard = 'if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then'
+        self.assertIn(guard, desktop)
+        self.assertIn('XRDP Plasma/X11 unavailable while alex Wayland is active', desktop)
+        self.assertLess(desktop.index(guard), desktop.index(
+            'exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11'
+        ))
+        self.assertIn('            exit 1\n          fi\n          exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
         self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
         self.assertIn("users.users.ander = {", desktop)

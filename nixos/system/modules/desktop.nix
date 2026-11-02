@@ -28,13 +28,19 @@ let cfg = config.heimPc.desktop; in {
       forceRun = true;
     };
 
-    # Preserve alex's original XRDP Plasma/X11 fallback; ander uses isolated Xfce.
-    # Concurrent alex Wayland/X11 sessions share KDE user services and are not advised.
+    # Alex's standalone Plasma/X11 fallback must not compete with his live
+    # Wayland session for shared KDE user services and org.kde.KWin on D-Bus.
+    # Concurrent remote control of the real alex desktop uses KRDP instead.
+    # The separate ander account keeps its independent Xfce desktop.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
       enable = true;
       defaultWindowManager = "${pkgs.writeShellScript "xrdp-window-manager-by-user" ''
         if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then
+          if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then
+            printf '%s\n' 'XRDP Plasma/X11 unavailable while alex Wayland is active; use KRDP for the live desktop.' >&2
+            exit 1
+          fi
           exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11
         else
           exec ${pkgs.xfce4-session}/bin/startxfce4
