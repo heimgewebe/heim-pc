@@ -400,6 +400,14 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
+              # Keep a bounded compressed swap fallback on the real Seagate
+              # Grabowski candidate; avoid another OOM-driven desktop build failure.
+              zramSwap = {
+                enable = true;
+                algorithm = "zstd";
+                memoryPercent = 25;
+                priority = 1000;
+              };
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =

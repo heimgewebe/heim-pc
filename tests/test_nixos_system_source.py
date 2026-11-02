@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "e8600d4dff5b73214f278e06186755d6cc7defc5fa88d4d05911793fe54d4966"
+SOURCE_SNAPSHOT_SHA256 = "bf900afdcd4f3d2ac6217dd476f01079a9a455122e39267a0d478b70b099d167"
 ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -412,17 +412,16 @@ class T(unittest.TestCase):
         self.assertIn('networking.firewall.interfaces."tailscale0".allowedTCPPorts', desktop)
         self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
         self.assertIn("openFirewall = false;", desktop)
-        self.assertIn(
-            'defaultWindowManager = "${pkgs.xfce4-session}/bin/startxfce4";',
-            desktop,
-        )
+        self.assertIn('defaultWindowManager = "${pkgs.writeShellScript ', desktop)
+        self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
+        self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
+        self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
         self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
         self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
         self.assertIn("users.users.ander = {", desktop)
         self.assertIn("uid = 1001;", desktop)
         self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
         self.assertNotIn("pkgs.firefox", desktop)
-        self.assertNotIn("startplasma-x11", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
@@ -437,6 +436,12 @@ class T(unittest.TestCase):
         )[1].split("# Negative pre-deployment proof", 1)[0]
         self.assertIn("./modules/grosser-adler.nix", seagate_operator)
         self.assertIn("heimPc.grosserAdler.enable = true;", seagate_operator)
+        # This physical release candidate needs compressed swap under high
+        # Nix/Qt compile pressure; the storage fallback stays untouched.
+        self.assertIn("zramSwap = {", seagate_operator)
+        self.assertIn('algorithm = "zstd";', seagate_operator)
+        self.assertIn("memoryPercent = 25;", seagate_operator)
+        self.assertIn("priority = 1000;", seagate_operator)
         self.assertNotIn(
             "grosser-adler.nix",
             (SOURCE / "modules/seagate-primary-candidate.nix").read_text(),
