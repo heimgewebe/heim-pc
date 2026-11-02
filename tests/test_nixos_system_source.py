@@ -12,8 +12,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "1e792964fe06b75fe9f61843e16301017a636c6f5b70a48844978185efd64003"
-ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
+SOURCE_SNAPSHOT_SHA256 = "bf900afdcd4f3d2ac6217dd476f01079a9a455122e39267a0d478b70b099d167"
+ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +32,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";',
+            'nixer.url = "github:heimgewebe/nixer/c252b62b0fcd0bd5442681bb68d809a4b5984c61";',
             nested,
         )
 
@@ -43,8 +43,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0="
-        rev = "6c1fae3936e441c43d19a7924f2f26f3539fb1d3"
+        nar = "sha256-aaDoiW4Eg/0/kE+I3qGUzFzwnH/7DRMStC8h5FcUSDE="
+        rev = "c252b62b0fcd0bd5442681bb68d809a4b5984c61"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -412,10 +412,16 @@ class T(unittest.TestCase):
         self.assertIn('networking.firewall.interfaces."tailscale0".allowedTCPPorts', desktop)
         self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
         self.assertIn("openFirewall = false;", desktop)
-        self.assertIn(
-            'defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";',
-            desktop,
-        )
+        self.assertIn('defaultWindowManager = "${pkgs.writeShellScript ', desktop)
+        self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
+        self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
+        self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
+        self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
+        self.assertIn("users.users.ander = {", desktop)
+        self.assertIn("uid = 1001;", desktop)
+        self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
+        self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
@@ -430,6 +436,12 @@ class T(unittest.TestCase):
         )[1].split("# Negative pre-deployment proof", 1)[0]
         self.assertIn("./modules/grosser-adler.nix", seagate_operator)
         self.assertIn("heimPc.grosserAdler.enable = true;", seagate_operator)
+        # This physical release candidate needs compressed swap under high
+        # Nix/Qt compile pressure; the storage fallback stays untouched.
+        self.assertIn("zramSwap = {", seagate_operator)
+        self.assertIn('algorithm = "zstd";', seagate_operator)
+        self.assertIn("memoryPercent = 25;", seagate_operator)
+        self.assertIn("priority = 1000;", seagate_operator)
         self.assertNotIn(
             "grosser-adler.nix",
             (SOURCE / "modules/seagate-primary-candidate.nix").read_text(),
@@ -450,7 +462,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 48)
+        self.assertEqual(len(files), 49)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -822,7 +834,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
+            "c252b62b0fcd0bd5442681bb68d809a4b5984c61",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)

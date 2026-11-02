@@ -315,6 +315,8 @@ def test_consumer_cache_protocol_probe_runtime(tmp_path, probe_mode, expected):
         "if [ \"$1\" = \"config\" ] && [ \"$2\" = \"show\" ]; then\n"
         "  echo 'require-sigs = true'\n"
         "  echo 'fallback = true'\n"
+        "  echo 'max-jobs = 1'\n"
+        "  echo 'cores = 4'\n"
         "  echo 'substituters = https://cache.nixos.org/'\n"
         "  echo 'trusted-public-keys = cache.nixos.org-1:test'\n"
         "  exit 0\n"
@@ -860,17 +862,34 @@ def test_full_nix_ci_budget_covers_measured_complete_gates():
     assert "\n    timeout-minutes: 5\n" in detect
     nix_header = nix_job.split("\n    steps:\n", 1)[0]
     # Bounded increase, not disabling any expensive security checks.
-    assert "\n    timeout-minutes: 120\n" in nix_header
+    assert "\n    timeout-minutes: 360\n" in nix_header
+    assert "max-jobs = 1" in nix_job
+    assert "cores = 4" in nix_job
     steps = [
         "- name: Verify source identity",
+        "- name: Set CI Nix daemon stack to 8 MiB",
+        "- name: Report CI-only signed-cache trust",
         "- name: Evaluate complete flake without building checks",
         "- name: Prove evaluated Heim-PC contracts",
+        "- name: Verify i686 Nix builder stack and 100 concurrent threads",
+        "- name: Prebuild i686 filelock threading tests",
         "- name: Build storage, VM and physical-gate closures",
         "- name: Build live-gate and inventory ISOs",
         "- name: Build no-IP agent-zone closures",
         "- name: Run scoped VM checks",
         "- name: Prove untrusted signatures are rejected by substitution",
     ]
+    assert ".#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock" in nix_job
+    # This adjustment is restricted to ephemeral GitHub CI; no NixOS source
+    # or Nixpkgs dependency tests/signature policy are modified.
+    assert "LimitSTACK=8M" in nix_job
+    assert "nix-daemon.service.d/20-heim-pc-ci-thread-stack.conf" in nix_job
+    assert "systemctl restart nix-daemon.service" in nix_job
+    assert "systemctl show --value --property=LimitSTACK" in nix_job
+    assert "I686_NIX_BUILDER_STACK_KIB" in nix_job
+    assert "test \"$stack\" = 8192" in nix_job
+    assert "I686_CONCURRENT_THREADS" in nix_job
+    assert "range(100)" in nix_job
     indices = [nix_job.index(step) for step in steps]
     assert indices == sorted(indices)
     assert "require-sigs = true" in nix_job
