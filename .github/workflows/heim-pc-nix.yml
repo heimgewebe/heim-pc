@@ -110,9 +110,11 @@ jobs:
        needs.detect.outputs.control_changed != 'false' ||
        needs.detect.outputs.nix_changed != 'false')
     runs-on: ubuntu-latest
-    # PR233 run 39459985355 reached the 90-minute cap during ISO builds.
-    # Keep every mandatory closure, VM and signature check in this job.
-    timeout-minutes: 120
+    # Runs 39459985355 (90m) and 41052537896 (120m) exhausted the
+    # heavy build budget; the latter also hit Python thread exhaustion.
+    # Run 41141193775 exhausted 240m while Node/V8 remained unbuilt.
+    # Keep all closure, VM and signature gates; use the 4-vCPU public runner.
+    timeout-minutes: 360
     env:
       EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       # Fresh derivations: the CI evaluator cache retained an unrealized drv
@@ -137,14 +139,36 @@ jobs:
           extra-conf: |
             require-sigs = true
             fallback = true
+            # Configure the Nix daemon, not only the client NIX_CONFIG.
+            # Shared GitHub runners cannot sustain unbounded parallel builders.
+            max-jobs = 1
+            cores = 4
             extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
             extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+
+      # The hosted Nix daemon set RLIMIT_STACK=64 MiB, so each i686 pthread
+      # reserved 64 MiB of the 32-bit address space and filelock's 100-thread
+      # test ran out around thread 61. The native 8-MiB limit passed all 149
+      # Filelock tests on heim-pc. Change only this ephemeral CI runner.
+      - name: Set CI Nix daemon stack to 8 MiB
+        run: |
+          set -euo pipefail
+          sudo systemctl cat nix-daemon.service >/dev/null
+          sudo install -d -m 0755 /etc/systemd/system/nix-daemon.service.d
+          printf '[Service]\nLimitSTACK=8M\n' | \
+            sudo tee /etc/systemd/system/nix-daemon.service.d/20-heim-pc-ci-thread-stack.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl restart nix-daemon.service
+          test "$(systemctl show --value --property=LimitSTACK nix-daemon.service)" = 8388608
+          printf 'CI_NIX_DAEMON_STACK_BYTES=8388608\n'
 
       - name: Report CI-only signed-cache trust
         run: |
           set -euo pipefail
           nix --version
-          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback) ='
+          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback|max-jobs|cores) ='
+          test "$(nix config show | sed -n 's/^max-jobs = //p')" = 1
+          test "$(nix config show | sed -n 's/^cores = //p')" = 4
           # An HTTP health.txt 200 does not establish a valid Nix binary cache.
           # Do not conflate protocol metadata with trusted NAR signatures or
           # availability of the expensive Ollama/CUDA derivations.
@@ -171,6 +195,50 @@ jobs:
           .#checks.x86_64-linux.recovery-readiness-contract
           .#checks.x86_64-linux.intentional-break-rejected
           .#checks.x86_64-linux.agent-zone-contract
+
+      # Fail early if the actual sandboxed builder did not inherit the
+      # bounded stack. Then exercise 100 *simultaneous* i686 threads before
+      # the unchanged complete Filelock installCheck and every other gate.
+      - name: Verify i686 Nix builder stack and 100 concurrent threads
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/i686-nix-stack-contract.nix" <<'NIX'
+          let
+            f = builtins.getFlake (toString ./.);
+            p = f.nixosConfigurations.heim-pc.pkgs;
+            py32 = p.pkgsi686Linux.python3;
+          in p.runCommand "heim-pc-ci-i686-stack-contract-v1" {
+            nativeBuildInputs = [ py32 ];
+          } ''
+            set -e
+            stack="$(ulimit -s)"
+            echo "I686_NIX_BUILDER_STACK_KIB=$stack"
+            test "$stack" = 8192
+            ${py32}/bin/python3 - <<'PY'
+          import threading
+          gate = threading.Event()
+          threads = [threading.Thread(target=gate.wait) for _ in range(100)]
+          started = []
+          try:
+              for thread in threads:
+                  thread.start()
+                  started.append(thread)
+              print("I686_CONCURRENT_THREADS", len(started), flush=True)
+          finally:
+              gate.set()
+              for thread in started:
+                  thread.join()
+          PY
+            touch "$out"
+          ''
+          NIX
+          nix build --impure --no-link --no-update-lock-file --print-out-paths --print-build-logs \
+            --expr "$(cat "$RUNNER_TEMP/i686-nix-stack-contract.nix")"
+
+      - name: Prebuild i686 filelock threading tests
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc.pkgs.pkgsi686Linux.python313Packages.filelock
 
       - name: Record heavy-derivation substitution plan
         run: |

@@ -7,7 +7,7 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";
+    nixer.url = "github:heimgewebe/nixer/c252b62b0fcd0bd5442681bb68d809a4b5984c61";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
@@ -400,6 +400,14 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
+              # Keep a bounded compressed swap fallback on the real Seagate
+              # Grabowski candidate; avoid another OOM-driven desktop build failure.
+              zramSwap = {
+                enable = true;
+                algorithm = "zstd";
+                memoryPercent = 25;
+                priority = 1000;
+              };
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -954,10 +962,13 @@ PY
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
-            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            # CVE-patched Brotli changes transitive store IDs. Compare the
+            # original package expressions under this candidate's exact pkgs.
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            originalOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
-              inherit pkgs;
-              lib = pkgs.lib;
+              pkgs = candidatePkgs;
+              lib = candidatePkgs.lib;
               packageOnly = true;
             };
           in
@@ -978,7 +989,7 @@ PY
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
           assert builtins.any
-            (package: package.outPath == (pkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
             cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
@@ -1014,7 +1025,8 @@ PY
           let
             release = "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
-            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
               (nixpkgs.lib.nixosSystem {
                 inherit system;
@@ -1111,7 +1123,7 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${candidatePkgs.coreutils}/bin:${candidatePkgs.git}/bin:${candidatePkgs.systemd}/bin:${candidatePkgs.openssh}/bin:${candidatePkgs.tailscale}/bin:${candidatePkgs.procps}/bin:${candidatePkgs.iproute2}/bin:${candidatePkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
