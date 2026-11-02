@@ -7,17 +7,32 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.wayland.enable = true;
     services.desktopManager.plasma6.enable = true;
 
+    # The local dual-monitor workstation remains Plasma/Wayland.
+    # Xfce supplies a lightweight, independent X11 session for iPad XRDP.
+    services.xserver.desktopManager.xfce.enable = true;
+    services.displayManager.defaultSession = "plasma";
+
+    # A separate UID is required: concurrent graphical sessions of the same
+    # systemd user share the session bus, clipboard services, and focus state.
+    # Never put a password into this public NixOS source or the Nix store.
+    users.users.ander = {
+      isNormalUser = true;
+      uid = 1001;
+      description = "Independent remote desktop (ander)";
+      packages = [ pkgs.google-chrome ]; # Browser only in the remote user profile.
+    };
+
     # Retain the active Gen19 XRDP password-login KWallet unlock.
     security.pam.services.xrdp-sesman.kwallet = lib.mkIf config.services.xrdp.enable {
       enable = true;
       forceRun = true;
     };
 
-    # Start a separate Plasma X11 desktop through XRDP; keep local Wayland.
+    # Run an Xfce X11 desktop under the dedicated ipad UID; leave local Plasma untouched.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
       enable = true;
-      defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";
+      defaultWindowManager = "${pkgs.xfce4-session}/bin/startxfce4";
       openFirewall = false;
     };
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
