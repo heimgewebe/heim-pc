@@ -410,7 +410,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
+                  "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -516,8 +516,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
-            revision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
+            release = "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea";
+            revision = "d4d44d6951ec59a7556c1de42c7fd424a504d7fc";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -966,7 +966,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
+            "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -1012,7 +1012,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
+            release = "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
@@ -1050,7 +1050,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
+            == "d4d44d6951ec59a7556c1de42c7fd424a504d7fc";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;

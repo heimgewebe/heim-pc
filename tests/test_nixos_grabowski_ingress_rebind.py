@@ -49,8 +49,8 @@ class RebindTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.manifest = self.root / "nixos-integrity-manifest.json"
         self.selector = self.root / "operator-routing-selector.json"
-        self.release = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea"
-        self.head = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f"
+        self.release = "d4d44d69-nixos-lock264e747ad05a-contract23851f3e6dea"
+        self.head = "d4d44d6951ec59a7556c1de42c7fd424a504d7fc"
         self.agent_sha = "6235fde59895c8add3590115f5d94b8dd8f432e2fef5645d4461691822c97142"
         self.tools = ["z_tool", "a_tool", "m_tool"]
         self.manifest.write_text(json.dumps({
