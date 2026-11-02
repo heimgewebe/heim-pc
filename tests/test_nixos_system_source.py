@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "fdd822061f50c8b1f9b7ebe7590dadeaa45b32f21c0043173c12b1f834917144"
+SOURCE_SNAPSHOT_SHA256 = "176a156e00135d3bfdac1afd1a018b5536c6c5434d055a01ea83889db13eddee"
 ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -432,6 +432,9 @@ class T(unittest.TestCase):
         self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
         self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+        self.assertIn("services.displayManager.autoLogin.enable = true;", desktop)
+        self.assertIn('services.displayManager.autoLogin.user = "alex";', desktop)
+        self.assertIn("services.displayManager.sddm.settings.Autologin.Relogin = true;", desktop)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
         module = (SOURCE / "modules/grosser-adler.nix").read_text()

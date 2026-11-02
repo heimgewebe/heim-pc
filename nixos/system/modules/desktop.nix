@@ -5,6 +5,13 @@ let cfg = config.heimPc.desktop; in {
     services.xserver.enable = true;
     services.displayManager.sddm.enable = true;
     services.displayManager.sddm.wayland.enable = true;
+
+    # The real alex KDE/Wayland session must exist after unattended reboot
+    # so the current desktop remains reachable through the native KRDP service.
+    # SDDM autologin is local-only; remote RDP is still bound to Tailscale.
+    services.displayManager.autoLogin.enable = true;
+    services.displayManager.autoLogin.user = "alex";
+    services.displayManager.sddm.settings.Autologin.Relogin = true;
     services.desktopManager.plasma6.enable = true;
 
     # The local dual-monitor workstation remains Plasma/Wayland.
