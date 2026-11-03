@@ -16,6 +16,13 @@
     ./grabowski-broker-package.nix
   ];
 
+  # This is the physically booted Seagate host; the generic hosts/heim-pc
+  # keymap configuration is not imported here. Load Stage0's existing "de"
+  # console keymap in the initrd, before any console password prompt.
+  console.earlySetup = true;
+  # SDDM/X11 must use the same German keyboard as early console and KDE.
+  services.xserver.xkb.layout = "de";
+
   # The WD_BLACK remains the independent bootable Pop!_OS fallback. Expose all
   # its data partitions without writes, journal replay or boot-time dependency.
   # The swap partition is intentionally not activated.
