@@ -14,7 +14,8 @@ let
       # boot-approved generation. Named Nix profiles keep both pinned closures
       # (and their kernel/initrd) in systemd-boot beyond configurationLimit.
       pinned_entry() {
-        local name="$1" link="/nix/var/nix/profiles/system-profiles/$name"
+        local name="$1"
+        local link="/nix/var/nix/profiles/system-profiles/$name"
         local ref generation closure entry options token seen=0
         [[ -L "$link" ]] || fail "missing pinned boot profile $name"
         ref="$(readlink -- "$link")"

@@ -79,6 +79,11 @@ class PinnedBootProfilesTest(unittest.TestCase):
         self.assertIn('grep -qxF "default $approved" "$conf"', script)
         self.assertIn('[[ "$(grep -c \'^default \' "$conf" || true)" == 1 ]]', script)
 
+    def test_shell_variable_initialization_uses_defined_name(self) -> None:
+        script = boot_script()
+        self.assertIn('local name="$1"\n        local link=', script)
+        self.assertNotIn('local name="$1" link=', script)
+
     def test_source_config_sort_key_matches_runtime_entries(self) -> None:
         module = BOOT.read_text(encoding="utf-8")
         self.assertIn(
