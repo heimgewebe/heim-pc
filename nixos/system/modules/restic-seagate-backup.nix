@@ -71,6 +71,57 @@
     serviceConfig.TimeoutStartSec = "0";
   };
 
+  # Keep the twice-daily backup fast. The older Pop!_OS snapshots share
+  # this repository, so retention selects ONLY the Seagate NixOS host/tag.
+  # Weekly pruning is deliberately separate from the backup timer and never
+  # runs Restic's global 'unlock' (which may invalidate another process' lock).
+  systemd.services."heim-pc-restic-retention" = {
+    description = "Scoped weekly retention for NixOS Seagate Restic snapshots";
+    unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
+    after = [ "restic-backups-heim-pc.service" ];
+    path = [ pkgs.restic ];
+    environment = {
+      RESTIC_REPOSITORY = "/var/lib/heim-pc-backup/restic/heim-pc";
+      RESTIC_PASSWORD_FILE = "/persist/secrets/restic/heim-pc-password";
+      RESTIC_CACHE_DIR = "/var/cache/heim-pc-restic-retention";
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+      CacheDirectory = "heim-pc-restic-retention";
+      CacheDirectoryMode = "0700";
+      TimeoutStartSec = "6h";
+      CPUWeight = 30;
+      IOWeight = 20;
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      ReadWritePaths = [ "/var/lib/heim-pc-backup" ];
+    };
+    script = ''
+      set -eu
+      test -f /var/lib/heim-pc-backup/restic/heim-pc/config
+      restic forget --retry-lock=30m \
+        --host heim-pc-nixos --tag nixos-seagate \
+        --group-by host,paths,tags \
+        --keep-last 14 --keep-within 7d \
+        --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2
+      # Prune is repository-wide ONLY for unreferenced packs. The other
+      # hosts' snapshots stay referenced because forget filtered host+tag.
+      restic prune --retry-lock=30m
+    '';
+  };
+
+  systemd.timers."heim-pc-restic-retention" = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "Sun *-*-* 03:30:00";
+      Persistent = true;
+      RandomizedDelaySec = "30m";
+    };
+  };
+
   # No Polkit grant for alex: even a fixed root-owned unit must only be
   # started by the authenticated and tightly scoped Grabowski Rootbroker.
 
