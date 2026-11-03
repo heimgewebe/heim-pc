@@ -1014,6 +1014,7 @@ PY
             baseline = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
             cfg = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             op = cfg.systemd.services.grabowski-operator;
+            userManager = cfg.systemd.services."user@1000";
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
@@ -1053,7 +1054,16 @@ PY
           assert op.serviceConfig.User == "alex";
           assert op.serviceConfig.Group == "users";
           assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";
-          assert builtins.elem "user@1000.service" op.requires;
+          assert builtins.elem "user@1000.service" op.wants;
+          assert builtins.elem "user@1000.service" op.after;
+          assert !(builtins.elem "user@1000.service" op.requires);
+          assert op.unitConfig.StartLimitIntervalSec == "0";
+          assert op.serviceConfig.Restart == "on-failure";
+          assert op.serviceConfig.RestartSec == "10s";
+          assert userManager.overrideStrategy == "asDropin";
+          assert userManager.unitConfig.StartLimitIntervalSec == "0";
+          assert userManager.serviceConfig.Restart == "on-failure";
+          assert userManager.serviceConfig.RestartSec == "15s";
           assert builtins.elem "XDG_RUNTIME_DIR=/run/user/1000" op.serviceConfig.Environment;
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
