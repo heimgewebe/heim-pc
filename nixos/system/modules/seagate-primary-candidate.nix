@@ -6,6 +6,7 @@
   # This profile is an evaluation/build candidate, NOT a productive cutover.
   imports = [
     ./stage0-no-usb.nix
+    ./boot-approved-profiles.nix
     ./brotli-security.nix
     ./networking.nix
     ./nix-trust.nix

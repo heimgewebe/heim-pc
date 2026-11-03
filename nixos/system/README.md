@@ -23,29 +23,36 @@ Das native `systemd-boot`-Installationsskript setzt bei jeder regulären
 Bootloader-Aktualisierung `loader.conf default` auf die übergebene
 Systemprofilgeneration. Die EFI-Variable `LoaderEntryDefault` hat aber Vorrang.
 Mit `boot.loader.efi.canTouchEfiVariables = false` korrigiert NixOS diese
-Variable nicht selbst. Die physischen `storage-layout.nix`-Install-Hooks
-synchronisieren deshalb **beide** Standards und den `SysFail`-Eintrag aus
-zwei bestehenden nativen NixOS-Profilen:
+Variable nicht selbst. Das gemeinsame `boot-approved-profiles.nix` wird
+sowohl im tatsächlich physischen Seagate-/Grabowski-Host
+(`seagate-primary-candidate.nix`) als auch im getrennten späteren
+Storage-Ziel (`storage-layout.nix`) importiert. Nur sein vorhandener
+`systemd-boot.extraInstallCommands`-Pfad gleicht beide Standardquellen
+und den `SysFail`-Eintrag aus zwei nativen NixOS-Profilen ab:
 
 - `/nix/var/nix/profiles/system-profiles/heim-pc-approved` – ausschließlich eine tatsächlich gebootete, freigegebene Closure;
 - `/nix/var/nix/profiles/system-profiles/heim-pc-recovery` – eine vorher bootgeprüfte Rückfall-Closure.
 
 Diese benannten Profile halten ihre Boot-Einträge, Kernel, Initrd und
-Store-Closures auch über `configurationLimit = 10` hinaus vor.
+Store-Closures auch über das Konfigurationslimit hinaus vor
+(physischer Seagate-Host: 8; zukünftiges Storage-Ziel: 10).
 Eine bloße `nix build`-, `switch`- oder Systemprofil-Aktualisierung
 promotet **keine** neue Bootgeneration.
 
 **Einmalige Migration, vor dem ersten Bootloader-Install mit dem neuen Hook:**
 Nur über den autorisierten Root-Operator, nach Liveprüfung der existierenden
-Closures, produktiver Writer-Leases und der unabhängigen Freigabe. Für den
-Stand vom 03.11.2026 ist Gen42 die bootgeprüfte Kandidatin (Store
-`1sr7yj37fi167q0hpqc0d7vmjls9nmkw`), Gen38 der bootgeprüfte
-Recoverypfad (`2xy6inggq55kq8zzkhvppivm8yz0xlqn`). Die genauen Pfade
-sind vor der Mutation erneut zu prüfen:
+Closures, produktiver Writer-Leases und einer tatsächlich nachgewiesenen
+Freigabe. Für den Stand vom 03.11.2026 ist **Gen38** der vorhandene
+funktionsfähige EFI-Standard **und** SysFail-/Recoverypfad
+(`2xy6inggq55kq8zzkhvppivm8yz0xlqn`).
+Gen42 wurde zwar physisch gestartet (`1sr7yj37fi167q0hpqc0d7vmjls9nmkw`),
+ist aber wegen offener iPad-Bild-/Eingabe-Ende-zu-Ende-Abnahme noch **nicht**
+als dauerhafter Bootstandard freigegeben. Die genauen Pfade sind vor
+jedem Root-Effekt erneut zu prüfen:
 
 ```sh
 install -d -m 0755 /nix/var/nix/profiles/system-profiles
-nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-approved --set /nix/store/1sr7yj37fi167q0hpqc0d7vmjls9nmkw-nixos-system-heim-pc-26.05.20261031.fa13731
+nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-approved --set /nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system-heim-pc-26.05.20261025.1f607aa
 nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-recovery --set /nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system-heim-pc-26.05.20261025.1f607aa
 ```
 
@@ -58,6 +65,12 @@ besteht aus einer **bewussten** Aktualisierung des
 `heim-pc-approved`-Profils auf eine zuvor real gebootete und freigegebene
 Closure sowie derselben regulären Bootloader-Aktualisierung.
 `bootctl set-default` allein ist keine dauerhafte Promotion.
+
+Bei der ersten Aktivierung beide Profile zunächst auf Gen38 pinnen. Ein
+erneuter Boot mit Gen42 oder einer neueren Generation darf das
+`heim-pc-approved`-Profil erst nach vollständiger Freigabe verändern.
+Die Bootprofilauswahl wird niemals allein aus der aktuellsten System-
+oder PR-Nummer abgeleitet.
 
 Der physische Reboot ist separat zu koordinieren; eine vorbereitete Generation
 oder ein grüner Build beweist weder den nächsten Boot noch den automatischen
