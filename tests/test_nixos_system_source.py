@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "8c01397a28322ef2c1e57f927112e9c7eaf75c2bd2b3d7ca09dbc0d08da66a2e"
+SOURCE_SNAPSHOT_SHA256 = "d191d40d0f814fa10541ae0fefca3207c104969c7e25c717970eb1665fc90ce4"
 ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -528,11 +528,13 @@ class T(unittest.TestCase):
         flake = (SOURCE / "flake.nix").read_text()
         self.assertIn('console.keyMap = "de";', stage0)
         self.assertIn("console.earlySetup = true;", physical)
+        self.assertIn('services.xserver.xkb.layout = "de";', physical)
         primary_contract = flake.split(
             "seagate-primary-candidate-contract =", 1
         )[1].split("seagate-workstation-candidate-contract =", 1)[0]
         self.assertIn("assert cfg.console.earlySetup;", primary_contract)
         self.assertIn('assert cfg.console.keyMap == "de";', primary_contract)
+        self.assertIn('assert cfg.services.xserver.xkb.layout == "de";', primary_contract)
 
     def test_stage0_no_usb_is_nonproductive_and_isolated(self):
         flake = (SOURCE / "flake.nix").read_text()

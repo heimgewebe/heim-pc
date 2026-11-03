@@ -923,6 +923,7 @@ PY
           # not only to the unrelated generic hosts/heim-pc configuration.
           assert cfg.console.earlySetup;
           assert cfg.console.keyMap == "de";
+          assert cfg.services.xserver.xkb.layout == "de";
           assert cfg.boot.loader.systemd-boot.enable;
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
           assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;
