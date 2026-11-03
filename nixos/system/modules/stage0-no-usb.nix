@@ -32,7 +32,8 @@ in
   # Never share or rewrite Pop!_OS's WD EFI partition or firmware entries.
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.editor = false;
-  boot.loader.systemd-boot.configurationLimit = 3;
+  # Keep known-good rollback entries across consecutive release candidates.
+  boot.loader.systemd-boot.configurationLimit = 8;
   boot.loader.efi.efiSysMountPoint = "/boot";
   boot.loader.efi.canTouchEfiVariables = false;
 
