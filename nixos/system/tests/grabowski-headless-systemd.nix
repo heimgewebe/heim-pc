@@ -279,6 +279,9 @@ pkgs.testers.runNixOSTest {
       isNormalUser = true;
       uid = 1000;
       group = "alex";
+      # Production enables linger. Without it, logind removes the runtime
+      # directory after a user-manager crash, cancelling systemd's restart.
+      linger = true;
       home = "/home/alex";
       createHome = true;
     };
