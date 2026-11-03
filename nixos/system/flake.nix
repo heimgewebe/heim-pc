@@ -418,7 +418,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea";
+                  "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -524,8 +524,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea";
-            revision = "37bdcbb2c38a1e8df310634c1e21dc6688b8921d";
+            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+            revision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -600,6 +600,38 @@ from pathlib import Path
 import json
 import grabowski_mcp as runtime
 from grabowski_nixos_integrity import build_manifest, MANIFEST_RELATIVE
+import grabowski_self_review_execution as source_review
+
+# Prove the *built* operator admits a legitimate Astro dynamic route, while
+# rejecting path traversal, duplicates and shell metacharacters. This is a
+# local package regression test; it does not mint a signed PR review.
+bracket_ref = "src/pages/produkte/[slug].astro:L1-L47"
+if source_review.REF.fullmatch(bracket_ref) is None:
+    raise SystemExit("pinned review source references reject safe Astro dynamic routes")
+binding = {"review_purpose": "pull_request", "base_sha": "a" * 40, "head_sha": "b" * 40}
+original_git_read = source_review._git_read
+try:
+    for changed, should_accept in (
+        (["src/pages/produkte/[slug].astro"], True),
+        (["src/pages/produkte/[...slug].astro"], True),
+        (["src/pages/../../secrets.txt"], False),
+        (["src/pages/[slug].astro;touch"], False),
+        (["src/pages/bad name.astro"], False),
+        (["src/pages/produkte/[slug].astro"] * 2, False),
+    ):
+        source_review._git_read = (
+            lambda *args, _data=b"\0".join(s.encode() for s in changed) + b"\0", **kwargs: _data
+        )
+        try:
+            observed = source_review._first_party_changed_paths(Path("/tmp"), binding)
+        except source_review.ReviewExecutionRejected:
+            if should_accept:
+                raise
+        else:
+            if not should_accept or observed != changed:
+                raise SystemExit("pinned review source changed-path validation regressed")
+finally:
+    source_review._git_read = original_git_read
 
 root = Path("${operator}")
 manifest = json.loads((root / MANIFEST_RELATIVE).read_text())
@@ -977,7 +1009,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea";
+            "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -1023,7 +1055,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea";
+            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
@@ -1062,7 +1094,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "37bdcbb2c38a1e8df310634c1e21dc6688b8921d";
+            == "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
