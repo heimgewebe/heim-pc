@@ -17,6 +17,53 @@ Non-production prototype for the long-term Heim-PC operating-system architecture
 
 This directory is deliberately safe to evaluate/build in isolation. It must not be interpreted as permission to install NixOS, change partitions, replace the bootloader or switch the running Heim-PC.
 
+## Freigegebener Bootstandard und Recovery auf dem physischen NixOS-Host
+
+Das native `systemd-boot`-Installationsskript setzt bei jeder regulären
+Bootloader-Aktualisierung `loader.conf default` auf die übergebene
+Systemprofilgeneration. Die EFI-Variable `LoaderEntryDefault` hat aber Vorrang.
+Mit `boot.loader.efi.canTouchEfiVariables = false` korrigiert NixOS diese
+Variable nicht selbst. Die physischen `storage-layout.nix`-Install-Hooks
+synchronisieren deshalb **beide** Standards und den `SysFail`-Eintrag aus
+zwei bestehenden nativen NixOS-Profilen:
+
+- `/nix/var/nix/profiles/system-profiles/heim-pc-approved` – ausschließlich eine tatsächlich gebootete, freigegebene Closure;
+- `/nix/var/nix/profiles/system-profiles/heim-pc-recovery` – eine vorher bootgeprüfte Rückfall-Closure.
+
+Diese benannten Profile halten ihre Boot-Einträge, Kernel, Initrd und
+Store-Closures auch über `configurationLimit = 10` hinaus vor.
+Eine bloße `nix build`-, `switch`- oder Systemprofil-Aktualisierung
+promotet **keine** neue Bootgeneration.
+
+**Einmalige Migration, vor dem ersten Bootloader-Install mit dem neuen Hook:**
+Nur über den autorisierten Root-Operator, nach Liveprüfung der existierenden
+Closures, produktiver Writer-Leases und der unabhängigen Freigabe. Für den
+Stand vom 03.11.2026 ist Gen42 die bootgeprüfte Kandidatin (Store
+`1sr7yj37fi167q0hpqc0d7vmjls9nmkw`), Gen38 der bootgeprüfte
+Recoverypfad (`2xy6inggq55kq8zzkhvppivm8yz0xlqn`). Die genauen Pfade
+sind vor der Mutation erneut zu prüfen:
+
+```sh
+install -d -m 0755 /nix/var/nix/profiles/system-profiles
+nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-approved --set /nix/store/1sr7yj37fi167q0hpqc0d7vmjls9nmkw-nixos-system-heim-pc-26.05.20261031.fa13731
+nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-recovery --set /nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system-heim-pc-26.05.20261025.1f607aa
+```
+
+Danach ausschließlich die reguläre, koordinierte NixOS-Bootloader-Aktivierung
+verwenden. Der vorhandene Install-Hook verifiziert beide benannten Einträge
+und deren exakte `init`-Closure, aktualisiert EFI-Standard/SysFail und
+`loader.conf` und prüft den Readback. Fehlende Profile oder unpassende
+Einträge sind ein Fehler, keine implizite Freigabe. Eine spätere Promotion
+besteht aus einer **bewussten** Aktualisierung des
+`heim-pc-approved`-Profils auf eine zuvor real gebootete und freigegebene
+Closure sowie derselben regulären Bootloader-Aktualisierung.
+`bootctl set-default` allein ist keine dauerhafte Promotion.
+
+Der physische Reboot ist separat zu koordinieren; eine vorbereitete Generation
+oder ein grüner Build beweist weder den nächsten Boot noch den automatischen
+Grabowski-/SSH-/Tailscale-/MCP-Wiederanlauf. Recovery-Profile und ältere
+Bootmöglichkeiten bis zu dessen realem Nachweis nicht bereinigen.
+
 ## Physical PCR7 security hold (#202, 14 October 2026)
 
 Physical TPM2 PCR7 auto-unlock remains blocked even when firmware Secure Boot
