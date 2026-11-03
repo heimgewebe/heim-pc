@@ -171,8 +171,6 @@ let
   };
 in
 {
-  imports = [ ./boot-approved-profiles.nix ];
-
   assertions = [
     {
       assertion = contract.schema_version == 1

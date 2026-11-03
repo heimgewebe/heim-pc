@@ -50,12 +50,14 @@ class PinnedBootProfilesTest(unittest.TestCase):
         self.assertIn('"/dev/disk/by-label/NIXOS2_EFI"', source)
         self.assertIn("config.boot.loader.efi.canTouchEfiVariables", source)
 
-    def test_private_storage_uses_same_hook_after_luks_patch(self) -> None:
+    def test_future_storage_install_remains_bootstrap_independent(self) -> None:
         source = STORAGE.read_text(encoding="utf-8")
         boot = BOOT.read_text(encoding="utf-8")
-        self.assertIn("imports = [ ./boot-approved-profiles.nix ];", source)
+        # The future encrypted storage installer has no named GC profiles
+        # during nixos-install. Do not install the Seagate promotion hook there.
+        self.assertNotIn("./boot-approved-profiles.nix", source)
         self.assertIn("heim-pc-private-storage patch-loader-entries", source)
-        self.assertNotIn("select_approved_boot\n", source)
+        self.assertNotIn("select_approved_boot", source)
         self.assertIn('lib.mkAfter "${bootProfileSelection}/bin/heim-pc-boot-profile-selection"', boot)
         self.assertIn("pkgs.systemd", boot)
         self.assertIn("boot.loader.efi.canTouchEfiVariables = false;", source)

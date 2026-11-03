@@ -23,19 +23,24 @@ Das native `systemd-boot`-Installationsskript setzt bei jeder regulären
 Bootloader-Aktualisierung `loader.conf default` auf die übergebene
 Systemprofilgeneration. Die EFI-Variable `LoaderEntryDefault` hat aber Vorrang.
 Mit `boot.loader.efi.canTouchEfiVariables = false` korrigiert NixOS diese
-Variable nicht selbst. Das gemeinsame `boot-approved-profiles.nix` wird
-sowohl im tatsächlich physischen Seagate-/Grabowski-Host
-(`seagate-primary-candidate.nix`) als auch im getrennten späteren
-Storage-Ziel (`storage-layout.nix`) importiert. Nur sein vorhandener
-`systemd-boot.extraInstallCommands`-Pfad gleicht beide Standardquellen
-und den `SysFail`-Eintrag aus zwei nativen NixOS-Profilen ab:
+Variable nicht selbst. Das Modul `boot-approved-profiles.nix` wird
+deshalb **nur** im tatsächlich physischen Seagate-/Grabowski-Host
+(`seagate-primary-candidate.nix`) importiert. Der vorhandene
+`systemd-boot.extraInstallCommands`-Pfad gleicht beide
+Standardquellen und den `SysFail`-Eintrag aus zwei nativen
+NixOS-Profilen ab. Das getrennte spätere `storage-layout.nix`-
+Ziel bleibt bewusst unverändert: Seine frische `nixos-install`-
+Installation besitzt noch keine Approved-/Recovery-Profile und darf
+durch die Bootprofilpflicht nicht blockiert werden:
 
 - `/nix/var/nix/profiles/system-profiles/heim-pc-approved` – ausschließlich eine tatsächlich gebootete, freigegebene Closure;
 - `/nix/var/nix/profiles/system-profiles/heim-pc-recovery` – eine vorher bootgeprüfte Rückfall-Closure.
 
 Diese benannten Profile halten ihre Boot-Einträge, Kernel, Initrd und
-Store-Closures auch über das Konfigurationslimit hinaus vor
-(physischer Seagate-Host: 8; zukünftiges Storage-Ziel: 10).
+Store-Closures auf dem realen Seagate-Host auch über dessen
+`configurationLimit = 8` hinaus vor. Im separaten späteren
+Storage-Ziel gilt weiterhin die bisherige 10er-Grenze ohne
+Approved-Profil-Hook bis zu einer ausdrücklich definierten Migration.
 Eine bloße `nix build`-, `switch`- oder Systemprofil-Aktualisierung
 promotet **keine** neue Bootgeneration.
 
