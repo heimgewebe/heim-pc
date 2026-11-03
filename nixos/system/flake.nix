@@ -919,6 +919,10 @@ PY
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/persist".options) [ "subvol=@persist" "compress=zstd" ];
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          # Bind early German console setup to the actual Seagate candidate,
+          # not only to the unrelated generic hosts/heim-pc configuration.
+          assert cfg.console.earlySetup;
+          assert cfg.console.keyMap == "de";
           assert cfg.boot.loader.systemd-boot.enable;
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
           assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;

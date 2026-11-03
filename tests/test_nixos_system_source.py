@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "69bfc2769866e7ec50938e73770a61f9a37112c78a2253edf6a56db56882ff5c"
+SOURCE_SNAPSHOT_SHA256 = "8c01397a28322ef2c1e57f927112e9c7eaf75c2bd2b3d7ca09dbc0d08da66a2e"
 ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -519,6 +519,20 @@ class T(unittest.TestCase):
             'control.succeed("test $(systemctl show grabowski-broker-boundary.service -p NoNewPrivileges --value) = yes")',
             proof,
         )
+
+    def test_seagate_real_boot_console_uses_german_early_setup(self):
+        # The generic hosts/heim-pc module is not imported by the physical
+        # Seagate profile. Bind the source check to the actual candidate.
+        stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
+        physical = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('console.keyMap = "de";', stage0)
+        self.assertIn("console.earlySetup = true;", physical)
+        primary_contract = flake.split(
+            "seagate-primary-candidate-contract =", 1
+        )[1].split("seagate-workstation-candidate-contract =", 1)[0]
+        self.assertIn("assert cfg.console.earlySetup;", primary_contract)
+        self.assertIn('assert cfg.console.keyMap == "de";', primary_contract)
 
     def test_stage0_no_usb_is_nonproductive_and_isolated(self):
         flake = (SOURCE / "flake.nix").read_text()
