@@ -12,6 +12,26 @@
 
   outputs = { self, nixpkgs, microvm, nixer }:
     let
+      # Root flake.lock is the sole authority; nixos/system/flake.lock is its
+      # generated compatibility projection (scripts/ci/check_flake_lock.py).
+      # Reject drift before exposing ANY selectable output,
+      # including direct toplevel builds that never select checks.*.
+      lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+      rootInputs = lock.nodes.${lock.root}.inputs;
+      trust = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
+      lockedInput = name: lock.nodes.${rootInputs.${name}}.locked;
+      inputMatches = name: input:
+        input.rev == (lockedInput name).rev
+        && input.narHash == (lockedInput name).narHash;
+      lockAuthorityValid =
+        builtins.readFile ../../flake.lock == builtins.readFile ./flake.lock
+        && inputMatches "nixpkgs" nixpkgs
+        && inputMatches "microvm" microvm
+        && inputMatches "nixer" nixer
+        && nixpkgs.rev == trust.inputs.root_nixpkgs.required_revision
+        && microvm.rev == trust.inputs.microvm.required_revision
+        && nixer.rev == trust.inputs.nixer.required_revision
+        && nixer.narHash == trust.inputs.nixer.required_nar_hash;
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
       sourceRevision =
@@ -140,7 +160,9 @@
         ln -s ${proofVmConfig.system.build.etc} "$out/runtime-etc"
         cp ${provenanceGuard}/source-revision "$out/source-revision"
       '';
-    in {
+    in
+    assert lockAuthorityValid || throw "flake lock authority drift: root, system, evaluated inputs and trust contract must agree";
+    {
       nixosConfigurations.heim-pc = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -400,6 +422,7 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
+              heimPc.downgradeProtection.enable = true;
               # Keep a bounded compressed swap fallback on the real Seagate
               # Grabowski candidate; avoid another OOM-driven desktop build failure.
               zramSwap = {
@@ -1484,7 +1507,7 @@ PY
             systemNixerNode = builtins.getAttr contract.inputs.nixer.lock_node systemLock.nodes;
             nixerRuntimeNixpkgsNode =
               builtins.getAttr contract.inputs.nixer.runtime_nixpkgs_lock_node lock.nodes;
-            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
           in
           assert target.nix.settings.substituters == contract.nix.substituters;
           assert target.nix.settings.trusted-substituters == contract.nix.trusted_substituters;
@@ -1526,8 +1549,11 @@ PY
         nix-lifecycle-contract =
           let
             contract = builtins.fromJSON (builtins.readFile ../production/nix-lifecycle-contract-v1.json);
-            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
           in
+          assert target.heimPc.downgradeProtection.enable;
+          assert target.heimPc.downgradeProtection.overrideReason == null;
+          assert builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks;
           assert !target.nix.gc.automatic;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.services;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.timers;
