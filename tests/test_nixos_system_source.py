@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "a83cd132f5f16c4f8242721c4c65a9aa60f6f1748aead49cb11afb27c184b618"
+SOURCE_SNAPSHOT_SHA256 = "e0ce54f90d83ab33bade21072a5f71841893beb10bec175073313bdadd3110b4"
 ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -416,6 +416,15 @@ class T(unittest.TestCase):
         self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
         self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        # The alex/X11 fallback must never start a competing KDE compositor
+        # while the real alex/Wayland desktop is active.
+        guard = 'if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then'
+        self.assertIn(guard, desktop)
+        self.assertIn('XRDP Plasma/X11 unavailable while alex Wayland is active', desktop)
+        self.assertLess(desktop.index(guard), desktop.index(
+            'exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11'
+        ))
+        self.assertIn('            exit 1\n          fi\n          exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
         self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
         self.assertIn("users.users.ander = {", desktop)
@@ -423,6 +432,9 @@ class T(unittest.TestCase):
         self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
         self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+        self.assertIn("services.displayManager.autoLogin.enable = true;", desktop)
+        self.assertIn('services.displayManager.autoLogin.user = "alex";', desktop)
+        self.assertIn("services.displayManager.sddm.settings.Autologin.Relogin = true;", desktop)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
         module = (SOURCE / "modules/grosser-adler.nix").read_text()
