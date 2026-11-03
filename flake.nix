@@ -1,6 +1,8 @@
 {
   description = "Isolated heim-pc-as-code prototype for NixOS 26.05";
 
+  # Root flake.lock is authoritative. The nested lock is generated with
+  # scripts/ci/check_flake_lock.py --sync; outputs reject any projection drift.
   # Flake metadata and inputs are literal; only outputs may evaluate imports.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";

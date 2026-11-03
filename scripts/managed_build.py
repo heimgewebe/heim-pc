@@ -529,6 +529,10 @@ def _toolchain_digest(
             repo, [
                 "flake.nix",
                 "flake.lock",
+                "nixos/system/flake.nix",
+                "nixos/system/flake.lock",
+                "nixos/deployment/contract-v1.json",
+                "nixos/production/trust-contract-v1.json",
                 "nixos/production/contract-v1.json",
             ]
         )["sha256"]

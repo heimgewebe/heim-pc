@@ -228,7 +228,7 @@ _SUPPORTED_REQUEST_DIGEST_SEMANTICS = "canonical-validated-input-v1"
 _SUPPORTED_CANONICAL_BUILD_ENTRYPOINT = (
     "nix",
     "build",
-    ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+    ".#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel",
     "--no-link",
     "--print-out-paths",
 )

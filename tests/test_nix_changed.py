@@ -11,6 +11,12 @@ class T(unittest.TestCase):
             "config/home-hygiene.v1.json",
             "config/memory-pressure-guard.v1.json",
             "config/storage-pressure.v1.json",
+            ".github/grabowski-required-checks.json",
+            "scripts/ci/check_flake_lock.py",
+            "config/managed-build.v1.json",
+            "scripts/managed_nix.py",
+            "tests/test_managed_nix.py",
+            "tests/test_nixos_system_source.py",
             "flake.nix",
             "flake.lock",
             "nixos/system/flake.nix",
@@ -72,8 +78,8 @@ class T(unittest.TestCase):
         self.assertIn("no Nix-relevant change", reason)
 
 
-    def test_draft_pr_defers_full_nix_until_review_ready(self):
-        # Draft checks are skipped, not proof of a successful Nix build.
+    def test_prototype_ci_is_manual_and_live_ci_handles_review_ready(self):
+        # The old ISO/storage matrix is optional, not an automatic second build.
         from pathlib import Path
 
         workflow = (
@@ -86,13 +92,16 @@ class T(unittest.TestCase):
             "types: [opened, reopened, synchronize, ready_for_review]",
             workflow,
         )
-        nix_header = workflow.split("\n  nix:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        prototype_header = workflow.split("\n  nix:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        self.assertIn("github.event_name == 'workflow_dispatch'", prototype_header)
+        live = workflow.split("\n  live-system:\n", 1)[1]
+        self.assertIn("    if: always()", live.split("\n    steps:\n", 1)[0])
         self.assertIn(
             "(github.event_name != 'pull_request' || !github.event.pull_request.draft) &&",
-            nix_header,
+            live,
         )
-        self.assertIn("needs.detect.result != 'success'", nix_header)
-        self.assertIn("needs.detect.outputs.nix_changed != 'false'", nix_header)
+        self.assertIn("needs.detect.result != 'success'", live)
+        self.assertIn("needs.detect.outputs.nix_changed != 'false'", live)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("branches: [ main ]", workflow)
 

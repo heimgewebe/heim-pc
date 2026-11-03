@@ -101,14 +101,12 @@ jobs:
 
   nix:
     needs: detect
-    # Draft PRs cannot merge; defer expensive ISO, VM and closure builds until
-    # ready_for_review. Main pushes and manual dispatch keep the full gate.
+    # Historical storage/ISO/agent-zone proof matrix is optional. The actual
+    # deployed host and both headless systemd VM proofs run in live-system.
+    # Keep these legacy builds manually runnable without doubling routine CI.
     if: >-
       always() &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
-      (needs.detect.result != 'success' ||
-       needs.detect.outputs.control_changed != 'false' ||
-       needs.detect.outputs.nix_changed != 'false')
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Runs 39459985355 (90m) and 41052537896 (120m) exhausted the
     # heavy build budget; the latter also hit Python thread exhaustion.
@@ -162,6 +160,9 @@ jobs:
           test "$(systemctl show --value --property=LimitSTACK nix-daemon.service)" = 8388608
           printf 'CI_NIX_DAEMON_STACK_BYTES=8388608\n'
 
+      - name: Check canonical lock projection
+        run: python3 scripts/ci/check_flake_lock.py
+
       - name: Report CI-only signed-cache trust
         run: |
           set -euo pipefail
@@ -189,8 +190,6 @@ jobs:
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#checks.x86_64-linux.profile-contract
-          .#checks.x86_64-linux.supply-chain-trust
-          .#checks.x86_64-linux.nix-lifecycle-contract
           .#checks.x86_64-linux.host-protection-contract
           .#checks.x86_64-linux.recovery-readiness-contract
           .#checks.x86_64-linux.intentional-break-rejected
@@ -278,3 +277,98 @@ jobs:
 
       - name: Prove untrusted signatures are rejected by substitution
         run: bash scripts/ci/check_nix_cache_signature_rejection.sh
+
+  live-system:
+    needs: detect
+    # Always report this tracked check. Detection errors force the real build;
+    # a proven documentation-only change may omit expensive realization.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      NIX_CONFIG: "eval-cache = false"
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REVISION"
+          test -z "$(git status --porcelain)"
+          printf 'SOURCE_REVISION=%s\n' "$EXPECTED_SOURCE_REVISION"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            require-sigs = true
+            fallback = true
+            # Configure the Nix daemon, not only the client NIX_CONFIG.
+            # Shared GitHub runners cannot sustain unbounded parallel builders.
+            max-jobs = 1
+            cores = 4
+            extra-substituters = https://commonserver.tail6dbb90.ts.net:10000/nix-cache
+            extra-trusted-public-keys = heim-pc-ci-cache-20260923-1:fDffoLuvBMGVo8JKRR7uY7EmJPawIsKXuB5OBswBdIo=
+
+      # The hosted Nix daemon set RLIMIT_STACK=64 MiB, so each i686 pthread
+      # reserved 64 MiB of the 32-bit address space and filelock's 100-thread
+      # test ran out around thread 61. The native 8-MiB limit passed all 149
+      # Filelock tests on heim-pc. Change only this ephemeral CI runner.
+      - name: Set CI Nix daemon stack to 8 MiB
+        run: |
+          set -euo pipefail
+          sudo systemctl cat nix-daemon.service >/dev/null
+          sudo install -d -m 0755 /etc/systemd/system/nix-daemon.service.d
+          printf '[Service]\nLimitSTACK=8M\n' | \
+            sudo tee /etc/systemd/system/nix-daemon.service.d/20-heim-pc-ci-thread-stack.conf >/dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl restart nix-daemon.service
+          test "$(systemctl show --value --property=LimitSTACK nix-daemon.service)" = 8388608
+          printf 'CI_NIX_DAEMON_STACK_BYTES=8388608\n'
+
+      - name: Check canonical lock projection
+        run: python3 scripts/ci/check_flake_lock.py
+
+      - name: Report CI-only signed-cache trust
+        run: |
+          set -euo pipefail
+          nix --version
+          nix config show | grep -E '^(substituters|trusted-public-keys|require-sigs|fallback|max-jobs|cores) ='
+          test "$(nix config show | sed -n 's/^max-jobs = //p')" = 1
+          test "$(nix config show | sed -n 's/^cores = //p')" = 4
+          # An HTTP health.txt 200 does not establish a valid Nix binary cache.
+          # Do not conflate protocol metadata with trusted NAR signatures or
+          # availability of the expensive Ollama/CUDA derivations.
+          cache_info="$(mktemp "$RUNNER_TEMP/heim-pc-ci-cache-info.XXXXXX")"
+          trap 'rm -f "$cache_info"' EXIT
+          if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+              --max-filesize 4096 "$CI_NIX_CACHE_URL/nix-cache-info" > "$cache_info" \
+              && awk 'BEGIN { n=0; ok=1 } { c=index($0, ":"); if (c && substr($0, 1, c-1) == "StoreDir") { n++; v=substr($0, c+1); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); if (v != "/nix/store") ok=0 } } END { exit !(n == 1 && ok) }' "$cache_info"; then
+            printf 'CI_NIX_CACHE_PROTOCOL=available; signed-output availability is not established\n'
+          else
+            printf 'CI_NIX_CACHE_PROTOCOL=unavailable; fallback=true keeps the local build path authoritative\n'
+          fi
+
+
+      - name: Evaluate live trust and lifecycle contracts
+        run: |
+          nix eval --no-update-lock-file --raw .#checks.x86_64-linux.supply-chain-trust.drvPath
+          nix eval --no-update-lock-file --raw .#checks.x86_64-linux.nix-lifecycle-contract.drvPath
+
+      - name: Build deployed live closure and execute both systemd VM proofs
+        if: >-
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+          (needs.detect.result != 'success' ||
+           needs.detect.outputs.control_changed != 'false' ||
+           needs.detect.outputs.nix_changed != 'false')
+        run: >-
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
+          .#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel
+          .#checks.x86_64-linux.supply-chain-trust
+          .#checks.x86_64-linux.nix-lifecycle-contract
+          .#packages.x86_64-linux.grabowski-headless-systemd-vm-proof
+          .#packages.x86_64-linux.nixer-headless-systemd-vm-proof

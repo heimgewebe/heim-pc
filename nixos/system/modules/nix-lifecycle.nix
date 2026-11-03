@@ -1,5 +1,66 @@
-{ lib, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 let
+  downgrade = config.heimPc.downgradeProtection;
+  candidateVersions = builtins.toJSON {
+    kernel = config.boot.kernelPackages.kernel.modDirVersion;
+    systemd = config.systemd.package.version;
+    nix = config.nix.package.version;
+    nixos = config.system.nixos.version;
+  };
+  # Native preSwitchChecks run before activation for test/switch/boot. Read
+  # the running closure, never the mutable boot-default profile or /etc.
+  downgradeCheck = pkgs.writeText "heim-pc-downgrade-check.py" ''
+    import json
+    from pathlib import Path
+    import re
+    import subprocess
+    import sys
+
+    def version(value):
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+            raise ValueError("unsupported version: " + value)
+        return tuple(int(part) for part in value.split("."))
+
+    def output(executable):
+        return subprocess.check_output(
+            [str(executable), "--version"], text=True, timeout=10,
+            stderr=subprocess.STDOUT,
+        ).splitlines()[0]
+
+    def check(current, candidate):
+        # NixOS versions bind release/date/revision. Compare release/date only;
+        # unrelated Git hashes have no chronological ordering.
+        def release(value):
+            match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]{8})\.[0-9a-f]+", value)
+            if match is None:
+                raise ValueError("unsupported NixOS version: " + value)
+            return match.group(1)
+
+        kernels = list((current / "kernel-modules/lib/modules").iterdir())
+        if len(kernels) != 1 or not kernels[0].is_dir():
+            raise ValueError("running kernel version is ambiguous or missing")
+        systemd = re.fullmatch(r"systemd [0-9]+ \(([0-9.]+)\)",
+                              output(current / "sw/bin/systemctl"))
+        nix = re.fullmatch(r"nix \(Nix\) ([0-9.]+)", output(current / "sw/bin/nix"))
+        if systemd is None or nix is None:
+            raise ValueError("running systemd/Nix version is unsupported")
+        running = {
+            "kernel": kernels[0].name,
+            "systemd": systemd.group(1),
+            "nix": nix.group(1),
+            "nixos": release((current / "nixos-version").read_text().strip()),
+        }
+        candidate = dict(candidate, nixos=release(candidate["nixos"]))
+        for name, old in running.items():
+            if version(candidate[name]) < version(old):
+                raise ValueError(name + " downgrade denied: " + old + " -> " + candidate[name])
+
+    if __name__ == "__main__":
+        try:
+            check(Path(sys.argv[1]), json.loads(sys.argv[2]))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            sys.exit("Heim-PC pre-switch downgrade protection: " + str(exc))
+  '';
   contract = builtins.fromJSON (builtins.readFile ../../production/nix-lifecycle-contract-v1.json);
   markerPath = contract.protected_generations.last_known_good_marker;
   evidencePath = contract.read_only_audit.evidence_path;
@@ -142,7 +203,31 @@ let
   };
 in
 {
+  imports = [ {
+    options.heimPc.downgradeProtection = {
+      enable = lib.mkEnableOption "native pre-switch core package downgrade protection";
+      overrideReason = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Explicit reviewed source override for an intentional rollback; remove after use.";
+      };
+    };
+  } ];
+
+  system.preSwitchChecks = lib.mkIf downgrade.enable {
+    heim-pc-downgrade-protection =
+      if downgrade.overrideReason != null then
+        "echo " + lib.escapeShellArg ("Intentional Heim-PC downgrade override: " + downgrade.overrideReason) + " >&2"
+      else
+        "${pkgs.python3}/bin/python3 ${downgradeCheck} /run/current-system "
+        + lib.escapeShellArg candidateVersions;
+  };
   assertions = [
+    {
+      assertion = downgrade.overrideReason == null
+        || builtins.match ".*[^[:space:]].*" downgrade.overrideReason != null;
+      message = "An intentional downgrade override requires a nonempty reviewed reason";
+    }
     {
       assertion =
         contract.schema_version == 1
