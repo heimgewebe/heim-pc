@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "96b0fe5ee90e5dfeaca2d87b3e6ac0b79ff5ced48fc359f3efc0a5c16e012b64"
+SOURCE_SNAPSHOT_SHA256 = "377e841846f73592c8fd65dcc1f21f1cbdb5c0baf066e281d2b1fc9564fda2b2"
 ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -408,6 +408,23 @@ class T(unittest.TestCase):
         self.assertIn("if downgrade.overrideReason != null then", module)
         self.assertIn("An intentional downgrade override requires a nonempty reviewed reason", module)
         self.assertIn("heimPc.downgradeProtection.enable = true;", (SOURCE / "flake.nix").read_text())
+
+    def test_nix_lifecycle_awk_gc_root_parser_matches_exact_target(self):
+        module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        program = module.split("""awk -v target="$target" '""", 1)[1].split("\n        '", 1)[0]
+        target = "/nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system"
+        cases = [
+            (f'"/nix/var/nix/gcroots/lkg" -> {target}\n', 0),
+            (f'"/nix/var/nix/gcroots/lkg" -> {target}-wrong\n', 1),
+            ('"/nix/var/nix/gcroots/lkg" -> /nix/store/other\n', 1),
+        ]
+        for roots, expected_code in cases:
+            with self.subTest(roots=roots):
+                completed = subprocess.run(
+                    ["awk", "-v", f"target={target}", program],
+                    input=roots, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode, expected_code, completed.stderr)
 
     def test_lock_projection_checker_is_directional_and_fails_closed(self):
         from scripts.ci.check_flake_lock import check
