@@ -10,6 +10,23 @@
 
 **Monitore und Rückfall:** Bei der aktuellen Live-Abfrage meldete der DRM-Kernel DP-2 als verbunden und DP-1 als *disconnected*. KScreen zeigte DP-2 allein bei 2560×1440, Skalierung 1, Position 0,0. Das ist kein Beleg, dass die frühere Zweimonitor-Anordnung nach der aktuellen Verbindung wiederhergestellt wurde; sie darf auch nicht ohne physischen Anschlussstatus erzwungen werden. Der optionale `krdp-ipad-display-controller.service` bleibt deaktiviert. Vor Serverwechsel aktive RDP-Verbindungen ausschließen; bei einer Regression das lokal gesicherte vorige User-Drop-in und den KWin-Desktop-Eintrag zusammen zurückstellen. Gen46-Boot und Gen38-Recovery unverändert lassen.
 
+**Wiederherstellung der Benutzerkonfiguration:** Nach einer Wiederherstellung des Repositories und der KDE-Benutzerdateien zuerst `./runtime/krdp-ipad/build.sh` ausführen und den ausgegebenen Storepfad gegen `ExecStart=` und `Exec=` in den beiden Sourcevorlagen prüfen. Diese Vorlagen sind für den am 4. November gebauten Gen46-Stand konkret ausgefüllt; bei einer anderen Nixpkgs-/KWin-Basis müssen **beide** Pfade gemeinsam auf den dann tatsächlich gebauten KRDP-Pfad aktualisiert werden. Die aktive Binärversion ist zusätzlich durch `/home/alex/.local/state/grabowski/krdp-ipad-native-v10` als GC-Root geschützt; v9 hält den vorigen Physical-Size-Stand.
+
+Nur ohne aktive KRDP-Verbindung und mit vorhandenem KDE-Wayland-Socket die Benutzerkonfiguration gezielt wiederherstellen:
+
+```bash
+install -Dm644 runtime/krdp-ipad/krdp-native-override.conf \
+  "$HOME/.config/systemd/user/app-org.kde.krdpserver.service.d/override.conf"
+install -Dm644 runtime/krdp-ipad/org.kde.krdpserver-ipad-test.desktop \
+  "$HOME/.local/share/applications/org.kde.krdpserver-ipad-test.desktop"
+systemctl --user daemon-reload
+kbuildsycoca6 --noincremental
+systemctl --user restart app-org.kde.krdpserver.service
+systemctl --user show app-org.kde.krdpserver.service -p ExecStart -p MainPID -p ActiveState
+```
+
+Die Dateien in `~/.config/systemd/user/` und `~/.local/share/applications/` bleiben über normale Wiederanmeldung und einen NixOS-Neustart erhalten. Für den Verlust beider Benutzerdateien ist die obige, erneut ausführbare Restore-Prozedur notwendig; ein vollständig deklaratives Provisioning aus NixOS-Systemquellen ist damit **noch nicht** realisiert. KRDP- und KWin-Registrierung vor dem Start stets auf denselben Store-Build abgleichen.
+
 ## Historischer Entwicklungs- und Testverlauf
 
 Die nachfolgenden Angaben vom 1.–3. November dokumentieren frühere virtuelle Monitormodi und Binärrevisionen; sie gelten **nicht** als aktuelle Produktiv-Anweisung. Maßgeblich sind die eben genannten Einstellungen und die aktuelle Sourcevorlage.
