@@ -17,6 +17,7 @@ pkgs.kdePackages.krdp.overrideAttrs (old: {
     ./patches/krdp-6.6.6-vm-size-v1.patch
     ./patches/krdp-6.6.6-wl-fixed-pointer-v1.patch
     ./patches/krdp-6.7.0-virtual-output-pointer-offset-v1.patch
+    ./patches/krdp-6.7.0-physical-output-size-v1.patch
     ./patches/krdp-6.7.0-embedded-pointer-v1.patch
     ./patches/krdp-6.7.0-close-videostream-on-qt-thread-v1.patch
     ./patches/krdp-6.7.0-position-before-mouse-button-v1.patch
