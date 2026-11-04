@@ -38,5 +38,45 @@ class PhysicalMonitorGeometryTest(unittest.TestCase):
         self.assertGreater(desktop_h, dp1_h)
 
 
+    def test_pointer_offset_patch_uses_selected_physical_output_geometry(self):
+        pointer_patch = (FEATURE / "patches/krdp-6.7.0-physical-output-pointer-coordinates-v1.patch").read_text(
+            encoding="utf-8"
+        )
+        package = (FEATURE / "package.nix").read_text(encoding="utf-8")
+        self.assertIn("else if (const auto physicalIndex = activeStream())", pointer_patch)
+        self.assertIn("qApp->screens().at(*physicalIndex)->geometry()", pointer_patch)
+        self.assertIn("geometry.width() + geometry.x()", pointer_patch)
+        self.assertIn("geometry.height() + geometry.y()", pointer_patch)
+        self.assertIn("krdp-6.7.0-physical-output-pointer-coordinates-v1.patch", package)
+
+    def test_dp2_pointer_mapping_preserves_nonzero_screen_origin(self):
+        # Independently calibrated FreeRDP/KWin: 2560x1440 DP-2 at x=2259.
+        for cx, cy, expected_x, expected_y in [
+            (256, 360, 2515, 360), (640, 360, 2899, 360),
+            (1024, 360, 3283, 360), (640, 144, 2899, 144),
+            (640, 576, 2899, 576),
+        ]:
+            with self.subTest(client=(cx, cy)):
+                x = (cx / 2560) * 2560 + 2259
+                y = (cy / 1440) * 1440
+                self.assertAlmostEqual(x, expected_x, delta=0.5)
+                self.assertAlmostEqual(y, expected_y, delta=0.5)
+
+    def test_dp1_pointer_mapping_respects_logical_scale(self):
+        # Independently calibrated FreeRDP/KWin: 3840x2160, scale 1.7.
+        logical_width = round(3840 / 1.7)
+        logical_height = round(2160 / 1.7)
+        for cx, cy, expected_x, expected_y in [
+            (320, 450, 188, 265), (800, 450, 471, 265),
+            (1280, 450, 753, 265), (800, 180, 471, 106),
+            (800, 720, 471, 424),
+        ]:
+            with self.subTest(client=(cx, cy)):
+                x = (cx / 3840) * logical_width
+                y = (cy / 2160) * logical_height
+                self.assertAlmostEqual(x, expected_x, delta=1.0)
+                self.assertAlmostEqual(y, expected_y, delta=1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
