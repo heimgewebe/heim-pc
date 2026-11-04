@@ -5,6 +5,7 @@ underlying ESP block device, but the EFI variable and mounted entry files can
 be read safely inside that existing sandbox.
 """
 
+import hashlib
 from pathlib import Path
 import re
 import sys
@@ -17,6 +18,7 @@ EFI_DEFAULT = Path(
 LOADER_CONF = Path("/boot/loader/loader.conf")
 ENTRIES = Path("/boot/loader/entries")
 ENTRY_ID = re.compile(r"nixos-[A-Za-z0-9_.+\-]{1,180}\.conf\Z")
+HASH_ENTRY = re.compile(r"nixos-([0-9a-f]{64})(?:\+[0-9]+(?:-[0-9]+)?)?\.conf\Z")
 INIT_PATH = re.compile(
     r"init=(/nix/store/[a-z0-9]{32}-nixos-system-[A-Za-z0-9_.+\-]+)/init\Z"
 )
@@ -47,12 +49,29 @@ def read_efi_default(
     if defaults != [entry_id]:
         raise ValueError("loader.conf and EFI default disagree")
 
+    entry_hash = HASH_ENTRY.fullmatch(entry_id)
     entry = entries / entry_id
+    if entry_hash and not entry.exists():
+        # systemd-boot boot counting modifies the filename but retains the
+        # stable content-hash ID in the EFI default variable.
+        stem = entry_id[:-5]
+        candidates = [
+            path for path in entries.glob(stem + "+*.conf")
+            if re.fullmatch(
+                re.escape(stem) + r"\+[0-9]+(?:-[0-9]+)?\.conf", path.name
+            )
+        ]
+        if len(candidates) != 1:
+            raise ValueError("EFI default counted entries missing or ambiguous")
+        entry = candidates[0]
     if entry.is_symlink() or not entry.is_file() or entry.stat().st_size > 65536:
         raise ValueError("EFI default entry missing or unsafe")
+    entry_bytes = entry.read_bytes()
+    if entry_hash and hashlib.sha256(entry_bytes).hexdigest() != entry_hash.group(1):
+        raise ValueError("EFI default content hash mismatch")
     options = [
         line[8:]
-        for line in entry.read_text(encoding="utf-8").splitlines()
+        for line in entry_bytes.decode("utf-8").splitlines()
         if line.startswith("options ")
     ]
     if len(options) != 1:

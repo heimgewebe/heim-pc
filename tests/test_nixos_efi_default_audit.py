@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -17,7 +18,8 @@ spec.loader.exec_module(module)
 
 CLOSURE = "/nix/store/" + "a" * 32 + "-nixos-system-heim-pc-26.05.20261031.fa13731"
 LEGACY = "nixos-heim-pc-approved-generation-2.conf"
-HASHED = "nixos-" + "b" * 64 + ".conf"
+HASH_CONTENT = ("title NixOS\noptions init=" + CLOSURE + "/init root=fstab\n").encode()
+HASHED = "nixos-" + hashlib.sha256(HASH_CONTENT).hexdigest() + ".conf"
 
 
 class EfiDefaultReadbackTest(unittest.TestCase):
@@ -50,6 +52,25 @@ class EfiDefaultReadbackTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             efi, loader, entries = self.fixture(Path(temp), entry=HASHED)
             self.assertEqual(module.read_efi_default(efi, loader, entries), (HASHED, CLOSURE))
+
+    def test_counted_entry_uses_stable_hash_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            efi, loader, entries = self.fixture(Path(temp), entry=HASHED)
+            counted = entries / (HASHED[:-5] + "+3-0.conf")
+            (entries / HASHED).rename(counted)
+            self.assertEqual(module.read_efi_default(efi, loader, entries), (HASHED, CLOSURE))
+            counted.write_bytes(HASH_CONTENT + b"tampered")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                module.read_efi_default(efi, loader, entries)
+
+    def test_multiple_counted_entries_reject_ambiguous_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            efi, loader, entries = self.fixture(Path(temp), entry=HASHED)
+            counted = entries / (HASHED[:-5] + "+3-0.conf")
+            (entries / HASHED).rename(counted)
+            (entries / (HASHED[:-5] + "+2-0.conf")).write_bytes(HASH_CONTENT)
+            with self.assertRaisesRegex(ValueError, "counted entries missing or ambiguous"):
+                module.read_efi_default(efi, loader, entries)
 
     def test_negative_cases_fail_closed(self) -> None:
         cases = (
