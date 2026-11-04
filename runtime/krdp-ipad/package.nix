@@ -14,6 +14,7 @@ pkgs.kdePackages.krdp.overrideAttrs (old: {
   patches = [
     ./patches/krdp-6.6.6-disable-ext-security-v1.patch
     ./patches/krdp-6.6.6-fakeinput-auth-v1.patch
+    ./patches/krdp-6.7.0-guard-unbound-fakeinput-v1.patch
     ./patches/krdp-6.6.6-vm-size-v1.patch
     ./patches/krdp-6.6.6-wl-fixed-pointer-v1.patch
     ./patches/krdp-6.7.0-virtual-output-pointer-offset-v1.patch

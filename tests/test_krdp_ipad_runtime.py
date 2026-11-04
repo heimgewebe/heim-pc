@@ -44,15 +44,31 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         desktop = (FEATURE / "org.kde.krdpserver-ipad-test.desktop").read_text()
         binary = re.search(r"^ExecStart=(/nix/store/[^ ]+/bin/krdpserver) ", service, re.M)
         self.assertIsNotNone(binary)
-        self.assertIn("Exec=" + binary.group(1), desktop)
+        # KWin 6.6.6 compares canonical desktop Exec against /proc/PID/exe.
+        # systemd starts the Nix Qt wrapper; the real process is .krdpserver-wrapped.
+        service_executable = binary.group(1)
+        kwin_executable = service_executable.replace("/bin/krdpserver", "/bin/.krdpserver-wrapped")
+        self.assertIn("Exec=" + kwin_executable, desktop)
+        self.assertNotIn("Exec=" + service_executable + "\n", desktop)
         self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
         self.assertIn("ExecCondition=/run/current-system/sw/bin/test -S /run/user/1000/wayland-0", service)
         self.assertLess(service.index("ExecCondition="), service.index("ExecStartPre="))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
-        self.assertIn("h97rxnpv402zv7bnl9grqvk54v95ncq5-krdp-6.7.0", binary.group(1))
+        self.assertIn("9jac0lb4y5zxqd0nw1g8fsn0py9y7lq3-krdp-6.7.0", binary.group(1))
         self.assertIn("--monitor 0 --plasma", service)
         self.assertNotIn("--virtual-monitor", service)
+
+    def test_unbound_kwin_fakeinput_proxy_is_never_authenticated(self):
+        # Live v11 SIGSEGV 258707: wl_proxy_get_version on an unbound proxy.
+        package = (FEATURE / "package.nix").read_text()
+        name = "krdp-6.7.0-guard-unbound-fakeinput-v1.patch"
+        patch = (FEATURE / "patches" / name).read_text()
+        self.assertIn(name, package)
+        self.assertIn("if (d->remoteInterface->isActive()) {", patch)
+        self.assertIn("-    d->remoteInterface->authenticate(", patch)
+        self.assertIn("+        d->remoteInterface->authenticate(", patch)
+        # Preserve active-server behavior; do not remove working authentication.
 
     def test_windows_app_suspended_frame_acks_do_not_block_video(self):
         # KDE bug 520260; cherry-picked concept from upstream fe003738...
