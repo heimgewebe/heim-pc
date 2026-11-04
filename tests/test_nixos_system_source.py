@@ -1998,3 +1998,620 @@ class T(unittest.TestCase):
         self.assertIn("assert_shadow_path_identity", helper)
         self.assertIn("validate_shadow_metadata", helper)
         self.assertIn("require_marker_shadow_initialized", helper)
+        self.assertIn("is_initialized_default_yescrypt", helper)
+        self.assertIn("os.O_NONBLOCK", helper)
+        self.assertIn("follow_symlinks=False", helper)
+        self.assertIn('PENDING_NAME = ".alex-password-initialized.pending"', helper)
+        self.assertIn("tmp_name = PENDING_NAME", helper)
+        self.assertIn("password_mutation_started = True", helper)
+        self.assertIn("bootstrap pending intent exists; recovery required", helper)
+        self.assertIn("fcntl.flock", helper)
+        self.assertIn("NOFOLLOW = os.O_NOFOLLOW", helper)
+        self.assertIn("dir_fd=", helper)
+        self.assertIn("assert_entry_unchanged", helper)
+        self.assertIn("os.fsync", helper)
+        self.assertIn("timeout=10", helper)
+        self.assertIn("write_all(marker_fd, MARKER_BYTES)", helper)
+        self.assertIn('current_hash not in {"!", "!!", "*"}', helper)
+        self.assertIn("require_shadow_hash(password_hash)", helper)
+        self.assertIn("os.link(", helper)
+        self.assertNotIn("os.replace(", helper)
+        self.assertIn('if marker != MARKER_BYTES:', helper)
+        self.assertNotIn("passwd -S", helper)
+        self.assertNotRegex(
+            host,
+            r"\b(?:initialHashedPassword|initialPassword|hashedPassword|password)\s*=",
+        )
+        self.assertIn("exact default-cost yescrypt", readme)
+        self.assertIn("systemd-user-sessions.service", readme)
+        self.assertIn("descriptor-relative", readme)
+        self.assertIn("separately authorized disposable installation", readme)
+        self.assertIn("The repository task stages neither file", readme)
+
+    def test_firstboot_credential_program_rejects_missing_malformed_unsafe_and_symlink_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+
+            missing = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("bootstrap secrets directory is missing or unsafe", missing.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            self._stage_firstboot_secret(root, "not-a-password-hash\n")
+            invalid = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("not canonical default-cost yescrypt", invalid.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            self._stage_firstboot_secret(root, "$6$short$still-not-valid\n")
+            crypt_like = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(crypt_like.returncode, 0)
+            self.assertIn("not canonical default-cost yescrypt", crypt_like.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            secret = self._stage_firstboot_secret(
+                root, self._synthetic_password_hash(), mode=0o644
+            )
+            unsafe = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertIn("bootstrap secret mode mismatch", unsafe.stderr)
+            self.assertTrue(secret.exists())
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            target = root / "secret-target"
+            target.write_text(self._synthetic_password_hash())
+            target.chmod(0o600)
+            secret.unlink()
+            secret.symlink_to(target)
+            symlinked = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(symlinked.returncode, 0)
+            self.assertIn("bootstrap secret is missing or unsafe", symlinked.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_credential_program_requires_exact_source_bound_authority_and_cost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            authority = self._firstboot_authority_path(root)
+            authority.unlink()
+
+            missing_authority = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(missing_authority.returncode, 0)
+            self.assertIn("bootstrap authority is missing or unsafe", missing_authority.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            self._stage_firstboot_secret(
+                root, self._synthetic_password_hash(), authority_revision="b" * 40
+            )
+            wrong_revision = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(wrong_revision.returncode, 0)
+            self.assertIn("not bound to this exact source and hash", wrong_revision.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            bad_cost = "$y$z9T$" + ("s" * 21) + "0$" + ("x" * 42) + "A\n"
+            self._stage_firstboot_secret(root, bad_cost)
+            wrong_cost = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(wrong_cost.returncode, 0)
+            self.assertIn("not canonical default-cost yescrypt", wrong_cost.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_credential_program_rejects_noncanonical_crypt64_padding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+
+            bad_salt_padding = (
+                "$y$j9T$" + ("s" * 22) + "$" + ("x" * 42) + "A\n"
+            )
+            self._stage_firstboot_secret(root, bad_salt_padding)
+            salt_result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(salt_result.returncode, 0)
+            self.assertIn("not canonical default-cost yescrypt", salt_result.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+            bad_checksum_padding = (
+                "$y$j9T$" + ("s" * 21) + "0$" + ("x" * 43) + "\n"
+            )
+            self._stage_firstboot_secret(root, bad_checksum_padding)
+            checksum_result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(checksum_result.returncode, 0)
+            self.assertIn("not canonical default-cost yescrypt", checksum_result.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_stale_pending_intent_blocks_replay_from_bare_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            marker_namespace = root / "persist/heim-pc"
+            marker_namespace.mkdir(parents=True, exist_ok=True)
+            marker_namespace.chmod(0o700)
+            marker_dir = marker_namespace / "bootstrap"
+            marker_dir.mkdir(mode=0o700)
+            pending = self._firstboot_pending_path(root)
+            pending.write_bytes(b"schema_version=1\nuser=alex\nstate=initialized\n")
+            pending.chmod(0o600)
+
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bootstrap pending intent exists; recovery required", result.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+            self.assertTrue(pending.exists())
+            self.assertTrue(secret.exists())
+            self.assertTrue(self._firstboot_authority_path(root).exists())
+
+    def test_firstboot_bare_lock_variants_are_supported(self):
+        for virgin in ("!!", "*"):
+            with self.subTest(virgin=virgin):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root, initial_hash=virgin)
+                    self._stage_firstboot_secret(root, self._synthetic_password_hash())
+                    result = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_chpasswd_failure_or_timeout_is_sticky_non_replay(self):
+        for mode, expected_error, timeout in (
+            ("nonzero", "setting alex password failed", None),
+            ("timeout", "setting alex password timed out", 0.5),
+        ):
+            with self.subTest(mode=mode):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root)
+                    secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+                    result = self._run_firstboot_program(
+                        root,
+                        bin_dir,
+                        shadow,
+                        log,
+                        extra_env={"HEIM_PC_TEST_CHPASSWD_MODE": mode},
+                        chpasswd_timeout_seconds=timeout,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertEqual(self._shadow_hash(shadow), "!")
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+                    self.assertTrue(secret.exists())
+                    self.assertTrue(self._firstboot_authority_path(root).exists())
+                    self.assertTrue(self._firstboot_pending_path(root).exists())
+
+                    replay = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertNotEqual(replay.returncode, 0)
+                    self.assertIn("bootstrap pending intent exists; recovery required", replay.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_rejects_unsafe_persist_and_marker_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            (root / "persist").chmod(0o775)
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("persist mount is group/other writable", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            namespace = root / "persist/heim-pc"
+            namespace.mkdir(mode=0o700)
+            marker_dir = namespace / "bootstrap"
+            marker_dir.mkdir(mode=0o755)
+            marker_dir.chmod(0o755)
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bootstrap marker directory mode mismatch", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_nonregular_entries_fail_promptly(self):
+        for entry in ("secret", "authority"):
+            with self.subTest(entry=entry):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root)
+                    secret = self._stage_firstboot_secret(
+                        root, self._synthetic_password_hash()
+                    )
+                    target = (
+                        secret
+                        if entry == "secret"
+                        else self._firstboot_authority_path(root)
+                    )
+                    target.unlink()
+                    os.mkfifo(target, 0o600)
+                    result = self._run_firstboot_program(
+                        root,
+                        bin_dir,
+                        shadow,
+                        log,
+                        outer_timeout_seconds=1,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("is not one regular file", result.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            first = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            marker = self._firstboot_marker_path(root)
+            marker.unlink()
+            os.mkfifo(marker, 0o600)
+            result = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                outer_timeout_seconds=1,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bootstrap marker is not one regular file", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_accepts_nixos_standard_shadow_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            shadow.chmod(0o640)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertTrue(self._firstboot_marker_path(root).exists())
+
+    def test_firstboot_rejects_unsafe_shadow_metadata_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            shadow.chmod(0o666)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("shadow database permissions are unsafe", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            os.link(shadow, root / "shadow-hardlink")
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("shadow database identity is unsafe", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+    def test_firstboot_marker_rejects_root_rollback_without_replay(self):
+        for rolled_back_hash in (
+            "",
+            "!",
+            "!!",
+            "*",
+            "$garbage",
+            "!$garbage",
+            "$6$$hash",
+            "$6$salt$",
+            "$6$salt$" + ("x" * 86),
+            "$y$j9T$" + ("s" * 21) + "0$short",
+        ):
+            with self.subTest(rolled_back_hash=rolled_back_hash):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root)
+                    self._stage_firstboot_secret(
+                        root, self._synthetic_password_hash()
+                    )
+                    first = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertEqual(first.returncode, 0, first.stderr)
+                    self._write_shadow(root, rolled_back_hash)
+                    second = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertNotEqual(second.returncode, 0)
+                    self.assertIn(
+                        "bootstrap marker exists but alex shadow state is "
+                        "uninitialized; recovery required",
+                        second.stderr,
+                    )
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+                    self.assertTrue(self._firstboot_marker_path(root).exists())
+
+    def test_firstboot_marker_accepts_only_pinned_nixos_yescrypt_family(self):
+        for locked in (False, True):
+            with self.subTest(locked=locked):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root)
+                    self._stage_firstboot_secret(root, self._synthetic_password_hash())
+                    first = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertEqual(first.returncode, 0, first.stderr)
+                    current = self._synthetic_password_hash().strip()
+                    self._write_shadow(root, ("!" if locked else "") + current)
+                    repeat = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertEqual(repeat.returncode, 0, repeat.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_accepts_chpasswd_atomic_shadow_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            result = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                extra_env={"HEIM_PC_TEST_CHPASSWD_MODE": "replace-shadow"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertTrue(self._firstboot_marker_path(root).exists())
+            self.assertFalse(self._firstboot_pending_path(root).exists())
+
+    def test_firstboot_shadow_path_replacement_is_detected_before_durable_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            result = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                inject_shadow_path_replacement=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("verified shadow path identity changed", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertTrue(secret.exists())
+            self.assertTrue(self._firstboot_authority_path(root).exists())
+            self.assertTrue(self._firstboot_pending_path(root).exists())
+
+    def test_firstboot_marker_shadow_path_replacement_fails_closed_without_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            first = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            raced = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                inject_marker_shadow_path_replacement=True,
+            )
+            self.assertNotEqual(raced.returncode, 0)
+            self.assertIn("verified shadow path identity changed", raced.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertTrue(self._firstboot_marker_path(root).exists())
+            self.assertFalse(self._firstboot_pending_path(root).exists())
+
+    def test_firstboot_inplace_staging_mutation_after_chpasswd_is_sticky(self):
+        for entry in ("secret", "authority"):
+            with self.subTest(entry=entry):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root)
+                    secret = self._stage_firstboot_secret(
+                        root, self._synthetic_password_hash()
+                    )
+                    target = (
+                        secret
+                        if entry == "secret"
+                        else self._firstboot_authority_path(root)
+                    )
+                    result = self._run_firstboot_program(
+                        root,
+                        bin_dir,
+                        shadow,
+                        log,
+                        extra_env={"HEIM_PC_TEST_MUTATE_STAGING_PATH": str(target)},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"bootstrap {entry} changed after validation", result.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+                    self.assertEqual(
+                        self._shadow_hash(shadow),
+                        self._synthetic_password_hash().strip(),
+                    )
+                    self.assertTrue(secret.exists())
+                    self.assertTrue(self._firstboot_authority_path(root).exists())
+                    self.assertTrue(self._firstboot_pending_path(root).exists())
+                    self.assertFalse(self._firstboot_marker_path(root).exists())
+
+                    replay = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertNotEqual(replay.returncode, 0)
+                    self.assertIn("bootstrap pending intent exists; recovery required", replay.stderr)
+                    self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_authority_rejects_extra_whitespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            authority = self._firstboot_authority_path(root)
+            authority.write_text(authority.read_text() + "\n")
+            authority.chmod(0o600)
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not bound to this exact source and hash", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_authority_binds_exact_hash_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            original = secret.read_text()
+            replacement = original.replace("x", "y", 1)
+            self.assertNotEqual(original, replacement)
+            secret.write_text(replacement)
+            secret.chmod(0o600)
+            result = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not bound to this exact source and hash", result.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_marker_publication_never_overwrites_concurrent_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            marker = self._firstboot_marker_path(root)
+
+            result = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                extra_env={"HEIM_PC_TEST_AFTER_CHPASSWD_MARKER_PATH": str(marker)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bootstrap marker appeared before publication", result.stderr)
+            self.assertEqual(marker.read_text(), "foreign-marker\n")
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertFalse(secret.exists())
+            self.assertFalse(self._firstboot_authority_path(root).exists())
+            self.assertTrue(self._firstboot_pending_path(root).exists())
+
+            replay = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(replay.returncode, 0)
+            self.assertIn("bootstrap pending intent exists; recovery required", replay.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_bootstrap_lock_blocks_parallel_instance_before_password_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            marker_namespace = root / "persist/heim-pc"
+            marker_namespace.mkdir(parents=True, exist_ok=True)
+            marker_namespace.chmod(0o700)
+            marker_dir = marker_namespace / "bootstrap"
+            marker_dir.mkdir(mode=0o700)
+            marker_dir.chmod(0o700)
+            lock_path = marker_dir / ".alex-password-bootstrap.lock"
+            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                blocked = self._run_firstboot_program(root, bin_dir, shadow, log)
+            finally:
+                os.close(lock_fd)
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("another bootstrap instance is active", blocked.stderr)
+            self.assertEqual(self._shadow_hash(shadow), "!")
+            self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_credential_program_is_single_use_and_marker_is_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+
+            first = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            marker = self._firstboot_marker_path(root)
+            self.assertEqual(self._shadow_hash(shadow), self._synthetic_password_hash().strip())
+            self.assertFalse(secret.exists())
+            self.assertFalse(self._firstboot_authority_path(root).exists())
+            self.assertEqual(
+                marker.read_bytes(), b"schema_version=1\nuser=alex\nstate=initialized\n"
+            )
+            self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(self._firstboot_pending_path(root).exists())
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+            # Marker means bootstrap is finished. Both the active modular hash
+            # and a later passwd-style lock/rotation must survive reboot without
+            # invoking chpasswd again.
+            repeat_active = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(repeat_active.returncode, 0, repeat_active.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self._write_shadow(root, "!" + self._synthetic_password_hash().strip())
+            repeat_locked = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertEqual(repeat_locked.returncode, 0, repeat_locked.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+            restaged = self._stage_firstboot_secret(
+                root, self._synthetic_password_hash()
+            )
+            rejected = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("bootstrap staging material remains after initialization", rejected.stderr)
+            self.assertTrue(restaged.exists())
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+            restaged.unlink()
+            marker.write_text("corrupt\n")
+            marker.chmod(0o600)
+            corrupted = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(corrupted.returncode, 0)
+            self.assertIn("bootstrap marker content mismatch", corrupted.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_firstboot_credential_program_never_overwrites_nonvirgin_account_without_marker(self):
+        for existing in (
+            self._synthetic_password_hash().strip(),
+            "!" + self._synthetic_password_hash().strip(),
+        ):
+            with self.subTest(existing=existing[:8]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    bin_dir, shadow, log = self._firstboot_fixture(root, initial_hash=existing)
+                    secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+
+                    result = self._run_firstboot_program(root, bin_dir, shadow, log)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("alex account is not in an initialization-compatible locked state", result.stderr)
+                    self.assertEqual(self._shadow_hash(shadow), existing)
+                    self.assertTrue(secret.exists())
+                    self.assertEqual(self._chpasswd_call_count(log), 0)
+
+    def test_firstboot_post_password_failure_is_recovery_required_and_non_replaying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, shadow, log = self._firstboot_fixture(root)
+            secret = self._stage_firstboot_secret(root, self._synthetic_password_hash())
+            first = self._run_firstboot_program(
+                root,
+                bin_dir,
+                shadow,
+                log,
+                inject_secret_unlink_failure=True,
+            )
+            self.assertNotEqual(first.returncode, 0)
+            self.assertIn("consuming bootstrap staging material failed", first.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+            self.assertEqual(self._shadow_hash(shadow), self._synthetic_password_hash().strip())
+            self.assertTrue(secret.exists())
+            self.assertTrue(self._firstboot_authority_path(root).exists())
+            self.assertTrue(self._firstboot_pending_path(root).exists())
+            self.assertFalse(
+                (root / "persist/heim-pc/bootstrap/alex-password-initialized").exists()
+            )
+
+            second = self._run_firstboot_program(root, bin_dir, shadow, log)
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("bootstrap pending intent exists; recovery required", second.stderr)
+            self.assertEqual(self._chpasswd_call_count(log), 1)
+
+    def test_nix_and_python_provenance_contracts_both_require_40_hex(self):
+        flake = (SOURCE / "flake.nix").read_text()
+        managed = (ROOT / "scripts/managed_nix.py").read_text()
+        self.assertIn("^[0-9a-f]{40}$", flake)
+        self.assertIn("len(value) != 40", managed)
+        self.assertNotIn("len(value) not in {40, 64}", managed)
+
+
+if __name__ == "__main__":
+    unittest.main()
