@@ -111,8 +111,7 @@ let
         printf '%s\n' "$roots" | awk -v target="$target" '
           {
             suffix = " -> " target
-            if (length($0) > length(suffix)
-                && substr($0, length($0) - length(suffix) + 1) == suffix) {
+            if (length($0) > length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix) {
               found = 1
             }
           }
