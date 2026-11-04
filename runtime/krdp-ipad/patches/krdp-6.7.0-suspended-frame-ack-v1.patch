@@ -1,0 +1,62 @@
+diff --git a/src/VideoStream.cpp b/src/VideoStream.cpp
+--- a/src/VideoStream.cpp
++++ b/src/VideoStream.cpp
+@@ -146,6 +146,7 @@
+ 
+     QQueue<VideoFrame> frameQueue;
+     QSet<uint32_t> pendingFrames;
++    bool frameAcknowledgementSuspended = false;
+ 
+     std::mutex pendingFramesMutex;
+ 
+@@ -394,6 +395,7 @@
+     {
+         std::lock_guard lock(d->pendingFramesMutex);
+         d->pendingFrames.clear();
++        d->frameAcknowledgementSuspended = false;
+     }
+     {
+         std::lock_guard lock(d->frameQueueMutex);
+@@ -530,6 +532,7 @@
+         destroySurface();
+         std::lock_guard lock(d->pendingFramesMutex);
+         d->pendingFrames.clear();
++        d->frameAcknowledgementSuspended = false;
+     }
+ 
+     auto capsSets = capsAdvertise->capsSets;
+@@ -625,6 +628,12 @@
+ 
+     std::lock_guard lock(d->pendingFramesMutex);
+ 
++    d->frameAcknowledgementSuspended = frameAcknowledge->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
++    if (d->frameAcknowledgementSuspended) {
++        d->pendingFrames.clear();
++        return CHANNEL_RC_OK;
++    }
++
+     auto itr = d->pendingFrames.constFind(id);
+     if (itr == d->pendingFrames.cend()) {
+         qCWarning(KRDP) << "Got frame acknowledge for an unknown frame";
+@@ -843,7 +852,9 @@
+ 
+     {
+         std::lock_guard lock(d->pendingFramesMutex);
++        if (!d->frameAcknowledgementSuspended) {
++            d->pendingFrames.insert(frameId);
++        }
+-        d->pendingFrames.insert(frameId);
+     }
+ 
+     RDPGFX_START_FRAME_PDU startFramePdu;
+@@ -956,7 +967,9 @@
+ 
+     {
+         std::lock_guard lock(d->pendingFramesMutex);
++        if (!d->frameAcknowledgementSuspended) {
++            d->pendingFrames.insert(frameId);
++        }
+-        d->pendingFrames.insert(frameId);
+     }
+ 
+     RDPGFX_START_FRAME_PDU startFramePdu;

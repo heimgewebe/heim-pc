@@ -50,9 +50,25 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertLess(service.index("ExecCondition="), service.index("ExecStartPre="))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
-        self.assertIn("rldcrsfdhgm20xqnpra4c3g7h11zqj6d-krdp-6.7.0", binary.group(1))
+        self.assertIn("h97rxnpv402zv7bnl9grqvk54v95ncq5-krdp-6.7.0", binary.group(1))
         self.assertIn("--monitor 0 --plasma", service)
         self.assertNotIn("--virtual-monitor", service)
+
+    def test_windows_app_suspended_frame_acks_do_not_block_video(self):
+        # KDE bug 520260; cherry-picked concept from upstream fe003738...
+        # KRDP 6.7.0 has separate H264 and Progressive frame submissions.
+        package = (FEATURE / "package.nix").read_text()
+        patch_name = "krdp-6.7.0-suspended-frame-ack-v1.patch"
+        patch = (FEATURE / "patches" / patch_name).read_text()
+        self.assertIn(patch_name, package)
+        self.assertIn("SUSPEND_FRAME_ACKNOWLEDGEMENT", patch)
+        self.assertIn("+        d->pendingFrames.clear();", patch)
+        self.assertIn("+    bool frameAcknowledgementSuspended = false;", patch)
+        self.assertEqual(patch.count("+        d->frameAcknowledgementSuspended = false;"), 2)
+        self.assertEqual(patch.count("+        if (!d->frameAcknowledgementSuspended) {"), 2)
+        # Both H264 and the iPad's Progressive encoder must keep sending
+        # while the client explicitly suspends RDPGFX frame ACKs.
+        self.assertEqual(patch.count("+            d->pendingFrames.insert(frameId);"), 2)
 
     def test_pointer_fixes_are_reproducible(self):
         patches = FEATURE / "patches"

@@ -23,6 +23,7 @@ pkgs.kdePackages.krdp.overrideAttrs (old: {
     ./patches/krdp-6.7.0-position-before-mouse-button-v1.patch
     ./patches/krdp-6.7.0-rdpei-touch-input-v1.patch
     ./patches/krdp-6.7.0-physical-output-pointer-coordinates-v1.patch
+    ./patches/krdp-6.7.0-suspended-frame-ack-v1.patch
   ];
   buildInputs = (old.buildInputs or []) ++ [ pkgs.kdePackages.kirigami-addons ];
 })
