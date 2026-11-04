@@ -66,9 +66,10 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         production = (MODULES / "grabowski-production.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
         self.assertIn(
-            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"',
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"',
             operator,
         )
+        self.assertNotIn("${pkgs.google-chrome}/share/google/chrome/chrome", operator)
         self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
         self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
         flake = (ROOT / "nixos/system/flake.nix").read_text()
