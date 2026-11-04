@@ -9,6 +9,15 @@
      } else if (const auto streamIndex = activeStream()) {
          if (*streamIndex >= qApp->screens().size()) {
              qCWarning(KRDP) << "Invalid monitor index" << *streamIndex;
+@@ -179,7 +179,7 @@
+             return;
+         }
+         auto screen = qApp->screens().at(*streamIndex);
+-        d->request = d->m_screencasting.createOutputStream(screen, Screencasting::Metadata);
++        d->request = d->m_screencasting.createOutputStream(screen, qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR") ? Screencasting::Embedded : Screencasting::Metadata);
+     } else {
+         d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+     }
 --- a/src/Cursor.h
 +++ b/src/Cursor.h
 @@ -52,9 +52,9 @@
@@ -24,7 +33,7 @@
      const std::unique_ptr<Private> d;
 --- a/server/SessionController.cpp
 +++ b/server/SessionController.cpp
-@@ -49,12 +49,17 @@
+@@ -49,11 +49,16 @@
              session->setClipboardData(clipboard->getClipboard());
          });
  
@@ -42,4 +51,3 @@
 +        if (!connection || qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR")) {
              return;
          }
- 

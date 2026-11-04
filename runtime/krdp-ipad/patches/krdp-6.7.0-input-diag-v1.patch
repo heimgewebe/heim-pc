@@ -1,0 +1,31 @@
+--- a/src/InputHandler.cpp
++++ b/src/InputHandler.cpp
+@@ -9,1 +9,2 @@
+ #include <xkbcommon/xkbcommon.h>
++#include <atomic>
+@@ -103,3 +103,12 @@
+ void InputHandler::touchContact(uint32_t id, int32_t x, int32_t y, uint32_t flags)
+ {
++    if (qEnvironmentVariableIntValue("KRDP_INPUT_DIAG")) {
++        static std::atomic<unsigned long long> contactCount{0};
++        const auto count = contactCount.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (count <= 4 || (count & (count - 1)) == 0) {
++            qCInfo(KRDP) << "RDP_TOUCH_CONTACT" << count
++                         << "down" << bool(flags & RDPINPUT_CONTACT_FLAG_DOWN)
++                         << "up" << bool(flags & RDPINPUT_CONTACT_FLAG_UP);
++        }
++    }
+     const QPointF position(x, y);
+@@ -145,3 +145,12 @@
+ bool InputHandler::mouseEvent(uint16_t x, uint16_t y, uint16_t flags)
+ {
++    if (qEnvironmentVariableIntValue("KRDP_INPUT_DIAG")) {
++        static std::atomic<unsigned long long> mouseCount{0};
++        const auto count = mouseCount.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (count <= 4 || (count & (count - 1)) == 0) {
++            qCInfo(KRDP) << "RDP_MOUSE_PDU" << count
++                         << "move" << bool(flags & PTR_FLAGS_MOVE)
++                         << "button" << bool(flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3));
++        }
++    }
+     QPointF position = QPointF(x, y);

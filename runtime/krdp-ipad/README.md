@@ -1,5 +1,15 @@
 # iPad-Zugang zum laufenden KDE-Plasma-Konto alex
 
+## P0-Nutzerbefund nach Neustart am 4. November 2026
+
+**Die echte Microsoft Windows App auf dem iPad ist weiterhin NICHT nutzbar:** Der Nutzer bestätigt verzerrtes Bild sowie funktionslose Maus- und Touch-Eingabe. Frühere authentifizierte Linux-FreeRDP-Bild-, Pointer- und Tailnet-Tests bleiben technische Teilbelege und überstimmen diese native E2E-Beobachtung nicht.
+
+**Neuer KWin-Blocker nach dem NixOS-Neustart um 13:40 MEZ:** Der produktive KRDP-v12-Dienst bleibt auf `/nix/store/9jac0lb4y5zxqd0nw1g8fsn0py9y7lq3-krdp-6.7.0` aktiv, aber KWin 6.6.6 verweigert `zkde_screencast_unstable_v1` und erzeugt keinen nutzbaren Bildstream. Ein gezielter KRDP-Userdienst-Neustart mit erneutem `kbuildsycoca6` beseitigte dies nicht; die Linux-FreeRDP-Gegenprobe blieb schwarz. Die KService-Abfrage mit dem nativen `KApplicationTrader::query()` ermittelt die korrekte Desktop-Registrierung und beide angeforderten Wayland-Interfaces (Job `grabowski-job-0a45eef8a82c`), doch die laufende KWin-Instanz bewirbt sie gegenüber KRDP oder einem temporär registrierten Testclient nicht (Jobs `grabowski-job-f90587b247b7` und `grabowski-job-c52c76645eb9`). Die Ursache innerhalb der laufenden KWin-Berechtigungsentscheidung ist **noch nicht nachgewiesen**; kein pauschaler KWin-Permission-Bypass und kein KDE-Neustart auf Verdacht.
+
+**Tailscale:** Der während dieser Arbeiten abgelaufene Node-Schlüssel führte vorübergehend zu `NeedsLogin`. Der neueste Readback zeigt wieder `BackendState=Running`, und Tailscale Serve leitet `100.68.88.111:3391` auf den lokalen KRDP-Port 3390. Diese Wiederherstellung belegt nicht die Windows-App-Nutzbarkeit.
+
+**Quellkandidat KRDP v13 – NICHT produktiv aktiviert:** 14 Patches, darunter ein notwendiger Embedded-Cursor-Modus auch für den physischen `createOutputStream()` (vorher wurde der getrennte Cursor unterdrückt, ohne ihn einzubetten), sowie eine über `KRDP_INPUT_DIAG=1` aktivierbare, begrenzte Diagnose ausschließlich aggregierter Maus-/Touch-Eingangsereignisse ohne Koordinaten. `build.sh` reproduziert `/nix/store/2gzx8hw3mjgid4zw570js4fg7ck9cgvx-krdp-6.7.0`; 16/16 zielgerichtete Tests bestanden. Die isolierten Authentifizierungsversuche lieferten wegen der laufenden KWin-Screencast-Sperre keinen auswertbaren Bildstream. Die Sourcevorlagen sind auf diesen Kandidaten vorbereitet, während die tatsächliche Benutzer-Unit weiterhin v12 nutzt. Vor Aktivierung sind exakter Revisions-/Runtime-Readback, GC-/Rollback-Sicherung und positive Screencast-Gegenprobe erforderlich.
+
 ## Aktueller produktiver Stand – 4. November 2026
 
 **Verbindlicher Nutzerweg:** Microsoft Windows App auf dem iPad → `heim-pc.tail6dbb90.ts.net:3391` (alternativ `100.68.88.111:3391`) → Tailscale Serve → KRDP `127.0.0.1:3390` → bestehende KDE-Wayland-Sitzung von `alex`. Extern `:3390` ist dagegen XRDP und **nicht** der geteilte KDE-Desktop. Der Host läuft auf der tatsächlich gebooteten NixOS-Gen46 mit KDE Plasma/KWin 6.6.6.
