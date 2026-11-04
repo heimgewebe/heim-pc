@@ -14,6 +14,16 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.settings.Autologin.Relogin = true;
     services.desktopManager.plasma6.enable = true;
 
+    # Plasma enables the KDE native host, but Chrome only receives its manifest
+    # when the Chromium-based browser policy module is enabled as well.
+    programs.chromium.enable = true;
+    # Auto-install Plasma Integration while retaining the user's ability to
+    # disable it. Unlike programs.chromium.extensions this is not force-installed.
+    programs.chromium.extraOpts.ExtensionSettings."cimiefiiaegbelhefglklhhakcgmhkai" = {
+      installation_mode = "normal_installed";
+      update_url = "https://clients2.google.com/service/update2/crx";
+    };
+
     # The local dual-monitor workstation remains Plasma/Wayland.
     # Xfce supplies a lightweight, independent X11 session for iPad XRDP.
     services.xserver.desktopManager.xfce.enable = true;
