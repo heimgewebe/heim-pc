@@ -16,7 +16,7 @@ let
       pinned_entry() {
         local name="$1"
         local link="/nix/var/nix/profiles/system-profiles/$name"
-        local ref generation closure entry options token seen=0
+        local ref generation closure entry entry_file candidate entry_digest actual_digest options token matches=0 seen=0
         [[ -L "$link" ]] || fail "missing pinned boot profile $name"
         ref="$(readlink -- "$link")"
         [[ "$ref" =~ ^$name-([1-9][0-9]*)-link$ ]] || fail "invalid pinned profile generation $name"
@@ -24,10 +24,39 @@ let
         closure="$(readlink -f -- "$link")"
         [[ "$closure" == /nix/store/*-nixos-system-* && -x "$closure/init" ]] || fail "unsafe pinned system closure $name"
         entry="nixos-$name-generation-$generation.conf"
-        [[ -f "/boot/loader/entries/$entry" && ! -L "/boot/loader/entries/$entry" ]] || fail "missing pinned boot entry $entry"
-        grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "/boot/loader/entries/$entry" || fail "wrong sort-key for $entry"
-        [[ "$(grep -c '^options ' "/boot/loader/entries/$entry" || true)" == 1 ]] || fail "ambiguous boot options in $entry"
-        options="$(grep '^options ' "/boot/loader/entries/$entry")"
+        entry_file="/boot/loader/entries/$entry"
+        if [[ ! -f "$entry_file" ]]; then
+          # NixOS 26.11 names generated boot entries by their content hash,
+          # not by profile/generation. Keep 26.05's names as a safe fallback.
+          entry_file=""
+          for candidate in /boot/loader/entries/nixos-*.conf; do
+            [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+            [[ "''${candidate##*/}" =~ ^nixos-([0-9a-f]{64})(\+[0-9]+(-[0-9]+)?)?\.conf$ ]] || continue
+            entry_digest="''${BASH_REMATCH[1]}"
+            actual_digest="$(sha256sum -- "$candidate")"
+            [[ "''${actual_digest%% *}" == "$entry_digest" ]] || continue
+            grep -qxF "title NixOS [$name]" "$candidate" || continue
+            grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "$candidate" || continue
+            grep -q "^version Generation $generation " "$candidate" || continue
+            matches=$((matches + 1))
+            [[ "$matches" == 1 ]] || fail "ambiguous pinned boot entries for $name"
+            entry_file="$candidate"
+          done
+          [[ "$matches" == 1 ]] || fail "missing pinned boot entry for $name"
+          entry="''${entry_file##*/}"
+          # Boot counting adds a mutable +tries suffix. Use the stable ID
+          # also returned by upstream's BootFile.from_entry().
+          if [[ "$entry" =~ ^(nixos-[0-9a-f]{64})(\+[0-9]+(-[0-9]+)?)?\.conf$ ]]; then
+            entry="''${BASH_REMATCH[1]}.conf"
+          fi
+        fi
+        [[ -f "$entry_file" && ! -L "$entry_file" ]] || fail "missing pinned boot entry $entry"
+        grep -qxF "title NixOS [$name]" "$entry_file" || fail "wrong profile for $entry"
+        grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "$entry_file" || fail "wrong sort-key for $entry"
+        [[ "$(grep -c '^version ' "$entry_file" || true)" == 1 ]] || fail "ambiguous boot version in $entry"
+        grep -q "^version Generation $generation " "$entry_file" || fail "wrong pinned generation in $entry"
+        [[ "$(grep -c '^options ' "$entry_file" || true)" == 1 ]] || fail "ambiguous boot options in $entry"
+        options="$(grep '^options ' "$entry_file")"
         read -r -a tokens <<< "''${options#options }"
         for token in "''${tokens[@]}"; do
           if [[ "$token" == init=* ]]; then
