@@ -16,7 +16,8 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         service = (FEATURE / "krdp-native-override.conf").read_text()
         controller = (FEATURE / "krdp-ipad-display-controller.service").read_text()
         desktop = (FEATURE / "org.kde.krdpserver-ipad-test.desktop").read_text()
-        self.assertIn("--virtual-monitor 1168x812@1 --plasma", service)
+        self.assertIn("--monitor 0 --plasma", service)
+        self.assertNotIn("--virtual-monitor", service)
         self.assertIn("KRDP_EMBED_CURSOR=1", service)
         self.assertNotIn("KRDP_LETTERBOX", service)
         self.assertIn("127.0.0.1 --port 3390", service)
@@ -49,8 +50,9 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertLess(service.index("ExecCondition="), service.index("ExecStartPre="))
         self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
-        self.assertIn("nxpqvrpxqg69rszhbw222hyagkkwh9nb-krdp-6.7.0", binary.group(1))
-        self.assertIn("--virtual-monitor 1168x812@1", service)
+        self.assertIn("rldcrsfdhgm20xqnpra4c3g7h11zqj6d-krdp-6.7.0", binary.group(1))
+        self.assertIn("--monitor 0 --plasma", service)
+        self.assertNotIn("--virtual-monitor", service)
 
     def test_pointer_fixes_are_reproducible(self):
         patches = FEATURE / "patches"

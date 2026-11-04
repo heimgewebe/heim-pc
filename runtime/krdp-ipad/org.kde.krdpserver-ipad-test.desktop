@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=KRDP native iPad and Windows remote desktop
-Exec=/nix/store/nxpqvrpxqg69rszhbw222hyagkkwh9nb-krdp-6.7.0/bin/krdpserver
+Exec=/nix/store/rldcrsfdhgm20xqnpra4c3g7h11zqj6d-krdp-6.7.0/bin/krdpserver
 NoDisplay=true
 Terminal=false
 X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1

@@ -1,5 +1,19 @@
 # iPad-Zugang zum laufenden KDE-Plasma-Konto alex
 
+## Aktueller produktiver Stand – 4. November 2026
+
+**Verbindlicher Nutzerweg:** Microsoft Windows App auf dem iPad → `heim-pc.tail6dbb90.ts.net:3391` (alternativ `100.68.88.111:3391`) → Tailscale Serve → KRDP `127.0.0.1:3390` → bestehende KDE-Wayland-Sitzung von `alex`. Extern `:3390` ist dagegen XRDP und **nicht** der geteilte KDE-Desktop. Der Host läuft auf der tatsächlich gebooteten NixOS-Gen46 mit KDE Plasma/KWin 6.6.6.
+
+**Aktueller Betriebsmodus:** gepinnter KRDP 6.7.0 mit elf Quellpatches, einschließlich physischer Ausgabebreite (`screen->size()`) und korrektem Zeiger-Monitorursprung (`QScreen::geometry()`); `--monitor 0 --plasma` statt virtuellem 1168×812-Monitor. Exakter mit `./runtime/krdp-ipad/build.sh` reproduzierter Storepfad: `/nix/store/rldcrsfdhgm20xqnpra4c3g7h11zqj6d-krdp-6.7.0`. Die Benutzer-Unit `app-org.kde.krdpserver.service` und die KWin-Anwendungsberechtigung `org.kde.krdpserver-ipad-test.desktop` müssen **beide exakt diesen** `bin/krdpserver` verwenden. `KRDP_EMBED_CURSOR=1` und `KRDP_RDPEI_TOUCH=1` bleiben gesetzt. Ein systemd-Benutzer-Drop-in und die Desktop-Registrierung liegen lokal unter `~/.config/systemd/user/app-org.kde.krdpserver.service.d/override.conf` und `~/.local/share/applications/org.kde.krdpserver-ipad-test.desktop`. Die beiden Dateien dieses Verzeichnisses sind die zugehörigen wiederherstellbaren Sourcevorlagen, nicht der Nachweis eines bereits vollständig deklarativen NixOS-Aktivierungswegs.
+
+**Nachweise:** Der zusätzliche Pointerpatch wurde separat mit authentifizierten RDP-Eingaben auf DP-1 (3840×2160, Skalierung 1,7) und DP-2 (2560×1440, Skalierung 1, Offset 2259) jeweils an fünf Positionen exakt gegen KWin gemessen. Der komplette Nix-Build des PR #302 ergibt denselben Storepfad wie der gestartete Produktivdienst. Am 4.11. um 07:12 Uhr authentifizierte eine RDP-Verbindung und öffnete RDPEI, aber das Journal meldete wiederholt `PipeWire frame did not contain usable image data`; der Clienttransport brach um 07:17 Uhr ab. **Ein fehlerfreies natives iPad-Bild sowie Maus, Fingertipps, Ziehen, Scrollen, Tastatur und Reconnect sind weiterhin nicht abgenommen.** Die Juno-Python-Umgebung kann die iPad-Windows-App nicht selbst bedienen.
+
+**Monitore und Rückfall:** Bei der aktuellen Live-Abfrage meldete der DRM-Kernel DP-2 als verbunden und DP-1 als *disconnected*. KScreen zeigte DP-2 allein bei 2560×1440, Skalierung 1, Position 0,0. Das ist kein Beleg, dass die frühere Zweimonitor-Anordnung nach der aktuellen Verbindung wiederhergestellt wurde; sie darf auch nicht ohne physischen Anschlussstatus erzwungen werden. Der optionale `krdp-ipad-display-controller.service` bleibt deaktiviert. Vor Serverwechsel aktive RDP-Verbindungen ausschließen; bei einer Regression das lokal gesicherte vorige User-Drop-in und den KWin-Desktop-Eintrag zusammen zurückstellen. Gen46-Boot und Gen38-Recovery unverändert lassen.
+
+## Historischer Entwicklungs- und Testverlauf
+
+Die nachfolgenden Angaben vom 1.–3. November dokumentieren frühere virtuelle Monitormodi und Binärrevisionen; sie gelten **nicht** als aktuelle Produktiv-Anweisung. Maßgeblich sind die eben genannten Einstellungen und die aktuelle Sourcevorlage.
+
 Stand: 1. November 2026, heim-pc mit NixOS 26.05, Plasma/KWin 6.6.6 mit unabhängig gepinntem KRDP 6.7.0 (Progressive Encoding).
 
 ## Aktueller Nutzerweg
