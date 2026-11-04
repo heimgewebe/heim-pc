@@ -14,6 +14,14 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.settings.Autologin.Relogin = true;
     services.desktopManager.plasma6.enable = true;
 
+    # Plasma enables its integration option, but this parent option must
+    # also be enabled to register Chrome's native messaging host.
+    # Keep the official KDE browser extension installed across rebuilds.
+    programs.chromium = {
+      enable = true;
+      extensions = [ "cimiefiiaegbelhefglklhhakcgmhkai" ];
+    };
+
     # The local dual-monitor workstation remains Plasma/Wayland.
     # Xfce supplies a lightweight, independent X11 session for iPad XRDP.
     services.xserver.desktopManager.xfce.enable = true;
