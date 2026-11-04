@@ -7,11 +7,31 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";
+    nixer.url = "github:heimgewebe/nixer/9352502f5e5edb8cdeccc0610a1d1c071e68cb69";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
     let
+      # Root flake.lock is the sole authority; nixos/system/flake.lock is its
+      # generated compatibility projection (scripts/ci/check_flake_lock.py).
+      # Reject drift before exposing ANY selectable output,
+      # including direct toplevel builds that never select checks.*.
+      lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+      rootInputs = lock.nodes.${lock.root}.inputs;
+      trust = builtins.fromJSON (builtins.readFile ../production/trust-contract-v1.json);
+      lockedInput = name: lock.nodes.${rootInputs.${name}}.locked;
+      inputMatches = name: input:
+        input.rev == (lockedInput name).rev
+        && input.narHash == (lockedInput name).narHash;
+      lockAuthorityValid =
+        builtins.readFile ../../flake.lock == builtins.readFile ./flake.lock
+        && inputMatches "nixpkgs" nixpkgs
+        && inputMatches "microvm" microvm
+        && inputMatches "nixer" nixer
+        && nixpkgs.rev == trust.inputs.root_nixpkgs.required_revision
+        && microvm.rev == trust.inputs.microvm.required_revision
+        && nixer.rev == trust.inputs.nixer.required_revision
+        && nixer.narHash == trust.inputs.nixer.required_nar_hash;
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
       sourceRevision =
@@ -140,7 +160,9 @@
         ln -s ${proofVmConfig.system.build.etc} "$out/runtime-etc"
         cp ${provenanceGuard}/source-revision "$out/source-revision"
       '';
-    in {
+    in
+    assert lockAuthorityValid || throw "flake lock authority drift: root, system, evaluated inputs and trust contract must agree";
+    {
       nixosConfigurations.heim-pc = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -400,6 +422,15 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
+              heimPc.downgradeProtection.enable = true;
+              # Keep a bounded compressed swap fallback on the real Seagate
+              # Grabowski candidate; avoid another OOM-driven desktop build failure.
+              zramSwap = {
+                enable = true;
+                algorithm = "zstd";
+                memoryPercent = 25;
+                priority = 1000;
+              };
               heimPc.grabowskiProduction = {
                 enable = true;
                 operatorPackage =
@@ -410,7 +441,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "82599219-nixos-lock264e747ad05a-contract23851f3e6dea";
+                  "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -516,8 +547,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "82599219-nixos-lock264e747ad05a-contract23851f3e6dea";
-            revision = "8259921996010ac77ff9a02013d3af322ed55937";
+            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+            revision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -592,6 +623,38 @@ from pathlib import Path
 import json
 import grabowski_mcp as runtime
 from grabowski_nixos_integrity import build_manifest, MANIFEST_RELATIVE
+import grabowski_self_review_execution as source_review
+
+# Prove the *built* operator admits a legitimate Astro dynamic route, while
+# rejecting path traversal, duplicates and shell metacharacters. This is a
+# local package regression test; it does not mint a signed PR review.
+bracket_ref = "src/pages/produkte/[slug].astro:L1-L47"
+if source_review.REF.fullmatch(bracket_ref) is None:
+    raise SystemExit("pinned review source references reject safe Astro dynamic routes")
+binding = {"review_purpose": "pull_request", "base_sha": "a" * 40, "head_sha": "b" * 40}
+original_git_read = source_review._git_read
+try:
+    for changed, should_accept in (
+        (["src/pages/produkte/[slug].astro"], True),
+        (["src/pages/produkte/[...slug].astro"], True),
+        (["src/pages/../../secrets.txt"], False),
+        (["src/pages/[slug].astro;touch"], False),
+        (["src/pages/bad name.astro"], False),
+        (["src/pages/produkte/[slug].astro"] * 2, False),
+    ):
+        source_review._git_read = (
+            lambda *args, _data=b"\0".join(s.encode() for s in changed) + b"\0", **kwargs: _data
+        )
+        try:
+            observed = source_review._first_party_changed_paths(Path("/tmp"), binding)
+        except source_review.ReviewExecutionRejected:
+            if should_accept:
+                raise
+        else:
+            if not should_accept or observed != changed:
+                raise SystemExit("pinned review source changed-path validation regressed")
+finally:
+    source_review._git_read = original_git_read
 
 root = Path("${operator}")
 manifest = json.loads((root / MANIFEST_RELATIVE).read_text())
@@ -856,6 +919,11 @@ PY
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/persist".options) [ "subvol=@persist" "compress=zstd" ];
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          # Bind early German console setup to the actual Seagate candidate,
+          # not only to the unrelated generic hosts/heim-pc configuration.
+          assert cfg.console.earlySetup;
+          assert cfg.console.keyMap == "de";
+          assert cfg.services.xserver.xkb.layout == "de";
           assert cfg.boot.loader.systemd-boot.enable;
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
           assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;
@@ -951,13 +1019,17 @@ PY
             baseline = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
             cfg = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             op = cfg.systemd.services.grabowski-operator;
+            userManager = cfg.systemd.services."user@1000";
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
-            originalOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            # CVE-patched Brotli changes transitive store IDs. Compare the
+            # original package expressions under this candidate's exact pkgs.
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            originalOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             originalBroker = import ./modules/grabowski-broker-package.nix {
-              inherit pkgs;
-              lib = pkgs.lib;
+              pkgs = candidatePkgs;
+              lib = candidatePkgs.lib;
               packageOnly = true;
             };
           in
@@ -966,7 +1038,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "82599219-nixos-lock264e747ad05a-contract23851f3e6dea";
+            "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -978,7 +1050,7 @@ PY
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
           assert builtins.any
-            (package: package.outPath == (pkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
             cfg.users.users.alex.packages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
@@ -987,7 +1059,16 @@ PY
           assert op.serviceConfig.User == "alex";
           assert op.serviceConfig.Group == "users";
           assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";
-          assert builtins.elem "user@1000.service" op.requires;
+          assert builtins.elem "user@1000.service" op.wants;
+          assert builtins.elem "user@1000.service" op.after;
+          assert !(builtins.elem "user@1000.service" op.requires);
+          assert op.unitConfig.StartLimitIntervalSec == "0";
+          assert op.serviceConfig.Restart == "on-failure";
+          assert op.serviceConfig.RestartSec == "10s";
+          assert userManager.overrideStrategy == "asDropin";
+          assert userManager.unitConfig.StartLimitIntervalSec == "0";
+          assert userManager.serviceConfig.Restart == "on-failure";
+          assert userManager.serviceConfig.RestartSec == "15s";
           assert builtins.elem "XDG_RUNTIME_DIR=/run/user/1000" op.serviceConfig.Environment;
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
@@ -1012,9 +1093,10 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "82599219-nixos-lock264e747ad05a-contract23851f3e6dea";
+            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
-            pinnedOperator = import ./modules/grabowski-operator-package.nix { inherit pkgs; };
+            candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
+            pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
             runProof = { op ? pinnedOperator, broker ? null, id ? release }:
               (nixpkgs.lib.nixosSystem {
                 inherit system;
@@ -1050,7 +1132,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "8259921996010ac77ff9a02013d3af322ed55937";
+            == "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
@@ -1111,7 +1193,7 @@ PY
             "GRABOWSKI_PRIVILEGED_BROKER=${proof.heimPc.grabowskiProduction.brokerPackage}/bin/grabowski-privileged-broker"
             operator.Environment;
           assert builtins.elem
-            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+            "PATH=/run/wrappers/bin:${proof.heimPc.grabowskiProduction.brokerPackage}/bin:${candidatePkgs.coreutils}/bin:${candidatePkgs.git}/bin:${candidatePkgs.systemd}/bin:${candidatePkgs.openssh}/bin:${candidatePkgs.tailscale}/bin:${candidatePkgs.procps}/bin:${candidatePkgs.iproute2}/bin:${candidatePkgs.tmux}/bin:/run/current-system/sw/bin"
             operator.Environment;
           # The fixed root-owned Restic proof is broker-only. The operator
           # cannot acquire privilege through a setuid sudo wrapper.
@@ -1440,7 +1522,7 @@ PY
             systemNixerNode = builtins.getAttr contract.inputs.nixer.lock_node systemLock.nodes;
             nixerRuntimeNixpkgsNode =
               builtins.getAttr contract.inputs.nixer.runtime_nixpkgs_lock_node lock.nodes;
-            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
           in
           assert target.nix.settings.substituters == contract.nix.substituters;
           assert target.nix.settings.trusted-substituters == contract.nix.trusted_substituters;
@@ -1482,8 +1564,11 @@ PY
         nix-lifecycle-contract =
           let
             contract = builtins.fromJSON (builtins.readFile ../production/nix-lifecycle-contract-v1.json);
-            target = self.nixosConfigurations.heim-pc-storage-target.config;
+            target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
           in
+          assert target.heimPc.downgradeProtection.enable;
+          assert target.heimPc.downgradeProtection.overrideReason == null;
+          assert builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks;
           assert !target.nix.gc.automatic;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.services;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.timers;

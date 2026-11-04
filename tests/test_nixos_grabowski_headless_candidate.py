@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos/system/flake.nix"
 BASE = ROOT / "nixos/system/modules/seagate-primary-candidate.nix"
 PRODUCTION = ROOT / "nixos/system/modules/grabowski-production.nix"
-RELEASE = "82599219-nixos-lock264e747ad05a-contract23851f3e6dea"
+RELEASE = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea"
 
 
 class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
@@ -77,7 +77,9 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
             'assert cfg.users.users.alex.linger;',
             "assert builtins.any",
             "cfg.users.users.alex.packages;",
-            'assert builtins.elem "user@1000.service" op.requires;',
+            'assert builtins.elem "user@1000.service" op.wants;',
+            'assert !(builtins.elem "user@1000.service" op.requires);',
+            'assert userManager.serviceConfig.Restart == "on-failure";',
             'assert !(builtins.elem "grabowski" cfg.users.users.alex.extraGroups);',
             'assert op.serviceConfig.SupplementaryGroups == [ "grabowski" ];',
             'assert policy.unitConfig.AssertPathIsMountPoint == "/persist";',

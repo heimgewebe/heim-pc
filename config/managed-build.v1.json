@@ -117,6 +117,10 @@
       ],
       "lockfiles": [
         "flake.lock",
+        "nixos/system/flake.nix",
+        "nixos/system/flake.lock",
+        "nixos/deployment/contract-v1.json",
+        "nixos/production/trust-contract-v1.json",
         "nixos/production/contract-v1.json",
         "scripts/nixos_production_install.py",
         "scripts/nixos_production_prepare.py"

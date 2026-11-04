@@ -6,7 +6,7 @@ let
     lib = pkgs.lib;
     packageOnly = true;
   };
-  revision = "82599219-nixos-lock264e747ad05a-contract23851f3e6dea";
+  revision = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
 
   # Isolated VM only: one harmless fixed command, never a production allowlist.
   benignResponse = builtins.toJSON {
@@ -279,6 +279,9 @@ pkgs.testers.runNixOSTest {
       isNormalUser = true;
       uid = 1000;
       group = "alex";
+      # Production enables linger. Without it, logind removes the runtime
+      # directory after a user-manager crash, cancelling systemd's restart.
+      linger = true;
       home = "/home/alex";
       createHome = true;
     };
@@ -412,6 +415,35 @@ pkgs.testers.runNixOSTest {
             "${pkgs.python312}/bin/python3 -B ${verifyMcp}",
             timeout=160,
         )
+    with subtest("user manager crash restarts without replacing Grabowski MainPID"):
+        machine.wait_until_succeeds("systemctl is-active user@1000.service", timeout=120)
+        manager_before = machine.succeed(
+            "systemctl show -P MainPID user@1000.service"
+        ).strip()
+        operator_before = machine.succeed(
+            "systemctl show -P MainPID grabowski-operator.service"
+        ).strip()
+        assert manager_before.isdigit() and int(manager_before) > 1
+        assert operator_before.isdigit() and int(operator_before) > 1
+        machine.succeed(
+            "systemctl kill --kill-whom=main --signal=SIGKILL user@1000.service"
+        )
+        machine.wait_until_succeeds(
+            "test $(systemctl show -P MainPID user@1000.service) -gt 1 "
+            f"&& test $(systemctl show -P MainPID user@1000.service) -ne {manager_before}",
+            timeout=120,
+        )
+        machine.succeed("systemctl is-active grabowski-operator.service")
+        operator_after = machine.succeed(
+            "systemctl show -P MainPID grabowski-operator.service"
+        ).strip()
+        assert operator_after == operator_before, (operator_before, operator_after)
+        machine.wait_until_succeeds(
+            "PYTHONPATH=${operator}/lib/python3.12/site-packages "
+            "${pkgs.python312}/bin/python3 -B ${verifyMcp}",
+            timeout=120,
+        )
+
     with subtest("canonical per-request root broker is fail-closed"):
         machine.succeed("${pkgs.python3}/bin/python3 ${rootBrokerNegative}")
         machine.succeed("${pkgs.python3}/bin/python3 ${wrongMainPid}")

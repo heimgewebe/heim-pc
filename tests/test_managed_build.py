@@ -3917,6 +3917,28 @@ class ManagedBuildTests(unittest.TestCase):
             self.assertEqual(observation["entries"][0]["relative_path"], "target")
             self.assertGreaterEqual(observation["entries"][0]["logical_bytes"], 7)
 
+    def test_nix_identity_changes_with_lock_projection_and_live_contract(self) -> None:
+        paths = ["flake.lock", "nixos/system/flake.lock", "nixos/system/flake.nix",
+                 "nixos/deployment/contract-v1.json", "nixos/production/trust-contract-v1.json"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in paths:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("baseline")
+            with patch.object(managed_build, "_run_readonly", return_value="Docker fixture"):
+                before = managed_build._toolchain_digest("nix", [sys.executable], root)
+                locks = self.policy["tools"]["nix"]["lockfiles"]
+                before_locks = managed_build._files_digest(root, locks)
+                for relative in paths:
+                    with self.subTest(relative=relative):
+                        path = root / relative
+                        path.write_text("changed")
+                        after = managed_build._toolchain_digest("nix", [sys.executable], root)
+                        self.assertNotEqual(before["sha256"], after["sha256"])
+                        self.assertNotEqual(before_locks["sha256"], managed_build._files_digest(root, locks)["sha256"])
+                        path.write_text("baseline")
+
     def test_nix_toolchain_digest_separates_historical_source_from_trusted_tooling(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "historical-source"
