@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea";
-  expectedRevision = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f";
+  expectedReleaseId = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+  expectedRevision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -259,12 +259,28 @@ in
       };
     };
 
+    # User manager is required for delegated user-systemd tasks, but must not
+    # be a hard dependency that tears down the independent rootless operator
+    # when the manager fails. Reinstate the manager after a bounded delay.
+    systemd.services."user@1000" = lib.mkIf admit {
+      overrideStrategy = "asDropin";
+      unitConfig.StartLimitIntervalSec = "0";
+      serviceConfig = {
+        Restart = "on-failure";
+        RestartSec = "15s";
+      };
+    };
+
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];
+      wants = [ "network.target" "user@1000.service" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];
       after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "grabowski-privileged-broker.socket" ];
+      # A persistent broken user manager must not leave the operator in
+      # start-limit-hit after a brief series of failures. Restart is bounded
+      # by RestartSec, not abandoned after a fixed count.
+      unitConfig.StartLimitIntervalSec = "0";
       serviceConfig = {
         Type = "simple";
         User = "alex";
@@ -281,7 +297,7 @@ in
         CacheDirectory = "grabowski-xdg";
         CacheDirectoryMode = "0700";
         Restart = "on-failure";
-        RestartSec = "2s";
+        RestartSec = "10s";
         TimeoutStartSec = "20s";
         TimeoutStopSec = "20s";
         KillMode = "mixed";

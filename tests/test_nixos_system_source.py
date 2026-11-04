@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -12,8 +14,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "bf900afdcd4f3d2ac6217dd476f01079a9a455122e39267a0d478b70b099d167"
-ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
+SOURCE_SNAPSHOT_SHA256 = "96b0fe5ee90e5dfeaca2d87b3e6ac0b79ff5ced48fc359f3efc0a5c16e012b64"
+ROOT_LOCK_SHA256 = "c14e25d773d00058bbafd937ba5c4795fbd03e389c3d3e29d48050cd48c60f96"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +34,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/c252b62b0fcd0bd5442681bb68d809a4b5984c61";',
+            'nixer.url = "github:heimgewebe/nixer/9352502f5e5edb8cdeccc0610a1d1c071e68cb69";',
             nested,
         )
 
@@ -43,8 +45,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-aaDoiW4Eg/0/kE+I3qGUzFzwnH/7DRMStC8h5FcUSDE="
-        rev = "c252b62b0fcd0bd5442681bb68d809a4b5984c61"
+        nar = "sha256-GrhNXTkYeGAdkszKv/HfDhS9PPzs28cdUUegA/j4Niw="
+        rev = "9352502f5e5edb8cdeccc0610a1d1c071e68cb69"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -286,11 +288,171 @@ class T(unittest.TestCase):
         root_lock = (ROOT / "flake.lock").read_bytes()
         system_lock = (SOURCE / "flake.lock").read_bytes()
         self.assertEqual(hashlib.sha256(root_lock).hexdigest(), ROOT_LOCK_SHA256)
+        self.assertEqual(root_lock, system_lock)
         root_nodes = json.loads(root_lock)["nodes"]
         system_nodes = json.loads(system_lock)["nodes"]
         root_nixpkgs = root_nodes["root"]["inputs"]["nixpkgs"]
         system_nixpkgs = system_nodes["root"]["inputs"]["nixpkgs"]
         self.assertEqual(root_nodes[root_nixpkgs]["locked"], system_nodes[system_nixpkgs]["locked"])
+
+    @unittest.skipUnless(shutil.which("nix-instantiate"), "Nix evaluator unavailable")
+    def test_lock_authority_rejects_drift_before_exposing_outputs(self):
+        # Exercise the actual Nix gate, without fetching inputs or building.
+        # Healthy output enumeration ensures failures are not fixture errors.
+        canonical = json.loads((ROOT / "flake.lock").read_text())
+        pins = canonical["nodes"][canonical["root"]]["inputs"]
+        inputs = {name: {key: canonical["nodes"][pins[name]]["locked"][key]
+                         for key in ("rev", "narHash")}
+                  for name in ("nixpkgs", "microvm", "nixer")}
+        inputs["self"] = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nixos/system"
+            nested.mkdir(parents=True)
+            (root / "nixos/production").mkdir()
+            for relative in ("flake.nix", "flake.lock", "nixos/system/flake.nix",
+                             "nixos/production/trust-contract-v1.json"):
+                shutil.copyfile(ROOT / relative, root / relative)
+            system_lock = nested / "flake.lock"
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+
+            def evaluate(candidate, entry="flake.nix"):
+                expression = ("builtins.attrNames ((import " + str(root / entry)
+                              + ").outputs (builtins.fromJSON "
+                              + json.dumps(json.dumps(candidate)) + "))")
+                return subprocess.run(
+                    ["nix-instantiate", "--eval", "--strict", "--expr", expression],
+                    capture_output=True, text=True, timeout=30,
+                )
+
+            for entry in ("flake.nix", "nixos/system/flake.nix"):
+                result = evaluate(inputs, entry)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("nixosConfigurations", result.stdout)
+                for name in ("nixpkgs", "microvm", "nixer"):
+                    for key in ("rev", "narHash"):
+                        altered = json.loads(json.dumps(inputs))
+                        altered[name][key] = "unreviewed-input"
+                        result = evaluate(altered, entry)
+                        self.assertNotEqual(result.returncode, 0, (entry, name, key))
+                        self.assertIn("flake lock authority drift", result.stderr)
+
+            # Replacing the compatibility projection with an independently updated
+            # lock must fail even when all evaluated inputs still match root.
+            system_lock.unlink()
+            drifted = json.loads(json.dumps(canonical))
+            drifted["nodes"][pins["microvm"]]["locked"]["rev"] = "0" * 40
+            system_lock.write_text(json.dumps(drifted))
+            result = evaluate(inputs)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("flake lock authority drift", result.stderr)
+            system_lock.unlink()
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+            # A coordinated lock/input downgrade still needs the independent
+            # reviewed trust pin; agreement between locks alone is insufficient.
+            drifted = json.loads(json.dumps(canonical))
+            drifted["nodes"][pins["nixpkgs"]]["locked"]["rev"] = "0" * 40
+            (root / "flake.lock").write_text(json.dumps(drifted))
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+            altered = json.loads(json.dumps(inputs))
+            altered["nixpkgs"]["rev"] = "0" * 40
+            result = evaluate(altered)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("flake lock authority drift", result.stderr)
+
+    def test_native_downgrade_check_rejects_core_regressions_and_missing_evidence(self):
+        module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        program = textwrap.dedent(module.split(
+            "downgradeCheck = pkgs.writeText \"heim-pc-downgrade-check.py\" ''\n", 1
+        )[1].split("\n  '';", 1)[0])
+        namespace = {"__name__": "test_downgrade"}
+        exec(compile(program, "downgrade-check.py", "exec"), namespace)
+        check = namespace["check"]
+        baseline = {"kernel": "6.18.60", "systemd": "260.5", "nix": "2.34.9",
+                    "nixos": "26.05.20261031.fa13731"}
+        with tempfile.TemporaryDirectory() as directory:
+            current = Path(directory)
+            modules = current / "kernel-modules/lib/modules"
+            (modules / baseline["kernel"]).mkdir(parents=True)
+            (current / "sw/bin").mkdir(parents=True)
+            for name, value in (("systemctl", "systemd 260 (260.5)"), ("nix", "nix (Nix) 2.34.9")):
+                executable = current / "sw/bin" / name
+                executable.write_text(f"#!{sys.executable}\nprint({value!r})\n")
+                executable.chmod(0o700)
+            (current / "nixos-version").write_text(baseline["nixos"])
+            check(current, baseline)
+            check(current, dict(baseline, kernel="6.19.1", systemd="261.1", nix="2.35.2",
+                                nixos="26.11.20261103.abcdef0"))
+            # Hashes are not version numbers; a different source on the same
+            # Nixpkgs date must not be treated as a downgrade.
+            check(current, dict(baseline, nixos="26.05.20261031.0000000"))
+            for key, value in (("kernel", "6.18.48"), ("systemd", "260.2"),
+                               ("nix", "2.34.8"), ("nixos", "26.05.20260829.c5c4a43")):
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, key + " downgrade denied"):
+                    check(current, dict(baseline, **{key: value}))
+            with self.assertRaisesRegex(ValueError, "unsupported version"):
+                check(current, dict(baseline, kernel="6.19-rc1"))
+            with self.assertRaisesRegex(ValueError, "unsupported NixOS"):
+                check(current, dict(baseline, nixos="unbound"))
+            (modules / "6.18.59").mkdir()
+            with self.assertRaisesRegex(ValueError, "ambiguous or missing"):
+                check(current, baseline)
+            (modules / "6.18.59").rmdir()
+            (current / "sw/bin/nix").write_text(f"#!{sys.executable}\nprint('unknown')\n")
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                check(current, baseline)
+            (current / "sw/bin/nix").unlink()
+            with self.assertRaises(FileNotFoundError):
+                check(current, baseline)
+        self.assertIn("system.preSwitchChecks = lib.mkIf downgrade.enable", module)
+        self.assertIn("if downgrade.overrideReason != null then", module)
+        self.assertIn("An intentional downgrade override requires a nonempty reviewed reason", module)
+        self.assertIn("heimPc.downgradeProtection.enable = true;", (SOURCE / "flake.nix").read_text())
+
+    def test_lock_projection_checker_is_directional_and_fails_closed(self):
+        from scripts.ci.check_flake_lock import check
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "nixos/system").mkdir(parents=True)
+            authority = root / "flake.lock"
+            projection = root / "nixos/system/flake.lock"
+            authority.write_text("root authority")
+            projection.write_text("independent stale lock")
+            with self.assertRaisesRegex(ValueError, "authority drift"):
+                check(root)
+            self.assertEqual(projection.read_text(), "independent stale lock")
+            check(root, sync=True)
+            self.assertEqual(authority.read_bytes(), projection.read_bytes())
+            check(root)
+            projection.unlink()
+            with self.assertRaises(FileNotFoundError):
+                check(root)
+            projection.symlink_to("../../flake.lock")
+            with self.assertRaisesRegex(ValueError, "symlinks"):
+                check(root, sync=True)
+
+    def test_live_system_is_tracked_and_builds_deployed_host_and_both_vm_proofs(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / ".github/workflows/heim-pc-nix.yml").read_text())
+        live = workflow["jobs"]["live-system"]
+        self.assertEqual(live["if"], "always()")
+        self.assertEqual(live["needs"], "detect")
+        build = next(step for step in live["steps"] if step["name"].startswith("Build deployed"))
+        self.assertIn("nix build --no-link --no-update-lock-file", build["run"])
+        self.assertIn("heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel", build["run"])
+        for name in ("grabowski", "nixer"):
+            self.assertIn(f".#packages.x86_64-linux.{name}-headless-systemd-vm-proof", build["run"])
+        self.assertNotIn("--dry-run", build["run"])
+        for condition in ("needs.detect.result != 'success'", "needs.detect.outputs.control_changed != 'false'",
+                          "needs.detect.outputs.nix_changed != 'false'"):
+            self.assertIn(condition, build["if"])
+        required = json.loads((ROOT / ".github/grabowski-required-checks.json").read_text())
+        self.assertIn("live-system", required["required_checks"])
+        flake = (SOURCE / "flake.nix").read_text()
+        for check, following in (("supply-chain-trust", "nix-lifecycle-contract"),
+                                 ("nix-lifecycle-contract", "host-protection-contract")):
+            body = flake.split(f"        {check} =", 1)[1].split(f"        {following} =", 1)[0]
+            self.assertIn("target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;", body)
 
     def test_limine_secure_boot_proof_is_options_only_and_not_activatable(self):
         flake = (SOURCE / "flake.nix").read_text(encoding="utf-8")
@@ -358,6 +520,22 @@ class T(unittest.TestCase):
             proof,
         )
 
+    def test_seagate_real_boot_console_uses_german_early_setup(self):
+        # The generic hosts/heim-pc module is not imported by the physical
+        # Seagate profile. Bind the source check to the actual candidate.
+        stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
+        physical = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('console.keyMap = "de";', stage0)
+        self.assertIn("console.earlySetup = true;", physical)
+        self.assertIn('services.xserver.xkb.layout = "de";', physical)
+        primary_contract = flake.split(
+            "seagate-primary-candidate-contract =", 1
+        )[1].split("seagate-workstation-candidate-contract =", 1)[0]
+        self.assertIn("assert cfg.console.earlySetup;", primary_contract)
+        self.assertIn('assert cfg.console.keyMap == "de";', primary_contract)
+        self.assertIn('assert cfg.services.xserver.xkb.layout == "de";', primary_contract)
+
     def test_stage0_no_usb_is_nonproductive_and_isolated(self):
         flake = (SOURCE / "flake.nix").read_text()
         stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
@@ -416,6 +594,15 @@ class T(unittest.TestCase):
         self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
         self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        # The alex/X11 fallback must never start a competing KDE compositor
+        # while the real alex/Wayland desktop is active.
+        guard = 'if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then'
+        self.assertIn(guard, desktop)
+        self.assertIn('XRDP Plasma/X11 unavailable while alex Wayland is active', desktop)
+        self.assertLess(desktop.index(guard), desktop.index(
+            'exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11'
+        ))
+        self.assertIn('            exit 1\n          fi\n          exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
         self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
         self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
         self.assertIn("users.users.ander = {", desktop)
@@ -423,6 +610,9 @@ class T(unittest.TestCase):
         self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
         self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+        self.assertIn("services.displayManager.autoLogin.enable = true;", desktop)
+        self.assertIn('services.displayManager.autoLogin.user = "alex";', desktop)
+        self.assertIn("services.displayManager.sddm.settings.Autologin.Relogin = true;", desktop)
 
     def test_grosser_adler_nixos_declares_independent_observer(self):
         module = (SOURCE / "modules/grosser-adler.nix").read_text()
@@ -462,7 +652,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 49)
+        self.assertEqual(len(files), 50)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -834,7 +1024,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "c252b62b0fcd0bd5442681bb68d809a4b5984c61",
+            "9352502f5e5edb8cdeccc0610a1d1c071e68cb69",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
@@ -1280,7 +1470,7 @@ class T(unittest.TestCase):
         self.assertTrue(production["boot"]["own_esp_required"])
         self.assertTrue(production["boot"]["shared_esp_forbidden"])
         self.assertIn(
-            ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+            ".#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel",
             deployment,
         )
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)

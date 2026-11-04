@@ -45,6 +45,7 @@ in
   # XKB definition for the early console so LUKS and SDDM see the same layout.
   services.xserver.xkb.layout = "de";
   console.useXkbConfig = true;
+  console.earlySetup = true;
   i18n.defaultLocale = "de_DE.UTF-8";
   time.timeZone = "Europe/Berlin";
 

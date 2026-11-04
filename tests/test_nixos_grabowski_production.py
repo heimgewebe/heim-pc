@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "3fbe93d2f4c7a99c3c1aaf2c35952bac3541d98f"
-TARBALL_HASH = "sha256-99dRTvg1KOZ//Y3NHoMjJgi01xgqRM5fldFwSllPTqU="
+REVISION = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4"
+TARBALL_HASH = "sha256-ruSM9PX786hBwTG0B+h8q8YAGqUt/32bOUPgPqhAelE="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -162,7 +162,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "3fbe93d2-nixos-lock264e747ad05a-contract23851f3e6dea"
+        release_id = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -230,7 +230,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];', production)
+        self.assertIn('wants = [ "network.target" "user@1000.service" ];', production)
+        self.assertIn('systemd.services."user@1000" = lib.mkIf admit {', production)
+        self.assertIn('overrideStrategy = "asDropin";', production)
+        self.assertIn('unitConfig.StartLimitIntervalSec = "0";', production)
+        self.assertIn('RestartSec = "15s";', production)
+        self.assertIn('RestartSec = "10s";', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)

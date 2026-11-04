@@ -273,7 +273,7 @@ def test_build_request_binds_revision_release_inputs_budgets_leases_and_exact_ad
     assert normalized["leases"] == sorted(normalized["leases"])
     assert normalized["entrypoint"] == list(CANONICAL_BUILD_ENTRYPOINT)
     assert normalized["entrypoint"][2] == (
-        ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel"
+        ".#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel"
     )
 
 
