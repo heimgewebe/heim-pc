@@ -15,7 +15,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
     def test_runtime_is_native_and_has_a_recovery_path(self):
         service = (FEATURE / "krdp-native-override.conf").read_text()
         controller = (FEATURE / "krdp-ipad-display-controller.service").read_text()
-        desktop = (FEATURE / "org.kde.krdpserver-ipad-test.desktop").read_text()
+        desktop = (FEATURE / "org.kde.krdp-ipad-runtime-v13.desktop").read_text()
         self.assertIn("--monitor 0 --plasma", service)
         self.assertNotIn("--virtual-monitor", service)
         self.assertIn("KRDP_EMBED_CURSOR=1", service)
@@ -61,24 +61,48 @@ class TestIpadKrdpRuntime(unittest.TestCase):
 
     def test_runtime_unit_and_kwin_registration_match_binary(self):
         import re
+
         service = (FEATURE / "krdp-native-override.conf").read_text()
-        desktop = (FEATURE / "org.kde.krdpserver-ipad-test.desktop").read_text()
-        binary = re.search(r"^ExecStart=(/nix/store/[^ ]+/bin/krdpserver) ", service, re.M)
-        self.assertIsNotNone(binary)
-        # KWin 6.6.6 compares canonical desktop Exec against /proc/PID/exe.
-        # systemd starts the Nix Qt wrapper; the real process is .krdpserver-wrapped.
-        service_executable = binary.group(1)
-        kwin_executable = service_executable.replace("/bin/krdpserver", "/bin/.krdpserver-wrapped")
-        self.assertIn("Exec=" + kwin_executable, desktop)
-        self.assertNotIn("Exec=" + service_executable + "\n", desktop)
-        self.assertIn("-krdp-6.7.0/bin/krdpserver", binary.group(1))
+        desktop = (FEATURE / "org.kde.krdp-ipad-runtime-v13.desktop").read_text()
+        running = re.search(
+            r"^ExecStart=(/run/user/1000/[^ ]+/krdpserver) --address 127.0.0.1",
+            service, re.M,
+        )
+        install = re.search(
+            r"^ExecStartPre=/run/current-system/sw/bin/install -Dm755 "
+            r"(/nix/store/[^ ]+-krdp-6\.7\.0/bin/\.krdpserver-wrapped) "
+            r"(/run/user/1000/[^ ]+/krdpserver)$",
+            service, re.M,
+        )
+        self.assertIsNotNone(running)
+        self.assertIsNotNone(install)
+        self.assertEqual(running.group(1), install.group(2))
+        self.assertIn("Exec=" + running.group(1) + "\n", desktop)
+        self.assertIn("2gzx8hw3mjgid4zw570js4fg7ck9cgvx-krdp-6.7.0", install.group(1))
+        self.assertIn("X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1", desktop)
         self.assertIn("ExecCondition=/run/current-system/sw/bin/test -S /run/user/1000/wayland-0", service)
-        self.assertLess(service.index("ExecCondition="), service.index("ExecStartPre="))
-        self.assertIn("ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental", service)
         self.assertIn("TimeoutStopSec=15s", service)
-        self.assertIn("2gzx8hw3mjgid4zw570js4fg7ck9cgvx-krdp-6.7.0", binary.group(1))
-        self.assertIn("--monitor 0 --plasma", service)
+        self.assertNotIn("KWIN_WAYLAND_NO_PERMISSION_CHECKS", service)
         self.assertNotIn("--virtual-monitor", service)
+
+    def test_boot_and_krdp_restart_restore_bin_and_warm_kwin_in_order(self):
+        """Avoid the first-connection KWin permissions race after sycoca refresh."""
+        service = (FEATURE / "krdp-native-override.conf").read_text()
+        desktop = (FEATURE / "org.kde.krdp-ipad-runtime-v13.desktop").read_text()
+        running = next(line.split("=", 1)[1].split(" --address", 1)[0]
+                       for line in service.splitlines() if line.startswith("ExecStart=") and " --address" in line)
+        pre = [line for line in service.splitlines() if line.startswith("ExecStartPre=")]
+        self.assertEqual(len(pre), 4)
+        self.assertTrue(pre[0].startswith("ExecStartPre=/run/current-system/sw/bin/install -Dm755 /nix/store/"))
+        self.assertTrue(pre[0].endswith(" " + running))
+        self.assertEqual(pre[1], "ExecStartPre=/run/current-system/sw/bin/kbuildsycoca6 --noincremental")
+        self.assertEqual(pre[2], "ExecStartPre=-/run/current-system/sw/bin/busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure")
+        self.assertEqual(pre[3], "ExecStartPre=" + running + " --help")
+        self.assertIn("Exec=" + running + "\n", desktop)
+        self.assertIn("KRDP_EMBED_CURSOR=1", service)
+        self.assertIn("KRDP_RDPEI_TOUCH=1", service)
+        self.assertIn("KRDP_INPUT_DIAG=1", service)
+        self.assertFalse((FEATURE / "org.kde.krdpserver-ipad-test.desktop").exists())
 
     def test_unbound_kwin_fakeinput_proxy_is_never_authenticated(self):
         # Live v11 SIGSEGV 258707: wl_proxy_get_version on an unbound proxy.
