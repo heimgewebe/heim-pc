@@ -68,6 +68,24 @@ let cfg = config.heimPc.desktop; in {
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
       lib.optionals config.services.tailscale.enable [ 3389 ];
 
+    # The logged-in Plasma/Wayland session is already served by alex's
+    # rustdesk-session.service. Persist its matching privileged host helper
+    # across a reboot instead of relying on a four-hour systemd-run test unit.
+    # rustdesk-flutter is the 1.4.5 package used by the working Wayland client;
+    # pkgs.rustdesk is a different 1.4.7 build and must not replace it here.
+    systemd.services.rustdesk-host = {
+      description = "RustDesk host helper for the KDE Wayland desktop";
+      wantedBy = [ "multi-user.target" ];
+      conflicts = [ "rustdesk-host-test.service" ];
+      after = [ "network.target" "rustdesk-host-test.service" ];
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = "${pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        Restart = "on-failure";
+        RestartSec = "3s";
+      };
+    };
+
     # A headless systemd --user manager has no Qt display. Without this guard,
     # one Node crash recursively launched 3600 aborting DrKonqi instances.
     # Preserve graphical DrKonqi when Plasma imports its display environment.
