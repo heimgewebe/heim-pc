@@ -20,7 +20,7 @@ unit="app-org.kde.krdpserver.service"
 runtime=/run/user/1000/krdp-ipad-native-v13/krdpserver
 target_unit="$HOME/.config/systemd/user/$unit.d/override.conf"
 target_desktop="$HOME/.local/share/applications/org.kde.krdp-ipad-runtime-v13.desktop"
-gc_root="$HOME/.local/state/grabowski/krdp-ipad-native-v13"
+gc_root="$HOME/.local/state/grabowski/krdp-ipad-native-v13-named-monitor"
 
 # Derive the Store ELF from the checked-in unit; do not duplicate a version pin.
 store_binary="$(awk -v target="$runtime" \
@@ -34,7 +34,7 @@ store_binary="$(awk -v target="$runtime" \
   die "pinned Store ELF missing; rebuild with ./runtime/krdp-ipad/build.sh first"
 grep -Fxq "Exec=$runtime" "$source_desktop" ||
   die "KWin desktop entry does not match runtime ELF"
-grep -Fxq "ExecStart=$runtime --address 127.0.0.1 --port 3390 --monitor 0 --plasma" "$source_unit" ||
+grep -Fxq "ExecStart=$runtime --address 127.0.0.1 --port 3390 --monitor-name DP-2 --plasma" "$source_unit" ||
   die "source unit runtime has unexpected arguments"
 store_root="$(dirname "$(dirname "$store_binary")")"
 
