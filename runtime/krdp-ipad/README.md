@@ -1,5 +1,23 @@
 # iPad-Zugang zum laufenden KDE-Plasma-Konto alex
 
+## Produktiver v13-Serverstand – 5. November 2026 (native iPad-Abnahme offen)
+
+**Verbindlicher Weg:** Microsoft Windows App auf iPadOS → Tailscale `100.68.88.111:3391` → `127.0.0.1:3390` → KRDP im **bereits angemeldeten physischen KDE-Wayland-Desktop** von alex. Extern `:3390` führt zu XRDP, **nicht** zum physischen Desktop.
+
+**Runtime:** `app-org.kde.krdpserver.service` läuft seit 05.11.2026, 14:24:58 MEZ mit PID `1127601` und ohne Dienstneustart. Aufruf: `/run/user/1000/krdp-ipad-native-v13/krdpserver --address 127.0.0.1 --port 3390 --monitor 0 --plasma`. Das laufende ELF stimmt byteidentisch mit `/nix/store/2gzx8hw3mjgid4zw570js4fg7ck9cgvx-krdp-6.7.0/bin/.krdpserver-wrapped` überein (SHA-256 `eb11ab92dd570413744fd3c4999da10421934cefa6cb80885e61880e7e269109`). Der Userdienst stellt den unter `/run` liegenden, KWin-berechtigten ELF-Pfad vor jedem Start wieder her; ein Nix-GC-Root schützt die Store-Closure. Ein vollständiges, aus dem NixOS-Repository selbst reproduzierbares Benutzer-Provisioning ist damit **noch nicht** belegt.
+
+**Frische echte Server-E2E-Proben:** Grabowski-Task `4655878c1c674c83b3c608ca` authentifizierte sich gegen den laufenden v13, beobachtete laufend wechselnde, mehrfarbige Bilddaten und zwei unterschiedliche, von KWin bestätigte Mauspositionen. Task `249ffcea17194f0996acca6a` bestätigte im realen KDE-XWayland-Desktop über KRDP sechs Maus-Tastendrücke und sechs Freigaben einschließlich Links-/Rechtsklick, Radereignissen und Ziehen. Temporäres Fenster/Client entfernt; Dienst-PID und physische DRM-Anschlüsse unverändert. **Dies beweist weder die Funktion der echten iPad-Windows-App noch native Touch-Gesten.**
+
+**Aktuelle Bildschirmtopologie:** `DP-2` verbunden, 2560×1440, Skalierung 1, Ursprung (0,0). `DP-1` ist laut DRM `disconnected`. Die früheren Werte des zweimonitorigen Mixed-DPI-Layouts sind keine aktuelle Live-Topologie; physisch getrennte Ausgänge nicht zwangsweise aktivieren.
+
+**Windows-App-spezifische Konfiguration zur echten Abnahme:** In der Windows App **Einstellungen → Anzeige** Auflösung und `Vollanzeige verwenden` prüfen. Der geteilte 16:9-Monitor muss auf dem anders proportionierten iPad seitenverhältnistreu mit Randflächen dargestellt werden, nicht verzerrt in Vollbild gestreckt. In der Sitzung den **Mauszeigermodus** statt `Direct touch` wählen, wenn ein sichtbarer Zeiger erforderlich ist: Microsoft zufolge blendet `Direct touch` den Cursor aus. Der aktuelle RDPEI-Patch wandelt jeweils **einen** aktiven Kontakt in linke Mausbewegungs-/Tastenereignisse um; er ist **keine** vollständige Mehrfinger-Touchimplementierung. Rechtsklick, Rad und Gesten sind im Client-Mausmodus separat am echten iPad zu prüfen. Dokumentation: [Windows App – Anzeige](https://learn.microsoft.com/de-de/windows-app/display-settings) und [Windows App – Eingabemodi](https://learn.microsoft.com/en-us/windows-app/input-keyboard-mouse-touch-pen?tabs=ios-ipados).
+
+**P0 weiterhin offen:** Das native iPad meldete zuletzt ein verzerrtes Bild und unbrauchbare Maus-/Touchbedienung. Ohne echte native Clientabnahme und bestätigte Hoch-/Querformatwechsel, Klicks, Touch, Reconnect, korrekte Cursorposition, Zwei-Monitor-Zuordnung und Neustart-Wiederherstellung **nicht als vollständig repariert oder akzeptiert melden**. Die laufende Plasma-Sitzung und Monitore nicht zu Diagnosezwecken neu starten. PR #302 bleibt bis zur realen Abnahme entsprechend gekennzeichnet.
+
+## Historische Untersuchungen (1.–4. November 2026)
+
+Die folgenden Abschnitte dokumentieren frühere v12-Stände und den damaligen Status »v13 noch nicht produktiv aktiviert«. Diese Angaben sind historisch und dürfen nicht als aktueller Betriebszustand interpretiert werden.
+
 ## P0-Nutzerbefund nach Neustart am 4. November 2026
 
 **Die echte Microsoft Windows App auf dem iPad ist weiterhin NICHT nutzbar:** Der Nutzer bestätigt verzerrtes Bild sowie funktionslose Maus- und Touch-Eingabe. Frühere authentifizierte Linux-FreeRDP-Bild-, Pointer- und Tailnet-Tests bleiben technische Teilbelege und überstimmen diese native E2E-Beobachtung nicht.
@@ -10,7 +28,7 @@
 
 **Quellkandidat KRDP v13 – NICHT produktiv aktiviert:** 14 Patches, darunter ein notwendiger Embedded-Cursor-Modus auch für den physischen `createOutputStream()` (vorher wurde der getrennte Cursor unterdrückt, ohne ihn einzubetten), sowie eine über `KRDP_INPUT_DIAG=1` aktivierbare, begrenzte Diagnose ausschließlich aggregierter Maus-/Touch-Eingangsereignisse ohne Koordinaten. `build.sh` reproduziert `/nix/store/2gzx8hw3mjgid4zw570js4fg7ck9cgvx-krdp-6.7.0`; 16/16 zielgerichtete Tests bestanden. Die isolierten Authentifizierungsversuche lieferten wegen der laufenden KWin-Screencast-Sperre keinen auswertbaren Bildstream. Die Sourcevorlagen sind auf diesen Kandidaten vorbereitet, während die tatsächliche Benutzer-Unit weiterhin v12 nutzt. Vor Aktivierung sind exakter Revisions-/Runtime-Readback, GC-/Rollback-Sicherung und positive Screencast-Gegenprobe erforderlich.
 
-## Aktueller produktiver Stand – 4. November 2026
+## Historischer produktiver Stand – 4. November 2026
 
 **Verbindlicher Nutzerweg:** Microsoft Windows App auf dem iPad → `heim-pc.tail6dbb90.ts.net:3391` (alternativ `100.68.88.111:3391`) → Tailscale Serve → KRDP `127.0.0.1:3390` → bestehende KDE-Wayland-Sitzung von `alex`. Extern `:3390` ist dagegen XRDP und **nicht** der geteilte KDE-Desktop. Der Host läuft auf der tatsächlich gebooteten NixOS-Gen46 mit KDE Plasma/KWin 6.6.6.
 
