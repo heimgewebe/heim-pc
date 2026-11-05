@@ -12,7 +12,26 @@
 
 **Windows-App-spezifische Konfiguration zur echten Abnahme:** In der Windows App **Einstellungen → Anzeige** Auflösung und `Vollanzeige verwenden` prüfen. Der geteilte 16:9-Monitor muss auf dem anders proportionierten iPad seitenverhältnistreu mit Randflächen dargestellt werden, nicht verzerrt in Vollbild gestreckt. In der Sitzung den **Mauszeigermodus** statt `Direct touch` wählen, wenn ein sichtbarer Zeiger erforderlich ist: Microsoft zufolge blendet `Direct touch` den Cursor aus. Der aktuelle RDPEI-Patch wandelt jeweils **einen** aktiven Kontakt in linke Mausbewegungs-/Tastenereignisse um; er ist **keine** vollständige Mehrfinger-Touchimplementierung. Rechtsklick, Rad und Gesten sind im Client-Mausmodus separat am echten iPad zu prüfen. Dokumentation: [Windows App – Anzeige](https://learn.microsoft.com/de-de/windows-app/display-settings) und [Windows App – Eingabemodi](https://learn.microsoft.com/en-us/windows-app/input-keyboard-mouse-touch-pen?tabs=ios-ipados).
 
-**P0 weiterhin offen:** Das native iPad meldete zuletzt ein verzerrtes Bild und unbrauchbare Maus-/Touchbedienung. Ohne echte native Clientabnahme und bestätigte Hoch-/Querformatwechsel, Klicks, Touch, Reconnect, korrekte Cursorposition, Zwei-Monitor-Zuordnung und Neustart-Wiederherstellung **nicht als vollständig repariert oder akzeptiert melden**. Die laufende Plasma-Sitzung und Monitore nicht zu Diagnosezwecken neu starten. PR #302 bleibt bis zur realen Abnahme entsprechend gekennzeichnet.
+**P0 weiterhin offen:** Das native iPad meldete zuletzt ein verzerrtes Bild und unbrauchbare Maus-/Touchbedienung. Ohne echte native Clientabnahme und bestätigte Hoch-/Querformatwechsel, Klicks, Touch, Reconnect, korrekte Cursorposition, richtige Einzelmonitor-Auswahl bei zwei verbundenen physischen Monitoren und Neustart-Wiederherstellung **nicht als vollständig repariert oder akzeptiert melden**. Die laufende Plasma-Sitzung und Monitore nicht zu Diagnosezwecken neu starten. PR #302 bleibt bis zur realen Abnahme entsprechend gekennzeichnet.
+
+### Quellgebundene Wiederherstellung nach Benutzerprofilverlust oder Neustart
+
+Im Repository steht ein idempotentes KRDP-v13-Recovery-Werkzeug. Es leitet den Store-Binärpfad **aus** der User-Unit-Quelle ab und vergleicht ihn mit der KWin-Desktopregistrierung, dem GC-Root und dem laufenden Prozess.
+
+```bash
+# Aus dem Repository heimgewebe/heim-pc als Benutzer alex:
+bash runtime/krdp-ipad/recover-user.sh --check
+
+# Nur wenn der Check einen tatsächlichen Fehler meldet:
+# setzt aktive KDE-Wayland-Sitzung und keine bestehende RDP-Verbindung voraus
+bash runtime/krdp-ipad/recover-user.sh --apply
+```
+
+`--check` liest ausschließlich den v13-Livevertrag. `--apply` sichert vor jeder Änderung die betroffenen Benutzerdateien, prüft die Store-Closure, installiert die KWin-Desktopberechtigung und startet **nur KRDP** neu. Im Fehlerfall werden die ursprünglichen Benutzerdateien wiederhergestellt und der frühere Dienstzustand erneut versucht. KDE, physische Monitore und die gebootete NixOS-Generation bleiben unangetastet. Fehlt der gepinnte Store-Build, zuerst `bash runtime/krdp-ipad/build.sh` ausführen und den neuen Pfad gegen beide Sourcevorlagen prüfen.
+
+Der primäre Userdienst ist an `plasma-workspace.target` gebunden und aktiviert. Das ist ein **Startvertrag**, kein frischer Nachweis eines vollständigen Kaltboots samt erneuter iPad-Anmeldung.
+
+**Clientgrenze laut Microsoft:** Die Windows App unter iOS/iPadOS unterstützt weder gleichzeitige Mehrmonitorübertragung noch dynamische Sitzungsauflösung. KRDP `--monitor 0` streamt gegenwärtig **einen** Qt-/KWin-Ausgang. Beim Anschließen von DP-1 muss neu geprüft werden, ob Index 0 noch den gewünschten physischen Ausgang auswählt. [Microsoft: Plattformfunktionen](https://learn.microsoft.com/de-de/windows-app/compare-platforms-features).
 
 ## Historische Untersuchungen (1.–4. November 2026)
 
@@ -46,18 +65,7 @@ Die folgenden Abschnitte dokumentieren frühere v12-Stände und den damaligen St
 
 **Wiederherstellung der Benutzerkonfiguration:** Nach einer Wiederherstellung des Repositories und der KDE-Benutzerdateien zuerst `./runtime/krdp-ipad/build.sh` ausführen und den ausgegebenen Storepfad gegen `ExecStart=` und `Exec=` in den beiden Sourcevorlagen prüfen. Diese Vorlagen sind für den am 4. November gebauten Gen46-Stand konkret ausgefüllt; bei einer anderen Nixpkgs-/KWin-Basis müssen **beide** Pfade gemeinsam auf den dann tatsächlich gebauten KRDP-Pfad aktualisiert werden. Die aktive Binärversion wird über `/home/alex/.local/state/grabowski/krdp-ipad-native-v12` vor Nix-GC geschützt. v11, v10 und v9 bleiben als vorherige KRDP-Rückfall-Versionen erhalten.
 
-Nur ohne aktive KRDP-Verbindung und mit vorhandenem KDE-Wayland-Socket die Benutzerkonfiguration gezielt wiederherstellen:
-
-```bash
-install -Dm644 runtime/krdp-ipad/krdp-native-override.conf \
-  "$HOME/.config/systemd/user/app-org.kde.krdpserver.service.d/override.conf"
-install -Dm644 runtime/krdp-ipad/org.kde.krdpserver-ipad-test.desktop \
-  "$HOME/.local/share/applications/org.kde.krdpserver-ipad-test.desktop"
-systemctl --user daemon-reload
-kbuildsycoca6 --noincremental
-systemctl --user restart app-org.kde.krdpserver.service
-systemctl --user show app-org.kde.krdpserver.service -p ExecStart -p MainPID -p ActiveState
-```
+**Historische Wiederherstellungsanweisung (v12, nicht mehr ausführen):** Der alte Name `org.kde.krdpserver-ipad-test.desktop` gehört zu einer früheren Store-ELF-Berechtigung; er darf nicht mit der aktuellen v13-Unit vermischt werden. Stattdessen ausschließlich die obige `recover-user.sh`-Prozedur verwenden.
 
 Die Dateien in `~/.config/systemd/user/` und `~/.local/share/applications/` bleiben über normale Wiederanmeldung und einen NixOS-Neustart erhalten. Für den Verlust beider Benutzerdateien ist die obige, erneut ausführbare Restore-Prozedur notwendig; ein vollständig deklaratives Provisioning aus NixOS-Systemquellen ist damit **noch nicht** realisiert. KRDP- und KWin-Registrierung vor dem Start stets auf denselben Store-Build abgleichen.
 
