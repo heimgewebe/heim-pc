@@ -348,5 +348,46 @@ in
         SystemCallArchitectures = "native";
       };
     };
+    # The root-only Restic proof is insufficient without the operator-owned
+    # source marker and canonical Rootbroker publication.  Use the established
+    # complete MCP workflow inside the running trusted operator MainPID.
+    systemd.services."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Refresh complete NixOS Restic recovery via the running Grabowski operator";
+      wants = [ "grabowski-operator.service" ];
+      after = [ "grabowski-operator.service" "restic-backups-heim-pc.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-recovery-mcp-refresh.py}";
+        Environment = [ "HOME=/home/alex" "PYTHONDONTWRITEBYTECODE=1" ];
+        TimeoutStartSec = "100min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = "read-only";
+        ProtectSystem = "strict";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" ];
+        CapabilityBoundingSet = [ ];
+        SystemCallArchitectures = "native";
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Keep complete Restic recovery proof within its 24-hour validity window";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        # After the native morning/evening Restic backup opportunities.
+        OnCalendar = "*-*-* 09,21:15:00";
+        RandomizedDelaySec = "10m";
+        Persistent = true;
+        Unit = "grabowski-recovery-refresh.service";
+      };
+    };
   };
 }
