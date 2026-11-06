@@ -66,7 +66,7 @@ let
   evidencePath = contract.read_only_audit.evidence_path;
   auditTool = pkgs.writeShellApplication {
     name = "heim-pc-nix-lifecycle-audit";
-    runtimeInputs = with pkgs; [ coreutils findutils gawk jq nix ];
+    runtimeInputs = with pkgs; [ coreutils findutils gawk jq nix python3 ];
     text = ''
       set -euo pipefail
       umask 077
@@ -86,7 +86,19 @@ let
       }
 
       running="$(resolve_link /run/current-system)"
-      boot_default="$(resolve_link /nix/var/nix/profiles/system)"
+      system_profile="$(resolve_link /nix/var/nix/profiles/system)"
+      boot_entry=""
+      boot_default=""
+      efi_default_readback_ok=false
+      # /nix/var/nix/profiles/system is NOT the firmware boot default when
+      # an approved generation is pinned separately. Read LoaderEntryDefault
+      # and its exact init closure without opening /dev (PrivateDevices=true).
+      if boot_identity="$("${pkgs.python3}/bin/python3" ${../hosts/heim-pc/efi-boot-default-audit.py})"; then
+        read -r boot_entry boot_default <<< "$boot_identity"
+        if [ -x "$boot_default/init" ]; then
+          efi_default_readback_ok=true
+        fi
+      fi
       last_known_good=""
       if [ -f "$marker" ] && [ ! -L "$marker" ]; then
         last_known_good="$(head -n 1 -- "$marker")"
@@ -111,8 +123,7 @@ let
         printf '%s\n' "$roots" | awk -v target="$target" '
           {
             suffix = " -> " target
-            if (length($0) > length(suffix)
-                && substr($0, length($0) - length(suffix) + 1) == suffix) {
+            if (length($0) > length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix) {
               found = 1
             }
           }
@@ -136,7 +147,15 @@ let
 
       readiness=ready
       [ -n "$running" ] || readiness=blocked-missing-running-system
-      [ -n "$boot_default" ] || readiness=blocked-missing-boot-default
+      [ -n "$system_profile" ] || readiness=blocked-missing-system-profile
+      efi_default_gc_rooted=false
+      if [ "$efi_default_readback_ok" != true ]; then
+        readiness=blocked-efi-boot-default-unavailable
+      elif root_target_is_enumerated "$boot_default"; then
+        efi_default_gc_rooted=true
+      else
+        readiness=blocked-unrooted-efi-boot-default
+      fi
       last_known_good_gc_rooted=false
       last_known_good_is_system_generation=false
       if [ -z "$last_known_good" ]; then
@@ -171,7 +190,11 @@ let
         --arg kind heim_pc.nixos_store_lifecycle_audit \
         --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg running "$running" \
+        --arg system_profile "$system_profile" \
         --arg boot_default "$boot_default" \
+        --arg efi_default_entry "$boot_entry" \
+        --argjson efi_default_readback_ok "$efi_default_readback_ok" \
+        --argjson efi_default_gc_rooted "$efi_default_gc_rooted" \
         --arg last_known_good "$last_known_good" \
         --arg readiness "$readiness" \
         --argjson gc_root_count "$root_count" \
@@ -184,7 +207,11 @@ let
           kind: $kind,
           observed_at: $observed_at,
           running_system: $running,
+          system_profile_system: $system_profile,
           boot_default_system: $boot_default,
+          efi_boot_default_entry: $efi_default_entry,
+          efi_boot_default_readback_ok: $efi_default_readback_ok,
+          efi_boot_default_gc_rooted: $efi_default_gc_rooted,
           last_known_good_system: $last_known_good,
           gc_root_count: $gc_root_count,
           gc_root_readback_ok: $gc_root_readback_ok,

@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
-  expectedRevision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
+  expectedReleaseId = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
+  expectedRevision = "e46223b6e86734032a8b94b8d94c5eeeef096bc3";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -259,12 +259,28 @@ in
       };
     };
 
+    # User manager is required for delegated user-systemd tasks, but must not
+    # be a hard dependency that tears down the independent rootless operator
+    # when the manager fails. Reinstate the manager after a bounded delay.
+    systemd.services."user@1000" = lib.mkIf admit {
+      overrideStrategy = "asDropin";
+      unitConfig.StartLimitIntervalSec = "0";
+      serviceConfig = {
+        Restart = "on-failure";
+        RestartSec = "15s";
+      };
+    };
+
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];
+      wants = [ "network.target" "user@1000.service" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];
       after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "grabowski-privileged-broker.socket" ];
+      # A persistent broken user manager must not leave the operator in
+      # start-limit-hit after a brief series of failures. Restart is bounded
+      # by RestartSec, not abandoned after a fixed count.
+      unitConfig.StartLimitIntervalSec = "0";
       serviceConfig = {
         Type = "simple";
         User = "alex";
@@ -281,7 +297,7 @@ in
         CacheDirectory = "grabowski-xdg";
         CacheDirectoryMode = "0700";
         Restart = "on-failure";
-        RestartSec = "2s";
+        RestartSec = "10s";
         TimeoutStartSec = "20s";
         TimeoutStopSec = "20s";
         KillMode = "mixed";
@@ -300,8 +316,8 @@ in
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
           # Expose only the installed reviewer executable to the system service.
           "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
-          # Admit only the immutable Chrome binary pinned by this NixOS generation.
-          "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"
+          # Use the immutable Nixpkgs Chrome wrapper: it supplies EGL/GL runtime library paths.
+          "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"
           "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
@@ -330,6 +346,47 @@ in
         RestrictRealtime = true;
         LimitCORE = 0;
         SystemCallArchitectures = "native";
+      };
+    };
+    # The root-only Restic proof is insufficient without the operator-owned
+    # source marker and canonical Rootbroker publication.  Use the established
+    # complete MCP workflow inside the running trusted operator MainPID.
+    systemd.services."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Refresh complete NixOS Restic recovery via the running Grabowski operator";
+      wants = [ "grabowski-operator.service" ];
+      after = [ "grabowski-operator.service" "restic-backups-heim-pc.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-recovery-mcp-refresh.py}";
+        Environment = [ "HOME=/home/alex" "PYTHONDONTWRITEBYTECODE=1" ];
+        TimeoutStartSec = "100min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = "read-only";
+        ProtectSystem = "strict";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" ];
+        CapabilityBoundingSet = [ ];
+        SystemCallArchitectures = "native";
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Keep complete Restic recovery proof within its 24-hour validity window";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        # After the native morning/evening Restic backup opportunities.
+        OnCalendar = "*-*-* 09,21:15:00";
+        RandomizedDelaySec = "10m";
+        Persistent = true;
+        Unit = "grabowski-recovery-refresh.service";
       };
     };
   };

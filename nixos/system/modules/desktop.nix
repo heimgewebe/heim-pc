@@ -14,6 +14,16 @@ let cfg = config.heimPc.desktop; in {
     services.displayManager.sddm.settings.Autologin.Relogin = true;
     services.desktopManager.plasma6.enable = true;
 
+    # Plasma enables the KDE native host, but Chrome only receives its manifest
+    # when the Chromium-based browser policy module is enabled as well.
+    programs.chromium.enable = true;
+    # Auto-install Plasma Integration while retaining the user's ability to
+    # disable it. Unlike programs.chromium.extensions this is not force-installed.
+    programs.chromium.extraOpts.ExtensionSettings."cimiefiiaegbelhefglklhhakcgmhkai" = {
+      installation_mode = "normal_installed";
+      update_url = "https://clients2.google.com/service/update2/crx";
+    };
+
     # The local dual-monitor workstation remains Plasma/Wayland.
     # Xfce supplies a lightweight, independent X11 session for iPad XRDP.
     services.xserver.desktopManager.xfce.enable = true;
@@ -57,6 +67,24 @@ let cfg = config.heimPc.desktop; in {
     };
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
       lib.optionals config.services.tailscale.enable [ 3389 ];
+
+    # The logged-in Plasma/Wayland session is already served by alex's
+    # rustdesk-session.service. Persist its matching privileged host helper
+    # across a reboot instead of relying on a four-hour systemd-run test unit.
+    # rustdesk-flutter is the 1.4.5 package used by the working Wayland client;
+    # pkgs.rustdesk is a different 1.4.7 build and must not replace it here.
+    systemd.services.rustdesk-host = {
+      description = "RustDesk host helper for the KDE Wayland desktop";
+      wantedBy = [ "multi-user.target" ];
+      conflicts = [ "rustdesk-host-test.service" ];
+      after = [ "network.target" "rustdesk-host-test.service" ];
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = "${pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        Restart = "on-failure";
+        RestartSec = "3s";
+      };
+    };
 
     # A headless systemd --user manager has no Qt display. Without this guard,
     # one Node crash recursively launched 3600 aborting DrKonqi instances.

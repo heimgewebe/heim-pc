@@ -7,7 +7,7 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixer.url = "github:heimgewebe/nixer/9352502f5e5edb8cdeccc0610a1d1c071e68cb69";
+    nixer.url = "github:heimgewebe/nixer/7e137bf147b444d8359278043e6a08c6996adb36";
   };
 
   outputs = { self, nixpkgs, microvm, nixer }:
@@ -441,7 +441,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+                  "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
               };
             })
           ];
@@ -547,8 +547,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
-            revision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
+            release = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
+            revision = "e46223b6e86734032a8b94b8d94c5eeeef096bc3";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -919,6 +919,11 @@ PY
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/home".options) [ "subvol=@home" "compress=zstd" ];
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/persist".options) [ "subvol=@persist" "compress=zstd" ];
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
+          # Bind early German console setup to the actual Seagate candidate,
+          # not only to the unrelated generic hosts/heim-pc configuration.
+          assert cfg.console.earlySetup;
+          assert cfg.console.keyMap == "de";
+          assert cfg.services.xserver.xkb.layout == "de";
           assert cfg.boot.loader.systemd-boot.enable;
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
           assert cfg.services.openssh.enable && cfg.services.openssh.openFirewall;
@@ -1014,6 +1019,7 @@ PY
             baseline = self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.config;
             cfg = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             op = cfg.systemd.services.grabowski-operator;
+            userManager = cfg.systemd.services."user@1000";
             broker = cfg.systemd.services."grabowski-privileged-broker@";
             socket = cfg.systemd.sockets.grabowski-privileged-broker;
             policy = cfg.systemd.services.grabowski-private-policy-install;
@@ -1032,7 +1038,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+            "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -1053,7 +1059,16 @@ PY
           assert op.serviceConfig.User == "alex";
           assert op.serviceConfig.Group == "users";
           assert cfg.systemd.services.nixer-headless.serviceConfig.Group == "users";
-          assert builtins.elem "user@1000.service" op.requires;
+          assert builtins.elem "user@1000.service" op.wants;
+          assert builtins.elem "user@1000.service" op.after;
+          assert !(builtins.elem "user@1000.service" op.requires);
+          assert op.unitConfig.StartLimitIntervalSec == "0";
+          assert op.serviceConfig.Restart == "on-failure";
+          assert op.serviceConfig.RestartSec == "10s";
+          assert userManager.overrideStrategy == "asDropin";
+          assert userManager.unitConfig.StartLimitIntervalSec == "0";
+          assert userManager.serviceConfig.Restart == "on-failure";
+          assert userManager.serviceConfig.RestartSec == "15s";
           assert builtins.elem "XDG_RUNTIME_DIR=/run/user/1000" op.serviceConfig.Environment;
           assert builtins.elem "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
             op.serviceConfig.Environment;
@@ -1078,7 +1093,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+            release = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
@@ -1117,7 +1132,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
+            == "e46223b6e86734032a8b94b8d94c5eeeef096bc3";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
