@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "37bdcbb2c38a1e8df310634c1e21dc6688b8921d"
-TARBALL_HASH = "sha256-u6R1VlUVKnBxDWHJNgiEX3xexjjD535UsCdIDBLYOxk="
+REVISION = "e46223b6e86734032a8b94b8d94c5eeeef096bc3"
+TARBALL_HASH = "sha256-JNVFw0NfFvHnNPoS2VC70roZ3IejaaQpTThqplv+Ow8="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -66,9 +66,10 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         production = (MODULES / "grabowski-production.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
         self.assertIn(
-            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/share/google/chrome/chrome"',
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"',
             operator,
         )
+        self.assertNotIn("${pkgs.google-chrome}/share/google/chrome/chrome", operator)
         self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
         self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
         flake = (ROOT / "nixos/system/flake.nix").read_text()
@@ -162,7 +163,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "37bdcbb2-nixos-lock264e747ad05a-contract23851f3e6dea"
+        release_id = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -230,7 +231,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];', production)
+        self.assertIn('wants = [ "network.target" "user@1000.service" ];', production)
+        self.assertIn('systemd.services."user@1000" = lib.mkIf admit {', production)
+        self.assertIn('overrideStrategy = "asDropin";', production)
+        self.assertIn('unitConfig.StartLimitIntervalSec = "0";', production)
+        self.assertIn('RestartSec = "15s";', production)
+        self.assertIn('RestartSec = "10s";', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)

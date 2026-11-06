@@ -5,7 +5,24 @@ let cfg = config.heimPc.desktop; in {
     services.xserver.enable = true;
     services.displayManager.sddm.enable = true;
     services.displayManager.sddm.wayland.enable = true;
+
+    # The real alex KDE/Wayland session must exist after unattended reboot
+    # so the current desktop remains reachable through the native KRDP service.
+    # SDDM autologin is local-only; remote RDP is still bound to Tailscale.
+    services.displayManager.autoLogin.enable = true;
+    services.displayManager.autoLogin.user = "alex";
+    services.displayManager.sddm.settings.Autologin.Relogin = true;
     services.desktopManager.plasma6.enable = true;
+
+    # Plasma enables the KDE native host, but Chrome only receives its manifest
+    # when the Chromium-based browser policy module is enabled as well.
+    programs.chromium.enable = true;
+    # Auto-install Plasma Integration while retaining the user's ability to
+    # disable it. Unlike programs.chromium.extensions this is not force-installed.
+    programs.chromium.extraOpts.ExtensionSettings."cimiefiiaegbelhefglklhhakcgmhkai" = {
+      installation_mode = "normal_installed";
+      update_url = "https://clients2.google.com/service/update2/crx";
+    };
 
     # The local dual-monitor workstation remains Plasma/Wayland.
     # Xfce supplies a lightweight, independent X11 session for iPad XRDP.
@@ -28,13 +45,19 @@ let cfg = config.heimPc.desktop; in {
       forceRun = true;
     };
 
-    # Preserve alex's original XRDP Plasma/X11 fallback; ander uses isolated Xfce.
-    # Concurrent alex Wayland/X11 sessions share KDE user services and are not advised.
+    # Alex's standalone Plasma/X11 fallback must not compete with his live
+    # Wayland session for shared KDE user services and org.kde.KWin on D-Bus.
+    # Concurrent remote control of the real alex desktop uses KRDP instead.
+    # The separate ander account keeps its independent Xfce desktop.
     # Do not expose RDP outside the Tailscale overlay network.
     services.xrdp = lib.mkIf config.services.tailscale.enable {
       enable = true;
       defaultWindowManager = "${pkgs.writeShellScript "xrdp-window-manager-by-user" ''
         if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then
+          if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then
+            printf '%s\n' 'XRDP Plasma/X11 unavailable while alex Wayland is active; use KRDP for the live desktop.' >&2
+            exit 1
+          fi
           exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11
         else
           exec ${pkgs.xfce4-session}/bin/startxfce4
@@ -44,6 +67,24 @@ let cfg = config.heimPc.desktop; in {
     };
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
       lib.optionals config.services.tailscale.enable [ 3389 ];
+
+    # The logged-in Plasma/Wayland session is already served by alex's
+    # rustdesk-session.service. Persist its matching privileged host helper
+    # across a reboot instead of relying on a four-hour systemd-run test unit.
+    # rustdesk-flutter is the 1.4.5 package used by the working Wayland client;
+    # pkgs.rustdesk is a different 1.4.7 build and must not replace it here.
+    systemd.services.rustdesk-host = {
+      description = "RustDesk host helper for the KDE Wayland desktop";
+      wantedBy = [ "multi-user.target" ];
+      conflicts = [ "rustdesk-host-test.service" ];
+      after = [ "network.target" "rustdesk-host-test.service" ];
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = "${pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        Restart = "on-failure";
+        RestartSec = "3s";
+      };
+    };
 
     # A headless systemd --user manager has no Qt display. Without this guard,
     # one Node crash recursively launched 3600 aborting DrKonqi instances.

@@ -37,7 +37,7 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.fragment = self.sysunits / "grabowski-operator.service"
         self.fragment.symlink_to(self.unit_file)
         self.uid = os.getuid()
-        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-37bdcbb2")
+        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-e46223b6")
         (self.operator_pkg / "bin").mkdir(parents=True, mode=0o700)
         self.entry = self.operator_pkg / "bin" / "grabowski-operator"
         self.entry.write_text("#!/bin/sh\nexit 0\n")
@@ -144,6 +144,16 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.assertRaises(PermissionError, self.argv)
         self.store.chmod(0o1777)
         self.assertRaises(PermissionError, self.argv)
+
+    def test_old_release_operator_rejected_even_if_immutable(self):
+        # The previous Gen48 operator remains in the Nix store for recovery,
+        # but must not authenticate as the new release's systemd MainPID.
+        obsolete = self.store / ("c" * 32 + "-grabowski-operator-5e136cf3")
+        (obsolete / "bin").mkdir(parents=True, mode=0o700)
+        old_entry = obsolete / "bin" / "grabowski-operator"
+        old_entry.write_text("#!/bin/sh\nexit 0\n")
+        old_entry.chmod(0o555)
+        self.assertRaises(PermissionError, self.argv, str(old_entry))
 
     def test_modified_or_unrelated_binary_rejected(self):
         self.entry.chmod(0o777)

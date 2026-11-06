@@ -37,8 +37,8 @@
     },
     "nixer": {
       "lock_node": "nixer",
-      "required_revision": "c252b62b0fcd0bd5442681bb68d809a4b5984c61",
-      "required_nar_hash": "sha256-aaDoiW4Eg/0/kE+I3qGUzFzwnH/7DRMStC8h5FcUSDE=",
+      "required_revision": "7e137bf147b444d8359278043e6a08c6996adb36",
+      "required_nar_hash": "sha256-+Dq1kTHMkY0Oh42gVONglO534qlb7tm9JFhHb43lmhU=",
       "owns_runtime_nixpkgs": true,
       "runtime_nixpkgs_lock_node": "nixpkgs",
       "runtime_nixpkgs_required_revision": "fa1373130d5a21c040a47c5dbe1913d59ed91808"
