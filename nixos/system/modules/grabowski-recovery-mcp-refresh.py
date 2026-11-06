@@ -29,7 +29,7 @@ TOOL_ARGUMENTS = {
 
 
 def decide(status: dict, *, now: int) -> str:
-    """Return skip or refresh; refuse to invalidate proof without a valid backup."""
+    """Reuse intact proof or request a new root-validated recovery proof."""
     if not isinstance(status, dict) or type(now) is not int or now <= 0:
         raise RuntimeError("recovery status is malformed")
     checks = status.get("checks")
@@ -51,7 +51,19 @@ def decide(status: dict, *, now: int) -> str:
         raise RuntimeError("native backup timer or rootbroker is not ready")
     backup = status.get("local_backup")
     if not isinstance(backup, dict) or backup.get("valid") is not True:
-        raise RuntimeError("no journal-bound successful native backup: defer proof")
+        # An intact old proof must not be displaced by a failed/running
+        # backup. But the old source marker necessarily becomes invalid after
+        # a *new* completed backup, before this refresh publishes its proof.
+        if (
+            isinstance(canonical, dict)
+            and canonical.get("valid") is True
+            and isinstance(publication, dict)
+            and publication.get("current") is True
+        ):
+            return "skip"
+        # Native root probe alone checks the latest completed systemd backup
+        # invocation, matching Restic snapshot, byte restore and repository
+        # integrity before publishing; never use the old marker as admission.
     return "refresh"
 
 
@@ -154,7 +166,10 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        # This is a systemd failure, not an opportunity to suppress a red gate.
+        # MCP/AnyIO context managers wrap application errors in nested
+        # ExceptionGroups. Show the root cause in systemd's journal.
+        while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+            exc = exc.exceptions[0]
         print("recovery-refresh-failed: " + type(exc).__name__ + ": " + str(exc)[:240],
               file=sys.stderr, flush=True)
         sys.exit(1)

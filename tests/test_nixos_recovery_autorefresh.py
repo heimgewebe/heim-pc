@@ -56,13 +56,40 @@ class DecisionTests(unittest.TestCase):
         s["server_recovery"] = {"valid": False}
         self.assertEqual(refresh.decide(s, now=NOW), "refresh")
 
-    def test_latest_failed_or_running_backup_cannot_destroy_old_proof(self):
+    def test_invalid_previous_marker_allows_new_native_backup_probe(self):
+        s = current_status()
+        s["ready_for_privileged_actions"] = False
+        s["checks"]["local_backup_fresh"] = False
+        s["checks"]["server_recovery_fresh"] = False
+        s["checks"]["server_recovery_source_current"] = False
+        s["local_backup"] = {
+            "valid": False,
+            "snapshot_id": "f30f8e22",
+            "error": "NixOS recovery snapshot lacks matching completed backup invocation",
+        }
+        s["server_recovery"] = {"valid": False, "snapshot_id": "f30f8e22"}
+        s["server_recovery_source_publication"] = {"current": False}
+        # The old marker cannot attest the new run; root probe validates the
+        # new systemd invocation and snapshot before writing a fresh marker.
+        self.assertEqual(refresh.decide(s, now=NOW), "refresh")
+
+    def test_failed_or_running_backup_cannot_destroy_intact_old_proof(self):
         for value in (False, None):
             s = current_status()
             s["server_recovery"]["generated_at_unix"] = NOW - 12 * 60 * 60
             s["local_backup"]["valid"] = value
-            with self.subTest(value=value), self.assertRaisesRegex(
-                RuntimeError, "no journal-bound successful native backup"
+            with self.subTest(value=value):
+                self.assertEqual(refresh.decide(s, now=NOW), "skip")
+
+    def test_invalid_marker_still_requires_native_timer_and_rootbroker(self):
+        for key in refresh.PREREQUISITE_CHECKS:
+            s = current_status()
+            s["ready_for_privileged_actions"] = False
+            s["checks"][key] = False
+            s["local_backup"]["valid"] = False
+            s["server_recovery"]["valid"] = False
+            with self.subTest(key=key), self.assertRaisesRegex(
+                RuntimeError, "rootbroker is not ready"
             ):
                 refresh.decide(s, now=NOW)
 
@@ -154,6 +181,7 @@ class DeclarationTests(unittest.TestCase):
         self.assertNotIn('sudo ', source)
         self.assertNotIn('restic restore', source)
         self.assertIn('all(v is True for v in after["checks"].values())', source)
+        self.assertIn('while isinstance(exc, BaseExceptionGroup)', source)
 
 
 if __name__ == "__main__":
