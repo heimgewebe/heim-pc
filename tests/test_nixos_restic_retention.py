@@ -1,55 +1,58 @@
-"""Keep Pop!_OS history outside the native NixOS retention selection."""
-
+"""Static NixOS binding checks; destructive effects are tested separately."""
 from __future__ import annotations
 
 from pathlib import Path
 import unittest
 
-
-MODULE = (
-    Path(__file__).resolve().parents[1]
-    / "nixos/system/modules/restic-seagate-backup.nix"
-)
+ROOT = Path(__file__).resolve().parents[1]
+MODULE = ROOT / "nixos/system/modules/restic-seagate-backup.nix"
+RETENTION = ROOT / "nixos/system/modules/heim-pc-restic-retention.py"
 
 
 class SeagateResticRetentionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.text = MODULE.read_text(encoding="utf-8")
-        self.retention = self.text.split(
+        self.module = MODULE.read_text(encoding="utf-8")
+        self.retention = self.module.split(
             'systemd.services."heim-pc-restic-retention" = {', 1
-        )[1].split(
-            'systemd.timers."heim-pc-restic-retention" = {', 1
-        )[0]
+        )[1].split('systemd.timers."heim-pc-restic-retention" = {', 1)[0]
+        self.script = RETENTION.read_text(encoding="utf-8")
 
-    def test_backup_keeps_fast_twice_daily_path(self) -> None:
-        self.assertIn('pruneOpts = [ ];', self.text)
-        self.assertIn('OnCalendar = "*-*-* 07,19:30:00";', self.text)
-        self.assertIn('"--host=heim-pc-nixos"', self.text)
-        self.assertIn('"--tag=nixos-seagate"', self.text)
+    def test_twice_daily_backup_survives_with_extended_lock_wait(self) -> None:
+        self.assertIn('pruneOpts = [ ];', self.module)
+        self.assertIn('OnCalendar = "*-*-* 07,19:30:00";', self.module)
+        self.assertIn('"--retry-lock=6h"', self.module)
+        self.assertIn('"--host=heim-pc-nixos"', self.module)
+        self.assertIn('"--tag=nixos-seagate"', self.module)
 
-    def test_retention_selects_nixos_only_and_never_unconditionally_unlocks(self) -> None:
-        command = self.retention.split("script = ''", 1)[1]
-        self.assertIn("restic forget --retry-lock=30m", command)
-        self.assertIn("--host heim-pc-nixos --tag nixos-seagate", command)
-        self.assertIn("--group-by host,paths,tags", command)
-        self.assertIn("--keep-last 14 --keep-within 7d", command)
-        self.assertIn("--keep-daily 14 --keep-weekly 8", command)
-        self.assertIn("--keep-monthly 12 --keep-yearly 2", command)
-        self.assertIn("restic prune --retry-lock=30m", command)
-        self.assertNotIn("restic unlock\n", command)
-        self.assertNotIn("--host heim-pc ", command)
-        self.assertNotIn("--tag daily", command)
-
-    def test_mount_guard_and_low_impact_weekly_timer(self) -> None:
-        self.assertIn('RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];', self.retention)
-        self.assertIn('test -f /var/lib/heim-pc-backup/restic/heim-pc/config', self.retention)
-        self.assertIn('RESTIC_PASSWORD_FILE = "/persist/secrets/restic/heim-pc-password";', self.retention)
-        self.assertIn('ProtectSystem = "strict";', self.retention)
+    def test_retention_requires_separate_signed_independent_restore(self) -> None:
+        self.assertIn('ConditionPathExists = "/persist/secrets/restic/independent-restore.json";', self.retention)
+        self.assertIn('heim-pc-restic-retention.py', self.retention)
+        self.assertIn('pkgs.openssl', self.retention)
         self.assertIn('ReadWritePaths = [ "/var/lib/heim-pc-backup" ];', self.retention)
+        self.assertIn('RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];', self.retention)
+        self.assertIn('restic("forget", "--dry-run", "--json", "--retry-lock=6h"', self.script)
+        self.assertIn('restic("forget", "--retry-lock=6h", *removed', self.script)
+        self.assertIn('restic("prune", "--retry-lock=6h"', self.script)
+        self.assertIn('source_hash != restored_hash', self.script)
+        self.assertIn('openssl", "dgst", "-sha256", "-verify"', self.script)
+        self.assertIn('unitConfig.ConditionPathExists', self.retention)
+        self.assertNotIn('restic unlock', self.script)
+
+    def test_pop_os_history_is_never_targeted_by_policy(self) -> None:
+        self.assertIn('HOST, TAG = "heim-pc-nixos", "nixos-seagate"', self.script)
+        self.assertIn('"--host", HOST, "--tag", TAG', self.script)
+        self.assertIn('sid == attested_snapshot', self.script)
+        self.assertIn('snap.get("hostname") != HOST', self.script)
+
+    def test_retention_timer_and_non_suspending_io(self) -> None:
+        self.assertIn('OnCalendar = "Sun *-*-* 03:30:00";', self.module)
+        self.assertIn('Persistent = true;', self.module)
+        self.assertIn('RandomizedDelaySec = "30m";', self.module)
+        self.assertIn('systemd-inhibit --mode=block --what=sleep', self.retention)
+        self.assertIn('TimeoutStartSec = "0";', self.retention)
+        self.assertIn('PrivateNetwork = true;', self.retention)
         self.assertIn('CPUWeight = 30;', self.retention)
         self.assertIn('IOWeight = 20;', self.retention)
-        self.assertIn('OnCalendar = "Sun *-*-* 03:30:00";', self.text)
-        self.assertIn('Persistent = true;', self.text)
 
 
 if __name__ == "__main__":

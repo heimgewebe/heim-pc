@@ -37,7 +37,7 @@
       "--tag=nixos-seagate"
       # A concurrent verified Restic repository check can hold the exclusive lock.
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
-      "--retry-lock=30m"
+      "--retry-lock=6h"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
       # XRDP drive redirection can be a user-only FUSE mount that root cannot
       # stat. Never turn one unreadable transient session mount into backup
@@ -76,10 +76,12 @@
   # Weekly pruning is deliberately separate from the backup timer and never
   # runs Restic's global 'unlock' (which may invalidate another process' lock).
   systemd.services."heim-pc-restic-retention" = {
-    description = "Scoped weekly retention for NixOS Seagate Restic snapshots";
+    description = "Scoped weekly retention; requires independent signed full-restore evidence";
     unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
+    # A missing attestation means *skip*, never automatic deletion.
+    unitConfig.ConditionPathExists = "/persist/secrets/restic/independent-restore.json";
     after = [ "restic-backups-heim-pc.service" ];
-    path = [ pkgs.restic ];
+    path = [ pkgs.restic pkgs.util-linux pkgs.openssl pkgs.systemd ];
     environment = {
       RESTIC_REPOSITORY = "/var/lib/heim-pc-backup/restic/heim-pc";
       RESTIC_PASSWORD_FILE = "/persist/secrets/restic/heim-pc-password";
@@ -90,26 +92,20 @@
       User = "root";
       CacheDirectory = "heim-pc-restic-retention";
       CacheDirectoryMode = "0700";
-      TimeoutStartSec = "6h";
+      # Restic's own exclusive repository lock serializes destructive operations;
+      # wait rather than stealing the lock or breaking a concurrent backup.
+      TimeoutStartSec = "0";
       CPUWeight = 30;
       IOWeight = 20;
       NoNewPrivileges = true;
       PrivateTmp = true;
+      PrivateNetwork = true;
       ProtectSystem = "strict";
       ProtectHome = "read-only";
       ReadWritePaths = [ "/var/lib/heim-pc-backup" ];
     };
     script = ''
-      set -eu
-      test -f /var/lib/heim-pc-backup/restic/heim-pc/config
-      restic forget --retry-lock=30m \
-        --host heim-pc-nixos --tag nixos-seagate \
-        --group-by host,paths,tags \
-        --keep-last 14 --keep-within 7d \
-        --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --keep-yearly 2
-      # Prune is repository-wide ONLY for unreferenced packs. The other
-      # hosts' snapshots stay referenced because forget filtered host+tag.
-      restic prune --retry-lock=30m
+      exec ${pkgs.systemd}/bin/systemd-inhibit --mode=block --what=sleep --why="Restic retention" ${pkgs.python3}/bin/python3 -I -B ${./heim-pc-restic-retention.py}
     '';
   };
 
@@ -128,6 +124,7 @@
   # Fixed, root-owned restore evidence. The operator can trigger exactly this
   # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
   systemd.services."heim-pc-restic-recovery-probe" = {
+    after = [ "restic-backups-heim-pc.service" ];
     description = "Root-owned NixOS Restic restore and repository-integrity proof";
     unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
     serviceConfig = {
@@ -145,8 +142,8 @@
       StateDirectory = "heim-pc-restic-recovery-probe";
       StateDirectoryMode = "0755";
       UMask = "0022";
-      # Allows restore and a 1/10 repository check without outliving the caller.
-      TimeoutStartSec = "75min";
+      # May wait for a long exclusive Restic lock and every tenth check reads ALL data.
+      TimeoutStartSec = "8h";
       NoNewPrivileges = true;
       RestrictSUIDSGID = true;
       RestrictRealtime = true;
@@ -171,6 +168,17 @@
       MemoryDenyWriteExecute = true;
       RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
       SystemCallArchitectures = "native";
+    };
+  };
+
+  # Rotating data check runs daily; the tenth successful check reads all data.
+  # This proof is local only and NEVER authorizes snapshot retention.
+  systemd.timers."heim-pc-restic-recovery-probe" = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 09:00:00";
+      Persistent = true;
+      RandomizedDelaySec = "20m";
     };
   };
 
