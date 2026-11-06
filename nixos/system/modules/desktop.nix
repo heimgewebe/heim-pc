@@ -1,5 +1,20 @@
 { config, lib, pkgs, ... }:
-let cfg = config.heimPc.desktop; in {
+let
+  cfg = config.heimPc.desktop;
+  # Same immutable Nixpkgs commit and NAR used by the live RustDesk 1.5.0
+  # user profile; do not upgrade the system-wide Nixpkgs just for this helper.
+  rustdesk150Source = builtins.fetchTree {
+    type = "github";
+    owner = "NixOS";
+    repo = "nixpkgs";
+    rev = "1d060086d60cb76a40cf37109f979d88a5bd6396";
+    narHash = "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=";
+  };
+  rustdesk150Pkgs = import rustdesk150Source.outPath {
+    system = pkgs.stdenv.hostPlatform.system;
+    config.allowUnfree = true;
+  };
+in {
   options.heimPc.desktop.enable = lib.mkEnableOption "KDE Plasma/Wayland workstation profile";
   config = lib.mkIf cfg.enable {
     services.xserver.enable = true;
@@ -71,16 +86,19 @@ let cfg = config.heimPc.desktop; in {
     # The logged-in Plasma/Wayland session is already served by alex's
     # rustdesk-session.service. Persist its matching privileged host helper
     # across a reboot instead of relying on a four-hour systemd-run test unit.
-    # rustdesk-flutter is the 1.4.5 package used by the working Wayland client;
-    # pkgs.rustdesk is a different 1.4.7 build and must not replace it here.
+    # The live user profile uses RustDesk 1.5.0. The default pinned host
+    # pkgs.rustdesk-flutter is still 1.4.5, so use the separately NAR-pinned
+    # build above for the privileged helper as well.
     systemd.services.rustdesk-host = {
       description = "RustDesk host helper for the KDE Wayland desktop";
       wantedBy = [ "multi-user.target" ];
-      conflicts = [ "rustdesk-host-test.service" ];
-      after = [ "network.target" "rustdesk-host-test.service" ];
+      # Never run a second root helper alongside the 1.5.0 fallback.
+      # Only a separately coordinated system activation may perform cutover.
+      conflicts = [ "rustdesk-host-test.service" "rustdesk-input-v150.service" ];
+      after = [ "network.target" "rustdesk-host-test.service" "rustdesk-input-v150.service" ];
       serviceConfig = {
         Type = "exec";
-        ExecStart = "${pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        ExecStart = "${rustdesk150Pkgs.rustdesk-flutter}/bin/rustdesk --service";
         Restart = "on-failure";
         RestartSec = "3s";
       };

@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "5521f99448f045e3eaa15da4ca081254a84380d3dd2dc345b75bbfbde8e65cdb"
+SOURCE_SNAPSHOT_SHA256 = "55b18d2e05511e078257ff258cdaf915aa6295f4a106505327f8af631001c25b"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -660,6 +660,15 @@ class T(unittest.TestCase):
         self.assertIn('/home/alex/.local/bin/tunnel-client run --profile grosser-adler', module)
         self.assertIn('ProtectHome = "read-only";', module)
         self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
+
+    def test_rustdesk_root_host_matches_pinned_live_version_and_blocks_duplicate(self):
+        module = (SOURCE / "modules/desktop.nix").read_text()
+        self.assertIn('rev = "1d060086d60cb76a40cf37109f979d88a5bd6396";', module)
+        self.assertIn('narHash = "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=";', module)
+        self.assertIn('ExecStart = "${rustdesk150Pkgs.rustdesk-flutter}/bin/rustdesk --service";', module)
+        self.assertNotIn('ExecStart = "${pkgs.rustdesk-flutter}', module)
+        self.assertIn('conflicts = [ "rustdesk-host-test.service" "rustdesk-input-v150.service" ];', module)
+        self.assertIn('after = [ "network.target" "rustdesk-host-test.service" "rustdesk-input-v150.service" ];', module)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
