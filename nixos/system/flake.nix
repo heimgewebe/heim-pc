@@ -391,7 +391,6 @@
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
           modules = [
             ./modules/restic-seagate-backup.nix
-            ./modules/fotoatelier.nix
             ./modules/grosser-adler.nix
             ({ pkgs, ... }: {
               # The original operator's bounded task/job tools call systemd-run --user.

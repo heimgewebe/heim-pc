@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "5b7ba44ba1eec48fc441831358207cf7eae60fd34a5932dcbf6e6d6a03a8a0ca"
+SOURCE_SNAPSHOT_SHA256 = "08f525cc3c3fb23aa8a59d5c45934a7ffdae1ac9cc7bd46e19ebe0ebb894cf4e"
 ROOT_LOCK_SHA256 = "419e0c20ee1d118560a0171929be7fbf3a446bd9b52eda9581cad00942dc303d"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -462,7 +462,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 50)
+        self.assertEqual(len(files), 49)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -505,7 +505,7 @@ class T(unittest.TestCase):
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
             "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/grosser-adler.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/fotoatelier.nix", "modules/heim-pc-restic-recovery-probe.py",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
