@@ -1,0 +1,19 @@
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -237,7 +237,15 @@
+             if (!found) {
+                 qCWarning(KRDP) << "No virtual output found for RDP pointer" << outputName;
+                 return;
+             }
+-        }
++        } else if (const auto physicalIndex = activeStream()) {
++            if (*physicalIndex >= qApp->screens().size()) {
++                qCWarning(KRDP) << "Invalid physical monitor index for RDP pointer" << *physicalIndex;
++                return;
++            }
++            const auto geometry = qApp->screens().at(*physicalIndex)->geometry();
++            logicalPosition = QPointF{(position.x() / size().width()) * geometry.width() + geometry.x(),
++                                      (position.y() / size().height()) * geometry.height() + geometry.y()};
++        }
+         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+         break;

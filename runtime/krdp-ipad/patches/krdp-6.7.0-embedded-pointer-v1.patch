@@ -1,0 +1,53 @@
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -173,7 +173,7 @@
+ void PlasmaScreencastV1Session::start()
+ {
+     if (auto vm = virtualMonitor()) {
+-        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
++        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR") ? Screencasting::Embedded : Screencasting::Metadata);
+     } else if (const auto streamIndex = activeStream()) {
+         if (*streamIndex >= qApp->screens().size()) {
+             qCWarning(KRDP) << "Invalid monitor index" << *streamIndex;
+@@ -179,7 +179,7 @@
+             return;
+         }
+         auto screen = qApp->screens().at(*streamIndex);
+-        d->request = d->m_screencasting.createOutputStream(screen, Screencasting::Metadata);
++        d->request = d->m_screencasting.createOutputStream(screen, qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR") ? Screencasting::Embedded : Screencasting::Metadata);
+     } else {
+         d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+     }
+--- a/src/Cursor.h
++++ b/src/Cursor.h
+@@ -52,9 +52,9 @@
+     ~Cursor();
+ 
+     void update(const CursorUpdate &update);
++    void setCursorType(CursorType type);
+ 
+ private:
+-    void setCursorType(CursorType type);
+ 
+     class Private;
+     const std::unique_ptr<Private> d;
+--- a/server/SessionController.cpp
++++ b/server/SessionController.cpp
+@@ -49,11 +49,16 @@
+             session->setClipboardData(clipboard->getClipboard());
+         });
+ 
++        connect(connection, &KRdp::RdpConnection::stateChanged, this, [this](KRdp::RdpConnection::State state) {
++            if (state == KRdp::RdpConnection::State::Streaming && connection && qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR")) {
++                connection->cursor()->setCursorType(KRdp::Cursor::CursorType::Hidden);
++            }
++        });
+         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+     }
+ 
+     void onCursorUpdate(const PipeWireCursor &cursor)
+     {
+-        if (!connection) {
++        if (!connection || qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR")) {
+             return;
+         }
