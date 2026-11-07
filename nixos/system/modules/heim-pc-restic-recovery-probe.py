@@ -352,9 +352,8 @@ def main() -> int:
     snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
     restored_sha = _restore_digest(snapshot_id)
     part = _next_check_part()
-    # The tenth successful step is also a FULL data check, not only 10/10.
-    scope = "full" if part == CHECK_PARTS else "partial"
-    check_mode = "--read-data" if scope == "full" else f"--read-data-subset={part}/{CHECK_PARTS}"
+    # Ten successful daily partitions cover the entire repository exactly once.
+    check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
     _restic("check", check_mode, "--retry-lock", "6h", timeout=7 * 3600)
     if _mount_identity() != mounted_device:
         raise RuntimeError("backup mount identity changed while proving recovery")
@@ -376,8 +375,8 @@ def main() -> int:
         "restore_sha256": restored_sha,
         "restore_probe_valid": True,
         "repository_check_valid": True,
-        "check_scope": scope,
-        "check_subset": None if scope == "full" else f"{part}/{CHECK_PARTS}",
+        "check_scope": "partial",
+        "check_subset": f"{part}/{CHECK_PARTS}",
     })
     return 0
 

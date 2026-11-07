@@ -140,7 +140,7 @@
       StateDirectory = "heim-pc-restic-recovery-probe";
       StateDirectoryMode = "0755";
       UMask = "0022";
-      # May wait for a long exclusive Restic lock and every tenth check reads ALL data.
+      # May wait for a long exclusive Restic lock and read one tenth of the data.
       TimeoutStartSec = "8h";
       NoNewPrivileges = true;
       RestrictSUIDSGID = true;
@@ -169,7 +169,7 @@
     };
   };
 
-  # Rotating data check runs daily; the tenth successful check reads all data.
+  # Rotating daily data checks cover all data once per ten successful checks.
   # This routine verifies backup integrity; retention independently checks backup freshness.
   systemd.timers."heim-pc-restic-recovery-probe" = {
     wantedBy = [ "timers.target" ];

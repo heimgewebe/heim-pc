@@ -80,7 +80,7 @@ class RotationEffectsTests(unittest.TestCase):
                     self.assertEqual(probe.main(), 0)
                 calls = [c for c in check.call_args_list if c.args and c.args[0] == "check"]
                 self.assertEqual(len(calls), 1)
-                mode = "--read-data" if part == 10 else f"--read-data-subset={part}/10"
+                mode = f"--read-data-subset={part}/10"
                 self.assertEqual(calls[0].args, ("check", mode, "--retry-lock", "6h"))
                 if fail:
                     commit.assert_not_called()
@@ -89,12 +89,10 @@ class RotationEffectsTests(unittest.TestCase):
                     commit.assert_called_once_with(part)
                     proof_out.assert_called_once()
                     payload = proof_out.call_args.args[0]
-                    self.assertEqual(payload["check_scope"],
-                                     "full" if part == 10 else "partial")
-                    self.assertEqual(payload["check_subset"],
-                                     None if part == 10 else f"{part}/10")
+                    self.assertEqual(payload["check_scope"], "partial")
+                    self.assertEqual(payload["check_subset"], f"{part}/10")
 
-    def test_tenth_success_reads_all_data(self) -> None:
+    def test_tenth_success_reads_last_tenth(self) -> None:
         self.invoke(10)
 
     def test_prior_nine_steps_read_different_subsets(self) -> None:
@@ -102,13 +100,13 @@ class RotationEffectsTests(unittest.TestCase):
             with self.subTest(part=part):
                 self.invoke(part)
 
-    def test_failed_full_check_does_not_advance_or_publish_success(self) -> None:
+    def test_failed_last_subset_does_not_advance_or_publish_success(self) -> None:
         self.invoke(10, fail=True)
 
     def test_failed_partial_check_does_not_advance(self) -> None:
         self.invoke(2, fail=True)
 
-    def test_nixos_probe_timer_is_daily_and_ends_in_full_check(self) -> None:
+    def test_nixos_probe_timer_is_daily_and_auto_checks(self) -> None:
         nix = (Path(__file__).resolve().parents[1]
                / "nixos/system/modules/restic-seagate-backup.nix").read_text()
         self.assertIn('systemd.timers."heim-pc-restic-recovery-probe" = {', nix)

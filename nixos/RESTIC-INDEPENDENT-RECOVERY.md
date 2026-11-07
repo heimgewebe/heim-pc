@@ -20,7 +20,7 @@
 - Täglich nach dem morgendlichen Backup: Eine kleine Datei aus dem Snapshot
   testweise wiederherstellen und byteweise mit Restic `dump` vergleichen.
   Anschließend durch `restic check` jeweils ein Zehntel der Daten lesen.
-  Jeder zehnte erfolgreich abgeschlossene Durchlauf prüft alle Daten.
+  Zehn erfolgreiche Durchläufe prüfen sämtliche gespeicherten Daten einmal.
 - Sonntags: Nur **NixOS-Snapshots** mit Host `heim-pc-nixos` und
   Tag `nixos-seagate` nach konservativer Regel aufräumen. Die letzten 14,
   alle innerhalb von 7 Tagen, 14 tägliche, 8 wöchentliche, 12 monatliche
