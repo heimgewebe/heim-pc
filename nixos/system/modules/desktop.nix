@@ -96,6 +96,7 @@ in {
       wantedBy = [ "graphical-session.target" ];
       after = [ "plasma-kwin_wayland.service" ];
       partOf = [ "graphical-session.target" ];
+      unitConfig.ConditionUser = "alex";
       serviceConfig = {
         Type = "simple";
         ExecStart = "${rustdeskGrantSync}/bin/rustdesk-kde-screen-grant-sync --watch";
