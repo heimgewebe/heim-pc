@@ -20,10 +20,10 @@ import stat
 import sys
 from typing import Any
 
-PINNED_RELEASE = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144"
-PINNED_REVISION = "d79243e39734c1f4ee10f2b43be1cca266f54e00"
+PINNED_RELEASE = "0d70eb0f-nixos-lock264e747ad05a-contract7130dc15a144"
+PINNED_REVISION = "0d70eb0f091773742a0a1d91966dffada399008a"
 PINNED_LOCK_SHA256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
-ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-d79243e3\Z")
+ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-0d70eb0f\Z")
 REQUIRED_MODULE = "lib/python3.12/site-packages/grabowski_mcp.py"
 MANIFEST_RELATIVE = "share/grabowski/nixos-integrity-manifest.json"
 CONTRACT_RELATIVE = "share/grabowski/config/runtime-entrypoint.json"
