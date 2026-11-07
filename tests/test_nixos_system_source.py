@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "55b18d2e05511e078257ff258cdaf915aa6295f4a106505327f8af631001c25b"
+SOURCE_SNAPSHOT_SHA256 = "641e1c1d8827bc381e73344faeba3ea9e7c282913ed1ffa30913da7a4aa37611"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -661,14 +661,23 @@ class T(unittest.TestCase):
         self.assertIn('ProtectHome = "read-only";', module)
         self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
 
-    def test_rustdesk_root_host_matches_pinned_live_version_and_blocks_duplicate(self):
-        module = (SOURCE / "modules/desktop.nix").read_text()
-        self.assertIn('rev = "1d060086d60cb76a40cf37109f979d88a5bd6396";', module)
-        self.assertIn('narHash = "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=";', module)
-        self.assertIn('ExecStart = "${rustdesk150Pkgs.rustdesk-flutter}/bin/rustdesk --service";', module)
-        self.assertNotIn('ExecStart = "${pkgs.rustdesk-flutter}', module)
-        self.assertIn('conflicts = [ "rustdesk-host-test.service" "rustdesk-input-v150.service" ];', module)
-        self.assertIn('after = [ "network.target" "rustdesk-host-test.service" "rustdesk-input-v150.service" ];', module)
+    def test_rustdesk_host_uses_matching_nixos_151_and_native_gst(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        pkg = (SOURCE / "modules/rustdesk151-appdir.nix").read_text()
+        sudo = (SOURCE / "modules/rustdesk151-sudo-adapter.sh.in").read_text()
+        self.assertIn("rustdesk151AppDir = import ./rustdesk151-appdir.nix", desktop)
+        self.assertIn("ExecStart = " + chr(34) + '${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service' + chr(34) + ";", desktop)
+        self.assertNotIn("rustdesk150Source", desktop)
+        self.assertNotIn("pkgs.rustdesk-flutter", desktop)
+        self.assertIn('version = "1.5.1";', pkg)
+        self.assertIn('sha256-u4t8yz9QogHczcibRjhc/5DzPmC0cw+u2p+lUErE3OY=', pkg)
+        self.assertIn('pkgs.pipewire', pkg)
+        self.assertIn("noOpAppRunHooks", pkg)
+        self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
+        self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
+        self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
+        self.assertIn('"$2" != "alex"', sudo)
+        self.assertIn('"$2" != "--server"', sudo)
 
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
@@ -678,7 +687,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 52)
+        self.assertEqual(len(files), 54)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))

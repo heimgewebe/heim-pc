@@ -1,19 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.heimPc.desktop;
-  # Same immutable Nixpkgs commit and NAR used by the live RustDesk 1.5.0
-  # user profile; do not upgrade the system-wide Nixpkgs just for this helper.
-  rustdesk150Source = builtins.fetchTree {
-    type = "github";
-    owner = "NixOS";
-    repo = "nixpkgs";
-    rev = "1d060086d60cb76a40cf37109f979d88a5bd6396";
-    narHash = "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=";
-  };
-  rustdesk150Pkgs = import rustdesk150Source.outPath {
-    system = pkgs.stdenv.hostPlatform.system;
-    config.allowUnfree = true;
-  };
+  rustdesk151AppDir = import ./rustdesk151-appdir.nix { inherit pkgs; };
 in {
   options.heimPc.desktop.enable = lib.mkEnableOption "KDE Plasma/Wayland workstation profile";
   config = lib.mkIf cfg.enable {
@@ -83,22 +71,18 @@ in {
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
       lib.optionals config.services.tailscale.enable [ 3389 ];
 
-    # The logged-in Plasma/Wayland session is already served by alex's
-    # rustdesk-session.service. Persist its matching privileged host helper
-    # across a reboot instead of relying on a four-hour systemd-run test unit.
-    # The live user profile uses RustDesk 1.5.0. The default pinned host
-    # pkgs.rustdesk-flutter is still 1.4.5, so use the separately NAR-pinned
-    # build above for the privileged helper as well.
+    # Root RustDesk 1.5.1 owns its one Wayland UID1000 --server child.
+    # The AppImage is hash-verified, with the native PipeWire/GStreamer
+    # plugin set, safe AppRun hook, NixOS loginctl and a limited UID drop.
+    # The old per-user rustdesk-session.service must not be enabled.
     systemd.services.rustdesk-host = {
-      description = "RustDesk host helper for the KDE Wayland desktop";
+      description = "RustDesk 1.5.1 host helper for KDE Wayland";
       wantedBy = [ "multi-user.target" ];
-      # Never run a second root helper alongside the 1.5.0 fallback.
-      # Only a separately coordinated system activation may perform cutover.
-      conflicts = [ "rustdesk-host-test.service" "rustdesk-input-v150.service" ];
-      after = [ "network.target" "rustdesk-host-test.service" "rustdesk-input-v150.service" ];
+      conflicts = [ "rustdesk-host-test.service" ];
+      after = [ "network.target" ];
       serviceConfig = {
         Type = "exec";
-        ExecStart = "${rustdesk150Pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        ExecStart = "${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service";
         Restart = "on-failure";
         RestartSec = "3s";
       };

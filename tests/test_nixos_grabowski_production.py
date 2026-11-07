@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "e46223b6e86734032a8b94b8d94c5eeeef096bc3"
-TARBALL_HASH = "sha256-JNVFw0NfFvHnNPoS2VC70roZ3IejaaQpTThqplv+Ow8="
+REVISION = "d79243e39734c1f4ee10f2b43be1cca266f54e00"
+TARBALL_HASH = "sha256-3eawDmqWBEimhMH7GJkPJP7CTsMORasSC9nU6kONxSM="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -163,7 +163,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea"
+        release_id = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -185,12 +185,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # The deployment manifest maps runtime.py to grabowski_operator and
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
-        self.assertIn('len(expected) == 206', op)
-        self.assertIn('len(supporting) != 132', op)
+        self.assertIn('len(expected) == 207', op)
+        self.assertIn('len(supporting) != 133', op)
         integrity = (MODULES / 'grabowski-nixos-integrity.py').read_text()
-        self.assertIn('len(tools) != 206', integrity)
-        self.assertIn('len(set(tools)) != 206', integrity)
-        self.assertIn('len(actual) != 206', flake)
+        self.assertIn('len(tools) != 207', integrity)
+        self.assertIn('len(set(tools)) != 207', integrity)
+        self.assertIn('len(actual) != 207', flake)
+        self.assertIn('if "grabowski_chronik_full_search" not in expected:', flake)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
@@ -204,7 +205,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;", flake)
         self.assertIn("grabowski-release-artifacts =", flake)
         self.assertIn('if observed != expected:', flake)
-        self.assertIn('if len(expected) != 206:', flake)
+        self.assertIn('if len(expected) != 207:', flake)
         self.assertIn('"cmdline"', flake)
         self.assertIn("test -x ${operator}/bin/grabowski-operator", flake)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
