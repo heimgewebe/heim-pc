@@ -1,6 +1,6 @@
 # Restic — unabhängige Wiederherstellung und Retention-Freigabe
 
-Status 2026-11-06: **keine unabhängige vollständige Wiederherstellung nachgewiesen; Retention bleibt gesperrt.**
+Status 2026-11-07: **kein vollständiger Restore auf unabhängiger Hardware nachgewiesen; Retention bleibt gesperrt.**
 
 Der funktionierende lokale `heim-pc-restic-recovery-probe`-Nachweis ist **kein**
 unabhängiger Restore. Seine JSON-Datei darf nie zur Retention-Freigabe verwendet
@@ -10,15 +10,24 @@ darf niemals auf dem Heim-PC liegen.
 
 ## Voraussetzungen
 
-1. Eine **zweite, eigenständige Kopie** des verschlüsselten Restic-Repositories
-   auf anderer Hardware. Das Umstecken der einzigen USB-Backup-Platte genügt
-   nicht: Es bleibt sonst nur eine Kopie.
-2. Ein unabhängig vom Heim-PC beschafftes und erfolgreich getestetes
-   Restore-Passwort. Keine Geheimnisse in Git, stdout, Chat oder Protokollen.
-3. Genug freie Kapazität für die Kopie **und** den vollständigen Restore.
-   Stand 2026-11-06: Repository ca. 439 GiB belegt, letztes Backup enthält
-   logisch ca. 407 GiB; Heimberry hat nur ca. 209 GiB frei. Für den vollen
-   Test sind zusätzliche externe Datenträger erforderlich.
+1. **Vorhandene externe 4-TB-Platte HEIM_BACKUP:** 3,6 TiB, davon am
+   2026-11-07 rund 3,1 TiB frei. Das vorhandene Restic-Repository belegt
+   rund 439 GiB. Platte bei angehaltenem Backup ordnungsgemäß vom Heim-PC
+   aushängen und **auf Heimberry** anschließen. Der vollständige Restore
+   (~407 GiB beim letzten Lauf) kann auf der selben Platte in einem
+   **anderen Verzeichnis außerhalb von `restic/`** erfolgen; weder
+   Repository noch Quell-Snapshots dürfen überschrieben werden.
+2. **Kein Benutzerpasswort erforderlich:** Das bestehende Restic-Schlüsselmaterial
+   wurde auf Heimberry nach `/var/lib/heimberry/restic-recovery/heim-pc.key`
+   übertragen und byteweise mit dem Quellschlüssel verglichen (root:root 0600).
+   Restic erhält diesen Schlüssel automatisch via `--password-file`; kein
+   Mensch muss ein Passwort kennen oder eintippen. Ein echter off-host
+   Entschlüsselungs-/Restore-Lauf steht bis zum Umstecken noch aus.
+3. **Unabhängige Hardware ist Heimberry**, nicht ein zweiter Speicherdatenträger.
+   Der Original-Backupdatenträger muss dabei intakt bleiben. Das ist ein
+   realistischer Ausfalltest **des Heim-PCs**, aber **kein** Beweis für
+   Datenträgerredundanz. Eine zweite Kopie schützt zusätzlich gegen Ausfall
+   oder Verlust gerade dieser USB-Platte, ist jedoch keine Vorbedingung.
 4. Ausreichende Laufzeit zum echten Lesen und Vergleichen aller Dateien.
 
 Repositoryquelle: `/var/lib/heim-pc-backup/restic/heim-pc` auf
@@ -30,8 +39,9 @@ unkonsistenten Dateikopie dulden.
 
 ## End-to-End-Nachweis ausschließlich auf unabhängiger Hardware
 
-Die folgenden Platzhalter müssen *dort* auf tatsächliche, getrennte Verzeichnisse
-gesetzt werden: `REPO` (unabhängige Kopie), `PASS` (off-host Escrow),
+Die folgenden Platzhalter müssen *auf Heimberry* auf getrennte Verzeichnisse
+zeigen: `REPO` (direkter USB-Backup-Datenträger oder unabhängige Kopie),
+`PASS` (bereits hinterlegter root-only Schlüssel, ohne Benutzereingabe),
 `SNAPSHOT` (volle 64-stellige ID eines gesicherten NixOS-Snapshots),
 `RESTORE` (leeres Ziel), `VIEW` (leerer FUSE-Mountpunkt).
 
@@ -65,7 +75,7 @@ unabhängigen Host prüfen; der Hashvergleich deckt diese Metadaten nicht ab.
 
 ## Signierte Attestierung
 
-Erst nach erfolgreicher Wiederherstellung und unabhängiger Passwortprüfung eine
+Erst nach erfolgreicher Wiederherstellung und nachgewiesener, automatischer Restic-Schlüsselverwendung eine
 JSON-Datei mit exakt diesen Feldern erstellen (Platzhalter nicht als Belege
 verwenden):
 
@@ -76,9 +86,9 @@ verwenden):
   "backup_uuid": "9b626294-7913-4be0-88fa-96b314e96ee5",
   "source_host": "heim-pc-nixos",
   "restore_host": "<tatsaechlich-verwendeter-anderer-rechner>",
-  "restore_medium": "independent-repository-copy",
+  "restore_medium": "external-backup-disk",
   "complete_restore": true,
-  "off_host_password_escrow_verified": true,
+  "off_host_recovery_access_verified": true,
   "completed_at_unix": 0,
   "snapshot_id": "<volle-64-stellige-Snapshot-ID>",
   "inventory": {
@@ -98,7 +108,7 @@ verwenden):
 `inventory` aus `independent-inventory.json` übernehmen,
 `completed_at_unix` nach Abschluss auf den tatsächlichen UTC-Unix-Zeitpunkt
 setzen, Snapshot-/Repository-ID und Host nachprüfen. `complete_restore` und
-`off_host_password_escrow_verified` nur bei tatsächlichem Erfolg auf `true`
+`off_host_recovery_access_verified` nur bei tatsächlichem Erfolg auf `true`
 setzen.
 
 Den Schlüssel **auf dem unabhängigen Host** erzeugen und dort lassen:
@@ -137,6 +147,13 @@ dürfen entfernt werden. Die attestierte ID und historische Pop!_OS-Snapshots
 bleiben unangetastet. Ohne gültiges Attest startet der Löschjob nicht.
 
 Eine durchgeführte unabhängige Wiederherstellung ist erst abgenommen, wenn
-Snapshot-ID, Restore-Host, Inventar-SHA256, Passwort-Escrow, Restore-/Check-Logs
+Snapshot-ID, Restore-Host, Inventar-SHA256, Recovery-Key-Zugriff, Restore-/Check-Logs
 und unveränderte Historie frisch belegt sind. Die lokale Probe allein reicht
 nicht. Keine pauschalen `restic unlock`-Befehle.
+
+Die Verfügbarkeit des Schlüssels auf Heimberry wurde unabhängig vom PC-Dateisystem
+geprüft; wiederholen lässt sich die Kopie über
+`scripts/restic-recovery-key-to-heimberry.sh`, ohne den Schlüssel anzuzeigen.
+Die Signatur der späteren Restore-Bestätigung ist eine automatisierte
+Integritätsprüfung, **keine** zusätzliche Benutzerauthentifizierung.
+Auch nach physischem PC-Ausfall wird kein manuelles Restic-Passwort verlangt.

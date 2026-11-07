@@ -33,7 +33,7 @@ def proof(now: int) -> dict:
         "source_host": ret.HOST, "restore_host": "recovery-host-2",
         "restore_medium": "independent-repository-copy",
         "complete_restore": True,
-        "off_host_password_escrow_verified": True,
+        "off_host_recovery_access_verified": True,
         "completed_at_unix": now - 100,
         "snapshot_id": CURRENT_ID,
         "inventory": {
@@ -73,7 +73,7 @@ class RetentionEffectsTests(unittest.TestCase):
             {"snapshot_id": POP_ID},
             {"complete_restore": False},
             {"restore_medium": "same-disk"},
-            {"off_host_password_escrow_verified": False},
+            {"off_host_recovery_access_verified": False},
             {"completed_at_unix": now - 31 * 86400},
             {"inventory": {**original["inventory"], "restored_sha256": "0" * 64}},
             {"inventory": {**original["inventory"], "covered_paths": ["/home/alex"]}},
@@ -122,6 +122,14 @@ class RetentionEffectsTests(unittest.TestCase):
                                        encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, "openssl failed"):
                     ret.independent_proof(now, SNAPS)
+
+    def test_original_external_drive_works_on_another_restore_host(self) -> None:
+        now = int(time.time())
+        valid = {**proof(now), "restore_host": "heimberry",
+                 "restore_medium": "external-backup-disk"}
+        with patch.object(ret, "command", return_value="Verified OK"):
+            with patch.object(ret, "read_trusted", return_value=json.dumps(valid).encode()):
+                self.assertEqual(ret.independent_proof(now, SNAPS), CURRENT_ID)
 
     def test_dry_run_rejects_pop_os_and_attested_snapshot(self) -> None:
         for record in (SNAPS[POP_ID], SNAPS[CURRENT_ID]):

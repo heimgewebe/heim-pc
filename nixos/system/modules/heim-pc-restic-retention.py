@@ -99,9 +99,9 @@ def independent_proof(now: int, all_snapshots: dict) -> str:
             or proof.get("repository_id") != REPO_ID
             or proof.get("backup_uuid") != DEVICE_UUID
             or proof.get("source_host") != HOST
-            or proof.get("restore_medium") != "independent-repository-copy"
+            or proof.get("restore_medium") not in ("independent-repository-copy", "external-backup-disk")
             or proof.get("complete_restore") is not True
-            or proof.get("off_host_password_escrow_verified") is not True
+            or proof.get("off_host_recovery_access_verified") is not True
             or not isinstance(host, str) or not host or host.startswith("heim-pc")
             or not isinstance(complete_at, int) or isinstance(complete_at, bool)
             or not 0 <= now - complete_at <= MAX_PROOF_AGE
