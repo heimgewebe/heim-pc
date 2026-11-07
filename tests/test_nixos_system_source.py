@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "78e0853701ac925a52e1a9281ea70289f544f78176723e00501ab7c9d1bbfa9b"
+SOURCE_SNAPSHOT_SHA256 = "ca4ad57576aaa718a5f912a467b29e8e83bdd750646f3b91e0d338f3f8f9425c"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -687,6 +687,9 @@ class T(unittest.TestCase):
         watcher = (SOURCE / "modules/rustdesk-screen-grant-hotplug.cpp").read_text()
         self.assertIn("systemd.user.services.rustdesk-screen-grant-sync", desktop)
         self.assertIn('wantedBy = [ "graphical-session.target" ];', desktop)
+        grant_unit = desktop.split("systemd.user.services.rustdesk-screen-grant-sync =", 1)[1]
+        grant_unit = grant_unit.split('systemd.user.services."drkonqi-coredump-launcher@"', 1)[0]
+        self.assertIn('unitConfig.ConditionUser = "alex";', grant_unit)
         self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
         package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
         self.assertIn("pkgs.stdenv.mkDerivation", package)
