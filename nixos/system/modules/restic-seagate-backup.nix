@@ -76,12 +76,10 @@
   # Weekly pruning is deliberately separate from the backup timer and never
   # runs Restic's global 'unlock' (which may invalidate another process' lock).
   systemd.services."heim-pc-restic-retention" = {
-    description = "Scoped weekly retention; requires independent signed full-restore evidence";
+    description = "Conservative weekly NixOS-only Restic retention";
     unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
-    # A missing attestation means *skip*, never automatic deletion.
-    unitConfig.ConditionPathExists = "/persist/secrets/restic/independent-restore.json";
     after = [ "restic-backups-heim-pc.service" ];
-    path = [ pkgs.restic pkgs.util-linux pkgs.openssl pkgs.systemd ];
+    path = [ pkgs.restic pkgs.util-linux pkgs.systemd ];
     environment = {
       RESTIC_REPOSITORY = "/var/lib/heim-pc-backup/restic/heim-pc";
       RESTIC_PASSWORD_FILE = "/persist/secrets/restic/heim-pc-password";
@@ -172,7 +170,7 @@
   };
 
   # Rotating data check runs daily; the tenth successful check reads all data.
-  # This proof is local only and NEVER authorizes snapshot retention.
+  # This routine verifies backup integrity; retention independently checks backup freshness.
   systemd.timers."heim-pc-restic-recovery-probe" = {
     wantedBy = [ "timers.target" ];
     timerConfig = {

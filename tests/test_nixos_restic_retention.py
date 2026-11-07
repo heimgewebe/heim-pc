@@ -24,24 +24,24 @@ class SeagateResticRetentionTests(unittest.TestCase):
         self.assertIn('"--host=heim-pc-nixos"', self.module)
         self.assertIn('"--tag=nixos-seagate"', self.module)
 
-    def test_retention_requires_separate_signed_independent_restore(self) -> None:
-        self.assertIn('ConditionPathExists = "/persist/secrets/restic/independent-restore.json";', self.retention)
+    def test_retention_is_automatic_but_only_for_recent_complete_backups(self) -> None:
+        self.assertNotIn("ConditionPathExists", self.retention)
         self.assertIn('heim-pc-restic-retention.py', self.retention)
-        self.assertIn('pkgs.openssl', self.retention)
+        self.assertNotIn("pkgs.openssl", self.retention)
         self.assertIn('ReadWritePaths = [ "/var/lib/heim-pc-backup" ];', self.retention)
         self.assertIn('RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];', self.retention)
         self.assertIn('restic("forget", "--dry-run", "--json", "--retry-lock=6h"', self.script)
         self.assertIn('restic("forget", "--retry-lock=6h", *removed', self.script)
         self.assertIn('restic("prune", "--retry-lock=6h"', self.script)
-        self.assertIn('source_hash != restored_hash', self.script)
-        self.assertIn('openssl", "dgst", "-sha256", "-verify"', self.script)
-        self.assertIn('unitConfig.ConditionPathExists', self.retention)
+        self.assertIn("latest_healthy_snapshot", self.script)
+        self.assertNotIn("independent_proof", self.script)
+        self.assertIn("MAX_BACKUP_AGE = 72 * 3600", self.script)
         self.assertNotIn('restic unlock', self.script)
 
     def test_pop_os_history_is_never_targeted_by_policy(self) -> None:
         self.assertIn('HOST, TAG = "heim-pc-nixos", "nixos-seagate"', self.script)
         self.assertIn('"--host", HOST, "--tag", TAG', self.script)
-        self.assertIn('sid == attested_snapshot', self.script)
+        self.assertIn("sid == protected_snapshot", self.script)
         self.assertIn('snap.get("hostname") != HOST', self.script)
 
     def test_retention_timer_and_non_suspending_io(self) -> None:

@@ -1166,8 +1166,7 @@ PY
           assert rootResticProof.TimeoutStartSec == "8h";
           # Retention stays idle without an independent signed full-restore
           # attestation; a local probe is never delete authority.
-          assert rootResticCandidate.systemd.services."heim-pc-restic-retention".unitConfig.ConditionPathExists
-            == "/persist/secrets/restic/independent-restore.json";
+          assert !(rootResticCandidate.systemd.services."heim-pc-restic-retention".unitConfig ? ConditionPathExists);
           assert rootResticCandidate.systemd.services."heim-pc-restic-retention".serviceConfig.User
             == "root";
           assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;

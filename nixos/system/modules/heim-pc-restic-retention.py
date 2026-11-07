@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Scoped Restic retention. No deletion without off-host restore attestation."""
+"""Conservative weekly NixOS snapshot retention, no off-host proof or password prompt."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -14,9 +14,6 @@ import time
 MOUNT = Path("/var/lib/heim-pc-backup")
 REPO = MOUNT / "restic/heim-pc"
 PASSWORD = Path("/persist/secrets/restic/heim-pc-password")
-ATTESTATION = Path("/persist/secrets/restic/independent-restore.json")
-SIGNATURE = Path("/persist/secrets/restic/independent-restore.json.sig")
-PUBLIC_KEY = Path("/persist/secrets/restic/independent-restore-public.pem")
 DEVICE_UUID = "9b626294-7913-4be0-88fa-96b314e96ee5"
 REPO_ID = "85ee278eeb58f42c26745796cb7b23239d4c7c01f5f4d00f2c10e216cefa4972"
 HOST, TAG = "heim-pc-nixos", "nixos-seagate"
@@ -24,7 +21,7 @@ REQUIRED_PATHS = {
     "/home/alex", "/persist", "/etc", "/var/lib/tailscale",
     "/var/lib/NetworkManager", "/var/lib/nixos", "/var/lib/grabowski",
 }
-MAX_PROOF_AGE = 30 * 86400
+MAX_BACKUP_AGE = 72 * 3600
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 POLICY = (
     "--host", HOST, "--tag", TAG, "--group-by", "host,paths,tags",
@@ -64,67 +61,25 @@ def require_repository() -> None:
         raise RuntimeError("Restic repository ID differs")
 
 
-def read_trusted(path: Path, limit: int) -> bytes:
-    info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-            or info.st_mode & 0o022 or info.st_nlink != 1
-            or info.st_size < 1 or info.st_size > limit):
-        raise RuntimeError("invalid root-owned restore attestation material")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        live = os.fstat(fd)
-        if (live.st_ino != info.st_ino or live.st_dev != info.st_dev
-                or live.st_size != info.st_size):
-            raise RuntimeError("restore attestation changed during inspection")
-        return os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
-
-
-def independent_proof(now: int, all_snapshots: dict) -> str:
-    # Verification private key MUST remain on the independent restore host.
-    raw = read_trusted(ATTESTATION, 32768)
-    read_trusted(SIGNATURE, 8192)
-    read_trusted(PUBLIC_KEY, 8192)
-    command(["openssl", "dgst", "-sha256", "-verify", str(PUBLIC_KEY),
-             "-signature", str(SIGNATURE), str(ATTESTATION)])
-    proof = json.loads(raw)
-    if not isinstance(proof, dict):
-        raise RuntimeError("invalid independent restore attestation")
-    snapshot = proof.get("snapshot_id")
-    complete_at = proof.get("completed_at_unix")
-    inventory = proof.get("inventory")
-    host = proof.get("restore_host")
-    if (proof.get("kind") != "heim_pc.restic_independent_full_restore.v1"
-            or proof.get("repository_id") != REPO_ID
-            or proof.get("backup_uuid") != DEVICE_UUID
-            or proof.get("source_host") != HOST
-            or proof.get("restore_medium") not in ("independent-repository-copy", "external-backup-disk")
-            or proof.get("complete_restore") is not True
-            or proof.get("off_host_recovery_access_verified") is not True
-            or not isinstance(host, str) or not host or host.startswith("heim-pc")
-            or not isinstance(complete_at, int) or isinstance(complete_at, bool)
-            or not 0 <= now - complete_at <= MAX_PROOF_AGE
-            or not isinstance(snapshot, str) or not HEX64.fullmatch(snapshot)
-            or snapshot not in all_snapshots
-            or not isinstance(inventory, dict)):
-        raise RuntimeError("independent full restore proof absent, stale or mismatched")
-    source_hash = inventory.get("source_sha256")
-    restored_hash = inventory.get("restored_sha256")
-    paths = inventory.get("covered_paths")
-    if (not isinstance(source_hash, str) or not HEX64.fullmatch(source_hash)
-            or source_hash != restored_hash
-            or not isinstance(paths, list) or not REQUIRED_PATHS.issubset(set(
-                p for p in paths if isinstance(p, str)))
-            or type(inventory.get("file_count")) is not int
-            or inventory["file_count"] < 1
-            or type(inventory.get("total_bytes")) is not int
-            or inventory["total_bytes"] < 1):
-        raise RuntimeError("independent restore inventory equality is not proven")
-    snap = all_snapshots[snapshot]
-    if snap.get("hostname") != HOST or TAG not in snap.get("tags", []):
-        raise RuntimeError("attested snapshot does not belong to NixOS backup")
-    return snapshot
+def latest_healthy_snapshot(all_snapshots: dict, now: int) -> str:
+    """Conservatively skip deletion unless a recent complete NixOS backup exists."""
+    candidates = []
+    for sid, snap in all_snapshots.items():
+        if (snap.get("hostname") != HOST
+                or TAG not in snap.get("tags", [])
+                or not REQUIRED_PATHS.issubset(set(snap.get("paths", [])))):
+            continue
+        try:
+            created = int(datetime.fromisoformat(
+                snap["time"].replace("Z", "+00:00")
+            ).astimezone(timezone.utc).timestamp())
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if 0 <= now - created <= MAX_BACKUP_AGE:
+            candidates.append((created, sid))
+    if not candidates:
+        raise RuntimeError("no recent complete NixOS backup; retention skipped")
+    return max(candidates)[1]
 
 
 def snapshots() -> dict:
@@ -142,7 +97,7 @@ def snapshots() -> dict:
     return by_id
 
 
-def removal_plan(all_snapshots: dict, attested_snapshot: str) -> list[str]:
+def removal_plan(all_snapshots: dict, protected_snapshot: str) -> list[str]:
     groups = json.loads(restic("forget", "--dry-run", "--json", "--retry-lock=6h", *POLICY))
     if not isinstance(groups, list):
         raise RuntimeError("invalid forget dry-run plan")
@@ -151,6 +106,9 @@ def removal_plan(all_snapshots: dict, attested_snapshot: str) -> list[str]:
         if not isinstance(group, dict):
             raise RuntimeError("invalid forget group")
         entries = group.get("remove")
+        # Restic 0.18.1 emits null, not [], when every snapshot is kept.
+        if entries is None:
+            entries = []
         if not isinstance(entries, list):
             raise RuntimeError("invalid forget removal list")
         for item in entries:
@@ -162,7 +120,7 @@ def removal_plan(all_snapshots: dict, attested_snapshot: str) -> list[str]:
             snap = all_snapshots[sid]
             if (snap.get("hostname") != HOST
                     or TAG not in snap.get("tags", [])
-                    or sid == attested_snapshot):
+                    or sid == protected_snapshot):
                 raise RuntimeError("forget plan would delete protected history")
             removing.add(sid)
     return sorted(removing)
@@ -173,29 +131,25 @@ def main() -> int:
         raise RuntimeError("root-only fixed-argument retention command")
     require_repository()
     before = snapshots()
-    attested = independent_proof(int(time.time()), before)
-    removed = removal_plan(before, attested)
-    # Exact IDs from the validated dry run: new snapshots cannot change scope.
+    protected = latest_healthy_snapshot(before, int(time.time()))
+    removed = removal_plan(before, protected)
     if not removed:
-        print("Retention: dry-run contains no deletions; prune skipped")
+        print("Retention: no snapshots eligible; prune skipped")
         return 0
     if snapshots() != before:
         raise RuntimeError("repository snapshot set changed after dry-run")
-    # Recheck disk and repository identity immediately before BOTH mutations:
-    # an automounted USB device may disappear or be exchanged after dry-run.
+    # USB mount and Restic repository must remain the ones we inspected.
     require_repository()
-    independent_proof(int(time.time()), before)
     restic("forget", "--retry-lock=6h", *removed, timeout=6 * 3600)
-    # Prune affects unreferenced packs; other hosts' snapshots remain referenced.
+    # Referenced Pop!_OS data is preserved by Restic's normal prune semantics.
     require_repository()
     restic("prune", "--retry-lock=6h", timeout=6 * 3600)
-    print(f"Retention: removed {len(removed)} scoped snapshots, other hosts preserved")
+    print(f"Retention: removed {len(removed)} NixOS snapshots; other hosts preserved")
     return 0
-
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        print(f"Retention blocked: {exc}", file=sys.stderr)
+        print(f"Retention skipped: {exc}", file=sys.stderr)
         sys.exit(1)

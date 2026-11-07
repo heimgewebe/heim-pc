@@ -1,10 +1,9 @@
-"""Behavioural safety tests. No test uses a real backup repository."""
+"""Scoped retention behavioural tests. Never touch the live backup repository."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
 import json
-import subprocess
-import tempfile
 from pathlib import Path
 import time
 import unittest
@@ -16,216 +15,173 @@ assert SPEC is not None and SPEC.loader is not None
 ret = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ret)
 
-CURRENT_ID = "a" * 64
-OLD_ID = "b" * 64
-POP_ID = "c" * 64
-SNAPS = {
-    CURRENT_ID: {"id": CURRENT_ID, "hostname": ret.HOST, "tags": [ret.TAG]},
-    OLD_ID: {"id": OLD_ID, "hostname": ret.HOST, "tags": [ret.TAG]},
-    POP_ID: {"id": POP_ID, "hostname": "heim-pc", "tags": ["daily"]},
-}
+RECENT = "a" * 64
+OLDER = "b" * 64
+POP = "c" * 64
 
 
-def proof(now: int) -> dict:
+def entry(sid: str, host: str, tag: str, when: int, paths=None) -> dict:
     return {
-        "kind": "heim_pc.restic_independent_full_restore.v1",
-        "repository_id": ret.REPO_ID, "backup_uuid": ret.DEVICE_UUID,
-        "source_host": ret.HOST, "restore_host": "recovery-host-2",
-        "restore_medium": "independent-repository-copy",
-        "complete_restore": True,
-        "off_host_recovery_access_verified": True,
-        "completed_at_unix": now - 100,
-        "snapshot_id": CURRENT_ID,
-        "inventory": {
-            "source_sha256": "d" * 64,
-            "restored_sha256": "d" * 64,
-            "covered_paths": sorted(ret.REQUIRED_PATHS),
-            "file_count": 4000000, "total_bytes": 150000000000,
-        },
+        "id": sid, "hostname": host, "tags": [tag],
+        "paths": sorted(paths if paths is not None else ret.REQUIRED_PATHS),
+        "time": datetime.fromtimestamp(when, timezone.utc).isoformat(),
+    }
+
+
+def snapshots(now: int) -> dict[str, dict]:
+    return {
+        RECENT: entry(RECENT, ret.HOST, ret.TAG, now - 3600),
+        OLDER: entry(OLDER, ret.HOST, ret.TAG, now - 86400),
+        POP: entry(POP, "heim-pc", "daily", now - 100),
     }
 
 
 class RetentionEffectsTests(unittest.TestCase):
     def setUp(self) -> None:
-        # systemd invokes the root script without arguments; unittest does not.
         argv_patch = patch.object(ret.sys, "argv", ["heim-pc-restic-retention.py"])
         argv_patch.start()
         self.addCleanup(argv_patch.stop)
+        self.now = int(time.time())
+        self.rows = snapshots(self.now)
 
-    def test_missing_attestation_fails_before_any_forget(self) -> None:
-        with patch.object(ret.os, "geteuid", return_value=0):
-            with patch.object(ret, "require_repository"):
-                with patch.object(ret, "snapshots", return_value=SNAPS):
-                    with patch.object(ret, "independent_proof", side_effect=FileNotFoundError):
-                        with patch.object(ret, "restic") as repo_call:
-                            with self.assertRaises(FileNotFoundError):
-                                ret.main()
-                            repo_call.assert_not_called()
+    def test_recent_complete_nixos_backup_enables_retention_without_off_host_proof(self):
+        self.assertEqual(ret.latest_healthy_snapshot(self.rows, self.now), RECENT)
 
-    def test_no_local_machine_attestation_and_no_mismatched_inventory(self) -> None:
-        now = int(time.time())
-        original = proof(now)
-        invalid = [
-            {"restore_host": "heim-pc"},
-            {"restore_host": "heim-pc-nixos"},
-            {"repository_id": "0" * 64},
-            {"backup_uuid": "different"},
-            {"snapshot_id": POP_ID},
-            {"complete_restore": False},
-            {"restore_medium": "same-disk"},
-            {"off_host_recovery_access_verified": False},
-            {"completed_at_unix": now - 31 * 86400},
-            {"inventory": {**original["inventory"], "restored_sha256": "0" * 64}},
-            {"inventory": {**original["inventory"], "covered_paths": ["/home/alex"]}},
-        ]
-        with patch.object(ret, "command", return_value="Verified OK"):
-            for override in invalid:
-                with self.subTest(value=override):
-                    payload = json.dumps({**original, **override}).encode()
-                    with patch.object(ret, "read_trusted", return_value=payload):
-                        with self.assertRaises(RuntimeError):
-                            ret.independent_proof(now, SNAPS)
+    def test_foreign_or_partial_backups_cannot_authorize_retention(self):
+        bad = {
+            POP: self.rows[POP],
+            RECENT: entry(RECENT, ret.HOST, ret.TAG, self.now - 100,
+                          paths={"/home/alex", "/etc"}),
+        }
+        with self.assertRaisesRegex(RuntimeError, "no recent complete"):
+            ret.latest_healthy_snapshot(bad, self.now)
 
-    def test_matching_signed_full_restore_is_valid(self) -> None:
-        now = int(time.time())
-        payload = json.dumps(proof(now)).encode()
-        with patch.object(ret, "command", return_value="Verified OK") as openssl:
-            with patch.object(ret, "read_trusted", return_value=payload):
-                self.assertEqual(ret.independent_proof(now, SNAPS), CURRENT_ID)
-        self.assertEqual(openssl.call_count, 1)
-        self.assertEqual(openssl.call_args.args[0][0:3], ["openssl", "dgst", "-sha256"])
+    def test_stale_or_future_backups_skip_deletion(self):
+        for when in (self.now - ret.MAX_BACKUP_AGE - 1, self.now + 120):
+            with self.subTest(time=when):
+                row = {RECENT: entry(RECENT, ret.HOST, ret.TAG, when)}
+                with self.assertRaisesRegex(RuntimeError, "no recent complete"):
+                    ret.latest_healthy_snapshot(row, self.now)
 
-    def test_signed_attestation_rejects_tampered_bytes_with_real_openssl(self) -> None:
-        now = int(time.time())
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            private = root / "off-host-private-key.pem"
-            public = root / "independent-restore-public.pem"
-            attestation = root / "independent-restore.json"
-            signature = root / "independent-restore.json.sig"
-            attestation.write_text(json.dumps(proof(now)), encoding="utf-8")
-            for argv in (
-                ["openssl", "genpkey", "-algorithm", "RSA",
-                 "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(private)],
-                ["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)],
-                ["openssl", "dgst", "-sha256", "-sign", str(private),
-                 "-out", str(signature), str(attestation)],
-            ):
-                subprocess.run(argv, check=True, capture_output=True)
-            with patch.object(ret, "ATTESTATION", attestation), \
-                 patch.object(ret, "SIGNATURE", signature), \
-                 patch.object(ret, "PUBLIC_KEY", public), \
-                 patch.object(ret, "read_trusted", side_effect=lambda p, _: p.read_bytes()):
-                self.assertEqual(ret.independent_proof(now, SNAPS), CURRENT_ID)
-                # Content changes but the signature does not: fail closed.
-                attestation.write_text(json.dumps({**proof(now), "complete_restore": False}),
-                                       encoding="utf-8")
-                with self.assertRaisesRegex(RuntimeError, "openssl failed"):
-                    ret.independent_proof(now, SNAPS)
+    def test_latest_healthy_snapshot_is_protected_even_with_foreign_newer(self):
+        rows = dict(self.rows)
+        rows[POP] = entry(POP, "heim-pc", "daily", self.now - 1)
+        self.assertEqual(ret.latest_healthy_snapshot(rows, self.now), RECENT)
 
-    def test_original_external_drive_works_on_another_restore_host(self) -> None:
-        now = int(time.time())
-        valid = {**proof(now), "restore_host": "heimberry",
-                 "restore_medium": "external-backup-disk"}
-        with patch.object(ret, "command", return_value="Verified OK"):
-            with patch.object(ret, "read_trusted", return_value=json.dumps(valid).encode()):
-                self.assertEqual(ret.independent_proof(now, SNAPS), CURRENT_ID)
+    def test_empty_dry_run_json_null_is_normal_and_skips_prune(self):
+        # Real restic 0.18.1 returns "remove": null if nothing is deletable.
+        with patch.object(ret, "restic", return_value=json.dumps([
+            {"host": ret.HOST, "keep": [self.rows[RECENT]], "remove": None}
+        ])) as run:
+            self.assertEqual(ret.removal_plan(self.rows, RECENT), [])
+            self.assertIn("--dry-run", run.call_args.args)
+            self.assertIn("--tag", run.call_args.args)
+            self.assertIn("--group-by", run.call_args.args)
 
-    def test_dry_run_rejects_pop_os_and_attested_snapshot(self) -> None:
-        for record in (SNAPS[POP_ID], SNAPS[CURRENT_ID]):
-            with self.subTest(snapshot=record["id"]):
-                groups = [{"remove": [record], "host": ret.HOST}]
+    def test_dry_run_targets_exact_nixos_ids(self):
+        groups = [{"host": ret.HOST, "remove": [self.rows[OLDER]]}]
+        with patch.object(ret, "restic", return_value=json.dumps(groups)):
+            self.assertEqual(ret.removal_plan(self.rows, RECENT), [OLDER])
+
+    def test_dry_run_never_deletes_pop_or_recent_nixos_snapshot(self):
+        for sid in (POP, RECENT):
+            with self.subTest(snapshot=sid):
+                groups = [{"remove": [self.rows[sid]]}]
                 with patch.object(ret, "restic", return_value=json.dumps(groups)):
-                    with self.assertRaisesRegex(RuntimeError, "protected history"):
-                        ret.removal_plan(SNAPS, CURRENT_ID)
+                    with self.assertRaisesRegex(RuntimeError, "protected"):
+                        ret.removal_plan(self.rows, RECENT)
 
-    def test_snapshot_inventory_waits_for_exclusive_backup_or_prune_lock(self) -> None:
-        with patch.object(ret, "restic", return_value=json.dumps([SNAPS[OLD_ID]])) as call:
-            self.assertEqual(ret.snapshots(), {OLD_ID: SNAPS[OLD_ID]})
-            call.assert_called_once_with("snapshots", "--json", "--retry-lock=6h")
+    def test_dry_run_unknown_or_duplicate_ids_fail_closed(self):
+        for planned in ([{"id": "d" * 64}], [self.rows[OLDER], self.rows[OLDER]]):
+            with self.subTest(plan=planned):
+                with patch.object(ret, "restic", return_value=json.dumps([
+                    {"remove": planned}
+                ])):
+                    with self.assertRaisesRegex(RuntimeError, "unknown or duplicate"):
+                        ret.removal_plan(self.rows, RECENT)
 
-    def test_dry_run_accepts_only_the_target_snapshot(self) -> None:
-        groups = [{"remove": [SNAPS[OLD_ID]], "host": ret.HOST}]
-        with patch.object(ret, "restic", return_value=json.dumps(groups)) as cmd:
-            self.assertEqual(ret.removal_plan(SNAPS, CURRENT_ID), [OLD_ID])
-            argv = cmd.call_args.args
-            self.assertIn("--dry-run", argv)
-            self.assertIn("--json", argv)
-            self.assertIn("--host", argv)
-            self.assertIn("--tag", argv)
-            self.assertIn("--retry-lock=6h", argv)
+    def test_invalid_dry_run_shape_fails_closed(self):
+        with patch.object(ret, "restic", return_value=json.dumps([{"remove": {}}])):
+            with self.assertRaisesRegex(RuntimeError, "invalid .*removal"):
+                ret.removal_plan(self.rows, RECENT)
 
-    def test_non_root_command_rejected_without_looking_at_repository(self) -> None:
-        with patch.object(ret.os, "geteuid", return_value=1000):
-            with patch.object(ret, "require_repository") as repository:
-                with self.assertRaisesRegex(RuntimeError, "root-only"):
-                    ret.main()
-                repository.assert_not_called()
+    def test_snapshot_inventory_waits_for_restic_lock(self):
+        with patch.object(ret, "restic", return_value=json.dumps([self.rows[OLDER]])) as run:
+            self.assertEqual(ret.snapshots(), {OLDER: self.rows[OLDER]})
+            run.assert_called_once_with("snapshots", "--json", "--retry-lock=6h")
 
-    def test_irreversible_commands_use_exact_dry_run_ids(self) -> None:
-        calls = []
-        def record(*argv, **kwargs):
-            calls.append(argv)
-            return ""
+    def test_non_root_invocation_rejected_before_touching_repository(self):
+        with patch.object(ret.os, "geteuid", return_value=1000), \
+             patch.object(ret, "require_repository") as disk:
+            with self.assertRaisesRegex(RuntimeError, "root-only"):
+                ret.main()
+            disk.assert_not_called()
+
+    def test_no_old_snapshots_skips_forget_and_prune(self):
         with patch.object(ret.os, "geteuid", return_value=0), \
              patch.object(ret, "require_repository"), \
-             patch.object(ret, "snapshots", return_value=SNAPS), \
-             patch.object(ret, "independent_proof", return_value=CURRENT_ID) as checked, \
-             patch.object(ret, "removal_plan", return_value=[OLD_ID]), \
-             patch.object(ret, "restic", side_effect=record):
+             patch.object(ret, "snapshots", return_value=self.rows), \
+             patch.object(ret, "latest_healthy_snapshot", return_value=RECENT), \
+             patch.object(ret, "removal_plan", return_value=[]), \
+             patch.object(ret, "restic") as call:
             self.assertEqual(ret.main(), 0)
-        self.assertEqual(calls[0], ("forget", "--retry-lock=6h", OLD_ID))
-        self.assertEqual(calls[1], ("prune", "--retry-lock=6h"))
-        self.assertEqual(checked.call_count, 2)
+            call.assert_not_called()
 
-    def test_new_backup_between_dry_run_and_deletion_aborts(self) -> None:
+    def test_only_exact_checked_ids_are_deleted_and_pruned(self):
+        calls = []
+        with patch.object(ret.os, "geteuid", return_value=0), \
+             patch.object(ret, "require_repository") as disk, \
+             patch.object(ret, "snapshots", return_value=self.rows), \
+             patch.object(ret, "latest_healthy_snapshot", return_value=RECENT), \
+             patch.object(ret, "removal_plan", return_value=[OLDER]), \
+             patch.object(ret, "restic", side_effect=lambda *a, **kw: calls.append(a)):
+            self.assertEqual(ret.main(), 0)
+        self.assertEqual(disk.call_count, 3)
+        self.assertEqual(calls, [
+            ("forget", "--retry-lock=6h", OLDER),
+            ("prune", "--retry-lock=6h"),
+        ])
+
+    def test_inventory_change_after_dry_run_aborts_before_deletion(self):
         with patch.object(ret.os, "geteuid", return_value=0), \
              patch.object(ret, "require_repository"), \
-             patch.object(ret, "snapshots", side_effect=[SNAPS, {CURRENT_ID: SNAPS[CURRENT_ID]}]), \
-             patch.object(ret, "independent_proof", return_value=CURRENT_ID), \
-             patch.object(ret, "removal_plan", return_value=[OLD_ID]), \
-             patch.object(ret, "restic") as repo_call:
+             patch.object(ret, "snapshots", side_effect=[
+                 self.rows, {RECENT: self.rows[RECENT]}
+             ]), \
+             patch.object(ret, "latest_healthy_snapshot", return_value=RECENT), \
+             patch.object(ret, "removal_plan", return_value=[OLDER]), \
+             patch.object(ret, "restic") as call:
             with self.assertRaisesRegex(RuntimeError, "changed after dry-run"):
                 ret.main()
-            repo_call.assert_not_called()
+            call.assert_not_called()
 
-    def test_mount_or_repository_swapped_after_dry_run_aborts_before_delete(self) -> None:
+    def test_usb_disk_change_aborts_before_deletion(self):
         with patch.object(ret.os, "geteuid", return_value=0), \
-             patch.object(ret.sys, "argv", ["heim-pc-restic-retention.py"]), \
-             patch.object(ret, "require_repository",
-                          side_effect=[None, RuntimeError("repository identity changed")]) as identity, \
-             patch.object(ret, "snapshots", return_value=SNAPS), \
-             patch.object(ret, "independent_proof", return_value=CURRENT_ID), \
-             patch.object(ret, "removal_plan", return_value=[OLD_ID]), \
-             patch.object(ret, "restic") as repo_call:
-            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+             patch.object(ret, "require_repository", side_effect=[
+                 None, RuntimeError("backup USB changed")
+             ]) as disk, \
+             patch.object(ret, "snapshots", return_value=self.rows), \
+             patch.object(ret, "latest_healthy_snapshot", return_value=RECENT), \
+             patch.object(ret, "removal_plan", return_value=[OLDER]), \
+             patch.object(ret, "restic") as call:
+            with self.assertRaisesRegex(RuntimeError, "USB changed"):
                 ret.main()
-            self.assertEqual(identity.call_count, 2)
-            repo_call.assert_not_called()
+            self.assertEqual(disk.call_count, 2)
+            call.assert_not_called()
 
-    def test_mount_swapped_before_prune_skips_repacking(self) -> None:
+    def test_usb_disk_change_before_prune_never_repacks(self):
         calls = []
         with patch.object(ret.os, "geteuid", return_value=0), \
-             patch.object(ret.sys, "argv", ["heim-pc-restic-retention.py"]), \
              patch.object(ret, "require_repository", side_effect=[
-                 None, None, RuntimeError("repository identity changed")]), \
-             patch.object(ret, "snapshots", return_value=SNAPS), \
-             patch.object(ret, "independent_proof", return_value=CURRENT_ID), \
-             patch.object(ret, "removal_plan", return_value=[OLD_ID]), \
-             patch.object(ret, "restic", side_effect=lambda *a, **k: calls.append(a)):
-            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                 None, None, RuntimeError("backup USB changed")
+             ]), \
+             patch.object(ret, "snapshots", return_value=self.rows), \
+             patch.object(ret, "latest_healthy_snapshot", return_value=RECENT), \
+             patch.object(ret, "removal_plan", return_value=[OLDER]), \
+             patch.object(ret, "restic", side_effect=lambda *a, **kw: calls.append(a)):
+            with self.assertRaisesRegex(RuntimeError, "USB changed"):
                 ret.main()
-        self.assertEqual(calls, [("forget", "--retry-lock=6h", OLD_ID)])
-
-    def test_empty_dry_run_skips_prune(self) -> None:
-        with patch.object(ret.os, "geteuid", return_value=0), \
-             patch.object(ret, "require_repository"), \
-             patch.object(ret, "snapshots", return_value=SNAPS), \
-             patch.object(ret, "independent_proof", return_value=CURRENT_ID), \
-             patch.object(ret, "removal_plan", return_value=[]), \
-             patch.object(ret, "restic") as repo_call:
-            self.assertEqual(ret.main(), 0)
-            repo_call.assert_not_called()
+        self.assertEqual(calls, [("forget", "--retry-lock=6h", OLDER)])
 
 
 if __name__ == "__main__":
