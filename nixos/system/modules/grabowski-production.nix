@@ -318,7 +318,9 @@ in
           "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
           # Use the immutable Nixpkgs Chrome wrapper: it supplies EGL/GL runtime library paths.
           "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"
-          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+          # Subscription-backed Claude Code lives in the user Nix profile;
+          # append it last so pinned system tools keep precedence.
+          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin:/home/alex/.nix-profile/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
         # NNP prevents setuid escalation in this service's process tree. Jobs
