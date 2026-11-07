@@ -93,6 +93,8 @@ in {
     # session-scoped watcher, not an additional RustDesk server.
     systemd.user.services.rustdesk-screen-grant-sync = {
       description = "Keep RustDesk ScreenCast grant aligned to KDE Wayland outputs";
+      # kscreen-doctor is launched by QProcess and systemd's user PATH is minimal.
+      path = [ pkgs.kdePackages.kscreen ];
       wantedBy = [ "graphical-session.target" ];
       after = [ "plasma-kwin_wayland.service" ];
       partOf = [ "graphical-session.target" ];

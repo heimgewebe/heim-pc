@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "585fe3c1a94b9c3eec29dd7483db2642d5ecfb23c6ff0319b7ff8f00ebb5889f"
+SOURCE_SNAPSHOT_SHA256 = "9b826a14d812e816ee90742e64b7c8b7ecff0a6137c348ec9d8a73550bb236e9"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -690,6 +690,10 @@ class T(unittest.TestCase):
         grant_unit = desktop.split("systemd.user.services.rustdesk-screen-grant-sync =", 1)[1]
         grant_unit = grant_unit.split('systemd.user.services."drkonqi-coredump-launcher@"', 1)[0]
         self.assertIn('unitConfig.ConditionUser = "alex";', grant_unit)
+        # QProcess::execute("kscreen-doctor") needs the binary on user-unit PATH;
+        # systemd user managers do not inherit Plasma's interactive shell PATH.
+        self.assertIn("path = [ pkgs.kdePackages.kscreen ];", grant_unit)
+        self.assertIn('QProcess::execute(QStringLiteral("kscreen-doctor"),args)', watcher)
         self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
         package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
         self.assertIn("pkgs.stdenv.mkDerivation", package)
