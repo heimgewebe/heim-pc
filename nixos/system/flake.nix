@@ -442,7 +442,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
+                  "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144";
               };
             })
           ];
@@ -548,8 +548,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
-            revision = "e46223b6e86734032a8b94b8d94c5eeeef096bc3";
+            release = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144";
+            revision = "d79243e39734c1f4ee10f2b43be1cca266f54e00";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -722,7 +722,7 @@ for argv0 in (
                          + result.stderr[-2000:] + result.stdout[-500:])
 print("Nix kernel Python and distinct operator/forged argv0 identities verified")
 PY
-            # Runtime assembly must match the full original 206-tool MCP
+            # Runtime assembly must match the full original 207-tool MCP
             # surface, not the older 53-tool core. Register tools only; no
             # MCP listener, privileged operation or production state is used.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -736,20 +736,22 @@ if (contract.get("mode"), contract.get("module"), contract.get("source")) != (
 ):
     raise SystemExit("pinned canonical runtime module/source contract changed")
 expected = contract.get("expected_tools")
-if not isinstance(expected, list) or len(expected) != 206 or len(set(expected)) != 206:
+if not isinstance(expected, list) or len(expected) != 207 or len(set(expected)) != 207:
     raise SystemExit("canonical runtime tool list is incomplete")
+if "grabowski_chronik_full_search" not in expected:
+    raise SystemExit("Chronik full-search tool missing from NixOS canonical contract")
 actual = [
     tool.name
     for tool in importlib.import_module("grabowski_operator").mcp._tool_manager.list_tools()
 ]
-if len(actual) != 206 or set(actual) != set(expected):
+if len(actual) != 207 or set(actual) != set(expected):
     raise SystemExit(
-        "Nix Grabowski runtime tool surface differs from canonical 206-tool release: "
+        "Nix Grabowski runtime tool surface differs from canonical 207-tool release: "
         + str({"missing": sorted(set(expected) - set(actual)),
                "unexpected": sorted(set(actual) - set(expected))})
     )
 PY
-            # Prove the real executable reaches the canonical 206-tool MCP
+            # Prove the real executable reaches the canonical 207-tool MCP
             # surface, not just the legacy 53-tool core. No host resources
             # are mounted and no tools are invoked; only initialize/list.
             PYTHONPATH="${operator}/lib/python3.12/site-packages" \
@@ -770,8 +772,8 @@ source_contract = json.loads(
     (root / "share/grabowski/config/runtime-entrypoint.json").read_text()
 )
 expected = set(source_contract["expected_tools"])
-if len(expected) != 206:
-    raise SystemExit("canonical expected tool catalog is not exactly 206")
+if len(expected) != 207:
+    raise SystemExit("canonical expected tool catalog is not exactly 207")
 
 with tempfile.TemporaryDirectory(prefix="nixos-grabowski-mcp-") as home:
     env = {
@@ -1039,7 +1041,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
+            "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
@@ -1094,7 +1096,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "e46223b6-nixos-lock264e747ad05a-contract23851f3e6dea";
+            release = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
@@ -1133,7 +1135,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "e46223b6e86734032a8b94b8d94c5eeeef096bc3";
+            == "d79243e39734c1f4ee10f2b43be1cca266f54e00";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
