@@ -25,7 +25,8 @@ HOST = "heim-pc-nixos"
 TAG = "nixos-seagate"
 SOURCE = "/persist/secrets/restic/heim-pc-excludes"
 MAX_AGE_SECONDS = 24 * 3600
-CHECK_SUBSET = "1/10"
+CHECK_PARTS = 10
+CHECK_CURSOR = STATE / "check-cursor.json"
 
 
 def _command(argv: list[str], *, timeout: int = 300, binary: bool = False):
@@ -297,6 +298,46 @@ def _write_proof(record: dict[str, object]) -> None:
             os.unlink(temp)
 
 
+def _next_check_part() -> int:
+    """Only successful completed checks advance the repository-bound cursor."""
+    try:
+        record = json.loads(CHECK_CURSOR.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 1
+    if (not isinstance(record, dict)
+            or record.get("repository_id") != REPOSITORY_ID
+            or type(record.get("last_part")) is not int
+            or not 1 <= record["last_part"] <= CHECK_PARTS):
+        raise RuntimeError("rotating Restic check cursor is invalid")
+    return record["last_part"] % CHECK_PARTS + 1
+
+
+def _commit_check_part(part: int) -> None:
+    if type(part) is not int or not 1 <= part <= CHECK_PARTS:
+        raise RuntimeError("invalid rotating Restic check part")
+    payload = (json.dumps({
+        "repository_id": REPOSITORY_ID,
+        "last_part": part,
+        "completed_at_unix": int(time.time()),
+    }, sort_keys=True, separators=(",", ":"))).encode()
+    fd, temp = tempfile.mkstemp(prefix=".cursor-", dir=str(STATE))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, CHECK_CURSOR)
+        directory_fd = os.open(STATE, os.O_DIRECTORY | os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def main() -> int:
     if len(sys.argv) != 1 or os.geteuid() != 0:
         raise RuntimeError("root-only fixed-argument recovery probe")
@@ -310,13 +351,17 @@ def main() -> int:
     backup_run = _backup_timer_ready()
     snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
     restored_sha = _restore_digest(snapshot_id)
-    _restic("check", "--read-data-subset=" + CHECK_SUBSET, "--retry-lock", "30m", timeout=2100)
+    part = _next_check_part()
+    # Ten successful daily partitions cover the entire repository exactly once.
+    check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
+    _restic("check", check_mode, "--retry-lock", "6h", timeout=7 * 3600)
     if _mount_identity() != mounted_device:
         raise RuntimeError("backup mount identity changed while proving recovery")
     _require_backup_run_unchanged(backup_run)
     completed = int(time.time())
     if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
         raise RuntimeError("snapshot stale after Restic check")
+    _commit_check_part(part)
     _write_proof({
         "schema_version": 1,
         "kind": "heim_pc.nixos_restic_recovery_root_proof",
@@ -330,6 +375,8 @@ def main() -> int:
         "restore_sha256": restored_sha,
         "restore_probe_valid": True,
         "repository_check_valid": True,
+        "check_scope": "partial",
+        "check_subset": f"{part}/{CHECK_PARTS}",
     })
     return 0
 

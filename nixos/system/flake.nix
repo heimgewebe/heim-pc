@@ -1166,7 +1166,12 @@ PY
           assert !(nixpkgs.lib.hasInfix "heim-pc-restic-recovery-probe.service"
             rootResticCandidate.security.polkit.extraConfig);
           assert rootResticProof.User == "root" && rootResticProof.NoNewPrivileges;
-          assert rootResticProof.TimeoutStartSec == "75min";
+          assert rootResticProof.TimeoutStartSec == "8h";
+          # Retention stays idle without an independent signed full-restore
+          # attestation; a local probe is never delete authority.
+          assert !(rootResticCandidate.systemd.services."heim-pc-restic-retention".unitConfig ? ConditionPathExists);
+          assert rootResticCandidate.systemd.services."heim-pc-restic-retention".serviceConfig.User
+            == "root";
           assert rootResticProof.ProtectSystem == "strict" && rootResticProof.PrivateNetwork;
           assert rootResticProof.CacheDirectory == "heim-pc-restic-recovery-probe";
           assert builtins.elem "RESTIC_CACHE_DIR=/var/cache/heim-pc-restic-recovery-probe"

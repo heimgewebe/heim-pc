@@ -37,7 +37,7 @@
       "--tag=nixos-seagate"
       # A concurrent verified Restic repository check can hold the exclusive lock.
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
-      "--retry-lock=30m"
+      "--retry-lock=6h"
       "--exclude-file=/persist/secrets/restic/heim-pc-excludes"
       # XRDP drive redirection can be a user-only FUSE mount that root cannot
       # stat. Never turn one unreadable transient session mount into backup
@@ -71,12 +71,58 @@
     serviceConfig.TimeoutStartSec = "0";
   };
 
+  # Keep the twice-daily backup fast. The older Pop!_OS snapshots share
+  # this repository, so retention selects ONLY the Seagate NixOS host/tag.
+  # Weekly pruning is deliberately separate from the backup timer and never
+  # runs Restic's global 'unlock' (which may invalidate another process' lock).
+  systemd.services."heim-pc-restic-retention" = {
+    description = "Conservative weekly NixOS-only Restic retention";
+    unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
+    after = [ "restic-backups-heim-pc.service" ];
+    path = [ pkgs.restic pkgs.util-linux pkgs.systemd ];
+    environment = {
+      RESTIC_REPOSITORY = "/var/lib/heim-pc-backup/restic/heim-pc";
+      RESTIC_PASSWORD_FILE = "/persist/secrets/restic/heim-pc-password";
+      RESTIC_CACHE_DIR = "/var/cache/heim-pc-restic-retention";
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+      CacheDirectory = "heim-pc-restic-retention";
+      CacheDirectoryMode = "0700";
+      # Restic's own exclusive repository lock serializes destructive operations;
+      # wait rather than stealing the lock or breaking a concurrent backup.
+      TimeoutStartSec = "0";
+      CPUWeight = 30;
+      IOWeight = 20;
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      ReadWritePaths = [ "/var/lib/heim-pc-backup" ];
+    };
+    script = ''
+      exec ${pkgs.systemd}/bin/systemd-inhibit --mode=block --what=sleep --why="Restic retention" ${pkgs.python3}/bin/python3 -I -B ${./heim-pc-restic-retention.py}
+    '';
+  };
+
+  systemd.timers."heim-pc-restic-retention" = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "Sun *-*-* 03:30:00";
+      Persistent = true;
+      RandomizedDelaySec = "30m";
+    };
+  };
+
   # No Polkit grant for alex: even a fixed root-owned unit must only be
   # started by the authenticated and tightly scoped Grabowski Rootbroker.
 
   # Fixed, root-owned restore evidence. The operator can trigger exactly this
   # systemd oneshot, not choose privileged Restic argv or a writable restore dir.
   systemd.services."heim-pc-restic-recovery-probe" = {
+    after = [ "restic-backups-heim-pc.service" ];
     description = "Root-owned NixOS Restic restore and repository-integrity proof";
     unitConfig.RequiresMountsFor = [ "/var/lib/heim-pc-backup" "/persist" ];
     serviceConfig = {
@@ -94,8 +140,8 @@
       StateDirectory = "heim-pc-restic-recovery-probe";
       StateDirectoryMode = "0755";
       UMask = "0022";
-      # Allows restore and a 1/10 repository check without outliving the caller.
-      TimeoutStartSec = "75min";
+      # May wait for a long exclusive Restic lock and read one tenth of the data.
+      TimeoutStartSec = "8h";
       NoNewPrivileges = true;
       RestrictSUIDSGID = true;
       RestrictRealtime = true;
@@ -120,6 +166,17 @@
       MemoryDenyWriteExecute = true;
       RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
       SystemCallArchitectures = "native";
+    };
+  };
+
+  # Rotating daily data checks cover all data once per ten successful checks.
+  # This routine verifies backup integrity; retention independently checks backup freshness.
+  systemd.timers."heim-pc-restic-recovery-probe" = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 09:00:00";
+      Persistent = true;
+      RandomizedDelaySec = "20m";
     };
   };
 
