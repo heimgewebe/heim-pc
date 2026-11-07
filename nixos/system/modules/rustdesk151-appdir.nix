@@ -49,6 +49,12 @@ pkgs.appimageTools.extractType2 {
     ln -s ${pkgs.systemd}/bin/loginctl "$out/bin/loginctl"
     install -m755 ${userLaunch} "$out/bin/sudo"
 
+    # RustDesk chooses ScreenCast rather than RemoteDesktop only if its
+    # startup process probe can see the running --server executable.
+    # The AppImage FHS PATH lacks the ps command and reports a false negative.
+    test ! -e "$out/bin/ps"
+    ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"
+
     substituteInPlace "$out/AppRun.env" \
       --replace-fail 'APPDIR_LIBRARY_PATH=' 'APPDIR_LIBRARY_PATH=${gstLibraries}:'
 
@@ -62,5 +68,6 @@ pkgs.appimageTools.extractType2 {
     printf '\nGST_REGISTRY=$HOME/.cache/gstreamer-1.0/registry-rustdesk-native151.bin\nSPA_PLUGIN_DIR=${pkgs.pipewire}/lib/spa-0.2\n' >> "$out/AppRun.env"
     test -x "$out/bin/sudo"
     test -x "$out/bin/loginctl"
+    test -x "$out/bin/ps"
   '';
 }

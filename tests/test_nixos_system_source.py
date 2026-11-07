@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "da595c501eea8fa963f2123d17fc3a8c2be3bd9bb37f2daf2de41e2a3e64a5e3"
+SOURCE_SNAPSHOT_SHA256 = "0a6784d58900a9ca7eaef88dc9219da706e1b5d3733cdd7b460eb803ce303d49"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -675,6 +675,9 @@ class T(unittest.TestCase):
         self.assertIn("noOpAppRunHooks", pkg)
         self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
         self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
+        # Upstream determines whether to use ScreenCast via ps and grep.
+        self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
+        self.assertIn('test -x "$out/bin/ps"', pkg)
         self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
         self.assertIn('"$2" != "alex"', sudo)
         self.assertIn('"$2" != "--server"', sudo)
