@@ -4,11 +4,27 @@
     git gh nodejs python3 rustc cargo clang cmake pkg-config jq
     ripgrep fd curl wget file patchelf appimage-run distrobox
   ] ++ lib.optionals config.heimPc.desktop.enable (with pkgs; [
-    # Pop!_OS day-to-day document workflow, without a permanent PDF server.
+    # Documents stay local: no permanent PDF server or unmaintained containers.
     ocrmypdf qpdf tesseract pdfarranger
-    # LAN peer-to-peer transfer on demand; Taildrop handles remote transfers.
-    localsend
   ]);
+
+  # NixOS' native program module installs LocalSend and configures its
+  # discovery/transfer firewall ports; only the desktop profile enables it.
+  programs.localsend = lib.mkIf config.heimPc.desktop.enable {
+    enable = true;
+    openFirewall = true;
+  };
+
+  # Keep the user's existing Espanso snippets.  The NixOS Wayland package
+  # handles uinput/wrapper requirements; do not revive the Pop!_OS Snap.
+  services.espanso = lib.mkIf config.heimPc.desktop.enable {
+    enable = true;
+    package = pkgs.espanso-wayland;
+  };
+  # Only the physical desktop owner's user manager may expand snippets.
+  systemd.user.services.espanso.unitConfig.ConditionUser =
+    lib.mkIf config.heimPc.desktop.enable "alex";
+
   # Foreign dynamically-linked Linux binaries are a known NixOS friction point.
   programs.nix-ld.enable = true;
   programs.appimage.enable = true;
