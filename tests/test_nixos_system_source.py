@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "2812ffff48d1dbf963859802cf1bfa428d8d8aa1cb2de2ba7e9757b20bb748a7"
+SOURCE_SNAPSHOT_SHA256 = "b815b899240217243d47d4c5100a6477295473b2876dd01e5e3b17d2a04f1439"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -1997,7 +1997,6 @@ class T(unittest.TestCase):
         self.assertIn("assert !credentialConflictEval.success;", flake)
         self.assertIn("assert !missingPersistConflictEval.success;", flake)
         self.assertIn('builtins.hasAttr "heim-pc-firstboot-credentials" target.systemd.services', flake)
-
         self.assertIn("SOURCE_REVISION = @SOURCE_REVISION_JSON@", helper)
         self.assertIn("YESCRYPT_RE", helper)
         self.assertIn(r'^\$y\$j9T\$', helper)
