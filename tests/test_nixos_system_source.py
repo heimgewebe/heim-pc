@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "b815b899240217243d47d4c5100a6477295473b2876dd01e5e3b17d2a04f1439"
+SOURCE_SNAPSHOT_SHA256 = "9b826a14d812e816ee90742e64b7c8b7ecff0a6137c348ec9d8a73550bb236e9"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -661,6 +661,50 @@ class T(unittest.TestCase):
         self.assertIn('ProtectHome = "read-only";', module)
         self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
 
+    def test_rustdesk_host_uses_matching_nixos_151_and_native_gst(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        pkg = (SOURCE / "modules/rustdesk151-appdir.nix").read_text()
+        sudo = (SOURCE / "modules/rustdesk151-sudo-adapter.sh.in").read_text()
+        self.assertIn("rustdesk151AppDir = import ./rustdesk151-appdir.nix", desktop)
+        self.assertIn("ExecStart = " + chr(34) + '${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service' + chr(34) + ";", desktop)
+        self.assertNotIn("rustdesk150Source", desktop)
+        self.assertNotIn("pkgs.rustdesk-flutter", desktop)
+        self.assertIn('version = "1.5.1";', pkg)
+        self.assertIn('sha256-u4t8yz9QogHczcibRjhc/5DzPmC0cw+u2p+lUErE3OY=', pkg)
+        self.assertIn('pkgs.pipewire', pkg)
+        self.assertIn("noOpAppRunHooks", pkg)
+        self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
+        self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
+        # Upstream determines whether to use ScreenCast via ps and grep.
+        self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
+        self.assertIn('test -x "$out/bin/ps"', pkg)
+        self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
+        self.assertIn('"$2" != "alex"', sudo)
+        self.assertIn('"$2" != "--server"', sudo)
+
+    def test_rustdesk_grant_tracks_current_outputs_and_kde_hotplug(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        watcher = (SOURCE / "modules/rustdesk-screen-grant-hotplug.cpp").read_text()
+        self.assertIn("systemd.user.services.rustdesk-screen-grant-sync", desktop)
+        self.assertIn('wantedBy = [ "graphical-session.target" ];', desktop)
+        grant_unit = desktop.split("systemd.user.services.rustdesk-screen-grant-sync =", 1)[1]
+        grant_unit = grant_unit.split('systemd.user.services."drkonqi-coredump-launcher@"', 1)[0]
+        self.assertIn('unitConfig.ConditionUser = "alex";', grant_unit)
+        # QProcess::execute("kscreen-doctor") needs the binary on user-unit PATH;
+        # systemd user managers do not inherit Plasma's interactive shell PATH.
+        self.assertIn("path = [ pkgs.kdePackages.kscreen ];", grant_unit)
+        self.assertIn('QProcess::execute(QStringLiteral("kscreen-doctor"),args)', watcher)
+        self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
+        package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
+        self.assertIn("pkgs.stdenv.mkDerivation", package)
+        self.assertIn("Qt6Core Qt6DBus Qt6Gui", package)
+        self.assertIn("QGuiApplication::screenAdded", watcher)
+        self.assertIn("QGuiApplication::screenRemoved", watcher)
+        self.assertIn("QScreen::geometryChanged", watcher)
+        self.assertIn("org.freedesktop.impl.portal.PermissionStore", watcher)
+        self.assertIn("LAYOUT_RECOVERED_BY_CONNECTOR", watcher)
+        self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
+
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
         # host-specific files must not change the published source identity.
@@ -669,7 +713,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 53)
+        self.assertEqual(len(files), 57)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
@@ -1997,6 +2041,7 @@ class T(unittest.TestCase):
         self.assertIn("assert !credentialConflictEval.success;", flake)
         self.assertIn("assert !missingPersistConflictEval.success;", flake)
         self.assertIn('builtins.hasAttr "heim-pc-firstboot-credentials" target.systemd.services', flake)
+
         self.assertIn("SOURCE_REVISION = @SOURCE_REVISION_JSON@", helper)
         self.assertIn("YESCRYPT_RE", helper)
         self.assertIn(r'^\$y\$j9T\$', helper)
