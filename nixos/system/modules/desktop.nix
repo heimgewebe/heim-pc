@@ -2,6 +2,7 @@
 let
   cfg = config.heimPc.desktop;
   rustdesk151AppDir = import ./rustdesk151-appdir.nix { inherit pkgs; };
+  rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix { inherit pkgs; };
 in {
   options.heimPc.desktop.enable = lib.mkEnableOption "KDE Plasma/Wayland workstation profile";
   config = lib.mkIf cfg.enable {
@@ -83,6 +84,28 @@ in {
       serviceConfig = {
         Type = "exec";
         ExecStart = "${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service";
+        Restart = "on-failure";
+        RestartSec = "3s";
+      };
+    };
+
+    # RustDesk ScreenCast restoration must survive DP-1 hotplug. This is a
+    # session-scoped watcher, not an additional RustDesk server.
+    systemd.user.services.rustdesk-screen-grant-sync = {
+      description = "Keep RustDesk ScreenCast grant aligned to KDE Wayland outputs";
+      wantedBy = [ "graphical-session.target" ];
+      after = [ "plasma-kwin_wayland.service" ];
+      partOf = [ "graphical-session.target" ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${rustdeskGrantSync}/bin/rustdesk-kde-screen-grant-sync --watch";
+        Environment = [
+          "QT_QPA_PLATFORM=wayland"
+          "QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt6.qtwayland}/lib/qt-6/plugins/platforms"
+          "WAYLAND_DISPLAY=wayland-0"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+        ];
         Restart = "on-failure";
         RestartSec = "3s";
       };

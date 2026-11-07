@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "9d2ca3e9d787ea4a61c31f0ad6d5782876c7a8d79625a29d100590b5147eef53"
+SOURCE_SNAPSHOT_SHA256 = "da595c501eea8fa963f2123d17fc3a8c2be3bd9bb37f2daf2de41e2a3e64a5e3"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -679,6 +679,22 @@ class T(unittest.TestCase):
         self.assertIn('"$2" != "alex"', sudo)
         self.assertIn('"$2" != "--server"', sudo)
 
+    def test_rustdesk_grant_tracks_current_outputs_and_kde_hotplug(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        watcher = (SOURCE / "modules/rustdesk-screen-grant-hotplug.cpp").read_text()
+        self.assertIn("systemd.user.services.rustdesk-screen-grant-sync", desktop)
+        self.assertIn('wantedBy = [ "graphical-session.target" ];', desktop)
+        self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
+        package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
+        self.assertIn("pkgs.stdenv.mkDerivation", package)
+        self.assertIn("Qt6Core Qt6DBus Qt6Gui", package)
+        self.assertIn("QGuiApplication::screenAdded", watcher)
+        self.assertIn("QGuiApplication::screenRemoved", watcher)
+        self.assertIn("QScreen::geometryChanged", watcher)
+        self.assertIn("org.freedesktop.impl.portal.PermissionStore", watcher)
+        self.assertIn("LAYOUT_RECOVERED_BY_CONNECTOR", watcher)
+        self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
+
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
         # host-specific files must not change the published source identity.
@@ -687,7 +703,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 55)
+        self.assertEqual(len(files), 57)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
