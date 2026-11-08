@@ -62,6 +62,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
 
+    def test_external_candidate_runner_matches_nix_store_resolver(self):
+        operator = (MODULES / "grabowski-operator-package.nix").read_text()
+        # The imported canonical module resolves site-packages/../tools, not
+        # share/grabowski/tools. Symlinks would fail the regular-file check.
+        self.assertIn('candidate_asset = share / "tools/external_programming_candidate.py"', operator)
+        self.assertIn('candidate_runner = site.parent / "tools/external_programming_candidate.py"', operator)
+        self.assertIn("shutil.copyfile(candidate_asset, candidate_runner)", operator)
+        self.assertIn("candidate_runner.chmod(0o444)", operator)
+        self.assertIn("competition.RUNNER != candidate_runner", operator)
+        self.assertIn("stat.S_ISREG(candidate_runner.lstat().st_mode)", operator)
+        self.assertIn("candidate_runner.read_bytes() != candidate_asset.read_bytes()", operator)
+
     def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
