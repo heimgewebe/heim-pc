@@ -257,6 +257,16 @@ for item in contract.get("runtime_assets", []):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, target)
     target.chmod(0o444)
+# The canonical candidate resolver expects a regular runner beside the
+# installed site-packages parent. Runtime assets live in share/grabowski;
+# install an identical immutable copy, not a symlink (regular-file gate).
+candidate_asset = share / "tools/external_programming_candidate.py"
+if not candidate_asset.is_file() or candidate_asset.is_symlink():
+    raise SystemExit("canonical external candidate runner asset missing")
+candidate_runner = site.parent / "tools/external_programming_candidate.py"
+candidate_runner.parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(candidate_asset, candidate_runner)
+candidate_runner.chmod(0o444)
 PY
 
     # The existing source-pinned ingress CAS publisher is reused by the native
@@ -343,6 +353,14 @@ if Path(sys.prefix) != root or sys.prefix == sys.base_prefix:
 if importlib.util.find_spec("grabowski_job_finalizer") is None:
     raise SystemExit("Nix isolated job finalizer is not importable")
 import grabowski_coding_agent_router as router
+import grabowski_agent_competition as competition
+import stat
+candidate_runner = root / "lib/python3.12/tools/external_programming_candidate.py"
+candidate_asset = root / "share/grabowski/tools/external_programming_candidate.py"
+if (competition.RUNNER != candidate_runner
+        or not stat.S_ISREG(candidate_runner.lstat().st_mode)
+        or candidate_runner.read_bytes() != candidate_asset.read_bytes()):
+    raise SystemExit("Nix immutable external candidate runner cannot be resolved")
 health = router.coding_agent_catalog_health()
 if health.get("ready") is not True:
     raise SystemExit("Nix immutable coding-agent catalog is not ready: " + repr(health))
