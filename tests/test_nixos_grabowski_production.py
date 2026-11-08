@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "d79243e39734c1f4ee10f2b43be1cca266f54e00"
-TARBALL_HASH = "sha256-3eawDmqWBEimhMH7GJkPJP7CTsMORasSC9nU6kONxSM="
+REVISION = "68c8bcdeea9c79107532580c5074ce6aa9db92f9"
+TARBALL_HASH = "sha256-LVaVqDneW3S/5fQlJmbatNHrHphip6YArR/PmUFZrCE="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -61,6 +61,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         production = (MODULES / "grabowski-production.nix").read_text()
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
+
+    def test_external_candidate_runner_matches_nix_store_resolver(self):
+        operator = (MODULES / "grabowski-operator-package.nix").read_text()
+        # The imported canonical module resolves site-packages/../tools, not
+        # share/grabowski/tools. Symlinks would fail the regular-file check.
+        self.assertIn('candidate_asset = share / "tools/external_programming_candidate.py"', operator)
+        self.assertIn('candidate_runner = site.parent / "tools/external_programming_candidate.py"', operator)
+        self.assertIn("shutil.copyfile(candidate_asset, candidate_runner)", operator)
+        self.assertIn("candidate_runner.chmod(0o444)", operator)
+        self.assertIn("competition.RUNNER != candidate_runner", operator)
+        self.assertIn("stat.S_ISREG(candidate_runner.lstat().st_mode)", operator)
+        self.assertIn("candidate_runner.read_bytes() != candidate_asset.read_bytes()", operator)
 
     def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
         production = (MODULES / "grabowski-production.nix").read_text()
@@ -163,7 +175,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144"
+        release_id = "68c8bcde-nixos-lock264e747ad05a-contract7130dc15a144"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)

@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "d79243e3-nixos-lock264e747ad05a-contract7130dc15a144";
-  expectedRevision = "d79243e39734c1f4ee10f2b43be1cca266f54e00";
+  expectedReleaseId = "68c8bcde-nixos-lock264e747ad05a-contract7130dc15a144";
+  expectedRevision = "68c8bcdeea9c79107532580c5074ce6aa9db92f9";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -318,7 +318,9 @@ in
           "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
           # Use the immutable Nixpkgs Chrome wrapper: it supplies EGL/GL runtime library paths.
           "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"
-          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+          # Subscription-backed Claude Code lives in the user Nix profile;
+          # append it last so pinned system tools keep precedence.
+          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin:/home/alex/.nix-profile/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
         # NNP prevents setuid escalation in this service's process tree. Jobs

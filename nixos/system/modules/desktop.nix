@@ -1,5 +1,9 @@
 { config, lib, pkgs, ... }:
-let cfg = config.heimPc.desktop; in {
+let
+  cfg = config.heimPc.desktop;
+  rustdesk151AppDir = import ./rustdesk151-appdir.nix { inherit pkgs; };
+  rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix { inherit pkgs; };
+in {
   options.heimPc.desktop.enable = lib.mkEnableOption "KDE Plasma/Wayland workstation profile";
   config = lib.mkIf cfg.enable {
     services.xserver.enable = true;
@@ -68,19 +72,45 @@ let cfg = config.heimPc.desktop; in {
     networking.firewall.interfaces."tailscale0".allowedTCPPorts =
       lib.optionals config.services.tailscale.enable [ 3389 ];
 
-    # The logged-in Plasma/Wayland session is already served by alex's
-    # rustdesk-session.service. Persist its matching privileged host helper
-    # across a reboot instead of relying on a four-hour systemd-run test unit.
-    # rustdesk-flutter is the 1.4.5 package used by the working Wayland client;
-    # pkgs.rustdesk is a different 1.4.7 build and must not replace it here.
+    # Root RustDesk 1.5.1 owns its one Wayland UID1000 --server child.
+    # The AppImage is hash-verified, with the native PipeWire/GStreamer
+    # plugin set, safe AppRun hook, NixOS loginctl and a limited UID drop.
+    # The old per-user rustdesk-session.service must not be enabled.
     systemd.services.rustdesk-host = {
-      description = "RustDesk host helper for the KDE Wayland desktop";
+      description = "RustDesk 1.5.1 host helper for KDE Wayland";
       wantedBy = [ "multi-user.target" ];
       conflicts = [ "rustdesk-host-test.service" ];
-      after = [ "network.target" "rustdesk-host-test.service" ];
+      after = [ "network.target" ];
       serviceConfig = {
         Type = "exec";
-        ExecStart = "${pkgs.rustdesk-flutter}/bin/rustdesk --service";
+        ExecStart = "${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service";
+        # Keep each PipeWire capture stream on its own independent connection.
+        Environment = [ "RUSTDESK_PIPEWIRE_SYSTEM_SOCKET=1" ];
+        Restart = "on-failure";
+        RestartSec = "3s";
+      };
+    };
+
+    # RustDesk ScreenCast restoration must survive DP-1 hotplug. This is a
+    # session-scoped watcher, not an additional RustDesk server.
+    systemd.user.services.rustdesk-screen-grant-sync = {
+      description = "Keep RustDesk ScreenCast grant aligned to KDE Wayland outputs";
+      # kscreen-doctor is launched by QProcess and systemd's user PATH is minimal.
+      path = [ pkgs.kdePackages.kscreen ];
+      wantedBy = [ "graphical-session.target" ];
+      after = [ "plasma-kwin_wayland.service" ];
+      partOf = [ "graphical-session.target" ];
+      unitConfig.ConditionUser = "alex";
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${rustdeskGrantSync}/bin/rustdesk-kde-screen-grant-sync --watch";
+        Environment = [
+          "QT_QPA_PLATFORM=wayland"
+          "QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt6.qtwayland}/lib/qt-6/plugins/platforms"
+          "WAYLAND_DISPLAY=wayland-0"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+        ];
         Restart = "on-failure";
         RestartSec = "3s";
       };

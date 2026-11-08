@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "8e61e5c45704abad1326706c6033c9a13c4b462bf17175dddedc43ef525c9a29"
+SOURCE_SNAPSHOT_SHA256 = "08f68770c368157b7ad8943d2fe017ac9b8d3692aba539d0c460ae3e823ead47"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -661,6 +661,63 @@ class T(unittest.TestCase):
         self.assertIn('ProtectHome = "read-only";', module)
         self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
 
+    def test_rustdesk_host_uses_matching_nixos_151_and_native_gst(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        pkg = (SOURCE / "modules/rustdesk151-appdir.nix").read_text()
+        sudo = (SOURCE / "modules/rustdesk151-sudo-adapter.sh.in").read_text()
+        self.assertIn("rustdesk151AppDir = import ./rustdesk151-appdir.nix", desktop)
+        self.assertIn("ExecStart = " + chr(34) + '${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service' + chr(34) + ";", desktop)
+        self.assertNotIn("rustdesk150Source", desktop)
+        self.assertNotIn("pkgs.rustdesk-flutter", desktop)
+        self.assertIn('version = "1.5.1";', pkg)
+        self.assertIn('sha256-u4t8yz9QogHczcibRjhc/5DzPmC0cw+u2p+lUErE3OY=', pkg)
+        self.assertIn('pkgs.pipewire', pkg)
+        # Native libva (out, not dev) supplies vaMapBuffer2 required by the
+        # PipeWire SPA adapter; the bundled AppImage libva lacks it.
+        self.assertIn("pkgs.libva-minimal.out", pkg)
+        self.assertLess(pkg.index("pkgs.libva-minimal.out"), pkg.index("pkgs.glib"))
+        self.assertIn("safeAppRunHooks", pkg)
+        self.assertIn("rustdesk151-pipewire-fd-hook.c", pkg)
+        self.assertIn('Environment = [ "RUSTDESK_PIPEWIRE_SYSTEM_SOCKET=1" ];', desktop)
+        hook = (SOURCE / "modules/rustdesk151-pipewire-fd-hook.c").read_text()
+        self.assertIn('!strcmp(kind,"GstPipeWireSrc")', hook)
+        self.assertIn('!strcmp(property,"fd")', hook)
+        self.assertIn('dlsym(RTLD_NEXT,"g_object_set_property")', hook)
+        self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
+        self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
+        # Upstream determines whether to use ScreenCast via ps and grep.
+        self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
+        self.assertIn('test -x "$out/bin/ps"', pkg)
+        self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
+        self.assertIn('"$2" != "alex"', sudo)
+        self.assertIn('"$2" != "--server"', sudo)
+
+    def test_rustdesk_grant_tracks_current_outputs_and_kde_hotplug(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        watcher = (SOURCE / "modules/rustdesk-screen-grant-hotplug.cpp").read_text()
+        self.assertIn("systemd.user.services.rustdesk-screen-grant-sync", desktop)
+        self.assertIn('wantedBy = [ "graphical-session.target" ];', desktop)
+        grant_unit = desktop.split("systemd.user.services.rustdesk-screen-grant-sync =", 1)[1]
+        grant_unit = grant_unit.split('systemd.user.services."drkonqi-coredump-launcher@"', 1)[0]
+        self.assertIn('unitConfig.ConditionUser = "alex";', grant_unit)
+        # QProcess::execute("kscreen-doctor") needs the binary on user-unit PATH;
+        # systemd user managers do not inherit Plasma's interactive shell PATH.
+        self.assertIn("path = [ pkgs.kdePackages.kscreen ];", grant_unit)
+        self.assertIn('QProcess::execute(QStringLiteral("kscreen-doctor"),args)', watcher)
+        self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
+        package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
+        self.assertIn("pkgs.stdenv.mkDerivation", package)
+        self.assertIn("Qt6Core Qt6DBus Qt6Gui", package)
+        self.assertIn("QGuiApplication::screenAdded", watcher)
+        self.assertIn("QGuiApplication::screenRemoved", watcher)
+        self.assertIn("QScreen::geometryChanged", watcher)
+        self.assertIn("org.freedesktop.impl.portal.PermissionStore", watcher)
+        self.assertIn("LAYOUT_RECOVERED_BY_CONNECTOR", watcher)
+        # DP-2-only remains usable when the duplicate virtual monitor is disabled.
+        self.assertIn('!names.contains("DP-2") || desired.isEmpty()', watcher)
+        self.assertNotIn('!names.contains("Virtual-iPadRemote")', watcher)
+        self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
+
     def test_current_nixos_source_snapshot_is_bound(self):
         # The Nix Git flake contains tracked files only; ignored local
         # host-specific files must not change the published source identity.
@@ -669,7 +726,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 54)
+        self.assertEqual(len(files), 59)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))

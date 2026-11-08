@@ -1,0 +1,45 @@
+#!@bash@/bin/bash
+# RustDesk 1.5.1 --service uses sudo to spawn an unprivileged --server.
+# The appimage-run FHS has no PAM sudo or other profile. Never elevate here:
+# accept only RustDesk's own root -> alex UID 1000 launch, and refuse all else.
+set -Eeuo pipefail
+
+if [[ "$(id -u)" != 0 ]]; then
+  echo "rustdesk-user-launch: expected root service" >&2
+  exit 77
+fi
+
+# A deliberate failure selects RustDesk's explicit sudo -u alex env ... path
+# rather than sudo -E (which can silently discard required Wayland env).
+if [[ "$#" == 3 && "$1" == "-n" && "$2" == "-E" && "$3" == "env" ]]; then
+  exit 1
+fi
+
+if [[ "$#" -lt 6 || "$1" != "-u" || "$2" != "alex" || "$3" != "--" || "$4" != "env" ]]; then
+  echo "rustdesk-user-launch: unsupported sudo call" >&2
+  exit 64
+fi
+shift 4
+
+env_args=()
+while (($#)); do
+  case "$1" in
+    *=*)
+      if [[ ! "$1" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+        echo "rustdesk-user-launch: invalid environment key" >&2
+        exit 64
+      fi
+      env_args+=("$1")
+      shift
+      ;;
+    *) break ;;
+  esac
+done
+
+if [[ "$#" != 2 || "$1" != "$APPDIR/usr/share/rustdesk/rustdesk" || "$2" != "--server" ]]; then
+  echo "rustdesk-user-launch: refused unexpected executable" >&2
+  exit 64
+fi
+
+exec /run/current-system/sw/bin/setpriv --reuid=1000 --regid=100 --init-groups \
+     /run/current-system/sw/bin/env "${env_args[@]}" "$@"
