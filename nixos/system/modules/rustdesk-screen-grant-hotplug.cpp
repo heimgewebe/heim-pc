@@ -32,9 +32,11 @@ int converge(QGuiApplication &app, bool apply) {
         const QPoint pos=screen->geometry().topLeft();
         desired.append(QString("%1x%2").arg(pos.x()).arg(pos.y()));
     }
-    // Never replace a valid grant during login, before the expected screens exist.
-    if (!names.contains("DP-2") || !names.contains("Virtual-iPadRemote")
-        || desired.size()<2 || desired.size()>3) return 16;
+    // DP-2 is the stable fallback. The virtual output is optional: starting
+    // krfb-virtualmonitor again when KWin retains its output can duplicate
+    // Virtual-iPadRemote and produce black/transparent ScreenCast frames.
+    // Preserve unattended DP-2-only operation rather than blocking grant repair.
+    if (!names.contains("DP-2") || desired.isEmpty() || desired.size()>3) return 16;
     std::sort(desired.begin(), desired.end());
     QSet<QString> unique;
     for (const auto &id: desired) unique.insert(id);
