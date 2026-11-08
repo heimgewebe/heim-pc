@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "1062df290c2cbfa3ce8e8e0d980f8b125f4ace95f13c300e248659c9d23572c7"
+SOURCE_SNAPSHOT_SHA256 = "3f2b5efe19dd1fb1a4b71ae42ff9179941bbc5010f46fcde6aa76e42c5b05b89"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -672,7 +672,17 @@ class T(unittest.TestCase):
         self.assertIn('version = "1.5.1";', pkg)
         self.assertIn('sha256-u4t8yz9QogHczcibRjhc/5DzPmC0cw+u2p+lUErE3OY=', pkg)
         self.assertIn('pkgs.pipewire', pkg)
-        self.assertIn("noOpAppRunHooks", pkg)
+        # Native libva (out, not dev) supplies vaMapBuffer2 required by the
+        # PipeWire SPA adapter; the bundled AppImage libva lacks it.
+        self.assertIn("pkgs.libva-minimal.out", pkg)
+        self.assertLess(pkg.index("pkgs.libva-minimal.out"), pkg.index("pkgs.glib"))
+        self.assertIn("safeAppRunHooks", pkg)
+        self.assertIn("rustdesk151-pipewire-fd-hook.c", pkg)
+        self.assertIn('Environment = [ "RUSTDESK_PIPEWIRE_SYSTEM_SOCKET=1" ];', desktop)
+        hook = (SOURCE / "modules/rustdesk151-pipewire-fd-hook.c").read_text()
+        self.assertIn('!strcmp(kind,"GstPipeWireSrc")', hook)
+        self.assertIn('!strcmp(property,"fd")', hook)
+        self.assertIn('dlsym(RTLD_NEXT,"g_object_set_property")', hook)
         self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
         self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
         # Upstream determines whether to use ScreenCast via ps and grep.
@@ -703,6 +713,9 @@ class T(unittest.TestCase):
         self.assertIn("QScreen::geometryChanged", watcher)
         self.assertIn("org.freedesktop.impl.portal.PermissionStore", watcher)
         self.assertIn("LAYOUT_RECOVERED_BY_CONNECTOR", watcher)
+        # DP-2-only remains usable when the duplicate virtual monitor is disabled.
+        self.assertIn('!names.contains("DP-2") || desired.isEmpty()', watcher)
+        self.assertNotIn('!names.contains("Virtual-iPadRemote")', watcher)
         self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
 
     def test_current_nixos_source_snapshot_is_bound(self):
@@ -713,7 +726,7 @@ class T(unittest.TestCase):
         )
         files = sorted(ROOT / os.fsdecode(name)
                        for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 57)
+        self.assertEqual(len(files), 58)
         digest = hashlib.sha256()
         for path in files:
             self.assertTrue(path.is_file(), str(path))
