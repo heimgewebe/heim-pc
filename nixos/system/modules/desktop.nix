@@ -84,6 +84,8 @@ in {
       serviceConfig = {
         Type = "exec";
         ExecStart = "${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service";
+        # Keep each PipeWire capture stream on its own independent connection.
+        Environment = [ "RUSTDESK_PIPEWIRE_SYSTEM_SOCKET=1" ];
         Restart = "on-failure";
         RestartSec = "3s";
       };

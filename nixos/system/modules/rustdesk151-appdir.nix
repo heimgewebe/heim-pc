@@ -9,6 +9,9 @@ let
 
   # All capture plugins and GStreamer libraries must share the host ABI.
   gstLibraries = lib.makeLibraryPath [
+    # libspa-videoconvert needs vaMapBuffer2 (bundled libva.so.2 lacks it).
+    # libva-minimal defaults to the dev output; force its runtime output.
+    pkgs.libva-minimal.out
     pkgs.libayatana-appindicator
     pkgs.glib
     pkgs.gst_all_1.gstreamer
@@ -22,12 +25,16 @@ let
     "${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0"
   ];
 
-  # AppRun's interposed execvp uses unchecked strcpy(PATH) and aborts
-  # on NixOS's long PATH. Disable only that helper, not RustDesk's IPC auth.
-  noOpAppRunHooks = pkgs.runCommandCC "rustdesk-151-safe-apprun-hooks" { } ''
+  # AppRun's execvp hook is unsafe on NixOS's long PATH. Keep that hook
+  # disabled, but retain an opt-in, GstPipeWireSrc-only fd interceptor so
+  # independent GStreamer capture pipelines do not share the same portal socket.
+  safeAppRunHooks = pkgs.runCommandCC "rustdesk-151-safe-apprun-hooks" { } ''
     mkdir -p "$out/lib"
-    printf 'void rustdesk_empty_apprun_hooks(void) {}\n' > empty.c
-    "$CC" -shared -fPIC empty.c -o "$out/lib/libapprun_hooks.so"
+    cp ${./rustdesk151-pipewire-fd-hook.c} pipewire-hook.c
+    chmod u+w pipewire-hook.c
+    printf 'void rustdesk_empty_apprun_hooks(void) {}\n' >> pipewire-hook.c
+    "$CC" -shared -fPIC -O2 -Wall -Wextra pipewire-hook.c \
+      -o "$out/lib/libapprun_hooks.so" -ldl -pthread
   '';
 
   # Root --service must be able to start its UID1000 Wayland --server child.
@@ -41,7 +48,7 @@ pkgs.appimageTools.extractType2 {
   pname = "rustdesk-heimpc";
   inherit version src;
   postExtract = ''
-    install -m755 ${noOpAppRunHooks}/lib/libapprun_hooks.so \
+    install -m755 ${safeAppRunHooks}/lib/libapprun_hooks.so \
       "$out/lib/x86_64/libapprun_hooks.so"
 
     # The bundled systemd loginctl cannot read the current NixOS seat0.
