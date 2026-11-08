@@ -22,6 +22,9 @@ STORE_UNIT_RE = re.compile(
     r"^[0-9a-z]{32}-unit-grabowski-operator[.]service$"
 )
 OPERATOR_PACKAGE_RE = re.compile(
+    r"^[0-9a-z]{32}-grabowski-operator-0d70eb0f$"
+)
+ACTIVE_OPERATOR_PACKAGE_RE = re.compile(
     r"^[0-9a-z]{32}-grabowski-operator-[0-9a-f]{8}$"
 )
 
@@ -160,7 +163,6 @@ def fragment_trusted(
     return _safe_file(resolved, trusted_uid)
 
 
-
 # PID 1, not a fixed NixOS-generation pin, owns the effective ExecStart.
 # Runtime self-deployment uses a root-owned systemd override; the generated
 # NixOS fragment and its static environment can legitimately lag that override.
@@ -221,7 +223,9 @@ def expected_operator_argv(
         or path.parent.name != "bin"
         or path.name != "grabowski-operator"
         or path.parent.parent.parent != store_root
-        or OPERATOR_PACKAGE_RE.fullmatch(path.parent.parent.name) is None
+        or not (
+            ACTIVE_OPERATOR_PACKAGE_RE if environ is None else OPERATOR_PACKAGE_RE
+        ).fullmatch(path.parent.parent.name)
         or not _safe_nix_store_directory(store_root, trusted_uid)
         or not all(_safe_dir(parent, trusted_uid) for parent in (path.parent.parent, path.parent))
         or not _safe_file(path, trusted_uid, executable=True)

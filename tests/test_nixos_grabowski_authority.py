@@ -5,6 +5,7 @@ import runpy
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTH = ROOT / "nixos/system/modules/grabowski-nixos-unit-authority.py"
@@ -154,6 +155,50 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         old_entry.write_text("#!/bin/sh\nexit 0\n")
         old_entry.chmod(0o555)
         self.assertRaises(PermissionError, self.argv, str(old_entry))
+
+    def test_effective_root_owned_operator_can_advance_after_self_deploy(self):
+        # PID1 has a newer immutable ExecStart while the NixOS base unit is old.
+        active = "/nix/store/" + "d" * 32 + "-grabowski-operator-68c8bcde/bin/grabowski-operator"
+        expected = (
+            "{ path=" + active + " ; argv[]=" + active
+            + " ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a]"
+            + " ; pid=0 ; code=(null) ; status=0/0 }\n"
+        ).encode()
+        with patch.object(authority.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout=expected, stderr=b""
+        )):
+            with patch.dict(authority.expected_operator_argv.__globals__, {
+                "_safe_nix_store_directory": lambda *_args, **_kw: True,
+                "_safe_dir": lambda *_args, **_kw: True,
+                "_safe_file": lambda *_args, **_kw: True,
+            }):
+                actual = authority.expected_operator_argv()
+        self.assertEqual(actual[0], active)
+        self.assertEqual(actual[1:], (
+            "-m", "grabowski_operator", "--transport", "streamable-http",
+            "--host", "127.0.0.1", "--port", "18181",
+        ))
+        # A mismatching arbitrary peer argv is never inferred from PID1.
+        for reply in (
+            expected.replace(("argv[]=" + active).encode(), b"argv[]=/tmp/attacker"),
+            expected + expected,
+            expected.replace(("path=" + active).encode(), b"path=/tmp/attacker"),
+        ):
+            with patch.object(authority.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=reply, stderr=b""
+            )):
+                self.assertRaises(PermissionError, authority._effective_operator_entrypoint)
+
+    def test_pid1_execstart_errors_refuse_before_peer_admission(self):
+        for reply, code, stderr in (
+            (b"", 0, b""), (b"bad unit", 0, b""),
+            (b"x" * 4097, 0, b""), (b"", 1, b""),
+            (b"", 0, b"connection denied"),
+        ):
+            with patch.object(authority.subprocess, "run", return_value=SimpleNamespace(
+                returncode=code, stdout=reply, stderr=stderr
+            )):
+                self.assertRaises(PermissionError, authority._effective_operator_entrypoint)
 
     def test_modified_or_unrelated_binary_rejected(self):
         self.entry.chmod(0o777)
