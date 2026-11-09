@@ -95,6 +95,9 @@ in
       # these user-owned parents before the operator's mount namespace starts.
       "d /home/alex/.local 0755 alex users -"
       "d /home/alex/.local/state 0700 alex users -"
+      # A missing path makes the optional ReadWritePaths exception ineffective.
+      "d /home/alex/.local/state/chronik 0700 alex users -"
+      "d /home/alex/.local/state/chronik/data 0755 alex users -"
       "d /home/alex/.local/state/grabowski 0700 alex users -"
       "d /home/alex/.local/state/bureau 0700 alex users -"
       "d /home/alex/repos 0755 alex users -"
