@@ -350,6 +350,49 @@ in
         SystemCallArchitectures = "native";
       };
     };
+    # The pinned Grabowski runtime already reconciles Captain-verified merges
+    # into RepoGround via its existing targeted publisher. Preserve that
+    # post-merge path after the NixOS system-service migration; no second
+    # publisher, repository list, or user-service installation is introduced.
+    systemd.services."grabowski-repoground-post-merge-reconcile" = lib.mkIf admit {
+      description = "Reconcile verified Captain merges into RepoGround publications";
+      wants = [ "grabowski-operator.service" "user@1000.service" ];
+      after = [ "grabowski-operator.service" "user@1000.service" ];
+      path = [ cfg.operatorPackage pkgs.git pkgs.openssh pkgs.systemd ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B -m grabowski_repoground_post_merge --reconcile-audit-followups --reconcile-lookback-seconds 25200";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+          "PYTHONDONTWRITEBYTECODE=1"
+        ];
+        TimeoutStartSec = "30min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ReadWritePaths = [ "-/home/alex/.local/state/grabowski" ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-repoground-post-merge-reconcile" = lib.mkIf admit {
+      description = "Reconcile pending verified RepoGround post-merge follow-ups";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnActiveSec = "15s";
+        OnUnitInactiveSec = "1min";
+        AccuracySec = "5s";
+        Persistent = true;
+        Unit = "grabowski-repoground-post-merge-reconcile.service";
+      };
+    };
+
     # The root-only Restic proof is insufficient without the operator-owned
     # source marker and canonical Rootbroker publication.  Use the established
     # complete MCP workflow inside the running trusted operator MainPID.
