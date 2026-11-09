@@ -34,9 +34,17 @@ class SeagateResticRetentionTests(unittest.TestCase):
         self.assertIn('restic("forget", "--retry-lock=6h", *removed', self.script)
         self.assertIn('restic("prune", "--retry-lock=6h"', self.script)
         self.assertIn("latest_healthy_snapshot", self.script)
+        self.assertIn("_load_recovery_proof", self.script)
+        self.assertIn("successful root restore proof", self.script)
         self.assertNotIn("independent_proof", self.script)
         self.assertIn("MAX_BACKUP_AGE = 72 * 3600", self.script)
         self.assertNotIn('restic unlock', self.script)
+
+    def test_existing_grabowski_refresh_waits_for_root_proof(self) -> None:
+        self.assertNotIn('systemd.timers."heim-pc-restic-recovery-probe"', self.module)
+        self.assertIn('grabowski-recovery-refresh.service.d/10-restic-proof.conf', self.module)
+        self.assertIn('Requires=heim-pc-restic-recovery-probe.service', self.module)
+        self.assertIn('After=heim-pc-restic-recovery-probe.service', self.module)
 
     def test_pop_os_history_is_never_targeted_by_policy(self) -> None:
         self.assertIn('HOST, TAG = "heim-pc-nixos", "nixos-seagate"', self.script)

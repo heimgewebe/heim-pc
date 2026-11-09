@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ import time
 MOUNT = Path("/var/lib/heim-pc-backup")
 REPO = MOUNT / "restic/heim-pc"
 PASSWORD = Path("/persist/secrets/restic/heim-pc-password")
+ROOT_PROOF = Path("/var/lib/heim-pc-restic-recovery-probe/proof.json")
 DEVICE_UUID = "9b626294-7913-4be0-88fa-96b314e96ee5"
 REPO_ID = "85ee278eeb58f42c26745796cb7b23239d4c7c01f5f4d00f2c10e216cefa4972"
 HOST, TAG = "heim-pc-nixos", "nixos-seagate"
@@ -37,7 +39,7 @@ def command(argv: list[str], timeout: int = 60) -> str:
     return outcome.stdout
 
 
-def restic(*argv: str, timeout: int = 1800) -> str:
+def restic(*argv: str, timeout: int = 7 * 3600) -> str:
     return command(
         ["restic", "--repo", str(REPO), "--password-file", str(PASSWORD), *argv],
         timeout=timeout,
@@ -61,25 +63,57 @@ def require_repository() -> None:
         raise RuntimeError("Restic repository ID differs")
 
 
+def _load_recovery_proof() -> dict:
+    """Consume the existing root-owned journal-bound restore proof; never attest anew."""
+    try:
+        metadata = ROOT_PROOF.lstat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_nlink != 1 or metadata.st_mode & 0o022):
+            raise RuntimeError("root restore proof identity invalid")
+        proof = json.loads(ROOT_PROOF.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("successful root restore proof unavailable; retention skipped") from exc
+    if not isinstance(proof, dict):
+        raise RuntimeError("successful root restore proof malformed; retention skipped")
+    return proof
+
+
 def latest_healthy_snapshot(all_snapshots: dict, now: int) -> str:
-    """Conservatively skip deletion unless a recent complete NixOS backup exists."""
-    candidates = []
-    for sid, snap in all_snapshots.items():
-        if (snap.get("hostname") != HOST
-                or TAG not in snap.get("tags", [])
-                or not REQUIRED_PATHS.issubset(set(snap.get("paths", [])))):
-            continue
-        try:
-            created = int(datetime.fromisoformat(
-                snap["time"].replace("Z", "+00:00")
-            ).astimezone(timezone.utc).timestamp())
-        except (KeyError, ValueError, TypeError, OverflowError):
-            continue
-        if 0 <= now - created <= MAX_BACKUP_AGE:
-            candidates.append((created, sid))
-    if not candidates:
-        raise RuntimeError("no recent complete NixOS backup; retention skipped")
-    return max(candidates)[1]
+    """Never delete history without a recent root-verified successful backup."""
+    proof = _load_recovery_proof()
+    sid = proof.get("snapshot_id")
+    snap = all_snapshots.get(sid)
+    if (proof.get("schema_version") != 1
+            or proof.get("kind") != "heim_pc.nixos_restic_recovery_root_proof"
+            or not isinstance(sid, str) or not HEX64.fullmatch(sid)
+            or proof.get("repository_id") != REPO_ID
+            or proof.get("backup_uuid") != DEVICE_UUID
+            or proof.get("restore_probe_valid") is not True
+            or proof.get("repository_check_valid") is not True
+            or not isinstance(proof.get("restore_sha256"), str)
+            or not HEX64.fullmatch(proof["restore_sha256"])
+            or not isinstance(snap, dict)
+            or snap.get("hostname") != HOST
+            or TAG not in snap.get("tags", [])
+            or not REQUIRED_PATHS.issubset(set(snap.get("paths", [])))):
+        raise RuntimeError("no recent root-verified successful NixOS backup; retention skipped")
+    started = proof.get("started_at_unix")
+    finished = proof.get("completed_at_unix")
+    recorded = proof.get("snapshot_time_unix")
+    if (type(started) is not int or type(finished) is not int
+            or type(recorded) is not int
+            or not 0 <= now - finished <= MAX_BACKUP_AGE
+            or recorded > started or started > finished):
+        raise RuntimeError("root restore proof age/order invalid; retention skipped")
+    try:
+        created = int(datetime.fromisoformat(
+            snap["time"].replace("Z", "+00:00")
+        ).astimezone(timezone.utc).timestamp())
+    except (KeyError, ValueError, TypeError, OverflowError) as exc:
+        raise RuntimeError("root proof snapshot timestamp invalid; retention skipped") from exc
+    if created != recorded or not 0 <= now - created <= MAX_BACKUP_AGE:
+        raise RuntimeError("root restore proof snapshot binding invalid; retention skipped")
+    return sid
 
 
 def snapshots() -> dict:

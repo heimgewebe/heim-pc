@@ -106,12 +106,13 @@ class RotationEffectsTests(unittest.TestCase):
     def test_failed_partial_check_does_not_advance(self) -> None:
         self.invoke(2, fail=True)
 
-    def test_nixos_probe_timer_is_daily_and_auto_checks(self) -> None:
+    def test_nixos_probe_runs_before_existing_refresh_not_on_duplicate_timer(self) -> None:
         nix = (Path(__file__).resolve().parents[1]
                / "nixos/system/modules/restic-seagate-backup.nix").read_text()
-        self.assertIn('systemd.timers."heim-pc-restic-recovery-probe" = {', nix)
-        self.assertIn('OnCalendar = "*-*-* 09:00:00";', nix)
-        self.assertIn('RandomizedDelaySec = "20m";', nix)
+        self.assertNotIn('systemd.timers."heim-pc-restic-recovery-probe" = {', nix)
+        self.assertIn('grabowski-recovery-refresh.service.d/10-restic-proof.conf', nix)
+        self.assertIn('Requires=heim-pc-restic-recovery-probe.service', nix)
+        self.assertIn('After=heim-pc-restic-recovery-probe.service', nix)
         self.assertIn('TimeoutStartSec = "8h";', nix)
 
 

@@ -169,15 +169,15 @@
     };
   };
 
-  # Rotating daily data checks cover all data once per ten successful checks.
-  # This routine verifies backup integrity; retention independently checks backup freshness.
-  systemd.timers."heim-pc-restic-recovery-probe" = {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnCalendar = "*-*-* 09:00:00";
-      Persistent = true;
-      RandomizedDelaySec = "20m";
-    };
-  };
+  # The existing Grabowski refresh (09:15/21:15) owns the schedule.
+  # Bind the root-owned proof into that same systemd transaction; if its
+  # restore/check fails, the publication step must not run.
+  # Only add a drop-in: the existing Grabowski service remains the owner
+  # of ExecStart, environment, credentials and lifecycle.
+  environment.etc."systemd/system/grabowski-recovery-refresh.service.d/10-restic-proof.conf".text = ''
+    [Unit]
+    Requires=heim-pc-restic-recovery-probe.service
+    After=heim-pc-restic-recovery-probe.service
+  '';
 
 }

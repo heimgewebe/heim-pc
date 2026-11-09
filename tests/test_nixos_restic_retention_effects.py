@@ -15,6 +15,8 @@ assert SPEC is not None and SPEC.loader is not None
 ret = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ret)
 
+REAL_LOAD_PROOF = ret._load_recovery_proof
+
 RECENT = "a" * 64
 OLDER = "b" * 64
 POP = "c" * 64
@@ -43,8 +45,24 @@ class RetentionEffectsTests(unittest.TestCase):
         self.addCleanup(argv_patch.stop)
         self.now = int(time.time())
         self.rows = snapshots(self.now)
+        self.proof = {
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_restic_recovery_root_proof",
+            "snapshot_id": RECENT,
+            "snapshot_time_unix": self.now - 3600,
+            "started_at_unix": self.now - 1200,
+            "completed_at_unix": self.now - 900,
+            "repository_id": ret.REPO_ID,
+            "backup_uuid": ret.DEVICE_UUID,
+            "restore_sha256": "f" * 64,
+            "restore_probe_valid": True,
+            "repository_check_valid": True,
+        }
+        proof_patch = patch.object(ret, "_load_recovery_proof", return_value=self.proof)
+        proof_patch.start()
+        self.addCleanup(proof_patch.stop)
 
-    def test_recent_complete_nixos_backup_enables_retention_without_off_host_proof(self):
+    def test_recent_restic_snapshot_requires_successful_root_restore_proof(self):
         self.assertEqual(ret.latest_healthy_snapshot(self.rows, self.now), RECENT)
 
     def test_foreign_or_partial_backups_cannot_authorize_retention(self):
@@ -53,20 +71,65 @@ class RetentionEffectsTests(unittest.TestCase):
             RECENT: entry(RECENT, ret.HOST, ret.TAG, self.now - 100,
                           paths={"/home/alex", "/etc"}),
         }
-        with self.assertRaisesRegex(RuntimeError, "no recent complete"):
+        with self.assertRaisesRegex(RuntimeError, "retention skipped"):
             ret.latest_healthy_snapshot(bad, self.now)
 
     def test_stale_or_future_backups_skip_deletion(self):
         for when in (self.now - ret.MAX_BACKUP_AGE - 1, self.now + 120):
             with self.subTest(time=when):
                 row = {RECENT: entry(RECENT, ret.HOST, ret.TAG, when)}
-                with self.assertRaisesRegex(RuntimeError, "no recent complete"):
+                with self.assertRaisesRegex(RuntimeError, "retention skipped"):
                     ret.latest_healthy_snapshot(row, self.now)
 
     def test_latest_healthy_snapshot_is_protected_even_with_foreign_newer(self):
         rows = dict(self.rows)
         rows[POP] = entry(POP, "heim-pc", "daily", self.now - 1)
         self.assertEqual(ret.latest_healthy_snapshot(rows, self.now), RECENT)
+
+    def test_failed_or_missing_root_proof_prevents_retention(self):
+        for change in (
+            {"restore_probe_valid": False},
+            {"repository_check_valid": False},
+            {"snapshot_id": OLDER},
+            {"repository_id": "0" * 64},
+            {"backup_uuid": "other"},
+            {"completed_at_unix": self.now - ret.MAX_BACKUP_AGE - 1},
+            {"snapshot_time_unix": self.now + 1},
+        ):
+            with self.subTest(change=change):
+                with patch.object(ret, "_load_recovery_proof", return_value={**self.proof, **change}):
+                    with self.assertRaises(RuntimeError):
+                        ret.latest_healthy_snapshot(self.rows, self.now)
+
+    def test_incomplete_snapshot_cannot_replace_verified_recovery_point(self):
+        rows = dict(self.rows)
+        rows["d" * 64] = entry("d" * 64, ret.HOST, ret.TAG, self.now - 30)
+        # A newer incomplete snapshot has the same metadata but no root proof.
+        self.assertEqual(ret.latest_healthy_snapshot(rows, self.now), RECENT)
+
+    def test_missing_or_unsafe_root_proof_fails_closed(self):
+        from unittest.mock import MagicMock
+        import stat
+        for mode, owner, links in (
+            (stat.S_IFLNK | 0o777, 0, 1),
+            (stat.S_IFREG | 0o644, 1000, 1),
+            (stat.S_IFREG | 0o666, 0, 1),
+            (stat.S_IFREG | 0o644, 0, 2),
+        ):
+            with self.subTest(mode=mode, owner=owner, links=links):
+                file = MagicMock()
+                file.lstat.return_value = type("Meta", (), {
+                    "st_mode": mode, "st_uid": owner, "st_nlink": links
+                })()
+                with patch.object(ret, "ROOT_PROOF", file):
+                    with self.assertRaises(RuntimeError):
+                        REAL_LOAD_PROOF()
+
+    def test_restic_lock_wait_has_matching_subprocess_deadline(self):
+        from unittest.mock import patch
+        with patch.object(ret, "command", return_value="") as command:
+            ret.restic("snapshots", "--json", "--retry-lock=6h")
+            self.assertGreater(command.call_args.kwargs["timeout"], 6 * 3600)
 
     def test_empty_dry_run_json_null_is_normal_and_skips_prune(self):
         # Real restic 0.18.1 returns "remove": null if nothing is deletable.
