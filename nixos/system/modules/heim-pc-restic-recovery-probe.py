@@ -436,7 +436,7 @@ def main() -> int:
     part = _next_check_part()
     # Ten successful daily partitions cover the entire repository exactly once.
     check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
-    _restic("check", check_mode, "--retry-lock", "6h", timeout=7 * 3600)
+    _restic("check", check_mode, "--retry-lock", "45m", timeout=65 * 60)
     if _mount_identity() != mounted_device:
         raise RuntimeError("backup mount identity changed while proving recovery")
     _require_backup_run_unchanged(backup_run)

@@ -141,7 +141,7 @@
       StateDirectoryMode = "0755";
       UMask = "0022";
       # May wait for a long exclusive Restic lock and read one tenth of the data.
-      TimeoutStartSec = "8h";
+      TimeoutStartSec = "80min";
       NoNewPrivileges = true;
       RestrictSUIDSGID = true;
       RestrictRealtime = true;

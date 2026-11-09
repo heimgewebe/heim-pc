@@ -81,7 +81,7 @@ class RotationEffectsTests(unittest.TestCase):
                 calls = [c for c in check.call_args_list if c.args and c.args[0] == "check"]
                 self.assertEqual(len(calls), 1)
                 mode = f"--read-data-subset={part}/10"
-                self.assertEqual(calls[0].args, ("check", mode, "--retry-lock", "6h"))
+                self.assertEqual(calls[0].args, ("check", mode, "--retry-lock", "45m"))
                 if fail:
                     commit.assert_not_called()
                     proof_out.assert_not_called()
@@ -120,7 +120,7 @@ class RotationEffectsTests(unittest.TestCase):
         self.assertNotIn('grabowski-recovery-refresh.service.d/', nix)
         self.assertNotIn('Requires=heim-pc-restic-recovery-probe.service', nix)
         self.assertIn('systemd.services."heim-pc-restic-recovery-probe"', nix)
-        self.assertIn('TimeoutStartSec = "8h";', nix)
+        self.assertIn('TimeoutStartSec = "80min";', nix)
 
 
 if __name__ == "__main__":
