@@ -28,6 +28,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertNotIn("ProtectHome = false;", operator)
         writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
         normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertIn("/home/alex/.local/state/chronik/data", normalized)
+        self.assertNotIn("/home/alex/.local/state/chronik", normalized)
         self.assertNotIn("/home/alex", normalized)
         self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
         self.assertNotIn('BindPaths = ', operator)
@@ -416,6 +418,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         expected = (
             ("d /home/alex/.local 0755 alex users -", 0o755),
             ("d /home/alex/.local/state 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/chronik 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/chronik/data 0755 alex users -", 0o755),
             ("d /home/alex/.local/state/grabowski 0700 alex users -", 0o700),
             ("d /home/alex/.local/state/bureau 0700 alex users -", 0o700),
             ("d /home/alex/repos 0755 alex users -", 0o755),
@@ -429,6 +433,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             self.assertIn(f'"{line}"', rules)
             if absolute in {
                 "/home/alex/.local/state/grabowski",
+                "/home/alex/.local/state/chronik/data",
                 "/home/alex/.local/state/bureau",
                 "/home/alex/repos",
                 "/home/alex/grabowski-workspace",
