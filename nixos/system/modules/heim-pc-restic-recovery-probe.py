@@ -444,6 +444,8 @@ def main() -> int:
     if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
         raise RuntimeError("snapshot stale after Restic check")
     _commit_check_part(part)
+    # The v1 proof is consumed by Grabowski and its rootbroker with an exact
+    # field set. Rotation state belongs exclusively to check-cursor.json.
     _write_proof({
         "schema_version": 1,
         "kind": "heim_pc.nixos_restic_recovery_root_proof",
@@ -457,8 +459,6 @@ def main() -> int:
         "restore_sha256": restored_sha,
         "restore_probe_valid": True,
         "repository_check_valid": True,
-        "check_scope": "partial",
-        "check_subset": f"{part}/{CHECK_PARTS}",
     })
     return 0
 

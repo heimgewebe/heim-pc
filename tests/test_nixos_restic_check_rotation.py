@@ -89,8 +89,15 @@ class RotationEffectsTests(unittest.TestCase):
                     commit.assert_called_once_with(part)
                     proof_out.assert_called_once()
                     payload = proof_out.call_args.args[0]
-                    self.assertEqual(payload["check_scope"], "partial")
-                    self.assertEqual(payload["check_subset"], f"{part}/10")
+                    # Exact shared v1 ABI: both the running Grabowski server
+                    # and rootbroker reject unexpected proof fields.
+                    self.assertEqual(set(payload), {
+                        "schema_version", "kind", "started_at_unix",
+                        "completed_at_unix", "snapshot_id", "snapshot_time_unix",
+                        "repository_id", "backup_uuid", "backup_source",
+                        "restore_sha256", "restore_probe_valid",
+                        "repository_check_valid",
+                    })
 
     def test_tenth_success_reads_last_tenth(self) -> None:
         self.invoke(10)
