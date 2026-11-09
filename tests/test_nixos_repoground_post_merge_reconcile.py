@@ -25,11 +25,22 @@ class RepoGroundPostMergeNixOSContractTests(unittest.TestCase):
         self.assertIn('Group = "users";', service)
         self.assertIn('"XDG_RUNTIME_DIR=/run/user/1000"', service)
         self.assertIn('"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"', service)
-        self.assertIn('ProtectHome = "read-only";', service)
-        self.assertIn('"-/home/alex/.local/state/grabowski"', service)
         self.assertNotIn('.local/share/grabowski-mcp/.venv', service)
         self.assertNotIn('systemctl start', service)
         self.assertNotIn('repoground-publish-fleet --', service)
+
+    def test_existing_publisher_can_write_home_owned_output_roots(self):
+        # RepoGround writes to ~/repos/manifest-publications, source clones,
+        # ~/.local/state/repoground-publish and ~/logs/repoground-publish.
+        data = SOURCE.read_text(encoding="utf-8")
+        service = data.split(
+            f'systemd.services."{NAME}" = lib.mkIf admit {{', 1
+        )[1].split("systemd.timers.", 1)[0]
+        self.assertIn('ProtectSystem = "full";', service)
+        self.assertIn("ProtectHome = false;", service)
+        self.assertNotIn('ProtectSystem = "strict";', service)
+        self.assertNotIn('ProtectHome = "read-only";', service)
+        self.assertNotIn("ReadWritePaths", service)
 
     def test_timer_reuses_level_triggered_verified_audit_scan(self):
         data = SOURCE.read_text(encoding="utf-8")

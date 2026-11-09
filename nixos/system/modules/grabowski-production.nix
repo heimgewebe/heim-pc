@@ -380,9 +380,11 @@ in
         TimeoutStartSec = "30min";
         NoNewPrivileges = true;
         PrivateTmp = true;
-        ProtectSystem = "strict";
-        ProtectHome = "read-only";
-        ReadWritePaths = [ "-/home/alex/.local/state/grabowski" ];
+        # The existing RepoGround publisher creates source worktrees, bundles,
+        # state and logs under /home/alex. Read-only home would prevent every
+        # reconciliation despite a healthy timer; the service runs as alex.
+        ProtectSystem = "full";
+        ProtectHome = false;
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         UMask = "0077";
       };
