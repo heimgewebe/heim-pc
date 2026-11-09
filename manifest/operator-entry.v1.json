@@ -367,9 +367,7 @@
     "tasksClaimsReceipts": {
       "repository": "${HOME}/repos/bureau",
       "machineCommandPrefix": [
-        "python3",
-        "-m",
-        "bureau.cli",
+        "${HOME}/.local/bin/bureau",
         "--root",
         "${HOME}/repos/bureau",
         "--json"
