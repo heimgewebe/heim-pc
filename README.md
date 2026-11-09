@@ -54,6 +54,8 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 
 ## NixOS-Funktionskarte für Agenten
 
+[Recovery-/Boot-/26.11-Umsetzungsplan](nixos/RECOVERY-AND-2611-EXECUTION-PLAN-20261109.md) (kein Live-Nachweis).
+
 Die folgende Karte zeigt **vorhandene Nutzerwege und ihre Prüfstellen**, nicht einen dauerhaften Live-Gesundheitsstatus. Beobachtungsstand: **8. November 2026**. Vor Nutzung oder Änderung die aktive NixOS-Generation, die konkrete Anwendung und ihren tatsächlichen Client erneut prüfen. Der [Pop!_OS-Migrationsentscheid](nixos/architecture/popos-functional-migration-20261107.md) enthält die Alternativen und bewusst nicht übernommenen Alt-Dienste; das Repository [audio](https://github.com/heimgewebe/audio) besitzt die Audio-Fachverträge. Die ältere [Softwareinventur](runtime/software-inventory.md) beschreibt ausdrücklich einen **Pop!_OS-Snapshot vom Juli 2026**, keine aktuelle NixOS-Paketliste.
 
 | Funktion | Bereits vorhandener Einstieg / Prüfweg | Abnahmegrenze beim letzten Readback |

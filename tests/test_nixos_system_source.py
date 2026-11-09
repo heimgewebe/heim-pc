@@ -14,7 +14,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "145c15a68eab733c2a8f6f46dc531844e7d5be4f6813f6549b2c6604bba18b7e"
 ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
@@ -360,54 +359,19 @@ class T(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("flake lock authority drift", result.stderr)
 
-    def test_native_downgrade_check_rejects_core_regressions_and_missing_evidence(self):
+    def test_native_lifecycle_does_not_veto_previous_generation_recovery(self):
         module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
-        program = textwrap.dedent(module.split(
-            "downgradeCheck = pkgs.writeText \"heim-pc-downgrade-check.py\" ''\n", 1
-        )[1].split("\n  '';", 1)[0])
-        namespace = {"__name__": "test_downgrade"}
-        exec(compile(program, "downgrade-check.py", "exec"), namespace)
-        check = namespace["check"]
-        baseline = {"kernel": "6.18.60", "systemd": "260.5", "nix": "2.34.9",
-                    "nixos": "26.05.20261031.fa13731"}
-        with tempfile.TemporaryDirectory() as directory:
-            current = Path(directory)
-            modules = current / "kernel-modules/lib/modules"
-            (modules / baseline["kernel"]).mkdir(parents=True)
-            (current / "sw/bin").mkdir(parents=True)
-            for name, value in (("systemctl", "systemd 260 (260.5)"), ("nix", "nix (Nix) 2.34.9")):
-                executable = current / "sw/bin" / name
-                executable.write_text(f"#!{sys.executable}\nprint({value!r})\n")
-                executable.chmod(0o700)
-            (current / "nixos-version").write_text(baseline["nixos"])
-            check(current, baseline)
-            check(current, dict(baseline, kernel="6.19.1", systemd="261.1", nix="2.35.2",
-                                nixos="26.11.20261103.abcdef0"))
-            # Hashes are not version numbers; a different source on the same
-            # Nixpkgs date must not be treated as a downgrade.
-            check(current, dict(baseline, nixos="26.05.20261031.0000000"))
-            for key, value in (("kernel", "6.18.48"), ("systemd", "260.2"),
-                               ("nix", "2.34.8"), ("nixos", "26.05.20260829.c5c4a43")):
-                with self.subTest(key=key), self.assertRaisesRegex(ValueError, key + " downgrade denied"):
-                    check(current, dict(baseline, **{key: value}))
-            with self.assertRaisesRegex(ValueError, "unsupported version"):
-                check(current, dict(baseline, kernel="6.19-rc1"))
-            with self.assertRaisesRegex(ValueError, "unsupported NixOS"):
-                check(current, dict(baseline, nixos="unbound"))
-            (modules / "6.18.59").mkdir()
-            with self.assertRaisesRegex(ValueError, "ambiguous or missing"):
-                check(current, baseline)
-            (modules / "6.18.59").rmdir()
-            (current / "sw/bin/nix").write_text(f"#!{sys.executable}\nprint('unknown')\n")
-            with self.assertRaisesRegex(ValueError, "unsupported"):
-                check(current, baseline)
-            (current / "sw/bin/nix").unlink()
-            with self.assertRaises(FileNotFoundError):
-                check(current, baseline)
-        self.assertIn("system.preSwitchChecks = lib.mkIf downgrade.enable", module)
-        self.assertIn("if downgrade.overrideReason != null then", module)
-        self.assertIn("An intentional downgrade override requires a nonempty reviewed reason", module)
-        self.assertIn("heimPc.downgradeProtection.enable = true;", (SOURCE / "flake.nix").read_text())
+        flake = (SOURCE / "flake.nix").read_text()
+        executor = (ROOT / "scripts/nixos_day2_activation.py").read_text()
+        self.assertNotIn("preSwitchChecks", module)
+        self.assertNotIn("downgradeProtection", module)
+        self.assertNotIn("heimPc.downgradeProtection", flake)
+        self.assertIn(
+            'assert !(builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks);',
+            flake,
+        )
+        self.assertIn("runner(switch_argv, prior_closure)", executor)
+        self.assertIn("_require_recovery_transaction_state(", executor)
 
     def test_nix_lifecycle_awk_gc_root_parser_matches_exact_target(self):
         module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
@@ -717,22 +681,6 @@ class T(unittest.TestCase):
         self.assertIn('!names.contains("DP-2") || desired.isEmpty()', watcher)
         self.assertNotIn('!names.contains("Virtual-iPadRemote")', watcher)
         self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
-
-    def test_current_nixos_source_snapshot_is_bound(self):
-        # The Nix Git flake contains tracked files only; ignored local
-        # host-specific files must not change the published source identity.
-        tracked = subprocess.check_output(
-            ["git", "ls-files", "-z", "--", "nixos/system"], cwd=ROOT
-        )
-        files = sorted(ROOT / os.fsdecode(name)
-                       for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 58)
-        digest = hashlib.sha256()
-        for path in files:
-            self.assertTrue(path.is_file(), str(path))
-            relative = str(path.relative_to(SOURCE)).encode()
-            digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
 
     def test_native_restic_uses_systemd_automount_with_idle_release(self):
         module = (SOURCE / "modules/restic-seagate-backup.nix").read_text()

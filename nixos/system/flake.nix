@@ -423,7 +423,8 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
-              heimPc.downgradeProtection.enable = true;
+              # Do not block activation of a known previous NixOS generation
+              # merely because its kernel, systemd or Nix is older.
               # Keep a bounded compressed swap fallback on the real Seagate
               # Grabowski candidate; avoid another OOM-driven desktop build failure.
               zramSwap = {
@@ -1569,9 +1570,8 @@ PY
             contract = builtins.fromJSON (builtins.readFile ../production/nix-lifecycle-contract-v1.json);
             target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
           in
-          assert target.heimPc.downgradeProtection.enable;
-          assert target.heimPc.downgradeProtection.overrideReason == null;
-          assert builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks;
+          # Native NixOS rollback must not be vetoed by version comparison.
+          assert !(builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks);
           assert !target.nix.gc.automatic;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.services;
           assert builtins.hasAttr "heim-pc-nix-lifecycle-audit" target.systemd.timers;
