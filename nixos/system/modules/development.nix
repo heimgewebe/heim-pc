@@ -8,6 +8,17 @@
     ocrmypdf qpdf tesseract pdfarranger
   ]);
 
+  # Keep GitHub HTTPS authentication valid across gh updates and Nix store GC.
+  # gh auth setup-git writes a versioned store path into ~/.gitconfig, whereas
+  # the active system profile always provides this stable wrapper.
+  programs.git = {
+    enable = true;
+    config.credential = {
+      "https://github.com".helper = [ "" "!/run/current-system/sw/bin/gh auth git-credential" ];
+      "https://gist.github.com".helper = [ "" "!/run/current-system/sw/bin/gh auth git-credential" ];
+    };
+  };
+
   # NixOS' native program module installs LocalSend and configures its
   # discovery/transfer firewall ports; only the desktop profile enables it.
   programs.localsend = lib.mkIf config.heimPc.desktop.enable {
