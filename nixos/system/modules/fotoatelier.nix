@@ -27,6 +27,10 @@ in
 
   systemd.user.services.fotoatelier-backup = {
     description = "Fotoatelier off-machine backup";
+    # This timer-owned off-host backup must not be restarted by unrelated
+    # NixOS user-service switches when FOTOLABOR is offline. The timer and
+    # genuine backup failure/age evidence remain unchanged.
+    restartIfChanged = false;
     after = [ "network-online.target" ];
     unitConfig.ConditionUser = "alex";
     serviceConfig = {

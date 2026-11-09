@@ -46,6 +46,20 @@ class FotoatelierNixOSSourceTests(unittest.TestCase):
         self.assertNotIn('User = "root";', source)
         self.assertNotIn('ProtectHome = false', source)
 
+    def test_timer_owned_backup_disables_nixos_restart_without_disabling_timer(self):
+        source = MODULE.read_text(encoding="utf-8")
+        backup = source.split("systemd.user.services.fotoatelier-backup =", 1)[1].split(
+            "systemd.user.timers.fotoatelier-backup =", 1
+        )[0]
+        timer = source.split("systemd.user.timers.fotoatelier-backup =", 1)[1].split(
+            "systemd.user.services.fotoatelier-public-sync =", 1
+        )[0]
+        self.assertIn("restartIfChanged = false;", backup)
+        self.assertNotIn("wantedBy =", backup)
+        self.assertIn('wantedBy = [ "timers.target" ];', timer)
+        self.assertIn("Persistent = true;", timer)
+        self.assertIn('Unit = "fotoatelier-backup.service";', timer)
+
     def test_public_sync_offline_detection_has_tailscale_in_service_path(self):
         source = MODULE.read_text(encoding="utf-8")
         tools = source.split("tools = lib.makeBinPath [", 1)[1].split("];", 1)[0]
