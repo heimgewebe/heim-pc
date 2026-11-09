@@ -337,6 +337,9 @@ in
         ReadWritePaths = [
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
+          # Only Chronik's ledger and lock directory must be writable.
+          # ProtectHome otherwise rejects valid imports with EROFS.
+          "-/home/alex/.local/state/chronik/data"
           "-/home/alex/repos"
           "-/home/alex/grabowski-workspace"
           "-/home/alex/worktrees"

@@ -28,6 +28,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertNotIn("ProtectHome = false;", operator)
         writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
         normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertIn("/home/alex/.local/state/chronik/data", normalized)
+        self.assertNotIn("/home/alex/.local/state/chronik", normalized)
         self.assertNotIn("/home/alex", normalized)
         self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
         self.assertNotIn('BindPaths = ', operator)

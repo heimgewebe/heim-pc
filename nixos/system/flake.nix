@@ -1223,6 +1223,7 @@ PY
                 && !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
             operator.ReadWritePaths;
           # The Restic repository lock mount is available only to the root probe.
+          assert builtins.elem "-/home/alex/.local/state/chronik/data" operator.ReadWritePaths;
           assert !(builtins.elem "-/var/lib/heim-pc-backup" operator.ReadWritePaths);
           assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);
           # Optional ReadWritePaths is ineffective if the target is missing on cold start.
