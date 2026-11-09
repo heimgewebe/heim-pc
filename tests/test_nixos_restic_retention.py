@@ -40,11 +40,15 @@ class SeagateResticRetentionTests(unittest.TestCase):
         self.assertIn("MAX_BACKUP_AGE = 72 * 3600", self.script)
         self.assertNotIn('restic unlock', self.script)
 
-    def test_existing_grabowski_refresh_waits_for_root_proof(self) -> None:
+    def test_existing_grabowski_refresh_owns_the_only_recovery_schedule(self) -> None:
         self.assertNotIn('systemd.timers."heim-pc-restic-recovery-probe"', self.module)
-        self.assertIn('grabowski-recovery-refresh.service.d/10-restic-proof.conf', self.module)
-        self.assertIn('Requires=heim-pc-restic-recovery-probe.service', self.module)
-        self.assertIn('After=heim-pc-restic-recovery-probe.service', self.module)
+        self.assertNotIn('grabowski-recovery-refresh.service.d/', self.module)
+        self.assertNotIn('Requires=heim-pc-restic-recovery-probe.service', self.module)
+        grabowski = (ROOT / "nixos/system/modules/grabowski-production.nix").read_text()
+        self.assertIn('systemd.timers."grabowski-recovery-refresh"', grabowski)
+        self.assertIn('Unit = "grabowski-recovery-refresh.service"', grabowski)
+        refresh = (ROOT / "nixos/system/modules/grabowski-recovery-mcp-refresh.py").read_text()
+        self.assertIn('"grabowski_recovery_server_probe"', refresh)
 
     def test_pop_os_history_is_never_targeted_by_policy(self) -> None:
         self.assertIn('HOST, TAG = "heim-pc-nixos", "nixos-seagate"', self.script)

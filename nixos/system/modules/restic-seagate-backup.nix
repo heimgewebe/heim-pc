@@ -169,15 +169,8 @@
     };
   };
 
-  # The existing Grabowski refresh (09:15/21:15) owns the schedule.
-  # Bind the root-owned proof into that same systemd transaction; if its
-  # restore/check fails, the publication step must not run.
-  # Only add a drop-in: the existing Grabowski service remains the owner
-  # of ExecStart, environment, credentials and lifecycle.
-  environment.etc."systemd/system/grabowski-recovery-refresh.service.d/10-restic-proof.conf".text = ''
-    [Unit]
-    Requires=heim-pc-restic-recovery-probe.service
-    After=heim-pc-restic-recovery-probe.service
-  '';
+  # The existing Grabowski refresh owns the schedule and invokes the
+  # root-owned proof once through its fixed broker command. Do not add a
+  # second timer or a Requires= dependency that would repeat the heavy check.
 
 }

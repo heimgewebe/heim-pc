@@ -117,9 +117,9 @@ class RotationEffectsTests(unittest.TestCase):
         nix = (Path(__file__).resolve().parents[1]
                / "nixos/system/modules/restic-seagate-backup.nix").read_text()
         self.assertNotIn('systemd.timers."heim-pc-restic-recovery-probe" = {', nix)
-        self.assertIn('grabowski-recovery-refresh.service.d/10-restic-proof.conf', nix)
-        self.assertIn('Requires=heim-pc-restic-recovery-probe.service', nix)
-        self.assertIn('After=heim-pc-restic-recovery-probe.service', nix)
+        self.assertNotIn('grabowski-recovery-refresh.service.d/', nix)
+        self.assertNotIn('Requires=heim-pc-restic-recovery-probe.service', nix)
+        self.assertIn('systemd.services."heim-pc-restic-recovery-probe"', nix)
         self.assertIn('TimeoutStartSec = "8h";', nix)
 
 
