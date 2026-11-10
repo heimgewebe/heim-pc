@@ -44,22 +44,25 @@ Approved-Profil-Hook bis zu einer ausdrücklich definierten Migration.
 Eine bloße `nix build`-, `switch`- oder Systemprofil-Aktualisierung
 promotet **keine** neue Bootgeneration.
 
-**Einmalige Migration, vor dem ersten Bootloader-Install mit dem neuen Hook:**
-Nur über den autorisierten Root-Operator, nach Liveprüfung der existierenden
-Closures, produktiver Writer-Leases und einer tatsächlich nachgewiesenen
-Freigabe. Für den Stand vom 03.11.2026 ist **Gen38** der vorhandene
-funktionsfähige EFI-Standard **und** SysFail-/Recoverypfad
-(`2xy6inggq55kq8zzkhvppivm8yz0xlqn`).
-Gen42 wurde zwar physisch gestartet (`1sr7yj37fi167q0hpqc0d7vmjls9nmkw`),
-ist aber wegen offener iPad-Bild-/Eingabe-Ende-zu-Ende-Abnahme noch **nicht**
-als dauerhafter Bootstandard freigegeben. Die genauen Pfade sind vor
-jedem Root-Effekt erneut zu prüfen:
+**Historische Erstmigration (Stand 03.11.2026):** Die damals einmalig
+verwendeten `nix-env --set`-Befehle für Gen38 waren nur zur Einrichtung
+beider benannter Profile bestimmt. Sie sind **keine** wiederholbaren
+Betriebsbefehle: Erneutes Setzen auf die historischen Storepfade würde
+den heutigen Bootstandard zurücksetzen.
 
-```sh
-install -d -m 0755 /nix/var/nix/profiles/system-profiles
-nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-approved --set /nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system-heim-pc-26.05.20261025.1f607aa
-nix-env --profile /nix/var/nix/profiles/system-profiles/heim-pc-recovery --set /nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system-heim-pc-26.05.20261025.1f607aa
-```
+**Readback vom 10.11.2026, ca. 07:25 Uhr MEZ (Momentaufnahme):**
+
+- EFI Current/Default: `nixos-heim-pc-approved-generation-12.conf`;
+  EFI SysFail: `nixos-heim-pc-recovery-generation-1.conf`.
+- `heim-pc-approved` zeigt auf die real gebootete Closure vom 31.10.;
+  `heim-pc-recovery` auf die getrennte, ältere Closure vom 25.10.
+- `/run/booted-system` entspricht approved. Die aktuelle System-Closure
+  (Systemprofilgeneration 70) ist dagegen neuer und noch nicht als
+  Bootstandard freigegeben. `switch` bewirkt keine Promotion.
+
+Vor jedem Boot-Effekt Profile, `/run/booted-system`, `/run/current-system`,
+EFI Current/Default/SysFail und `/boot/loader/loader.conf` erneut am
+Gerät prüfen. Die Readback-Werte oben sind kein dauerhaftes Soll.
 
 Danach ausschließlich die reguläre, koordinierte NixOS-Bootloader-Aktivierung
 verwenden. Der vorhandene Install-Hook verifiziert beide benannten Einträge
@@ -71,11 +74,18 @@ besteht aus einer **bewussten** Aktualisierung des
 Closure sowie derselben regulären Bootloader-Aktualisierung.
 `bootctl set-default` allein ist keine dauerhafte Promotion.
 
-Bei der ersten Aktivierung beide Profile zunächst auf Gen38 pinnen. Ein
-erneuter Boot mit Gen42 oder einer neueren Generation darf das
-`heim-pc-approved`-Profil erst nach vollständiger Freigabe verändern.
-Die Bootprofilauswahl wird niemals allein aus der aktuellsten System-
-oder PR-Nummer abgeleitet.
+Eine spätere Boot-Promotion setzt einen real erfolgreichen Neustart in
+zuvor geprüfter Ziel-Closure und die Abnahme der betroffenen Nutzerwege
+voraus. Die Bootprofilauswahl wird niemals allein aus der aktuellsten
+System- oder PR-Nummer abgeleitet.
+
+Ältere, unveränderliche Generationen aus der Zeit vor PR #344 können
+noch den inzwischen entfernten Downgrade-Check enthalten. Scheitert
+**genau daran** ein erforderlicher manueller Rückweg, ist nach Prüfung
+von Ziel- und Ausgangs-Closure der gezielte Einmal-Aufruf
+`NIXOS_NO_CHECK=1 nixos-rebuild switch --rollback` möglich. Das ist
+keine Standardoption für normale Switches; die nicht destruktive
+Rückwegprobe am Gerät steht weiterhin aus.
 
 Der physische Reboot ist separat zu koordinieren; eine vorbereitete Generation
 oder ein grüner Build beweist weder den nächsten Boot noch den automatischen

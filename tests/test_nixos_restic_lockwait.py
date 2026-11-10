@@ -24,7 +24,7 @@ class SeagateNativeResticLockWaitTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         args = re.findall(r'"([^"]+)"', match.group(1))
-        self.assertEqual(args.count("--retry-lock=30m"), 1)
+        self.assertEqual(args.count("--retry-lock=6h"), 1)
         self.assertNotIn("--no-lock", args)
         self.assertIn("--host=heim-pc-nixos", args)
         self.assertIn("--tag=nixos-seagate", args)

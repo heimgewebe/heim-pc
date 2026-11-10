@@ -265,6 +265,76 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                 probe._require_backup_snapshot_in_journal(full_id, run)
             call.assert_called_once_with(expected_command, timeout=30)
 
+    def test_garbage_collected_backup_receipt_uses_trusted_journal(self) -> None:
+        now = int(probe.time.time())
+        service = "restic-backups-heim-pc.service"
+        boot = "a" * 32
+        invocation = "b" * 32
+        start_us, end_us = (now - 600) * 1000000, (now - 60) * 1000000
+        start_mono, end_mono = 1000000, 541000000
+
+        def manager(message, marker, stamp, mono, pid="1", boot_id=boot):
+            return {"_PID": pid, "_SYSTEMD_UNIT": "init.scope", "UNIT": service,
+                    "MESSAGE": message, "MESSAGE_ID": marker, "_BOOT_ID": boot_id,
+                    "__REALTIME_TIMESTAMP": str(stamp),
+                    "__MONOTONIC_TIMESTAMP": str(mono)}
+
+        started = manager("Starting " + service + "...",
+                          "7d4958e842da4a758f6c1cdc7b36dcc5", start_us, start_mono)
+        finished = manager("Finished " + service + ".",
+                           "39f53479d3a045ac8e11786248231fbf", end_us, end_mono)
+        snapshot = {"_SYSTEMD_UNIT": service, "_BOOT_ID": boot,
+                    "_SYSTEMD_INVOCATION_ID": invocation,
+                    "MESSAGE": "snapshot 81afdf3e saved",
+                    "__REALTIME_TIMESTAMP": str(start_us + 2000000),
+                    "__MONOTONIC_TIMESTAMP": str(start_mono + 2000000)}
+        gc_fields = {
+            "LoadState": "loaded", "Result": "success", "ExecMainStatus": "0",
+            "ExecMainCode": "0", "InvocationID": "",
+            "ExecMainStartTimestamp": "", "ExecMainExitTimestamp": "",
+            "ExecMainStartTimestampMonotonic": "0",
+            "ExecMainExitTimestampMonotonic": "0",
+        }
+        show = "\n".join(k + "=" + v for k, v in gc_fields.items())
+        cases = [
+            ("valid", [started, finished], [snapshot], True),
+            ("newer_start", [started, finished, started], [snapshot], False),
+            ("newer_failure", [started, finished, manager(
+                "Failed to start " + service + ".", "", end_us + 1000000,
+                end_mono + 1000000)], [snapshot], False),
+            ("spoof_pid1", [{**started, "_PID": "222"}, finished], [snapshot], False),
+            ("wrong_manager_message_id", [started, {**finished, "MESSAGE_ID": "bad"}],
+             [snapshot], False),
+            ("missing_completion", [started], [snapshot], False),
+            ("missing_snapshot", [started, finished], [], False),
+            ("duplicate_snapshot", [started, finished], [snapshot, snapshot], False),
+            ("foreign_boot", [started, finished],
+             [{**snapshot, "_BOOT_ID": "c" * 32}], False),
+            ("snapshot_after_finish", [started, finished],
+             [{**snapshot, "__MONOTONIC_TIMESTAMP": str(end_mono + 1)}], False),
+            ("invalid_invocation", [started, finished],
+             [{**snapshot, "_SYSTEMD_INVOCATION_ID": ""}], False),
+        ]
+        for label, manager_rows, snapshot_rows, accepted in cases:
+            with self.subTest(label=label):
+                manager_log = "\n".join(json.dumps(row) for row in manager_rows)
+                snapshot_log = "\n".join(json.dumps(row) for row in snapshot_rows)
+                calls = ["", "", show, manager_log, snapshot_log]
+                with patch.object(probe, "_command", side_effect=calls) as cmd:
+                    if accepted:
+                        self.assertEqual(
+                            probe._backup_timer_ready(),
+                            (invocation, now - 600, now - 60, start_mono, end_mono),
+                        )
+                        self.assertEqual(cmd.call_count, 5)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            probe._backup_timer_ready()
+        with patch.object(probe, "_command",
+                          side_effect=["", "", show, "{bad json"]):
+            with self.assertRaisesRegex(RuntimeError, "journal is malformed"):
+                probe._backup_timer_ready()
+
     def test_recovery_rejects_changed_systemd_invocation_before_publishing(self) -> None:
         expected = ("a" * 32, 100, 200, 100000, 300000)
         with patch.object(probe, "_backup_timer_ready", return_value=expected):

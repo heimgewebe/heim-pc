@@ -25,7 +25,8 @@ HOST = "heim-pc-nixos"
 TAG = "nixos-seagate"
 SOURCE = "/persist/secrets/restic/heim-pc-excludes"
 MAX_AGE_SECONDS = 24 * 3600
-CHECK_SUBSET = "1/10"
+CHECK_PARTS = 10
+CHECK_CURSOR = STATE / "check-cursor.json"
 
 
 def _command(argv: list[str], *, timeout: int = 300, binary: bool = False):
@@ -167,6 +168,79 @@ def _restore_digest(snapshot_id: str) -> str:
         return restored_sha
 
 
+def _journal_backup_run() -> tuple[str, int, int, int, int]:
+    """Recover trusted backup success after systemd garbage-collects oneshot state."""
+    service = "restic-backups-heim-pc.service"
+
+    def journal_rows(selector: str) -> list[dict[str, object]]:
+        raw = _command(["journalctl", "--system", "--no-pager",
+                        "--output=json", "-n", "300", selector], timeout=30)
+        try:
+            rows = [json.loads(line) for line in raw.splitlines()]
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("native Restic journal is malformed") from exc
+        if any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError("native Restic journal is malformed")
+        return rows
+
+    markers = {
+        "Starting " + service + "...": ("start", "7d4958e842da4a758f6c1cdc7b36dcc5"),
+        "Finished " + service + ".": ("finish", "39f53479d3a045ac8e11786248231fbf"),
+    }
+    timeline: list[tuple[str, str, int, int]] = []
+    for row in journal_rows("UNIT=" + service):
+        if (row.get("_PID") != "1" or row.get("_SYSTEMD_UNIT") != "init.scope"
+                or row.get("UNIT") != service):
+            continue
+        message = row.get("MESSAGE")
+        marker = markers.get(message) if isinstance(message, str) else None
+        if marker is not None and row.get("MESSAGE_ID") == marker[1]:
+            kind = marker[0]
+        elif isinstance(message, str) and (
+                message.startswith("Failed to start " + service)
+                or message.startswith(service + ": Failed with result")):
+            kind = "failed"
+        else:
+            continue
+        boot = row.get("_BOOT_ID")
+        real = row.get("__REALTIME_TIMESTAMP")
+        mono = row.get("__MONOTONIC_TIMESTAMP")
+        if (not isinstance(boot, str) or not re.fullmatch(r"[0-9a-f]{32}", boot)
+                or not isinstance(real, str) or not re.fullmatch(r"[0-9]{1,20}", real)
+                or not isinstance(mono, str) or not re.fullmatch(r"[0-9]{1,20}", mono)):
+            raise RuntimeError("native Restic journal timestamp identity invalid")
+        timeline.append((kind, boot, int(real), int(mono)))
+    if len(timeline) < 2 or [item[0] for item in timeline[-2:]] != ["start", "finish"]:
+        raise RuntimeError("native Restic journal has no latest successful backup run")
+    started, finished = timeline[-2:]
+    if (started[1] != finished[1] or not started[2] < finished[2]
+            or not started[3] < finished[3]
+            or not 0 <= int(time.time()) - finished[2] // 1_000_000 <= MAX_AGE_SECONDS):
+        raise RuntimeError("native Restic journal backup interval invalid")
+    invocations: list[str] = []
+    for row in journal_rows("_SYSTEMD_UNIT=" + service):
+        message = row.get("MESSAGE")
+        if (not isinstance(message, str)
+                or re.fullmatch(r"snapshot [0-9a-f]{8,64} saved", message) is None
+                or row.get("_BOOT_ID") != started[1]):
+            continue
+        real = row.get("__REALTIME_TIMESTAMP")
+        mono = row.get("__MONOTONIC_TIMESTAMP")
+        invocation = row.get("_SYSTEMD_INVOCATION_ID")
+        if (not isinstance(real, str) or re.fullmatch(r"[0-9]{1,20}", real) is None
+                or not isinstance(mono, str) or re.fullmatch(r"[0-9]{1,20}", mono) is None
+                or not isinstance(invocation, str)
+                or re.fullmatch(r"[0-9a-f]{32}", invocation) is None):
+            raise RuntimeError("native Restic journal snapshot identity invalid")
+        if (started[2] <= int(real) <= finished[2]
+                and started[3] <= int(mono) <= finished[3]):
+            invocations.append(invocation)
+    if len(invocations) != 1:
+        raise RuntimeError("native Restic journal has no unique backed-up invocation")
+    return (invocations[0], started[2] // 1_000_000, finished[2] // 1_000_000,
+            started[3], finished[3])
+
+
 def _backup_timer_ready() -> tuple[str, int, int, int, int]:
     """Identify one completed successful service invocation, not stale unit defaults."""
     for operation in ("is-enabled", "is-active"):
@@ -188,6 +262,15 @@ def _backup_timer_ready() -> tuple[str, int, int, int, int]:
         if not separator or key not in properties or key in values:
             raise RuntimeError("native Restic system backup service has not succeeded")
         values[key] = value
+    if (set(values) == set(properties) and values["LoadState"] == "loaded"
+            and values["Result"] == "success" and values["ExecMainStatus"] == "0"
+            and values["ExecMainCode"] == "0" and values["InvocationID"] == ""
+            and values["ExecMainStartTimestamp"] == ""
+            and values["ExecMainExitTimestamp"] == ""
+            and values["ExecMainStartTimestampMonotonic"] == "0"
+            and values["ExecMainExitTimestampMonotonic"] == "0"):
+        # systemd GC erases oneshot run properties; the trusted journal survives.
+        return _journal_backup_run()
     if (
         set(values) != set(properties)
         or values["LoadState"] != "loaded"
@@ -297,6 +380,46 @@ def _write_proof(record: dict[str, object]) -> None:
             os.unlink(temp)
 
 
+def _next_check_part() -> int:
+    """Only successful completed checks advance the repository-bound cursor."""
+    try:
+        record = json.loads(CHECK_CURSOR.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 1
+    if (not isinstance(record, dict)
+            or record.get("repository_id") != REPOSITORY_ID
+            or type(record.get("last_part")) is not int
+            or not 1 <= record["last_part"] <= CHECK_PARTS):
+        raise RuntimeError("rotating Restic check cursor is invalid")
+    return record["last_part"] % CHECK_PARTS + 1
+
+
+def _commit_check_part(part: int) -> None:
+    if type(part) is not int or not 1 <= part <= CHECK_PARTS:
+        raise RuntimeError("invalid rotating Restic check part")
+    payload = (json.dumps({
+        "repository_id": REPOSITORY_ID,
+        "last_part": part,
+        "completed_at_unix": int(time.time()),
+    }, sort_keys=True, separators=(",", ":"))).encode()
+    fd, temp = tempfile.mkstemp(prefix=".cursor-", dir=str(STATE))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, CHECK_CURSOR)
+        directory_fd = os.open(STATE, os.O_DIRECTORY | os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def main() -> int:
     if len(sys.argv) != 1 or os.geteuid() != 0:
         raise RuntimeError("root-only fixed-argument recovery probe")
@@ -310,13 +433,19 @@ def main() -> int:
     backup_run = _backup_timer_ready()
     snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
     restored_sha = _restore_digest(snapshot_id)
-    _restic("check", "--read-data-subset=" + CHECK_SUBSET, "--retry-lock", "30m", timeout=2100)
+    part = _next_check_part()
+    # Ten successful daily partitions cover the entire repository exactly once.
+    check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
+    _restic("check", check_mode, "--retry-lock", "45m", timeout=65 * 60)
     if _mount_identity() != mounted_device:
         raise RuntimeError("backup mount identity changed while proving recovery")
     _require_backup_run_unchanged(backup_run)
     completed = int(time.time())
     if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
         raise RuntimeError("snapshot stale after Restic check")
+    _commit_check_part(part)
+    # The v1 proof is consumed by Grabowski and its rootbroker with an exact
+    # field set. Rotation state belongs exclusively to check-cursor.json.
     _write_proof({
         "schema_version": 1,
         "kind": "heim_pc.nixos_restic_recovery_root_proof",

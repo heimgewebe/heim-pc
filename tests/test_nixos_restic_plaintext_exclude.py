@@ -35,7 +35,7 @@ class ResticPlaintextExclusionTests(unittest.TestCase):
         self.assertLess(args.index(PRIVATE), args.index(FINAL))
         self.assertEqual(args.strip().splitlines()[-1].strip(), f'"{FINAL}"')
         self.assertNotIn('"--exclude=**/*.sql.gz"', args)
-        self.assertIn('"--retry-lock=30m"', args)
+        self.assertIn('"--retry-lock=6h"', args)
 
     def test_real_restic_late_plaintext_and_negative_rule_cannot_override_final_exclude(self):
         restic = shutil.which("restic")

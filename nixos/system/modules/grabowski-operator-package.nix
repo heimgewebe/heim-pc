@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "5e136cf30dab4401f2a582ae1c7a2e4cfed15eb4";
-  releaseId = "5e136cf3-nixos-lock264e747ad05a-contract23851f3e6dea";
+  sourceRevision = "08457f0d5093ec2c04f36f15bfc706deb5f9795e";
+  releaseId = "08457f0d-nixos-lock264e747ad05a-contract7130dc15a144";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-ruSM9PX786hBwTG0B+h8q8YAGqUt/32bOUPgPqhAelE=";
+    hash = "sha256-XBofAHVcRyTIpNR6KBLA9G85iY2EbXEzTFY0xXzMuTc=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -17,7 +17,7 @@ let
   # occur during the subsequent ordinary, sandboxed operator build.
   wheelhouse = pkgs.stdenvNoCC.mkDerivation {
     pname = "grabowski-locked-runtime-wheels";
-    version = "5e136cf3";
+    version = "08457f0d";
     dontUnpack = true;
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
@@ -40,7 +40,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "5e136cf3";
+  version = "08457f0d";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -77,7 +77,7 @@ pkgs.stdenvNoCC.mkDerivation {
     export GRABOWSKI_NIXOS_GIT_BIN="$out/bin/git"
     export GRABOWSKI_NIXOS_GH_BIN="$out/bin/gh"
 
-    # Reproduce the ORIGINAL canonical 206-tool deployment entrypoint.
+    # Reproduce the ORIGINAL canonical 207-tool deployment entrypoint.
     # The source file name differs from the Python module name: the public
     # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
     # grabowski_operator and src/grabowski_operator.py to
@@ -104,11 +104,11 @@ if not (
 ):
     raise SystemExit("unexpected upstream canonical runtime entrypoint")
 expected = contract.get("expected_tools")
-if not (isinstance(expected, list) and len(expected) == 206
+if not (isinstance(expected, list) and len(expected) == 207
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
-if not isinstance(supporting, list) or len(supporting) != 132:
+if not isinstance(supporting, list) or len(supporting) != 133:
     raise SystemExit("canonical runtime module mapping changed")
 entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
 seen = set()
@@ -143,7 +143,7 @@ for entry in entries:
         content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
         content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
         dst.write_text(content)
-    # The copied full upstream runtime is still the canonical 206-tool
+    # The copied full upstream runtime is still the canonical 207-tool
     # entrypoint. Repair only Nix-specific argv0 and catalog discovery.
     if original == "src/grabowski_runtime.py":
         content = dst.read_text()
@@ -257,6 +257,16 @@ for item in contract.get("runtime_assets", []):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, target)
     target.chmod(0o444)
+# The canonical candidate resolver expects a regular runner beside the
+# installed site-packages parent. Runtime assets live in share/grabowski;
+# install an identical immutable copy, not a symlink (regular-file gate).
+candidate_asset = share / "tools/external_programming_candidate.py"
+if not candidate_asset.is_file() or candidate_asset.is_symlink():
+    raise SystemExit("canonical external candidate runner asset missing")
+candidate_runner = site.parent / "tools/external_programming_candidate.py"
+candidate_runner.parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(candidate_asset, candidate_runner)
+candidate_runner.chmod(0o444)
 PY
 
     # The existing source-pinned ingress CAS publisher is reused by the native
@@ -343,6 +353,14 @@ if Path(sys.prefix) != root or sys.prefix == sys.base_prefix:
 if importlib.util.find_spec("grabowski_job_finalizer") is None:
     raise SystemExit("Nix isolated job finalizer is not importable")
 import grabowski_coding_agent_router as router
+import grabowski_agent_competition as competition
+import stat
+candidate_runner = root / "lib/python3.12/tools/external_programming_candidate.py"
+candidate_asset = root / "share/grabowski/tools/external_programming_candidate.py"
+if (competition.RUNNER != candidate_runner
+        or not stat.S_ISREG(candidate_runner.lstat().st_mode)
+        or candidate_runner.read_bytes() != candidate_asset.read_bytes()):
+    raise SystemExit("Nix immutable external candidate runner cannot be resolved")
 health = router.coding_agent_catalog_health()
 if health.get("ready") is not True:
     raise SystemExit("Nix immutable coding-agent catalog is not ready: " + repr(health))

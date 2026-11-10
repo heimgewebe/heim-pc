@@ -1,2 +1,31 @@
-{ ... }:
-{ networking.networkmanager.enable = true; networking.firewall = { enable = true; allowedTCPPorts = [ ]; allowedUDPPorts = [ ]; }; }
+{ config, lib, pkgs, ... }:
+{
+  networking.networkmanager.enable = true;
+
+  # The physical wired desktop must not wait for NetworkManager's startup-complete
+  # check before starting Tailscale, Nixer and graphical.target. These services
+  # reconnect or retry independently when the link becomes available.
+  # Measured boot critical path (2026-11-09): nm-online held it for 3.082 s.
+  systemd.services.NetworkManager-wait-online.wantedBy = lib.mkForce [ ];
+  networking.firewall = {
+    enable = true;
+    allowedTCPPorts = [ ];
+    allowedUDPPorts = [ ];
+  };
+
+  # Restore Pop!_OS's unattended Taildrop inbox without an additional file
+  # transfer stack.  Keep the service user-scoped and restricted to alex:
+  # the separate XRDP account must not consume his Taildrop messages.
+  systemd.user.services.heim-taildrop-inbox = lib.mkIf config.services.tailscale.enable {
+    description = "Receive Tailscale Taildrop files into Incoming/Taildrop";
+    wantedBy = [ "default.target" ];
+    unitConfig.ConditionUser = "alex";
+    serviceConfig = {
+      Type = "simple";
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/Incoming/Taildrop";
+      ExecStart = "${pkgs.tailscale}/bin/tailscale file get --wait --loop --conflict=rename %h/Incoming/Taildrop";
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
+  };
+}

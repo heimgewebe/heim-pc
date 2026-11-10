@@ -526,8 +526,16 @@ def _gc_root_argv(
     ]
 
 
+# Only the verified Day-2 recovery of the previous closure may bypass
+# pre-switch checks inherited from immutable older generations. Never inherit
+# an ambient NIXOS_NO_CHECK into ordinary activation.
+_RECOVERY_SKIP_PRE_SWITCH_CHECKS: ContextVar[bool] = ContextVar(
+    "heim_pc_day2_recovery_skip_pre_switch_checks", default=False,
+)
+
+
 def _minimal_env(target_closure: str) -> dict[str, str]:
-    return {
+    env = {
         "HOME": "/root",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -535,6 +543,9 @@ def _minimal_env(target_closure: str) -> dict[str, str]:
         "NIX_PATH": "",
         "NIX_CONFIG": NIX_RUNTIME_CONFIG,
     }
+    if _RECOVERY_SKIP_PRE_SWITCH_CHECKS.get():
+        env["NIXOS_NO_CHECK"] = "1"
+    return env
 
 
 def _expected_dedicated_scope(request_id: str) -> str:
@@ -1246,12 +1257,18 @@ def _recover(
             prior_closure=prior_closure,
             target_closure=target_closure,
         )
+        # A prior immutable closure can still contain the faulty downgrade
+        # preSwitchCheck even after new builds have removed that check.
+        # Bypass it ONLY during this transaction-verified recovery effect.
+        token = _RECOVERY_SKIP_PRE_SWITCH_CHECKS.set(True)
         try:
             runner(switch_argv, prior_closure)
         except _ProcessTerminationUncertain:
             raise
         except RuntimeExecutorError as exc:
             errors.append(f"prior closure recovery activation failed: {exc}")
+        finally:
+            _RECOVERY_SKIP_PRE_SWITCH_CHECKS.reset(token)
 
         try:
             _require_link_target(
