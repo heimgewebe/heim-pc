@@ -1,6 +1,12 @@
 { config, lib, pkgs, ... }:
 {
   networking.networkmanager.enable = true;
+
+  # The physical wired desktop must not wait for NetworkManager's startup-complete
+  # check before starting Tailscale, Nixer and graphical.target. These services
+  # reconnect or retry independently when the link becomes available.
+  # Measured boot critical path (2026-11-09): nm-online held it for 3.082 s.
+  systemd.services.NetworkManager-wait-online.wantedBy = lib.mkForce [ ];
   networking.firewall = {
     enable = true;
     allowedTCPPorts = [ ];
