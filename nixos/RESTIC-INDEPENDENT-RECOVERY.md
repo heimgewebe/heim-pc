@@ -13,7 +13,15 @@
   Schlüssels unter `/var/lib/heimberry/restic-recovery/heim-pc.key` (0600).
   Eine Übertragung kann bei Schlüsseländerungen mit
   `scripts/restic-recovery-key-to-heimberry.sh` wiederholt werden.
-  Der tatsächliche Entschlüsselungs-/Restore-Test auf Heimberry steht noch aus.
+  Am 10.11.2026 wurde der Schlüssel auf Heimberry erfolgreich zur
+  Entschlüsselung des echten Snapshots `35bdf78e` verwendet. Restic stellte
+  dort zwei Dateien aus `/home/alex` und `/persist` in einem temporären,
+  root-eigenen `0700`-Verzeichnis wieder her und verifizierte beide.
+  Die SHA-256-Prüfsummen stimmten jeweils mit den Originalen am Heim-PC
+  überein; das Testverzeichnis wurde anschließend vollständig entfernt.
+  Für die Probe lieferte der laufende Heim-PC das Repository über
+  OpenSSH `sftp-server -R` (nur lesend). Eine Wiederherstellung bei
+  **ausgeschaltetem oder defektem Heim-PC** bleibt separat zu testen.
 
 ## Automatische Wartung
 
@@ -59,5 +67,9 @@ Betriebsvoraussetzung für die vorhandene Backup-Automatik.
 **Nachweisstand 10.11.2026:** Die Root-Probe war am 09.11.2026 um
 20:14 Uhr MEZ erfolgreich; `proof.json` meldete einen gültigen Restore
 und Repository-Check. Die Retention war noch nicht produktiv ausgeführt.
-Ein unabhängiger Restore auf Heimberry oder eine vollständige
-NixOS-Neuinstallation wurde nicht nachgewiesen.
+Ein geräteübergreifender Zwei-Dateien-Restore auf Heimberry wurde mit
+Snapshot `35bdf78e` nachgewiesen (Grabowski-Tasks `ab38380edfea4ac9aa910f10`,
+`baffda04d5ff485986d6b9b7`, `53a73992108442789d572838`);
+Heim-PC und USB-Platte waren währenddessen erreichbar. Ein Offline-Restore
+mit direkt an Heimberry angeschlossener Platte, eine vollständige
+Wiederherstellung oder eine NixOS-Neuinstallation sind nicht nachgewiesen.
