@@ -6,7 +6,7 @@ let
     lib = pkgs.lib;
     packageOnly = true;
   };
-  revision = "d334ba47-nixos-lock264e747ad05a-contract7130dc15a144";
+  revision = "08457f0d-nixos-lock264e747ad05a-contract7130dc15a144";
 
   # Isolated VM only: one harmless fixed command, never a production allowlist.
   benignResponse = builtins.toJSON {
