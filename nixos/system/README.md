@@ -17,6 +17,81 @@ Non-production prototype for the long-term Heim-PC operating-system architecture
 
 This directory is deliberately safe to evaluate/build in isolation. It must not be interpreted as permission to install NixOS, change partitions, replace the bootloader or switch the running Heim-PC.
 
+## Freigegebener Bootstandard und Recovery auf dem physischen NixOS-Host
+
+Das native `systemd-boot`-Installationsskript setzt bei jeder regulären
+Bootloader-Aktualisierung `loader.conf default` auf die übergebene
+Systemprofilgeneration. Die EFI-Variable `LoaderEntryDefault` hat aber Vorrang.
+Mit `boot.loader.efi.canTouchEfiVariables = false` korrigiert NixOS diese
+Variable nicht selbst. Das Modul `boot-approved-profiles.nix` wird
+deshalb **nur** im tatsächlich physischen Seagate-/Grabowski-Host
+(`seagate-primary-candidate.nix`) importiert. Der vorhandene
+`systemd-boot.extraInstallCommands`-Pfad gleicht beide
+Standardquellen und den `SysFail`-Eintrag aus zwei nativen
+NixOS-Profilen ab. Das getrennte spätere `storage-layout.nix`-
+Ziel bleibt bewusst unverändert: Seine frische `nixos-install`-
+Installation besitzt noch keine Approved-/Recovery-Profile und darf
+durch die Bootprofilpflicht nicht blockiert werden:
+
+- `/nix/var/nix/profiles/system-profiles/heim-pc-approved` – ausschließlich eine tatsächlich gebootete, freigegebene Closure;
+- `/nix/var/nix/profiles/system-profiles/heim-pc-recovery` – eine vorher bootgeprüfte Rückfall-Closure.
+
+Diese benannten Profile halten ihre Boot-Einträge, Kernel, Initrd und
+Store-Closures auf dem realen Seagate-Host auch über dessen
+`configurationLimit = 8` hinaus vor. Im separaten späteren
+Storage-Ziel gilt weiterhin die bisherige 10er-Grenze ohne
+Approved-Profil-Hook bis zu einer ausdrücklich definierten Migration.
+Eine bloße `nix build`-, `switch`- oder Systemprofil-Aktualisierung
+promotet **keine** neue Bootgeneration.
+
+**Historische Erstmigration (Stand 03.11.2026):** Die damals einmalig
+verwendeten `nix-env --set`-Befehle für Gen38 waren nur zur Einrichtung
+beider benannter Profile bestimmt. Sie sind **keine** wiederholbaren
+Betriebsbefehle: Erneutes Setzen auf die historischen Storepfade würde
+den heutigen Bootstandard zurücksetzen.
+
+**Readback vom 10.11.2026, ca. 07:25 Uhr MEZ (Momentaufnahme):**
+
+- EFI Current/Default: `nixos-heim-pc-approved-generation-12.conf`;
+  EFI SysFail: `nixos-heim-pc-recovery-generation-1.conf`.
+- `heim-pc-approved` zeigt auf die real gebootete Closure vom 31.10.;
+  `heim-pc-recovery` auf die getrennte, ältere Closure vom 25.10.
+- `/run/booted-system` entspricht approved. Die aktuelle System-Closure
+  (Systemprofilgeneration 70) ist dagegen neuer und noch nicht als
+  Bootstandard freigegeben. `switch` bewirkt keine Promotion.
+
+Vor jedem Boot-Effekt Profile, `/run/booted-system`, `/run/current-system`,
+EFI Current/Default/SysFail und `/boot/loader/loader.conf` erneut am
+Gerät prüfen. Die Readback-Werte oben sind kein dauerhaftes Soll.
+
+Danach ausschließlich die reguläre, koordinierte NixOS-Bootloader-Aktivierung
+verwenden. Der vorhandene Install-Hook verifiziert beide benannten Einträge
+und deren exakte `init`-Closure, aktualisiert EFI-Standard/SysFail und
+`loader.conf` und prüft den Readback. Fehlende Profile oder unpassende
+Einträge sind ein Fehler, keine implizite Freigabe. Eine spätere Promotion
+besteht aus einer **bewussten** Aktualisierung des
+`heim-pc-approved`-Profils auf eine zuvor real gebootete und freigegebene
+Closure sowie derselben regulären Bootloader-Aktualisierung.
+`bootctl set-default` allein ist keine dauerhafte Promotion.
+
+Eine spätere Boot-Promotion setzt einen real erfolgreichen Neustart in
+zuvor geprüfter Ziel-Closure und die Abnahme der betroffenen Nutzerwege
+voraus. Die Bootprofilauswahl wird niemals allein aus der aktuellsten
+System- oder PR-Nummer abgeleitet.
+
+Ältere, unveränderliche Generationen aus der Zeit vor PR #344 können
+noch den inzwischen entfernten Downgrade-Check enthalten. Scheitert
+**genau daran** ein erforderlicher manueller Rückweg, ist nach Prüfung
+von Ziel- und Ausgangs-Closure der gezielte Einmal-Aufruf
+`NIXOS_NO_CHECK=1 nixos-rebuild switch --rollback` möglich. Das ist
+keine Standardoption für normale Switches; die nicht destruktive
+Rückwegprobe am Gerät steht weiterhin aus.
+
+Der physische Reboot ist separat zu koordinieren; eine vorbereitete Generation
+oder ein grüner Build beweist weder den nächsten Boot noch den automatischen
+Grabowski-/SSH-/Tailscale-/MCP-Wiederanlauf. Recovery-Profile und ältere
+Bootmöglichkeiten bis zu dessen realem Nachweis nicht bereinigen.
+
 ## Physical PCR7 security hold (#202, 14 October 2026)
 
 Physical TPM2 PCR7 auto-unlock remains blocked even when firmware Secure Boot

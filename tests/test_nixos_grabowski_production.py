@@ -12,15 +12,15 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "02c70ad4fe97dea1e03e9bfa1d37980e620747ee"
-TARBALL_HASH = "sha256-B/T7Y6lp1GAuwzsTpMDZTyuKVp2RTJS9EGmKa+v0ZOY="
+REVISION = "08457f0d5093ec2c04f36f15bfc706deb5f9795e"
+TARBALL_HASH = "sha256-XBofAHVcRyTIpNR6KBLA9G85iY2EbXEzTFY0xXzMuTc="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
     def test_systemd_gh_cache_is_private_with_protected_home(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1].split('\n    };', 1)[0]
         self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
         self.assertIn('CacheDirectoryMode = "0700";', operator)
         self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
@@ -28,6 +28,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertNotIn("ProtectHome = false;", operator)
         writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
         normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
+        self.assertIn("/home/alex/.local/state/chronik/data", normalized)
+        self.assertNotIn("/home/alex/.local/state/chronik", normalized)
         self.assertNotIn("/home/alex", normalized)
         self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
         self.assertNotIn('BindPaths = ', operator)
@@ -61,6 +63,42 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         production = (MODULES / "grabowski-production.nix").read_text()
         self.assertIn('"PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:', production)
         self.assertIn("NoNewPrivileges = true;", production)
+
+    def test_external_candidate_runner_matches_nix_store_resolver(self):
+        operator = (MODULES / "grabowski-operator-package.nix").read_text()
+        # The imported canonical module resolves site-packages/../tools, not
+        # share/grabowski/tools. Symlinks would fail the regular-file check.
+        self.assertIn('candidate_asset = share / "tools/external_programming_candidate.py"', operator)
+        self.assertIn('candidate_runner = site.parent / "tools/external_programming_candidate.py"', operator)
+        self.assertIn("shutil.copyfile(candidate_asset, candidate_runner)", operator)
+        self.assertIn("candidate_runner.chmod(0o444)", operator)
+        self.assertIn("competition.RUNNER != candidate_runner", operator)
+        self.assertIn("stat.S_ISREG(candidate_runner.lstat().st_mode)", operator)
+        self.assertIn("candidate_runner.read_bytes() != candidate_asset.read_bytes()", operator)
+
+    def test_browser_worker_allowlists_the_pinned_nixpkgs_chrome(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        self.assertIn(
+            '"GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"',
+            operator,
+        )
+        self.assertNotIn("${pkgs.google-chrome}/share/google/chrome/chrome", operator)
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/nix/store/", operator)
+        self.assertNotIn("GRABOWSKI_BROWSER_EXECUTABLES=/opt/", operator)
+        flake = (ROOT / "nixos/system/flake.nix").read_text()
+        workstation = flake.split(
+            "nixosConfigurations.heim-pc-seagate-workstation-candidate =", 1
+        )[1].split(
+            "nixosConfigurations.heim-pc-seagate-nixer-headless-candidate =", 1
+        )[0]
+        self.assertIn('lib.hasPrefix "nvidia-" (lib.getName pkg)', workstation)
+        self.assertIn('|| lib.getName pkg == "google-chrome";', workstation)
+        unit_proof = flake.split("grabowski-production-unit-contract =", 1)[1]
+        self.assertIn(
+            'nixpkgs.config.allowUnfreePredicate = pkg:\n                      lib.getName pkg == "google-chrome";',
+            unit_proof,
+        )
 
     def test_xrdp_kwallet_keeps_active_gen19_behavior(self):
         desktop = (MODULES / "desktop.nix").read_text()
@@ -139,7 +177,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea"
+        release_id = "08457f0d-nixos-lock264e747ad05a-contract7130dc15a144"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -161,12 +199,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # The deployment manifest maps runtime.py to grabowski_operator and
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
-        self.assertIn('len(expected) == 206', op)
-        self.assertIn('len(supporting) != 132', op)
+        self.assertIn('len(expected) == 207', op)
+        self.assertIn('len(supporting) != 133', op)
         integrity = (MODULES / 'grabowski-nixos-integrity.py').read_text()
-        self.assertIn('len(tools) != 206', integrity)
-        self.assertIn('len(set(tools)) != 206', integrity)
-        self.assertIn('len(actual) != 206', flake)
+        self.assertIn('len(tools) != 207', integrity)
+        self.assertIn('len(set(tools)) != 207', integrity)
+        self.assertIn('len(actual) != 207', flake)
+        self.assertIn('if "grabowski_chronik_full_search" not in expected:', flake)
         self.assertIn('entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]', op)
         self.assertIn('dst = site / (name + ".py")', op)
         self.assertNotIn('install -m 0644 extracted/src/*.py', op)
@@ -180,7 +219,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn("assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;", flake)
         self.assertIn("grabowski-release-artifacts =", flake)
         self.assertIn('if observed != expected:', flake)
-        self.assertIn('if len(expected) != 206:', flake)
+        self.assertIn('if len(expected) != 207:', flake)
         self.assertIn('"cmdline"', flake)
         self.assertIn("test -x ${operator}/bin/grabowski-operator", flake)
         self.assertIn("test -x ${broker}/bin/grabowski-privileged-broker", flake)
@@ -207,7 +246,13 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('wantedBy = [ "multi-user.target" ];', production)
         self.assertIn('unitConfig.DefaultDependencies = false;', production)
         self.assertIn('after = [ "basic.target" "grabowski-private-policy-install.service" ];', production)
-        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];', production)
+        self.assertIn('requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];', production)
+        self.assertIn('wants = [ "network.target" "user@1000.service" ];', production)
+        self.assertIn('systemd.services."user@1000" = lib.mkIf admit {', production)
+        self.assertIn('overrideStrategy = "asDropin";', production)
+        self.assertIn('unitConfig.StartLimitIntervalSec = "0";', production)
+        self.assertIn('RestartSec = "15s";', production)
+        self.assertIn('RestartSec = "10s";', production)
         self.assertIn('SOURCE = Path("/persist/secrets/grabowski/privileged-actions.json")', installer)
         self.assertIn('DESTINATION = Path("/etc/grabowski/privileged-actions.json")', installer)
         self.assertIn('flags |= os.O_NOFOLLOW', installer)
@@ -308,6 +353,17 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         )
 
 
+    def test_codex_review_preflight_receives_exact_binary_without_extra_path(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
+        environment = operator.split("Environment = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(
+            environment.count('"GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"'), 1,
+        )
+        self.assertIn('"GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"', environment)
+        self.assertNotIn('"PATH=/home/alex/.nix-profile/bin:', environment)
+        self.assertIn('ProtectHome = "read-only";', operator)
+
     def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
         rule_block = prod.split("systemd.tmpfiles.rules = lib.optionals admit [", 1)[1].split("];", 1)[0]
@@ -362,6 +418,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         expected = (
             ("d /home/alex/.local 0755 alex users -", 0o755),
             ("d /home/alex/.local/state 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/chronik 0700 alex users -", 0o700),
+            ("d /home/alex/.local/state/chronik/data 0755 alex users -", 0o755),
             ("d /home/alex/.local/state/grabowski 0700 alex users -", 0o700),
             ("d /home/alex/.local/state/bureau 0700 alex users -", 0o700),
             ("d /home/alex/repos 0755 alex users -", 0o755),
@@ -375,6 +433,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             self.assertIn(f'"{line}"', rules)
             if absolute in {
                 "/home/alex/.local/state/grabowski",
+                "/home/alex/.local/state/chronik/data",
                 "/home/alex/.local/state/bureau",
                 "/home/alex/repos",
                 "/home/alex/grabowski-workspace",

@@ -44,8 +44,13 @@ jobs:
       - name: Validate GitHub Actions workflows
         working-directory: ./heim-pc
         run: |
-          bash ../_metarepo/scripts/tools/actionlint-pin.sh ensure
-          ../_metarepo/tools/bin/actionlint -color
+          if bash ../_metarepo/scripts/tools/actionlint-pin.sh ensure; then
+            ../_metarepo/tools/bin/actionlint -color
+          else
+            echo "::warning::Pinned actionlint release unavailable; use the same v1.7.5 via Go module proxy"
+            GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+              go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.5 -color
+          fi
 
       - name: Verify scripts syntax
         run: python3 -m compileall -q heim-pc/scripts

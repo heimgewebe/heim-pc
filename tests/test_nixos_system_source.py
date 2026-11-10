@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -12,8 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-SOURCE_SNAPSHOT_SHA256 = "13d64dd7c3d5a402a2e838fdea1c76f289e80d5b4fc61bc6cd2322f509a9e2ee"
-ROOT_LOCK_SHA256 = "8b620b93e22237a352eb61a5b89abf8a4ebae653d20a5c8decc913f0437487c5"
+ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -32,7 +33,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/6c1fae3936e441c43d19a7924f2f26f3539fb1d3";',
+            'nixer.url = "github:heimgewebe/nixer/7e137bf147b444d8359278043e6a08c6996adb36";',
             nested,
         )
 
@@ -43,8 +44,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-XshZ8TXNljSzZI1MGmkq0HofLgGrnKgRCCsK818AaK0="
-        rev = "6c1fae3936e441c43d19a7924f2f26f3539fb1d3"
+        nar = "sha256-+Dq1kTHMkY0Oh42gVONglO534qlb7tm9JFhHb43lmhU="
+        rev = "7e137bf147b444d8359278043e6a08c6996adb36"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -286,11 +287,153 @@ class T(unittest.TestCase):
         root_lock = (ROOT / "flake.lock").read_bytes()
         system_lock = (SOURCE / "flake.lock").read_bytes()
         self.assertEqual(hashlib.sha256(root_lock).hexdigest(), ROOT_LOCK_SHA256)
+        self.assertEqual(root_lock, system_lock)
         root_nodes = json.loads(root_lock)["nodes"]
         system_nodes = json.loads(system_lock)["nodes"]
         root_nixpkgs = root_nodes["root"]["inputs"]["nixpkgs"]
         system_nixpkgs = system_nodes["root"]["inputs"]["nixpkgs"]
         self.assertEqual(root_nodes[root_nixpkgs]["locked"], system_nodes[system_nixpkgs]["locked"])
+
+    @unittest.skipUnless(shutil.which("nix-instantiate"), "Nix evaluator unavailable")
+    def test_lock_authority_rejects_drift_before_exposing_outputs(self):
+        # Exercise the actual Nix gate, without fetching inputs or building.
+        # Healthy output enumeration ensures failures are not fixture errors.
+        canonical = json.loads((ROOT / "flake.lock").read_text())
+        pins = canonical["nodes"][canonical["root"]]["inputs"]
+        inputs = {name: {key: canonical["nodes"][pins[name]]["locked"][key]
+                         for key in ("rev", "narHash")}
+                  for name in ("nixpkgs", "microvm", "nixer")}
+        inputs["self"] = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nixos/system"
+            nested.mkdir(parents=True)
+            (root / "nixos/production").mkdir()
+            for relative in ("flake.nix", "flake.lock", "nixos/system/flake.nix",
+                             "nixos/production/trust-contract-v1.json"):
+                shutil.copyfile(ROOT / relative, root / relative)
+            system_lock = nested / "flake.lock"
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+
+            def evaluate(candidate, entry="flake.nix"):
+                expression = ("builtins.attrNames ((import " + str(root / entry)
+                              + ").outputs (builtins.fromJSON "
+                              + json.dumps(json.dumps(candidate)) + "))")
+                return subprocess.run(
+                    ["nix-instantiate", "--eval", "--strict", "--expr", expression],
+                    capture_output=True, text=True, timeout=30,
+                )
+
+            for entry in ("flake.nix", "nixos/system/flake.nix"):
+                result = evaluate(inputs, entry)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("nixosConfigurations", result.stdout)
+                for name in ("nixpkgs", "microvm", "nixer"):
+                    for key in ("rev", "narHash"):
+                        altered = json.loads(json.dumps(inputs))
+                        altered[name][key] = "unreviewed-input"
+                        result = evaluate(altered, entry)
+                        self.assertNotEqual(result.returncode, 0, (entry, name, key))
+                        self.assertIn("flake lock authority drift", result.stderr)
+
+            # Replacing the compatibility projection with an independently updated
+            # lock must fail even when all evaluated inputs still match root.
+            system_lock.unlink()
+            drifted = json.loads(json.dumps(canonical))
+            drifted["nodes"][pins["microvm"]]["locked"]["rev"] = "0" * 40
+            system_lock.write_text(json.dumps(drifted))
+            result = evaluate(inputs)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("flake lock authority drift", result.stderr)
+            system_lock.unlink()
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+            # A coordinated lock/input downgrade still needs the independent
+            # reviewed trust pin; agreement between locks alone is insufficient.
+            drifted = json.loads(json.dumps(canonical))
+            drifted["nodes"][pins["nixpkgs"]]["locked"]["rev"] = "0" * 40
+            (root / "flake.lock").write_text(json.dumps(drifted))
+            system_lock.write_bytes((root / "flake.lock").read_bytes())
+            altered = json.loads(json.dumps(inputs))
+            altered["nixpkgs"]["rev"] = "0" * 40
+            result = evaluate(altered)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("flake lock authority drift", result.stderr)
+
+    def test_native_lifecycle_does_not_veto_previous_generation_recovery(self):
+        module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        flake = (SOURCE / "flake.nix").read_text()
+        executor = (ROOT / "scripts/nixos_day2_activation.py").read_text()
+        self.assertNotIn("preSwitchChecks", module)
+        self.assertNotIn("downgradeProtection", module)
+        self.assertNotIn("heimPc.downgradeProtection", flake)
+        self.assertIn(
+            'assert !(builtins.hasAttr "heim-pc-downgrade-protection" target.system.preSwitchChecks);',
+            flake,
+        )
+        self.assertIn("runner(switch_argv, prior_closure)", executor)
+        self.assertIn("_require_recovery_transaction_state(", executor)
+
+    def test_nix_lifecycle_awk_gc_root_parser_matches_exact_target(self):
+        module = (SOURCE / "modules/nix-lifecycle.nix").read_text()
+        program = module.split("""awk -v target="$target" '""", 1)[1].split("\n        '", 1)[0]
+        target = "/nix/store/2xy6inggq55kq8zzkhvppivm8yz0xlqn-nixos-system"
+        cases = [
+            (f'"/nix/var/nix/gcroots/lkg" -> {target}\n', 0),
+            (f'"/nix/var/nix/gcroots/lkg" -> {target}-wrong\n', 1),
+            ('"/nix/var/nix/gcroots/lkg" -> /nix/store/other\n', 1),
+        ]
+        for roots, expected_code in cases:
+            with self.subTest(roots=roots):
+                completed = subprocess.run(
+                    ["awk", "-v", f"target={target}", program],
+                    input=roots, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode, expected_code, completed.stderr)
+
+    def test_lock_projection_checker_is_directional_and_fails_closed(self):
+        from scripts.ci.check_flake_lock import check
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "nixos/system").mkdir(parents=True)
+            authority = root / "flake.lock"
+            projection = root / "nixos/system/flake.lock"
+            authority.write_text("root authority")
+            projection.write_text("independent stale lock")
+            with self.assertRaisesRegex(ValueError, "authority drift"):
+                check(root)
+            self.assertEqual(projection.read_text(), "independent stale lock")
+            check(root, sync=True)
+            self.assertEqual(authority.read_bytes(), projection.read_bytes())
+            check(root)
+            projection.unlink()
+            with self.assertRaises(FileNotFoundError):
+                check(root)
+            projection.symlink_to("../../flake.lock")
+            with self.assertRaisesRegex(ValueError, "symlinks"):
+                check(root, sync=True)
+
+    def test_live_system_is_tracked_and_builds_deployed_host_and_both_vm_proofs(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / ".github/workflows/heim-pc-nix.yml").read_text())
+        live = workflow["jobs"]["live-system"]
+        self.assertEqual(live["if"], "always()")
+        self.assertEqual(live["needs"], "detect")
+        build = next(step for step in live["steps"] if step["name"].startswith("Build deployed"))
+        self.assertIn("nix build --no-link --no-update-lock-file", build["run"])
+        self.assertIn("heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel", build["run"])
+        for name in ("grabowski", "nixer"):
+            self.assertIn(f".#packages.x86_64-linux.{name}-headless-systemd-vm-proof", build["run"])
+        self.assertNotIn("--dry-run", build["run"])
+        for condition in ("needs.detect.result != 'success'", "needs.detect.outputs.control_changed != 'false'",
+                          "needs.detect.outputs.nix_changed != 'false'"):
+            self.assertIn(condition, build["if"])
+        required = json.loads((ROOT / ".github/grabowski-required-checks.json").read_text())
+        self.assertIn("live-system", required["required_checks"])
+        flake = (SOURCE / "flake.nix").read_text()
+        for check, following in (("supply-chain-trust", "nix-lifecycle-contract"),
+                                 ("nix-lifecycle-contract", "host-protection-contract")):
+            body = flake.split(f"        {check} =", 1)[1].split(f"        {following} =", 1)[0]
+            self.assertIn("target = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;", body)
 
     def test_limine_secure_boot_proof_is_options_only_and_not_activatable(self):
         flake = (SOURCE / "flake.nix").read_text(encoding="utf-8")
@@ -358,6 +501,22 @@ class T(unittest.TestCase):
             proof,
         )
 
+    def test_seagate_real_boot_console_uses_german_early_setup(self):
+        # The generic hosts/heim-pc module is not imported by the physical
+        # Seagate profile. Bind the source check to the actual candidate.
+        stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
+        physical = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('console.keyMap = "de";', stage0)
+        self.assertIn("console.earlySetup = true;", physical)
+        self.assertIn('services.xserver.xkb.layout = "de";', physical)
+        primary_contract = flake.split(
+            "seagate-primary-candidate-contract =", 1
+        )[1].split("seagate-workstation-candidate-contract =", 1)[0]
+        self.assertIn("assert cfg.console.earlySetup;", primary_contract)
+        self.assertIn('assert cfg.console.keyMap == "de";', primary_contract)
+        self.assertIn('assert cfg.services.xserver.xkb.layout == "de";', primary_contract)
+
     def test_stage0_no_usb_is_nonproductive_and_isolated(self):
         flake = (SOURCE / "flake.nix").read_text()
         stage0 = (SOURCE / "modules/stage0-no-usb.nix").read_text()
@@ -412,27 +571,116 @@ class T(unittest.TestCase):
         self.assertIn('networking.firewall.interfaces."tailscale0".allowedTCPPorts', desktop)
         self.assertIn("lib.optionals config.services.tailscale.enable [ 3389 ];", desktop)
         self.assertIn("openFirewall = false;", desktop)
-        self.assertIn(
-            'defaultWindowManager = "${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11";',
-            desktop,
-        )
+        self.assertIn('defaultWindowManager = "${pkgs.writeShellScript ', desktop)
+        self.assertIn('if [ "$(${pkgs.coreutils}/bin/id -un)" = alex ]; then', desktop)
+        self.assertIn('exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
+        self.assertIn('exec ${pkgs.xfce4-session}/bin/startxfce4', desktop)
+        # The alex/X11 fallback must never start a competing KDE compositor
+        # while the real alex/Wayland desktop is active.
+        guard = 'if [ -S "/run/user/$(${pkgs.coreutils}/bin/id -u)/wayland-0" ]; then'
+        self.assertIn(guard, desktop)
+        self.assertIn('XRDP Plasma/X11 unavailable while alex Wayland is active', desktop)
+        self.assertLess(desktop.index(guard), desktop.index(
+            'exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11'
+        ))
+        self.assertIn('            exit 1\n          fi\n          exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-x11', desktop)
+        self.assertIn("services.xserver.desktopManager.xfce.enable = true;", desktop)
+        self.assertIn('services.displayManager.defaultSession = "plasma";', desktop)
+        self.assertIn("users.users.ander = {", desktop)
+        self.assertIn("uid = 1001;", desktop)
+        self.assertIn("packages = [ pkgs.google-chrome ];", desktop)
+        self.assertNotIn("pkgs.firefox", desktop)
         self.assertIn("services.displayManager.sddm.wayland.enable = true;", desktop)
+        self.assertIn("services.displayManager.autoLogin.enable = true;", desktop)
+        self.assertIn('services.displayManager.autoLogin.user = "alex";', desktop)
+        self.assertIn("services.displayManager.sddm.settings.Autologin.Relogin = true;", desktop)
 
-    def test_current_nixos_source_snapshot_is_bound(self):
-        # The Nix Git flake contains tracked files only; ignored local
-        # host-specific files must not change the published source identity.
-        tracked = subprocess.check_output(
-            ["git", "ls-files", "-z", "--", "nixos/system"], cwd=ROOT
+    def test_grosser_adler_nixos_declares_independent_observer(self):
+        module = (SOURCE / "modules/grosser-adler.nix").read_text()
+        host = (SOURCE / "hosts/heim-pc/default.nix").read_text()
+        self.assertIn('heimPc.grosserAdler.enable = heimPcProfile.physical or false;', host)
+        # PR #290's physical prototype import alone does not reach the
+        # active Seagate Grabowski production profile.
+        flake = (SOURCE / "flake.nix").read_text()
+        seagate_operator = flake.split(
+            "nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =", 1
+        )[1].split("# Negative pre-deployment proof", 1)[0]
+        self.assertIn("./modules/grosser-adler.nix", seagate_operator)
+        self.assertIn("heimPc.grosserAdler.enable = true;", seagate_operator)
+        # This physical release candidate needs compressed swap under high
+        # Nix/Qt compile pressure; the storage fallback stays untouched.
+        self.assertIn("zramSwap = {", seagate_operator)
+        self.assertIn('algorithm = "zstd";', seagate_operator)
+        self.assertIn("memoryPercent = 25;", seagate_operator)
+        self.assertIn("priority = 1000;", seagate_operator)
+        self.assertNotIn(
+            "grosser-adler.nix",
+            (SOURCE / "modules/seagate-primary-candidate.nix").read_text(),
         )
-        files = sorted(ROOT / os.fsdecode(name)
-                       for name in tracked.split(b"\0") if name)
-        self.assertEqual(len(files), 47)
-        digest = hashlib.sha256()
-        for path in files:
-            self.assertTrue(path.is_file(), str(path))
-            relative = str(path.relative_to(SOURCE)).encode()
-            digest.update(relative + b"\0" + path.read_bytes() + b"\0")
-        self.assertEqual(digest.hexdigest(), SOURCE_SNAPSHOT_SHA256)
+        self.assertIn('systemd.user.services."grosser-adler-mcp" = {', module)
+        self.assertIn('systemd.user.services."tunnel-client-grosser-adler" = {', module)
+        self.assertIn('unitConfig.ConditionUser = "alex";', module)
+        self.assertIn('"d /home/alex/labs 0700 alex users -"', module)
+        self.assertIn('/home/alex/.local/bin/tunnel-client run --profile grosser-adler', module)
+        self.assertIn('ProtectHome = "read-only";', module)
+        self.assertIn('ReadWritePaths = [ "/home/alex/.local/state/grosser-adler" ];', module)
+
+    def test_rustdesk_host_uses_matching_nixos_151_and_native_gst(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        pkg = (SOURCE / "modules/rustdesk151-appdir.nix").read_text()
+        sudo = (SOURCE / "modules/rustdesk151-sudo-adapter.sh.in").read_text()
+        self.assertIn("rustdesk151AppDir = import ./rustdesk151-appdir.nix", desktop)
+        self.assertIn("ExecStart = " + chr(34) + '${pkgs.appimage-run}/bin/appimage-run -w ${rustdesk151AppDir} -- --service' + chr(34) + ";", desktop)
+        self.assertNotIn("rustdesk150Source", desktop)
+        self.assertNotIn("pkgs.rustdesk-flutter", desktop)
+        self.assertIn('version = "1.5.1";', pkg)
+        self.assertIn('sha256-u4t8yz9QogHczcibRjhc/5DzPmC0cw+u2p+lUErE3OY=', pkg)
+        self.assertIn('pkgs.pipewire', pkg)
+        # Native libva (out, not dev) supplies vaMapBuffer2 required by the
+        # PipeWire SPA adapter; the bundled AppImage libva lacks it.
+        self.assertIn("pkgs.libva-minimal.out", pkg)
+        self.assertLess(pkg.index("pkgs.libva-minimal.out"), pkg.index("pkgs.glib"))
+        self.assertIn("safeAppRunHooks", pkg)
+        self.assertIn("rustdesk151-pipewire-fd-hook.c", pkg)
+        self.assertIn('Environment = [ "RUSTDESK_PIPEWIRE_SYSTEM_SOCKET=1" ];', desktop)
+        hook = (SOURCE / "modules/rustdesk151-pipewire-fd-hook.c").read_text()
+        self.assertIn('!strcmp(kind,"GstPipeWireSrc")', hook)
+        self.assertIn('!strcmp(property,"fd")', hook)
+        self.assertIn('dlsym(RTLD_NEXT,"g_object_set_property")', hook)
+        self.assertIn("APPDIR_LIBRARY_PATH=", pkg)
+        self.assertIn("rustdesk151-sudo-adapter.sh.in", pkg)
+        # Upstream determines whether to use ScreenCast via ps and grep.
+        self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
+        self.assertIn('test -x "$out/bin/ps"', pkg)
+        self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
+        self.assertIn('"$2" != "alex"', sudo)
+        self.assertIn('"$2" != "--server"', sudo)
+
+    def test_rustdesk_grant_tracks_current_outputs_and_kde_hotplug(self):
+        desktop = (SOURCE / "modules/desktop.nix").read_text()
+        watcher = (SOURCE / "modules/rustdesk-screen-grant-hotplug.cpp").read_text()
+        self.assertIn("systemd.user.services.rustdesk-screen-grant-sync", desktop)
+        self.assertIn('wantedBy = [ "graphical-session.target" ];', desktop)
+        grant_unit = desktop.split("systemd.user.services.rustdesk-screen-grant-sync =", 1)[1]
+        grant_unit = grant_unit.split('systemd.user.services."drkonqi-coredump-launcher@"', 1)[0]
+        self.assertIn('unitConfig.ConditionUser = "alex";', grant_unit)
+        # QProcess::execute("kscreen-doctor") needs the binary on user-unit PATH;
+        # systemd user managers do not inherit Plasma's interactive shell PATH.
+        self.assertIn("path = [ pkgs.kdePackages.kscreen ];", grant_unit)
+        self.assertIn('QProcess::execute(QStringLiteral("kscreen-doctor"),args)', watcher)
+        self.assertIn("rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix", desktop)
+        package = (SOURCE / "modules/rustdesk-screen-grant-package.nix").read_text()
+        self.assertIn("pkgs.stdenv.mkDerivation", package)
+        self.assertIn("Qt6Core Qt6DBus Qt6Gui", package)
+        self.assertIn("QGuiApplication::screenAdded", watcher)
+        self.assertIn("QGuiApplication::screenRemoved", watcher)
+        self.assertIn("QScreen::geometryChanged", watcher)
+        self.assertIn("org.freedesktop.impl.portal.PermissionStore", watcher)
+        self.assertIn("LAYOUT_RECOVERED_BY_CONNECTOR", watcher)
+        # DP-2-only remains usable when the duplicate virtual monitor is disabled.
+        self.assertIn('!names.contains("DP-2") || desired.isEmpty()', watcher)
+        self.assertNotIn('!names.contains("Virtual-iPadRemote")', watcher)
+        self.assertNotIn('const QStringList desired{"0x0", "2560x0"};', watcher)
 
     def test_native_restic_uses_systemd_automount_with_idle_release(self):
         module = (SOURCE / "modules/restic-seagate-backup.nix").read_text()
@@ -468,8 +716,8 @@ class T(unittest.TestCase):
             "hosts/heim-pc/firstboot-credentials.py",
             "modules/audio.nix", "modules/backup.nix", "modules/build-reproducibility.nix", "modules/bureau.nix",
             "modules/containers.nix", "modules/day2-activation.nix", "modules/desktop.nix", "modules/development.nix",
-            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
-            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/heim-pc-restic-recovery-probe.py",
+            "modules/grabowski.nix", "modules/grabowski-production.nix", "modules/grabowski-broker-package.nix", "modules/grosser-adler.nix", "modules/host-protection.nix", "modules/live-media.nix", "modules/networking.nix",
+            "modules/nix-lifecycle.nix", "modules/nix-trust.nix", "modules/restic-seagate-backup.nix", "modules/fotoatelier.nix", "modules/heim-pc-restic-recovery-probe.py",
             "modules/nvidia.nix", "modules/nixer.nix", "modules/observability.nix", "modules/physical-gates.nix",
             "modules/storage-layout.nix", "modules/seagate-primary-candidate.nix",
             "tests/firstboot-credentials.nix", "tests/firstboot-gui-proof.nix", "tests/host-protection.nix", "tests/integration.nix", "tests/trust-zones.nix", "tests/vsock-broker.nix",
@@ -798,7 +1046,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "6c1fae3936e441c43d19a7924f2f26f3539fb1d3",
+            "7e137bf147b444d8359278043e6a08c6996adb36",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
@@ -1244,7 +1492,7 @@ class T(unittest.TestCase):
         self.assertTrue(production["boot"]["own_esp_required"])
         self.assertTrue(production["boot"]["shared_esp_forbidden"])
         self.assertIn(
-            ".#nixosConfigurations.heim-pc-storage-target.config.system.build.toplevel",
+            ".#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel",
             deployment,
         )
         self.assertIn("NIXOS_PROTOTYPE_DO_NOT_INSTALL", host)

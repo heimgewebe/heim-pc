@@ -49,6 +49,8 @@ Der kanonische Maschinenvertrag ist `manifest/operator-entry.v1.json`. Die lokal
 6. `runtime/home-entry.md` für die lokale Home-Projektion und deren Grenzen.
 7. `architecture/security.md` vor jeder Aktion, die lokale Pfade, Runtime-Flächen oder Inhaltsnähe berührt.
 
+**Funktionen vor Neuaufbau:** Die [NixOS-Funktionskarte im README](README.md#nixos-funktionskarte-für-agenten) nennt übernommene Fähigkeiten, konkrete Nutzerwege, Prüfkommandos und noch fehlende Abnahmen. Sie verweist auf den Pop!_OS-Migrationsvergleich und die Audio-Fachautorität. Sie ist eine datierte Orientierung, nie ein Ersatz für Live-Readback.
+
 ## Arbeitsregeln
 
 * Keine privaten Inhalte, Browserprofile, Keyrings, Agent-Runtime-Historien, Tokens, SSH-Schlüssel oder Secret-Flächen lesen oder ausgeben.

@@ -8,6 +8,7 @@ authorizes an arbitrary same-UID process and does not perform privileged work.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 import re
 import stat
@@ -21,7 +22,10 @@ STORE_UNIT_RE = re.compile(
     r"^[0-9a-z]{32}-unit-grabowski-operator[.]service$"
 )
 OPERATOR_PACKAGE_RE = re.compile(
-    r"^[0-9a-z]{32}-grabowski-operator-02c70ad4$"
+    r"^[0-9a-z]{32}-grabowski-operator-08457f0d$"
+)
+ACTIVE_OPERATOR_PACKAGE_RE = re.compile(
+    r"^[0-9a-z]{32}-grabowski-operator-[0-9a-f]{8}$"
 )
 
 
@@ -159,19 +163,58 @@ def fragment_trusted(
     return _safe_file(resolved, trusted_uid)
 
 
+# PID 1, not a fixed NixOS-generation pin, owns the effective ExecStart.
+# Runtime self-deployment uses a root-owned systemd override; the generated
+# NixOS fragment and its static environment can legitimately lag that override.
+# Existing broker checks still require SO_PEERCRED, exact MainPID, trusted
+# root-owned system unit/cgroup and exact /proc/<pid>/cmdline.
+_SYSTEMD_SHOW = "/run/current-system/sw/bin/systemctl"
+_EFFECTIVE_OPERATOR_RE = re.compile(
+    r"^\{ path=(?P<entry>/nix/store/[0-9a-z]{32}-grabowski-operator-[0-9a-f]{8}/bin/grabowski-operator)"
+    r" ; argv\[\]=(?P=entry) ; ignore_errors=no ; [^\r\n]{1,2048} \}$"
+)
+
+
+def _effective_operator_entrypoint() -> str:
+    try:
+        result = subprocess.run(
+            [
+                _SYSTEMD_SHOW, "--system", "show", UNIT_NAME,
+                "--property=ExecStart", "--value", "--no-pager",
+            ],
+            capture_output=True, timeout=6, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PermissionError("NixOS effective operator ExecStart unavailable") from exc
+    if (
+        result.returncode != 0 or result.stderr
+        or not result.stdout or len(result.stdout) > 4096
+    ):
+        raise PermissionError("NixOS effective operator ExecStart untrusted")
+    try:
+        output = result.stdout.decode("utf-8", "strict").strip()
+    except UnicodeDecodeError as exc:
+        raise PermissionError("NixOS effective operator ExecStart malformed") from exc
+    match = _EFFECTIVE_OPERATOR_RE.fullmatch(output)
+    if match is None:
+        raise PermissionError("NixOS effective operator ExecStart identity invalid")
+    return match.group("entry")
+
+
 def expected_operator_argv(
     *,
     environ: Mapping[str, str] | None = None,
     store_root: Path = NIX_STORE,
     trusted_uid: int = 0,
 ) -> tuple[str, ...]:
-    """Rootbroker unit supplies the immutable operator entrypoint, not the peer.
+    """Bind the exact active immutable operator to root-controlled PID 1.
 
-    Systemd owns this environment for the root per-request service. The
-    SO_PEERCRED/MainPID/cgroup process proof in the original broker is still
-    mandatory and must compare /proc/<peer>/cmdline to this exact argv.
+    A caller-supplied environ is supported solely for deterministic package
+    proofs; the actual Rootbroker always uses the effective systemd ExecStart.
+    The existing SO_PEERCRED/MainPID/cgroup/cmdline proof remains mandatory.
     """
-    raw = (os.environ if environ is None else environ).get(OPERATOR_ENTRYPOINT_ENV)
+    raw = (_effective_operator_entrypoint() if environ is None
+           else environ.get(OPERATOR_ENTRYPOINT_ENV))
     if not isinstance(raw, str) or "\x00" in raw:
         raise PermissionError("NixOS operator entrypoint is not configured")
     path = Path(raw)
@@ -180,7 +223,9 @@ def expected_operator_argv(
         or path.parent.name != "bin"
         or path.name != "grabowski-operator"
         or path.parent.parent.parent != store_root
-        or OPERATOR_PACKAGE_RE.fullmatch(path.parent.parent.name) is None
+        or not (
+            ACTIVE_OPERATOR_PACKAGE_RE if environ is None else OPERATOR_PACKAGE_RE
+        ).fullmatch(path.parent.parent.name)
         or not _safe_nix_store_directory(store_root, trusted_uid)
         or not all(_safe_dir(parent, trusted_uid) for parent in (path.parent.parent, path.parent))
         or not _safe_file(path, trusted_uid, executable=True)

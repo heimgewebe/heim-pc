@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "02c70ad4fe97-srcset1d57bf497dc6-lock264e747ad05a-contract23851f3e6dea";
-  expectedRevision = "02c70ad4fe97dea1e03e9bfa1d37980e620747ee";
+  expectedReleaseId = "08457f0d-nixos-lock264e747ad05a-contract7130dc15a144";
+  expectedRevision = "08457f0d5093ec2c04f36f15bfc706deb5f9795e";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -95,6 +95,9 @@ in
       # these user-owned parents before the operator's mount namespace starts.
       "d /home/alex/.local 0755 alex users -"
       "d /home/alex/.local/state 0700 alex users -"
+      # A missing path makes the optional ReadWritePaths exception ineffective.
+      "d /home/alex/.local/state/chronik 0700 alex users -"
+      "d /home/alex/.local/state/chronik/data 0755 alex users -"
       "d /home/alex/.local/state/grabowski 0700 alex users -"
       "d /home/alex/.local/state/bureau 0700 alex users -"
       "d /home/alex/repos 0755 alex users -"
@@ -259,12 +262,28 @@ in
       };
     };
 
+    # User manager is required for delegated user-systemd tasks, but must not
+    # be a hard dependency that tears down the independent rootless operator
+    # when the manager fails. Reinstate the manager after a bounded delay.
+    systemd.services."user@1000" = lib.mkIf admit {
+      overrideStrategy = "asDropin";
+      unitConfig.StartLimitIntervalSec = "0";
+      serviceConfig = {
+        Restart = "on-failure";
+        RestartSec = "15s";
+      };
+    };
+
     systemd.services.grabowski-operator = lib.mkIf admit {
       description = "Full Grabowski operator, headless system scope";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "network.target" ];
-      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "user@1000.service" ];
+      wants = [ "network.target" "user@1000.service" ];
+      requires = [ "grabowski-privileged-broker.socket" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" ];
       after = [ "network.target" "user@1000.service" "grabowski-private-policy-install.service" "grabowski-runtime-schema-install.service" "grabowski-privileged-broker.socket" ];
+      # A persistent broken user manager must not leave the operator in
+      # start-limit-hit after a brief series of failures. Restart is bounded
+      # by RestartSec, not abandoned after a fixed count.
+      unitConfig.StartLimitIntervalSec = "0";
       serviceConfig = {
         Type = "simple";
         User = "alex";
@@ -281,7 +300,7 @@ in
         CacheDirectory = "grabowski-xdg";
         CacheDirectoryMode = "0700";
         Restart = "on-failure";
-        RestartSec = "2s";
+        RestartSec = "10s";
         TimeoutStartSec = "20s";
         TimeoutStopSec = "20s";
         KillMode = "mixed";
@@ -298,7 +317,13 @@ in
           "GRABOWSKI_MAX_ACTIVE_CHECKOUTS_PER_REPO=64"
           "GRABOWSKI_PRIVILEGED_BROKER=${cfg.brokerPackage}/bin/grabowski-privileged-broker"
           "GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"
-          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin"
+          # Expose only the installed reviewer executable to the system service.
+          "GRABOWSKI_CODEX_BIN=/home/alex/.nix-profile/bin/codex"
+          # Use the immutable Nixpkgs Chrome wrapper: it supplies EGL/GL runtime library paths.
+          "GRABOWSKI_BROWSER_EXECUTABLES=${pkgs.google-chrome}/bin/google-chrome-stable"
+          # Subscription-backed Claude Code lives in the user Nix profile;
+          # append it last so pinned system tools keep precedence.
+          "PATH=/run/wrappers/bin:${cfg.brokerPackage}/bin:${pkgs.coreutils}/bin:${pkgs.git}/bin:${pkgs.systemd}/bin:${pkgs.openssh}/bin:${pkgs.tailscale}/bin:${pkgs.procps}/bin:${pkgs.iproute2}/bin:${pkgs.tmux}/bin:/run/current-system/sw/bin:/home/alex/.nix-profile/bin"
         ];
         # Only the root-owned broker can start the fixed Restic proof unit.
         # NNP prevents setuid escalation in this service's process tree. Jobs
@@ -315,6 +340,9 @@ in
         ReadWritePaths = [
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
+          # Only Chronik's ledger and lock directory must be writable.
+          # ProtectHome otherwise rejects valid imports with EROFS.
+          "-/home/alex/.local/state/chronik/data"
           "-/home/alex/repos"
           "-/home/alex/grabowski-workspace"
           "-/home/alex/worktrees"
@@ -326,6 +354,92 @@ in
         RestrictRealtime = true;
         LimitCORE = 0;
         SystemCallArchitectures = "native";
+      };
+    };
+    # The pinned Grabowski runtime already reconciles Captain-verified merges
+    # into RepoGround via its existing targeted publisher. Preserve that
+    # post-merge path after the NixOS system-service migration; no second
+    # publisher, repository list, or user-service installation is introduced.
+    systemd.services."grabowski-repoground-post-merge-reconcile" = lib.mkIf admit {
+      description = "Reconcile verified Captain merges into RepoGround publications";
+      wants = [ "grabowski-operator.service" "user@1000.service" ];
+      after = [ "grabowski-operator.service" "user@1000.service" ];
+      path = [ cfg.operatorPackage pkgs.git pkgs.openssh pkgs.systemd ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B -m grabowski_repoground_post_merge --reconcile-audit-followups --reconcile-lookback-seconds 25200";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+          "PYTHONDONTWRITEBYTECODE=1"
+        ];
+        TimeoutStartSec = "30min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        # The existing RepoGround publisher creates source worktrees, bundles,
+        # state and logs under /home/alex. Read-only home would prevent every
+        # reconciliation despite a healthy timer; the service runs as alex.
+        ProtectSystem = "full";
+        ProtectHome = false;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-repoground-post-merge-reconcile" = lib.mkIf admit {
+      description = "Reconcile pending verified RepoGround post-merge follow-ups";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnActiveSec = "15s";
+        OnUnitInactiveSec = "1min";
+        AccuracySec = "5s";
+        Persistent = true;
+        Unit = "grabowski-repoground-post-merge-reconcile.service";
+      };
+    };
+
+    # The root-only Restic proof is insufficient without the operator-owned
+    # source marker and canonical Rootbroker publication.  Use the established
+    # complete MCP workflow inside the running trusted operator MainPID.
+    systemd.services."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Refresh complete NixOS Restic recovery via the running Grabowski operator";
+      wants = [ "grabowski-operator.service" ];
+      after = [ "grabowski-operator.service" "restic-backups-heim-pc.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-recovery-mcp-refresh.py}";
+        Environment = [ "HOME=/home/alex" "PYTHONDONTWRITEBYTECODE=1" ];
+        TimeoutStartSec = "100min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = "read-only";
+        ProtectSystem = "strict";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" ];
+        CapabilityBoundingSet = [ ];
+        SystemCallArchitectures = "native";
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-recovery-refresh" = lib.mkIf admit {
+      description = "Keep complete Restic recovery proof within its 24-hour validity window";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        # After the native morning/evening Restic backup opportunities.
+        OnCalendar = "*-*-* 09,21:15:00";
+        RandomizedDelaySec = "10m";
+        Persistent = true;
+        Unit = "grabowski-recovery-refresh.service";
       };
     };
   };

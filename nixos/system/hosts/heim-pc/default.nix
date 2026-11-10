@@ -38,14 +38,14 @@ let
   );
 in
 {
-  imports = [ ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ];
+  imports = [ ../../modules/brotli-security.nix ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ../../modules/grosser-adler.nix ];
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
-
   # Canonical local interaction policy for the physical workstation.  Reuse the
   # XKB definition for the early console so LUKS and SDDM see the same layout.
   services.xserver.xkb.layout = "de";
   console.useXkbConfig = true;
+  console.earlySetup = true;
   i18n.defaultLocale = "de_DE.UTF-8";
   time.timeZone = "Europe/Berlin";
 
@@ -103,6 +103,7 @@ in
   heimPc.physicalGates.enable = heimPcProfile.physicalGates or false;
   heimPc.hostProtection.enable = heimPcProfile.physical or false;
   heimPc.day2Activation.enable = heimPcProfile.physical or false;
+  heimPc.grosserAdler.enable = heimPcProfile.physical or false;
 
   # Host policy: users.mutableUsers is intentionally global (and is the NixOS
   # default), because later password rotations must survive activation. No

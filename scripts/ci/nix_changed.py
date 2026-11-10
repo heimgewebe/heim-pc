@@ -14,6 +14,11 @@ NIX_EXACT_PATHS = frozenset(
     {
         ".github/workflows/heim-pc-nix-cache-publish.yml",
         ".github/workflows/heim-pc-nix.yml",
+        ".github/grabowski-required-checks.json",
+        "config/managed-build.v1.json",
+        "scripts/managed_nix.py",
+        "tests/test_managed_nix.py",
+        "tests/test_nixos_system_source.py",
         "config/home-hygiene.v1.json",
         "config/memory-pressure-guard.v1.json",
         "config/storage-pressure.v1.json",
@@ -22,6 +27,7 @@ NIX_EXACT_PATHS = frozenset(
         "scripts/ci/check_nix_cache_signature_rejection.sh",
         "scripts/ci/check_pinned_nix_find_contract.py",
         "scripts/ci/nix_changed.py",
+        "scripts/ci/check_flake_lock.py",
         "scripts/grabowski_memory_guard.py",
         "scripts/home_hygiene.py",
         "scripts/managed_build.py",
@@ -39,7 +45,7 @@ NIXOS_SCRIPT_RE = re.compile(r"^scripts/nixos_[^/]*\.py$")
 def path_requires_nix(path: str) -> bool:
     return (
         path in NIX_EXACT_PATHS
-        or path.startswith("nixos/")
+        or (path.startswith("nixos/") and not path.endswith(".md"))
         or NIXOS_SCRIPT_RE.fullmatch(path) is not None
     )
 
