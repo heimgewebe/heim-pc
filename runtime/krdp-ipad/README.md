@@ -1,5 +1,19 @@
 # iPad-Zugang zum laufenden KDE-Plasma-Konto alex
 
+## Aktueller iPad-Betriebsweg – 10. November 2026 (Gen71)
+
+Die echte Microsoft Windows App zeigte auf dem iPad über den isolierten Tailnet-Port **3392** den virtuellen KRDP-Bildschirm **1168 × 768** ohne die zuvor sichtbare Bildstreckung. Daraus wurde der folgende **laufende**, auf dem neuen Port noch nicht vollständig nativ abgenommene Standardweg eingerichtet:
+
+- **iPad:** `100.68.88.111:3390` → Tailscale Serve → `127.0.0.1:3390` → KRDP in der KDE-Wayland-Sitzung von `alex`. Extern 3390 ist jetzt **KRDP**, nicht mehr XRDP.
+- **Bildschirm:** `ipad-krdp-monitor.service` erstellt mit dem vorhandenen KRFB-Helfer die Plasma-sichtbare Ausgabe `Virtual-iPadKrdp` mit **1168 × 768, Skalierung 1**; KRDP wählt sie mit `--monitor-name Virtual-iPadKrdp --plasma`. Das Plasma-Panel auf diesem Bildschirm (ID 44) umfasst Startmenü, Fensterleiste, Systembereich, Uhr und „Desktop anzeigen“.
+- **Wiederherstellung:** Der virtuelle Monitor muss vor KRDP aktiviert werden. `recover-user.sh --check` kontrolliert deshalb die beiden Benutzer-Units und die gespeicherte Bildschirmdienstvorlage; `--apply` sperrt weiter bei aktivem RDP-Client und bewahrt für geänderte Konfigurationen Rückfallkopien.
+- **Alte Wege:** Tailnet-Port **3391 ist entfernt**. Port 3392 ist nur als zeitlich begrenzter Test-/Rückfallweg vorgesehen; dessen temporäre Task und Tailscale-Freigabe dürfen nicht zu einer zweiten Dauerarchitektur werden. Das interne XRDP kann weiter auf 3389 lauschen, ist aber nicht mehr an Tailnet 3390 angebunden.
+- **Grenzen:** Die echte Windows-App-Verbindung über **den neuen Port 3390**, Touch/Klick, Tastatur, Reconnect und eine physische Gen71-Approved-Bootpromotion sind noch nicht vollständig abgenommen. Die separaten KRDP-Tests und der RDP-Protokollhandshake ersetzen diese iPad-Gegenprobe nicht. RustDesk und Boot-Rückfallprofile sind unverändert. Die Plasma-Panel-Konfiguration liegt zunächst im Benutzerprofil, nicht deklarativ im NixOS-System.
+
+**Ab hier historische Konfigurationen:** Die alten Angaben zu DP-2, :3391 und früheren Builds dokumentieren Entwicklungsstände; sie sind nicht mehr als aktuelle Betriebsanweisung zu verwenden.
+
+## Historischer Produktivstand – 5. November 2026
+
 ## Produktiver KRDP-v13.1-Serverstand – 5. November 2026 (native iPad-Abnahme offen)
 
 **Verbindlicher Weg:** Microsoft Windows App auf iPadOS → Tailscale `100.68.88.111:3391` → `127.0.0.1:3390` → KRDP im **bereits angemeldeten physischen KDE-Wayland-Desktop** von alex. Extern `:3390` führt zu XRDP, **nicht** zum physischen Desktop.
