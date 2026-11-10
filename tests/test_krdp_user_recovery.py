@@ -34,6 +34,19 @@ class KrdpRecoveryTest(unittest.TestCase):
         self.assertIn("readlink -f \"/proc/$pid/exe\"", installer)
         self.assertIn("gc_root=", installer)
 
+    def test_recovery_preserves_virtual_ipad_monitor_and_restart_order(self):
+        source = INSTALLER.read_text()
+        unit = (FEATURE / "krdp-native-override.conf").read_text()
+        monitor = (FEATURE / "ipad-krdp-monitor.service").read_text()
+        self.assertIn("source_monitor=", source)
+        self.assertIn('cmp -s "$source_monitor" "$target_monitor"', source)
+        self.assertIn('cp -p -- "$target_monitor" "$backup/monitor"', source)
+        self.assertIn("KRDP has an active client; not restarting", source)
+        self.assertLess(source.index('systemctl --user enable --now "$monitor_unit"'),
+                        source.rindex('systemctl --user restart "$unit"'))
+        self.assertIn("--resolution 1168x768 --name iPadKrdp --scale 1 --port -1", monitor)
+        self.assertIn("--monitor-name Virtual-iPadKrdp --plasma", unit)
+
     def test_apply_never_restarts_live_rdp_client_or_kde(self):
         source = INSTALLER.read_text()
         self.assertIn("--check", source)
