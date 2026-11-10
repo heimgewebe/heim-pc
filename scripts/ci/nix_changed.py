@@ -45,7 +45,7 @@ NIXOS_SCRIPT_RE = re.compile(r"^scripts/nixos_[^/]*\.py$")
 def path_requires_nix(path: str) -> bool:
     return (
         path in NIX_EXACT_PATHS
-        or path.startswith("nixos/")
+        or (path.startswith("nixos/") and not path.endswith(".md"))
         or NIXOS_SCRIPT_RE.fullmatch(path) is not None
     )
 

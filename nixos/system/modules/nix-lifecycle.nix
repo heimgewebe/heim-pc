@@ -204,6 +204,9 @@ in
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${auditTool}/bin/heim-pc-nix-lifecycle-audit";
+      # The full-store scan must yield CPU and I/O to interactive work.
+      Nice = 10;
+      IOSchedulingClass = "idle";
       NoNewPrivileges = true;
       PrivateTmp = true;
       PrivateDevices = true;

@@ -56,6 +56,31 @@ class T(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(nix_changed.path_requires_nix(path))
 
+    def test_nixos_documentation_only_skips_heavy_nix_ci(self):
+        docs = [
+            "nixos/RESTIC-INDEPENDENT-RECOVERY.md",
+            "nixos/system/README.md",
+            "nixos/RECOVERY-AND-2611-EXECUTION-PLAN-20261109.md",
+        ]
+        for path in docs:
+            with self.subTest(path=path):
+                self.assertFalse(nix_changed.path_requires_nix(path))
+        self.assertFalse(nix_changed.changed_paths_require_nix(docs))
+        with mock.patch.object(nix_changed, "_changed_paths", return_value=docs):
+            required, reason = nix_changed.detect("pull_request", "a" * 40, "b" * 40)
+        self.assertFalse(required)
+        self.assertIn("no Nix-relevant change", reason)
+
+    def test_nixos_docs_do_not_hide_real_nix_changes(self):
+        doc = "nixos/system/README.md"
+        for changed in (
+            "nixos/system/modules/networking.nix",
+            "nixos/production/trust-contract-v1.json",
+            "scripts/nixos_day2_activation.py",
+        ):
+            with self.subTest(changed=changed):
+                self.assertTrue(nix_changed.changed_paths_require_nix([doc, changed]))
+
     def test_large_changeset_has_no_github_path_filter_file_limit(self):
         paths = [f"docs/generated-{index}.md" for index in range(5000)]
         paths.append("nixos/system/modules/networking.nix")
