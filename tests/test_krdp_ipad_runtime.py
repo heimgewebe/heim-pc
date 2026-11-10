@@ -104,7 +104,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIsNotNone(install)
         self.assertEqual(running.group(1), install.group(2))
         self.assertIn("Exec=" + running.group(1) + "\n", desktop)
-        self.assertIn("zd0w8091nc839xdnm14yg8ax8dd6y9hk-krdp-6.7.0", install.group(1))
+        self.assertIn("w8nvnmlzzc2niixcmcc0j6rjyp6m8l9n-krdp-6.7.0", install.group(1))
         self.assertIn("X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1", desktop)
         self.assertIn("ExecCondition=/run/current-system/sw/bin/test -S /run/user/1000/wayland-0", service)
         self.assertIn("TimeoutStopSec=15s", service)
@@ -157,6 +157,27 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         # while the client explicitly suspends RDPGFX frame ACKs.
         self.assertEqual(patch.count("+            d->pendingFrames.insert(frameId);"), 2)
 
+    def test_shutdown_guard_uses_new_gc_root_and_preserves_previous_release(self):
+        """Never overwrite the pre-existing working KRDP closure/GC fallback."""
+        recovery = (FEATURE / "recover-user.sh").read_text()
+        service = (FEATURE / "krdp-native-override.conf").read_text()
+        self.assertIn("krdp-ipad-native-v13-qt-close-guard", recovery)
+        self.assertNotIn("krdp-ipad-native-v13-named-monitor", recovery)
+        self.assertIn("w8nvnmlzzc2niixcmcc0j6rjyp6m8l9n-krdp-6.7.0", service)
+        self.assertNotIn("zd0w8091nc839xdnm14yg8ax8dd6y9hk-krdp-6.7.0", service)
+
+    def test_worker_close_does_not_deadlock_gui_shutdown(self):
+        """An RDP worker must not synchronously wait for the joining GUI."""
+        patch = (FEATURE / "patches" / "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch").read_text()
+        self.assertIn("Qt::QueuedConnection", patch)
+        self.assertNotIn("Qt::BlockingQueuedConnection", patch)
+        self.assertIn("RdpConnection::~RdpConnection()", patch)
+        self.assertIn("+    d->videoStream->close();", patch)
+        self.assertIn("@@ -252,3 +252,7 @@ RdpConnection::~RdpConnection()", patch)
+        self.assertIn("freerdp_peer_free(d->peer);", patch)
+        self.assertLess(patch.index("RdpConnection::~RdpConnection()"), patch.index("+    d->videoStream->close();"))
+        self.assertLess(patch.index("+    d->videoStream->close();"), patch.index("freerdp_peer_free(d->peer);"))
+
     def test_pointer_fixes_are_reproducible(self):
         patches = FEATURE / "patches"
         expected = {
@@ -183,7 +204,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         expected = {
             "krdp-6.7.0-virtual-output-pointer-offset-v1.patch": "geometry().topLeft()",
             "krdp-6.7.0-embedded-pointer-v1.patch": "KRDP_EMBED_CURSOR",
-            "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch": "Qt::BlockingQueuedConnection",
+            "krdp-6.7.0-close-videostream-on-qt-thread-v1.patch": "Qt::QueuedConnection",
             "krdp-6.7.0-position-before-mouse-button-v1.patch": "Q_EMIT inputEvent(motion);",
             "krdp-6.7.0-rdpei-touch-input-v1.patch": "rdpei_server_context_new",
         }

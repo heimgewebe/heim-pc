@@ -23,7 +23,7 @@ unit="app-org.kde.krdpserver.service"
 runtime=/run/user/1000/krdp-ipad-native-v13/krdpserver
 target_unit="$HOME/.config/systemd/user/$unit.d/override.conf"
 target_desktop="$HOME/.local/share/applications/org.kde.krdp-ipad-runtime-v13.desktop"
-gc_root="$HOME/.local/state/grabowski/krdp-ipad-native-v13-named-monitor"
+gc_root="$HOME/.local/state/grabowski/krdp-ipad-native-v13-qt-close-guard"
 
 # Derive the Store ELF from the checked-in unit; do not duplicate a version pin.
 store_binary="$(awk -v target="$runtime" \
