@@ -20,7 +20,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
     def test_systemd_gh_cache_is_private_with_protected_home(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        operator = production.split("systemd.services.grabowski-operator = ", 1)[1]
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1].split('\n    };', 1)[0]
         self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
         self.assertIn('CacheDirectoryMode = "0700";', operator)
         self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
