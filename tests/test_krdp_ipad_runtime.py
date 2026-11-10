@@ -16,7 +16,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         service = (FEATURE / "krdp-native-override.conf").read_text()
         controller = (FEATURE / "krdp-ipad-display-controller.service").read_text()
         desktop = (FEATURE / "org.kde.krdp-ipad-runtime-v13.desktop").read_text()
-        self.assertIn("--monitor-name DP-2 --plasma", service)
+        self.assertIn("--monitor-name Virtual-iPadKrdp --plasma", service)
         self.assertNotIn("--virtual-monitor", service)
         self.assertIn("KRDP_EMBED_CURSOR=1", service)
         self.assertNotIn("KRDP_LETTERBOX", service)
@@ -27,12 +27,22 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1", desktop)
         self.assertTrue((FEATURE / "krdp-unit-before-native-v1.conf").is_file())
 
+    def test_plasma_visible_virtual_monitor_starts_before_krdp(self):
+        monitor = (FEATURE / "ipad-krdp-monitor.service").read_text()
+        service = (FEATURE / "krdp-native-override.conf").read_text()
+        self.assertIn("Before=app-org.kde.krdpserver.service", monitor)
+        self.assertIn("Wants=ipad-krdp-monitor.service", service)
+        self.assertIn("After=ipad-krdp-monitor.service", service)
+        self.assertIn("--resolution 1168x768 --name iPadKrdp --scale 1 --port -1", monitor)
+        self.assertIn("--monitor-name Virtual-iPadKrdp --plasma", service)
+        self.assertIn("Restart=no", monitor)
+
     def test_named_monitor_is_resolved_per_connection(self):
         """A changing Qt screen index must not silently switch physical monitors."""
         service = (FEATURE / "krdp-native-override.conf").read_text()
         package = (FEATURE / "package.nix").read_text()
         patch = (FEATURE / "patches" / "krdp-6.7.0-monitor-name-v1.patch").read_text()
-        self.assertIn("--monitor-name DP-2 --plasma", service)
+        self.assertIn("--monitor-name Virtual-iPadKrdp --plasma", service)
         self.assertNotIn("--monitor 0", service)
         self.assertIn("krdp-6.7.0-monitor-name-v1.patch", package)
         self.assertIn('u"monitor-name"_s', patch)
@@ -44,7 +54,7 @@ class TestIpadKrdpRuntime(unittest.TestCase):
         self.assertIn("wrapper->session->setActiveStream(preferredIndex);", patch)
 
     def test_physical_output_embeds_cursor_when_client_pointer_is_hidden(self):
-        # Native iPad --monitor-name DP-2 uses createOutputStream(), not virtualMonitor().
+        # Native iPad named virtual output uses createOutputStream(), not virtualMonitor().
         # Do not suppress remote pointer PDUs without embedding the host cursor.
         source = (FEATURE / "patches" / "krdp-6.7.0-embedded-pointer-v1.patch").read_text()
         service = (FEATURE / "krdp-native-override.conf").read_text()
