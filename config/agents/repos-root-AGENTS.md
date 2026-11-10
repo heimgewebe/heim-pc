@@ -8,6 +8,12 @@ Lies zuerst den installierten Host-Vertrag unter `/home/alex/.config/heimgewebe/
 
 Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`. ChatGPT über Grabowski ist der Operator; der Mensch liefert Ziel, Bedeutung, Freigaben und Abbruchentscheidungen und soll nicht als Shell-Ausführer benutzt werden.
 
+## Chronik: Gedächtnis zuerst
+
+Chronik (`~/repos/chronik`) ist das append-only Gedächtnis: `agent.ledger` (Grabowski-Laufereignisse) und `knowledge.ledger` (bestätigte Ursachen, Reparaturen, Entscheidungen, Widerlegungen, offene Probleme). Vor nichttrivialer Heimgewebe-Arbeit, Statusfragen oder der Fortsetzung einer Diagnose zuerst gezielt dort nachschlagen (Grabowski: `grabowski_agent_bootstrap(repo=...)` liefert `chronik_first` inklusive `knowledge`; lokal: `tools/knowledge_ledger.py search` der installierten Release, siehe `appendOnlyHistory` im Host-Vertrag). Danach den Ist-Zustand frisch über Git, GitHub und Runtime prüfen; Historie ist keine Live-Wahrheit und keine Retry-Autorität.
+
+Dauerhafte, belegte Erkenntnisse am Ende einer Aufgabe über `tools/knowledge_ledger.py capture` erfassen (Vertrag: `~/repos/chronik/docs/chronik/knowledge-ledger-v1.md`). Keine Routine, keine Vermutungen ohne Beleg, keine Chats, Logs oder Geheimnisse; `implemented` ist nicht `production_verified`.
+
 ## Systemweite Orientierung
 
 Konsultiere den kanonischen Systemkatalog unter `/home/alex/repos/systemkatalog`, wenn eine Frage:

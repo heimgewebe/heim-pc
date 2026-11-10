@@ -419,7 +419,40 @@
       "rule": "unknown or stale provenance is not current repository truth"
     },
     "appendOnlyHistory": {
-      "repository": "${HOME}/repos/chronik"
+      "repository": "${HOME}/repos/chronik",
+      "dataDir": "${HOME}/.local/state/chronik/data",
+      "ledgers": {
+        "agent.ledger": "grabowski_run_events_automatic",
+        "knowledge.ledger": "semantic_knowledge_explicit_capture"
+      },
+      "installedRelease": "${HOME}/.local/lib/chronik/current",
+      "knowledgeSearchArgvPrefix": [
+        "${HOME}/.local/lib/chronik/runtime-python/bin/python3",
+        "${HOME}/.local/lib/chronik/current/tools/knowledge_ledger.py",
+        "--data-dir",
+        "${HOME}/.local/state/chronik/data",
+        "search"
+      ],
+      "knowledgeCaptureArgvPrefix": [
+        "${HOME}/.local/lib/chronik/runtime-python/bin/python3",
+        "${HOME}/.local/lib/chronik/current/tools/knowledge_ledger.py",
+        "--outbox-root",
+        "${HOME}/.local/state/grabowski/chronik-outbox",
+        "capture"
+      ],
+      "knowledgeContract": "${HOME}/repos/chronik/docs/chronik/knowledge-ledger-v1.md",
+      "grabowskiReads": [
+        "grabowski_agent_bootstrap",
+        "grabowski_chronik_full_search"
+      ],
+      "readBeforeNontrivialWork": true,
+      "captureRule": "durable_evidence_bound_insights_only",
+      "doesNotEstablish": [
+        "current_git_ci_or_runtime_state",
+        "safe_retry",
+        "production_verification",
+        "unrecorded_history"
+      ]
     },
     "fleetMembershipAndContracts": {
       "repository": "${HOME}/repos/metarepo",
