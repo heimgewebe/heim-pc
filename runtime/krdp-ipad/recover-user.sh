@@ -15,6 +15,9 @@ die() { printf 'KRDP_RECOVERY_ERROR %s\n' "$*" >&2; exit 1; }
 
 here="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 source_unit="$here/krdp-native-override.conf"
+source_monitor="$here/ipad-krdp-monitor.service"
+monitor_unit=ipad-krdp-monitor.service
+target_monitor="$HOME/.config/systemd/user/$monitor_unit"
 source_desktop="$here/org.kde.krdp-ipad-runtime-v13.desktop"
 unit="app-org.kde.krdpserver.service"
 runtime=/run/user/1000/krdp-ipad-native-v13/krdpserver
@@ -34,11 +37,17 @@ store_binary="$(awk -v target="$runtime" \
   die "pinned Store ELF missing; rebuild with ./runtime/krdp-ipad/build.sh first"
 grep -Fxq "Exec=$runtime" "$source_desktop" ||
   die "KWin desktop entry does not match runtime ELF"
-grep -Fxq "ExecStart=$runtime --address 127.0.0.1 --port 3390 --monitor-name DP-2 --plasma" "$source_unit" ||
+grep -Fxq "ExecStart=$runtime --address 127.0.0.1 --port 3390 --monitor-name Virtual-iPadKrdp --plasma" "$source_unit" ||
   die "source unit runtime has unexpected arguments"
+grep -Fxq 'ExecStart=/home/alex/.local/state/nix/profiles/krfb-virtual-ipad-no-vnc/bin/krfb-virtualmonitor --resolution 1168x768 --name iPadKrdp --scale 1 --port -1' "$source_monitor" ||
+  die "iPad monitor source does not expose the verified 1168x768 output"
 store_root="$(dirname "$(dirname "$store_binary")")"
 
 check() {
+  [[ -f "$target_monitor" ]] && cmp -s "$source_monitor" "$target_monitor" ||
+    die "iPad virtual monitor user unit differs from checked-in source"
+  [[ "$(systemctl --user is-enabled "$monitor_unit")" == enabled ]] || die "iPad monitor not enabled"
+  [[ "$(systemctl --user is-active "$monitor_unit")" == active ]] || die "iPad monitor not active"
   [[ -L "$gc_root" && "$(readlink -f "$gc_root")" == "$store_root" ]] ||
     die "v13 Nix GC root is missing or targets different build"
   [[ -f "$target_unit" ]] && cmp -s "$source_unit" "$target_unit" ||
@@ -73,7 +82,9 @@ fi
 connections="$(ss -Htn state established sport :3390)" ||
   die "could not determine whether a KRDP client is connected"
 [[ -z "$connections" ]] || die "KRDP has an active client; not restarting"
-if cmp -s "$source_unit" "$target_unit" && cmp -s "$source_desktop" "$target_desktop" &&
+if cmp -s "$source_unit" "$target_unit" && cmp -s "$source_monitor" "$target_monitor" &&
+   [[ "$(systemctl --user is-enabled "$monitor_unit" 2>/dev/null)" == enabled ]] &&
+   [[ "$(systemctl --user is-active "$monitor_unit" 2>/dev/null)" == active ]] && cmp -s "$source_desktop" "$target_desktop" &&
    [[ -L "$gc_root" && "$(readlink -f "$gc_root")" == "$store_root" ]] &&
    [[ "$(systemctl --user is-enabled "$unit" 2>/dev/null)" == enabled ]] &&
    [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == active ]]; then
@@ -94,6 +105,9 @@ mkdir -p -- "$HOME/.local/state/grabowski"
 backup="$(mktemp -d "$HOME/.local/state/grabowski/krdp-recovery.XXXXXXXX")"
 chmod 700 "$backup"
 old_active="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+old_monitor_active="$(systemctl --user is-active "$monitor_unit" 2>/dev/null || true)"
+old_monitor_enabled="$(systemctl --user is-enabled "$monitor_unit" 2>/dev/null || true)"
+[[ -f "$target_monitor" ]] && cp -p -- "$target_monitor" "$backup/monitor" || :
 old_enabled="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
 [[ -f "$target_unit" ]] && cp -p -- "$target_unit" "$backup/unit" || :
 [[ -f "$target_desktop" ]] && cp -p -- "$target_desktop" "$backup/desktop" || :
@@ -111,7 +125,18 @@ rollback() {
     else
       rm -f -- "$target_desktop"
     fi
+    if [[ -f "$backup/monitor" ]]; then
+      install -Dm644 "$backup/monitor" "$target_monitor"
+    else
+      rm -f -- "$target_monitor"
+    fi
     systemctl --user daemon-reload || :
+    if [[ "$old_monitor_enabled" != enabled ]]; then systemctl --user disable "$monitor_unit" || :; fi
+    if [[ "$old_monitor_active" == active ]]; then
+      systemctl --user start "$monitor_unit" || :
+    else
+      systemctl --user stop "$monitor_unit" || :
+    fi
     if [[ "$old_enabled" != enabled ]]; then systemctl --user disable "$unit" || :; fi
     if [[ "$old_active" == active ]]; then
       systemctl --user restart "$unit" || :
@@ -124,9 +149,11 @@ rollback() {
 }
 trap rollback EXIT
 
+install -Dm644 "$source_monitor" "$target_monitor"
 install -Dm644 "$source_unit" "$target_unit"
 install -Dm644 "$source_desktop" "$target_desktop"
 systemctl --user daemon-reload
+systemctl --user enable --now "$monitor_unit"
 systemctl --user enable "$unit"
 systemctl --user restart "$unit"
 check
