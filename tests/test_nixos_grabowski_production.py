@@ -559,6 +559,8 @@ class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
                         patch.object(adapter, "_sha", side_effect=fixture_hash),
                         patch.object(adapter, "_contract_entries", return_value=({"grabowski_mcp": module_relative}, {})),
                         patch.object(adapter.importlib.util, "find_spec", return_value=SimpleNamespace(origin=str(module_path))),
+                        # Model the trusted direct interpreter, not a Nix python.withPackages shim.
+                        patch.object(adapter.sys, "executable", str(Path("/proc/self/exe").resolve(strict=True))),
                     ):
                         result = adapter.deployment_metadata(
                             module_path, expected_agent_sha256=agent_sha

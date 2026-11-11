@@ -21,6 +21,15 @@ stage0 = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stage0)
 
 
+def _simulate_installer_openssl_file(stack):
+    """Mock only the Ubuntu installer tool presence in synthetic apply tests."""
+    original_is_file = Path.is_file
+    stack.enter_context(patch.object(
+        Path, "is_file",
+        lambda path: path == Path("/usr/bin/openssl") or original_is_file(path),
+    ))
+
+
 def mock_disk(parts: int, model: str = "Seagate ZP4000GP304001") -> dict:
     name = "/dev/nvme0n1"
     return {"blockdevices": [{
@@ -730,6 +739,7 @@ class Stage0SourceTests(unittest.TestCase):
                 stack.enter_context(patch.object(stage0.sys.stdin, "isatty", return_value=True))
                 stack.enter_context(patch.object(stage0.sys.stderr, "isatty", return_value=True))
                 stack.enter_context(patch.object(stage0.Path, "is_mount", return_value=False))
+                _simulate_installer_openssl_file(stack)
                 stack.enter_context(patch.object(stage0, "stored_plan", return_value=(plan, "d"*64)))
                 stack.enter_context(patch.object(stage0, "check_source", return_value=source))
                 source_review = stack.enter_context(patch.object(stage0, "require_immutable_install_source"))
@@ -814,6 +824,7 @@ class Stage0SourceTests(unittest.TestCase):
                 stack.enter_context(patch.object(stage0.sys.stdin, "isatty", return_value=True))
                 stack.enter_context(patch.object(stage0.sys.stderr, "isatty", return_value=True))
                 stack.enter_context(patch.object(stage0.Path, "is_mount", return_value=False))
+                _simulate_installer_openssl_file(stack)
                 stack.enter_context(patch.object(stage0, "stored_plan", return_value=(plan, "d"*64)))
                 stack.enter_context(patch.object(stage0, "check_source", return_value=source))
                 stack.enter_context(patch.object(stage0, "require_immutable_install_source",
