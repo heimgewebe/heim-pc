@@ -35,6 +35,9 @@
     extraBackupArgs = [
       "--host=heim-pc-nixos"
       "--tag=nixos-seagate"
+      # The last snapshot contains a CACHEDIR.TAG build cache (4.2 GiB live).
+      # Only tagged, regenerable caches are skipped; untagged data is kept.
+      "--exclude-caches"
       # A concurrent verified Restic repository check can hold the exclusive lock.
       # Without a bounded wait the 19:30 backup fails immediately with code 11.
       "--retry-lock=6h"
