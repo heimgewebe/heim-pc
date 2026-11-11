@@ -1,17 +1,27 @@
 --- a/src/PlasmaScreencastV1Session.cpp
 +++ b/src/PlasmaScreencastV1Session.cpp
-@@ -237,7 +237,15 @@
+@@ -237,7 +237,24 @@
              if (!found) {
                  qCWarning(KRDP) << "No virtual output found for RDP pointer" << outputName;
                  return;
              }
 -        }
-+        } else if (const auto physicalIndex = activeStream()) {
-+            if (*physicalIndex >= qApp->screens().size()) {
-+                qCWarning(KRDP) << "Invalid physical monitor index for RDP pointer" << *physicalIndex;
++        } else if (activeStream()) {
++            // Qt changes screen indices on hotplug, but the existing
++            // screencast keeps the connector name chosen at session start.
++            QScreen *selectedScreen = nullptr;
++            const QString selectedName = d->request ? d->request->objectName() : QString();
++            for (QScreen *screen : qApp->screens()) {
++                if (screen->name() == selectedName) {
++                    selectedScreen = screen;
++                    break;
++                }
++            }
++            if (!selectedScreen) {
++                qCWarning(KRDP) << "RDP monitor disappeared during session" << selectedName;
 +                return;
 +            }
-+            const auto geometry = qApp->screens().at(*physicalIndex)->geometry();
++            const auto geometry = selectedScreen->geometry();
 +            logicalPosition = QPointF{(position.x() / size().width()) * geometry.width() + geometry.x(),
 +                                      (position.y() / size().height()) * geometry.height() + geometry.y()};
 +        }
