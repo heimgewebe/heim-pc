@@ -54,6 +54,9 @@ class KrdpRecoveryTest(unittest.TestCase):
         self.assertIn("ss -Htn state established sport :3390", source)
         self.assertIn("could not determine whether a KRDP client is connected", source)
         self.assertIn("KRDP has an active client; not restarting", source)
+        self.assertIn("iPad monitor unit drift while active", source)
+        self.assertLess(source.index("iPad monitor unit drift while active"),
+                        source.index('install -Dm644 "$source_monitor" "$target_monitor"'))
         self.assertIn("[[ -S /run/user/1000/wayland-0 ]]", source)
         self.assertIn("systemctl --user restart \"$unit\"", source)
         self.assertNotIn("systemctl --user restart plasma-", source)
