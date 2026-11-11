@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=KRDP native iPad runtime v13
+Exec=/run/user/1000/krdp-ipad-native-v13/krdpserver
+NoDisplay=true
+Terminal=false
+X-KDE-Wayland-Interfaces=org_kde_kwin_fake_input,zkde_screencast_unstable_v1
