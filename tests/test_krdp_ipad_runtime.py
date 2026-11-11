@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import signal
 import tempfile
@@ -221,6 +222,40 @@ class TestIpadKrdpRuntime(unittest.TestCase):
                         click_fix.index("std::shared_ptr<QMouseEvent> event;"))
 
         self.assertIn("krdp-6.6.6-embedded-pointer-v3.patch", (FEATURE / "package-krdp-6.6.6.nix").read_text())
+
+    def test_restore_retains_preimage_if_mode_or_scale_not_applied(self):
+        """A delayed KScreen mode/scale application must not erase rollback."""
+        source = FEATURE / "controller.py"
+        prior_signals = {x: signal.getsignal(x) for x in (signal.SIGTERM, signal.SIGINT)}
+        spec = importlib.util.spec_from_file_location("krdp_restore_partial", source)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            for signum, handler in prior_signals.items():
+                signal.signal(signum, handler)
+        with tempfile.TemporaryDirectory(prefix="krdp-mode-drift-") as folder:
+            module.STATE = Path(folder)
+            module.PREIMAGE = Path(folder) / "physical-outputs.json"
+            preserved = {"name": "DP-2", "pos": {"x": 2560, "y": 0},
+                         "scale": 1.25, "mode": "17"}
+            module.PREIMAGE.write_text(json.dumps({"version": 1, "outputs": [preserved]}))
+            actual = {"name": "DP-2", "connected": True, "enabled": False,
+                      "pos": {"x": 0, "y": 0}, "scale": 1.0, "currentModeId": "18"}
+            module.outputs = lambda: [actual]
+            def partial_doctor(*cmds):
+                for cmd in cmds:
+                    if cmd == "output.DP-2.enable":
+                        actual["enabled"] = True
+                    elif cmd.startswith("output.DP-2.position."):
+                        actual["pos"] = {"x": 2560, "y": 0}
+                    # Device deliberately ignores both mode and scale requests.
+                return ""
+            module.doctor = partial_doctor
+            self.assertFalse(module.restore())
+            self.assertTrue(module.PREIMAGE.is_file())
+            self.assertEqual(actual["currentModeId"], "18")
+            self.assertEqual(actual["scale"], 1.0)
 
     def test_exclusive_takeover_restores_physical_preimage(self):
         source = FEATURE / "controller.py"
