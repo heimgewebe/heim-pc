@@ -7094,12 +7094,15 @@ def test_production_attestation_workflow_independently_rebuilds_local_candidate(
     assert "remote-install-artifact.json" in workflow
 
 
-def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_binding(tmp_path):
+def test_historical_workflow_prepare_entrypoint_satisfies_managed_worker_repo_binding(tmp_path, monkeypatch):
     managed_path = ROOT / "scripts" / "managed_build.py"
     managed_spec = importlib.util.spec_from_file_location("managed_build_historical_guard_test", managed_path)
     managed = importlib.util.module_from_spec(managed_spec)
     assert managed_spec.loader is not None
     managed_spec.loader.exec_module(managed)
+    # This proves repo/argv binding, not whether the host has Docker installed.
+    # The production toolchain requirement remains unchanged.
+    monkeypatch.setattr(managed, "_toolchain_digest", lambda *_a, **_kw: {"sha256": "0" * 64})
 
     primary = tmp_path / "primary"
     sealed_root = tmp_path / "sealed-source"
