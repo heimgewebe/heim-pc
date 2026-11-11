@@ -1,6 +1,6 @@
 --- a/src/PlasmaScreencastV1Session.cpp
 +++ b/src/PlasmaScreencastV1Session.cpp
-@@ -237,7 +237,24 @@
+@@ -237,7 +237,25 @@
              if (!found) {
                  qCWarning(KRDP) << "No virtual output found for RDP pointer" << outputName;
                  return;
