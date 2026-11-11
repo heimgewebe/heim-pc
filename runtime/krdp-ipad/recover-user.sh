@@ -82,6 +82,13 @@ fi
 connections="$(ss -Htn state established sport :3390)" ||
   die "could not determine whether a KRDP client is connected"
 [[ -z "$connections" ]] || die "KRDP has an active client; not restarting"
+# Replacing the unit text while the helper remains active leaves an old KWin
+# output behind. Restarting the helper blindly can duplicate that output and
+# produce black PipeWire frames. Refuse an unsafe silent-success recovery.
+if ! cmp -s "$source_monitor" "$target_monitor" &&
+   [[ "$(systemctl --user is-active "$monitor_unit" 2>/dev/null || true)" == active ]]; then
+  die "iPad monitor unit drift while active; stop/reconcile the KWin output before applying a new monitor config"
+fi
 if cmp -s "$source_unit" "$target_unit" && cmp -s "$source_monitor" "$target_monitor" &&
    [[ "$(systemctl --user is-enabled "$monitor_unit" 2>/dev/null)" == enabled ]] &&
    [[ "$(systemctl --user is-active "$monitor_unit" 2>/dev/null)" == active ]] && cmp -s "$source_desktop" "$target_desktop" &&
