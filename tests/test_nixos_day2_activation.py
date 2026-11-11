@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -2219,8 +2221,12 @@ def test_run_exact_real_sigterm_kills_real_process_group(
 
     def real_child(_argv, **kwargs):
         nonlocal child_pid, timer
+        # Use the actual host's sleep binary; NixOS has no /bin/sleep.
+        sleep = shutil.which("sleep")
+        assert sleep is not None
+        command = f"{shlex.quote(sleep)} 30"
         process = real_popen(
-            ["/bin/sh", "-c", "/bin/sleep 30 & /bin/sleep 30"],
+            ["/bin/sh", "-c", f"{command} & {command}"],
             **kwargs,
         )
         child_pid = process.pid
