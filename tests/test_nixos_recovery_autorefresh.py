@@ -2,7 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "nixos/system/modules/grabowski-recovery-mcp-refresh.py"
@@ -39,6 +39,36 @@ def current_status():
 class DecisionTests(unittest.TestCase):
     def test_valid_recent_proof_is_reused(self):
         self.assertEqual(refresh.decide(current_status(), now=NOW), "skip")
+
+    def test_new_completed_backup_defeats_recent_proof(self):
+        status = current_status()
+        proof_time = status["server_recovery"]["generated_at_unix"]
+        self.assertEqual(
+            refresh.decide(status, now=NOW, latest_backup_finished_unix=proof_time + 1),
+            "refresh",
+        )
+        self.assertEqual(
+            refresh.decide(status, now=NOW, latest_backup_finished_unix=proof_time),
+            "skip",
+        )
+
+    def test_new_backup_invalidates_local_marker_even_if_old_canonical_is_intact(self):
+        s = current_status()
+        s["local_backup"] = {
+            "valid": False,
+            "error": "NixOS recovery snapshot lacks matching completed backup invocation",
+        }
+        generated = s["server_recovery"]["generated_at_unix"]
+        self.assertEqual(
+            refresh.decide(s, now=NOW, latest_backup_finished_unix=generated + 4),
+            "refresh",
+        )
+        # If there was no later successful backup, preserve the old intact
+        # recovery proof instead of overwriting it during a failed upload.
+        self.assertEqual(
+            refresh.decide(s, now=NOW, latest_backup_finished_unix=None),
+            "skip",
+        )
 
     def test_refresh_before_24_hour_expiry(self):
         s = current_status()
@@ -115,6 +145,45 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(refresh.decide(s, now=NOW), "refresh")
 
 
+class NativeBackupReadTests(unittest.TestCase):
+    @staticmethod
+    def result(**fields):
+        values = {
+            "LoadState": "loaded", "ActiveState": "inactive",
+            "Result": "success", "ExecMainCode": "1", "ExecMainStatus": "0",
+            "ExecMainExitTimestamp": f"@{NOW - 10}",
+        }
+        values.update(fields)
+        return Mock(returncode=0, stdout="\n".join(
+            f"{key}={value}" for key, value in values.items()
+        ) + "\n")
+
+    def test_completed_backup_timestamp_uses_fixed_readonly_query(self):
+        with patch.object(refresh.subprocess, "run", return_value=self.result()) as run:
+            self.assertEqual(refresh.latest_completed_backup_unix(now=NOW), NOW - 10)
+        args, kwargs = run.call_args
+        self.assertEqual(args[0][:5], [
+            "/run/current-system/sw/bin/systemctl", "--system",
+            "--timestamp=unix", "show", "restic-backups-heim-pc.service",
+        ])
+        self.assertFalse(kwargs["check"])
+        self.assertNotIn("shell", kwargs)
+
+    def test_failed_running_unavailable_and_future_are_not_evidence(self):
+        for values in (
+            {"ActiveState": "activating"}, {"Result": "exit-code"},
+            {"ExecMainStatus": "1"}, {"ExecMainCode": "2"},
+            {"ExecMainExitTimestamp": ""}, {"LoadState": "not-found"},
+            {"ExecMainExitTimestamp": f"@{NOW+55}"},
+        ):
+            with self.subTest(fields=values), patch.object(
+                refresh.subprocess, "run", return_value=self.result(**values)
+            ):
+                self.assertIsNone(refresh.latest_completed_backup_unix(now=NOW))
+        with patch.object(refresh.subprocess, "run", side_effect=OSError):
+            self.assertIsNone(refresh.latest_completed_backup_unix(now=NOW))
+
+
 class PublishedProofTests(unittest.TestCase):
     @staticmethod
     def valid():
@@ -177,7 +246,8 @@ class DeclarationTests(unittest.TestCase):
         self.assertIn('"grabowski_recovery_server_probe"', source)
         self.assertIn('"grabowski_recovery_status"', source)
         self.assertIn('127.0.0.1:18181/mcp', source)
-        self.assertNotIn('subprocess', source)
+        self.assertIn('"--timestamp=unix"', source)
+        self.assertNotIn('shell=True', source)
         self.assertNotIn('sudo ', source)
         self.assertNotIn('restic restore', source)
         self.assertIn('all(v is True for v in after["checks"].values())', source)
