@@ -2,7 +2,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "nixos/system/modules/grabowski-recovery-mcp-refresh.py"
@@ -217,6 +218,82 @@ class PublishedProofTests(unittest.TestCase):
                 RuntimeError, "canonical publication not proven"
             ):
                 refresh.require_published_proof(proof)
+
+
+class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_exact_busy_response_is_retryable(self):
+        class Session:
+            def __init__(self, result):
+                self.result = result
+
+            async def call_tool(self, *_args, **_kwargs):
+                return self.result
+
+        busy = SimpleNamespace(isError=True, structuredContent=None,
+            content=[SimpleNamespace(text="Error: local recovery repository operation is busy")])
+        with self.assertRaises(refresh.RecoveryRepositoryBusy):
+            await refresh._call(Session(busy), "grabowski_recovery_server_probe",
+                                timeout=refresh.TOOL_TIMEOUT)
+        with self.assertRaises(RuntimeError) as unexpected:
+            await refresh._call(Session(busy), "grabowski_recovery_status",
+                                timeout=refresh.TOOL_TIMEOUT)
+        self.assertNotIsInstance(unexpected.exception, refresh.RecoveryRepositoryBusy)
+        invalid = SimpleNamespace(isError=False, structuredContent=None, content=[])
+        with self.assertRaises(RuntimeError):
+            await refresh._call(Session(invalid), "grabowski_recovery_server_probe",
+                                timeout=refresh.TOOL_TIMEOUT)
+
+    async def test_other_worker_published_latest_proof_without_duplicate_probe(self):
+        done = current_status()
+        done["server_recovery"]["generated_at_unix"] = NOW - 5
+        with patch.object(refresh, "_call", new=AsyncMock(side_effect=[
+            refresh.RecoveryRepositoryBusy("busy"), done
+        ])) as call, patch.object(refresh.asyncio, "sleep",
+                                   new=AsyncMock()) as sleep, patch.object(
+            refresh, "latest_completed_backup_unix", return_value=NOW - 20
+        ), patch.object(refresh.time, "time", return_value=NOW):
+            proof, status = await refresh._probe_or_wait(object())
+        self.assertIsNone(proof)
+        self.assertIs(status, done)
+        self.assertEqual(call.await_count, 2)
+        sleep.assert_awaited_once_with(refresh.BUSY_RETRY_INTERVAL_SECONDS)
+
+    async def test_stale_or_unready_concurrent_proof_is_not_accepted(self):
+        stale = current_status()
+        stale["server_recovery"]["generated_at_unix"] = NOW - 80
+        result = {"snapshot_id": "freshabcd"}
+        with patch.object(refresh, "_call", new=AsyncMock(side_effect=[
+            refresh.RecoveryRepositoryBusy("busy"), stale, result
+        ])) as call, patch.object(refresh.asyncio, "sleep",
+                                   new=AsyncMock()), patch.object(
+            refresh, "latest_completed_backup_unix", return_value=NOW - 20
+        ), patch.object(refresh.time, "time", return_value=NOW):
+            proof, status = await refresh._probe_or_wait(object())
+        self.assertIs(proof, result)
+        self.assertIsNone(status)
+        self.assertEqual(call.await_count, 3)
+
+    async def test_busy_exhaustion_fails_closed(self):
+        with patch.object(refresh, "BUSY_RETRY_ATTEMPTS", 1), patch.object(
+            refresh, "_call", new=AsyncMock(side_effect=[
+                refresh.RecoveryRepositoryBusy("busy"), current_status(),
+                refresh.RecoveryRepositoryBusy("busy")
+            ])
+        ), patch.object(refresh.asyncio, "sleep", new=AsyncMock()), patch.object(
+            refresh, "latest_completed_backup_unix", return_value=NOW - 20
+        ), patch.object(refresh.time, "time", return_value=NOW):
+            with self.assertRaisesRegex(RuntimeError, "remains busy"):
+                await refresh._probe_or_wait(object())
+
+    async def test_other_probe_failures_do_not_trigger_retry(self):
+        with patch.object(refresh, "_call", new=AsyncMock(
+            side_effect=RuntimeError("repository integrity failed")
+        )) as call, patch.object(refresh.asyncio, "sleep",
+                                 new=AsyncMock()) as sleep:
+            with self.assertRaisesRegex(RuntimeError, "integrity failed"):
+                await refresh._probe_or_wait(object())
+        call.assert_awaited_once()
+        sleep.assert_not_awaited()
 
 
 class DeclarationTests(unittest.TestCase):
