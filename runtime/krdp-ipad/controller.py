@@ -108,8 +108,12 @@ def restore():
             commands.append(f"output.{name}.scale.{item['scale']}")
     doctor(*commands)
     now = {o["name"]: o for o in outputs()}
+    # A partially applied KScreen command must not destroy the only
+    # recovery preimage. Mode and scale are as important as enable/position.
     ok = all(now.get(p["name"], {}).get("enabled")
              and now[p["name"]].get("pos") == p["pos"]
+             and (not p.get("mode") or now[p["name"]].get("currentModeId") == p["mode"])
+             and abs(float(now[p["name"]].get("scale", 1)) - float(p.get("scale", 1))) <= 0.001
              for p in old)
     if not ok:
         log("restore readback mismatch; retaining preimage")
