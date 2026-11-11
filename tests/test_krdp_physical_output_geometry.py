@@ -43,11 +43,23 @@ class PhysicalMonitorGeometryTest(unittest.TestCase):
             encoding="utf-8"
         )
         package = (FEATURE / "package.nix").read_text(encoding="utf-8")
-        self.assertIn("else if (const auto physicalIndex = activeStream())", pointer_patch)
-        self.assertIn("qApp->screens().at(*physicalIndex)->geometry()", pointer_patch)
+        self.assertIn("else if (activeStream())", pointer_patch)
+        self.assertIn("d->request->objectName()", pointer_patch)
+        self.assertIn("screen->name() == selectedName", pointer_patch)
+        self.assertIn("if (!selectedScreen)", pointer_patch)
+        self.assertNotIn("qApp->screens().at(*physicalIndex)", pointer_patch)
         self.assertIn("geometry.width() + geometry.x()", pointer_patch)
         self.assertIn("geometry.height() + geometry.y()", pointer_patch)
         self.assertIn("krdp-6.7.0-physical-output-pointer-coordinates-v1.patch", package)
+
+    def test_hotplug_keeps_selected_connector_not_stale_screen_index(self):
+        """Removing an earlier Qt screen must not redirect mouse movement."""
+        patch = (FEATURE / "patches/krdp-6.7.0-physical-output-pointer-coordinates-v1.patch").read_text()
+        self.assertIn("selectedName = d->request ? d->request->objectName()", patch)
+        self.assertIn("for (QScreen *screen : qApp->screens())", patch)
+        self.assertIn("screen->name() == selectedName", patch)
+        self.assertIn("if (!selectedScreen)", patch)
+        self.assertNotIn("qApp->screens().at(*physicalIndex)", patch)
 
     def test_dp2_pointer_mapping_preserves_nonzero_screen_origin(self):
         # Independently calibrated FreeRDP/KWin: 2560x1440 DP-2 at x=2259.
