@@ -1,4 +1,8 @@
 { config, lib, pkgs, ... }:
+let
+  # Real day-2 physical hosts only, not headless proof instances.
+  physicalHost = lib.attrByPath [ "heimPc" "day2Activation" "enable" ] false config;
+in
 {
   networking.networkmanager.enable = true;
 
@@ -28,4 +32,12 @@
       RestartSec = "10s";
     };
   };
+
+  # Heimberry may wake the real wired host without touching VM network.
+  networking.interfaces.enp7s0.wakeOnLan.enable =
+    lib.mkIf physicalHost true;
+
+  # Keep the NixOS hardware watchdog under systemd PID 1.
+  systemd.settings.Manager.RuntimeWatchdogSec =
+    lib.mkIf physicalHost "2min";
 }
