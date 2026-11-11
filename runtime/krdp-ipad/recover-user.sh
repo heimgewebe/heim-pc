@@ -43,6 +43,16 @@ grep -Fxq 'ExecStart=/home/alex/.local/state/nix/profiles/krfb-virtual-ipad-no-v
   die "iPad monitor source does not expose the verified 1168x768 output"
 store_root="$(dirname "$(dirname "$store_binary")")"
 
+running_runtime_matches() {
+  local pid expected_sha actual_sha
+  pid="$(systemctl --user show "$unit" -p MainPID --value 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" == "$runtime" ]] || return 1
+  expected_sha="$(sha256sum "$store_binary" | cut -d' ' -f1)" || return 1
+  actual_sha="$(sha256sum "/proc/$pid/exe" | cut -d' ' -f1)" || return 1
+  [[ "$expected_sha" == "$actual_sha" ]]
+}
+
 check() {
   [[ -f "$target_monitor" ]] && cmp -s "$source_monitor" "$target_monitor" ||
     die "iPad virtual monitor user unit differs from checked-in source"
@@ -94,7 +104,8 @@ if cmp -s "$source_unit" "$target_unit" && cmp -s "$source_monitor" "$target_mon
    [[ "$(systemctl --user is-active "$monitor_unit" 2>/dev/null)" == active ]] && cmp -s "$source_desktop" "$target_desktop" &&
    [[ -L "$gc_root" && "$(readlink -f "$gc_root")" == "$store_root" ]] &&
    [[ "$(systemctl --user is-enabled "$unit" 2>/dev/null)" == enabled ]] &&
-   [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == active ]]; then
+   [[ "$(systemctl --user is-active "$unit" 2>/dev/null)" == active ]] &&
+   running_runtime_matches; then
   check
   printf 'KRDP_RECOVERY_ALREADY_CURRENT\n'
   exit 0
@@ -111,13 +122,23 @@ fi
 mkdir -p -- "$HOME/.local/state/grabowski"
 backup="$(mktemp -d "$HOME/.local/state/grabowski/krdp-recovery.XXXXXXXX")"
 chmod 700 "$backup"
+backup_existing() {
+  local source="$1" target="$2"
+  if [[ -e "$source" || -L "$source" ]]; then
+    [[ -f "$source" && ! -L "$source" ]] || die "unsafe existing recovery source $source"
+    cp -p -- "$source" "$target" || die "backup copy failed for $source"
+    cmp -s -- "$source" "$target" || die "backup verification failed for $source"
+    sync -f "$target" || die "backup fsync failed for $source"
+  fi
+}
 old_active="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
 old_monitor_active="$(systemctl --user is-active "$monitor_unit" 2>/dev/null || true)"
 old_monitor_enabled="$(systemctl --user is-enabled "$monitor_unit" 2>/dev/null || true)"
-[[ -f "$target_monitor" ]] && cp -p -- "$target_monitor" "$backup/monitor" || :
 old_enabled="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
-[[ -f "$target_unit" ]] && cp -p -- "$target_unit" "$backup/unit" || :
-[[ -f "$target_desktop" ]] && cp -p -- "$target_desktop" "$backup/desktop" || :
+backup_existing "$target_monitor" "$backup/monitor"
+backup_existing "$target_unit" "$backup/unit"
+backup_existing "$target_desktop" "$backup/desktop"
+sync -f "$backup" || die "backup directory fsync failed"
 committed=0
 rollback() {
   local status=$?
