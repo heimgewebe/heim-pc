@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import stat
 import tempfile
 import unittest
@@ -349,11 +350,56 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                   "restore_sha256":"b"*64}
         with tempfile.TemporaryDirectory() as state:
             with patch.object(probe, "STATE", Path(state)), patch.object(probe, "PROOF", Path(state)/"proof.json"):
-                probe._write_proof(record)
                 result = Path(state)/"proof.json"
+                result.write_bytes(b"previous valid proof")
+                previous_inode = result.stat().st_ino
+                probe._write_proof(record)
+                self.assertNotEqual(result.stat().st_ino, previous_inode)
                 self.assertEqual(json.loads(result.read_text()), record)
                 self.assertEqual(stat.S_IMODE(result.stat().st_mode), 0o644)
                 self.assertEqual(list(Path(state).iterdir()), [result])
+
+    def test_old_proof_available_during_check_but_revoked_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            existing = Path(state) / "proof.json"
+            old_proof = b'{"previous":"root-verified-snapshot"}\\n'
+            existing.write_bytes(old_proof)
+            def fail_after_observing_old_proof(*args, **kwargs):
+                self.assertEqual(existing.read_bytes(), old_proof)
+                raise RuntimeError("simulated integrity check failure")
+
+            root_state = SimpleNamespace(
+                lstat=lambda: SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700, st_uid=0
+                )
+            )
+            with (
+                patch.object(probe.sys, "argv", ["root-proof.py"]),
+                patch.object(probe, "STATE", root_state),
+                patch.object(probe, "PROOF", existing),
+                patch.object(probe.os, "geteuid", return_value=0),
+                patch.object(probe, "_mount_identity", return_value="/dev/sda1"),
+                patch.object(
+                    probe, "_backup_timer_ready",
+                    return_value=("a" * 32, 100, 200, 100000, 300000),
+                ),
+                patch.object(
+                    probe, "_snapshot_for_backup_run",
+                    return_value=("b" * 64, 150),
+                ),
+                patch.object(probe, "_restore_digest", return_value="c" * 64),
+                patch.object(probe, "_next_check_part", return_value=6),
+                patch.object(
+                    probe, "_restic",
+                    side_effect=fail_after_observing_old_proof,
+                ) as restic,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "simulated integrity check failure"
+                ):
+                    probe.main()
+                self.assertEqual(restic.call_args.args[:2], ("check", "--read-data-subset=6/10"))
+            self.assertFalse(existing.exists())
 
     def test_non_root_execution_rejected_before_touching_proof(self) -> None:
         with patch.object(probe.os, "geteuid", return_value=1000):
