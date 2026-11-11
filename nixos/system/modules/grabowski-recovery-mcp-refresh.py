@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import json
+import re
+import subprocess
 import sys
 import time
 
@@ -28,7 +30,47 @@ TOOL_ARGUMENTS = {
 }
 
 
-def decide(status: dict, *, now: int) -> str:
+def latest_completed_backup_unix(*, now: int) -> int | None:
+    """Read an immutable systemd success outcome, without starting a backup.
+
+    The root probe later authenticates the source snapshot independently.
+    Missing/GC'ed or still-running unit evidence cannot supersede a valid proof.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "/run/current-system/sw/bin/systemctl", "--system",
+                "--timestamp=unix", "show", "restic-backups-heim-pc.service",
+                "-p", "LoadState", "-p", "ActiveState", "-p", "Result",
+                "-p", "ExecMainCode", "-p", "ExecMainStatus",
+                "-p", "ExecMainExitTimestamp",
+            ], capture_output=True, text=True, timeout=8, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 4096:
+        return None
+    lines = result.stdout.splitlines()
+    if any(line.count("=") != 1 for line in lines):
+        return None
+    fields = dict(line.split("=", 1) for line in lines)
+    if (
+        len(lines) != len(fields) or len(fields) != 6
+        or fields.get("LoadState") != "loaded"
+        or fields.get("ActiveState") != "inactive"
+        or fields.get("Result") != "success"
+        or fields.get("ExecMainCode") != "1"
+        or fields.get("ExecMainStatus") != "0"
+    ):
+        return None
+    stamp = fields.get("ExecMainExitTimestamp", "")
+    if re.fullmatch(r"@[0-9]+", stamp) is None:
+        return None
+    finished = int(stamp[1:])
+    return finished if 0 < finished <= now + 2 else None
+
+
+def decide(status: dict, *, now: int, latest_backup_finished_unix: int | None = None) -> str:
     """Reuse intact proof or request a new root-validated recovery proof."""
     if not isinstance(status, dict) or type(now) is not int or now <= 0:
         raise RuntimeError("recovery status is malformed")
@@ -37,6 +79,12 @@ def decide(status: dict, *, now: int) -> str:
         raise RuntimeError("recovery checks are unavailable")
     canonical = status.get("server_recovery")
     publication = status.get("server_recovery_source_publication")
+    verified_at = canonical.get("generated_at_unix") if isinstance(canonical, dict) else None
+    newer_backup_completed = (
+        type(verified_at) is int
+        and type(latest_backup_finished_unix) is int
+        and latest_backup_finished_unix > verified_at
+    )
     if (
         status.get("ready_for_privileged_actions") is True
         and isinstance(canonical, dict)
@@ -44,8 +92,11 @@ def decide(status: dict, *, now: int) -> str:
         and isinstance(publication, dict)
         and publication.get("current") is True
     ):
-        verified_at = canonical.get("generated_at_unix")
-        if type(verified_at) is int and 0 <= now - verified_at < REFRESH_AFTER_SECONDS:
+        if (
+            type(verified_at) is int
+            and 0 <= now - verified_at < REFRESH_AFTER_SECONDS
+            and not newer_backup_completed
+        ):
             return "skip"
     if any(checks.get(key) is not True for key in PREREQUISITE_CHECKS):
         raise RuntimeError("native backup timer or rootbroker is not ready")
@@ -59,6 +110,7 @@ def decide(status: dict, *, now: int) -> str:
             and canonical.get("valid") is True
             and isinstance(publication, dict)
             and publication.get("current") is True
+            and not newer_backup_completed
         ):
             return "skip"
         # Native root probe alone checks the latest completed systemd backup
@@ -121,7 +173,11 @@ async def refresh() -> None:
             before = await _call(
                 session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
             )
-            decision = decide(before, now=int(time.time()))
+            now = int(time.time())
+            decision = decide(
+                before, now=now,
+                latest_backup_finished_unix=latest_completed_backup_unix(now=now),
+            )
             if decision == "skip":
                 print(json.dumps({
                     "status": "current", "source": "canonical-restic-recovery",
