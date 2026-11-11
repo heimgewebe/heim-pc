@@ -4,7 +4,10 @@ The real iPad Windows App must still be independently accepted by a person.
 """
 
 from pathlib import Path
+import os
+import re
 import subprocess
+import tempfile
 import unittest
 
 
@@ -40,7 +43,7 @@ class KrdpRecoveryTest(unittest.TestCase):
         monitor = (FEATURE / "ipad-krdp-monitor.service").read_text()
         self.assertIn("source_monitor=", source)
         self.assertIn('cmp -s "$source_monitor" "$target_monitor"', source)
-        self.assertIn('cp -p -- "$target_monitor" "$backup/monitor"', source)
+        self.assertIn('backup_existing "$target_monitor" "$backup/monitor"', source)
         self.assertIn("KRDP has an active client; not restarting", source)
         self.assertLess(source.index('systemctl --user enable --now "$monitor_unit"'),
                         source.rindex('systemctl --user restart "$unit"'))
@@ -66,13 +69,46 @@ class KrdpRecoveryTest(unittest.TestCase):
     def test_apply_has_existing_config_backup_and_rollback(self):
         source = INSTALLER.read_text()
         self.assertIn("mktemp -d", source)
-        self.assertIn("cp -p -- \"$target_unit\" \"$backup/unit\"", source)
-        self.assertIn("cp -p -- \"$target_desktop\" \"$backup/desktop\"", source)
+        self.assertIn('backup_existing "$target_unit" "$backup/unit"', source)
+        self.assertIn('backup_existing "$target_desktop" "$backup/desktop"', source)
         self.assertIn("trap rollback EXIT", source)
         self.assertIn("KRDP_RECOVERY_ROLLED_BACK", source)
         self.assertIn("KRDP_RECOVERY_APPLIED", source)
         self.assertIn("KRDP_RECOVERY_ALREADY_CURRENT", source)
         self.assertIn("nix-store --add-root", source)
+
+    def test_failed_backup_copy_aborts_without_mutating_source(self):
+        """A full disk or failed copy must never delete original rollback data."""
+        source = INSTALLER.read_text()
+        match = re.search(r"(?ms)^backup_existing\(\) \{\n.*?^\}", source)
+        self.assertIsNotNone(match)
+        with tempfile.TemporaryDirectory(prefix="krdp-copy-failure-") as folder:
+            root = Path(folder)
+            src = root / "existing.conf"
+            dst = root / "preserved.conf"
+            src.write_text("prior-good-configuration")
+            stub = root / "cp"
+            stub.write_text("#!/bin/sh\nexit 37\n")
+            stub.chmod(0o755)
+            command = ('set -euo pipefail\n'
+                       'die() { printf "FAILED: %s\\n" "$*" >&2; exit 1; }\n'
+                       + match.group(0) + '\nbackup_existing "$1" "$2"\n')
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ.get("PATH", ""))
+            result = subprocess.run(["bash", "-c", command, "krdp-test", str(src), str(dst)],
+                                    env=env, capture_output=True, text=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("backup copy failed", result.stderr)
+            self.assertEqual(src.read_text(), "prior-good-configuration")
+            self.assertFalse(dst.exists())
+
+    def test_runtime_identity_mismatch_never_skips_repair(self):
+        source = INSTALLER.read_text()
+        self.assertIn('actual_sha="$(sha256sum "/proc/$pid/exe"', source)
+        self.assertIn('[[ "$expected_sha" == "$actual_sha" ]]', source)
+        self.assertIn('running_runtime_matches; then', source)
+        self.assertLess(source.index('running_runtime_matches; then'),
+                        source.index('systemctl --user restart "$unit"'))
+        self.assertIn('iPad monitor unit drift while active', source)
 
     def test_readme_names_correct_recovery_path(self):
         readme = (FEATURE / "README.md").read_text()
