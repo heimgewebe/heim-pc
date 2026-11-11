@@ -1,0 +1,19 @@
+--- a/src/InputHandler.cpp
++++ b/src/InputHandler.cpp
+@@ -163,6 +163,16 @@
+         return true;
+     }
+ 
++    // RDP mouse-button PDUs carry their own absolute position. The iPad
++    // Windows App can send a tap as DOWN/UP without an earlier MOVE.
++    // KWin fake-input button() acts at the last cursor position, so send
++    // the position update first to avoid clicking a stale coordinate.
++    if (button != Qt::NoButton && !(flags & PTR_FLAGS_MOVE)) {
++        auto motion = std::make_shared<QMouseEvent>(QEvent::MouseMove, position, QPointF{}, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
++        Q_EMIT inputEvent(motion);
++        d->lastMousePosition = position;
++    }
++
+     std::shared_ptr<QMouseEvent> event;
+     if (flags & PTR_FLAGS_DOWN) {
+         event = std::make_shared<QMouseEvent>(QEvent::MouseButtonPress, position, QPointF{}, button, button, Qt::NoModifier);

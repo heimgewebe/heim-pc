@@ -1,0 +1,18 @@
+[Unit]
+Description=KDE iPad KRDP full Plasma output 1168x768
+After=plasma-kwin_wayland.service
+Before=app-org.kde.krdpserver.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=QT_QPA_PLATFORM=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecCondition=/run/current-system/sw/bin/test -S /run/user/1000/wayland-0
+ExecStart=/home/alex/.local/state/nix/profiles/krfb-virtual-ipad-no-vnc/bin/krfb-virtualmonitor --resolution 1168x768 --name iPadKrdp --scale 1 --port -1
+Restart=no
+
+[Install]
+WantedBy=graphical-session.target

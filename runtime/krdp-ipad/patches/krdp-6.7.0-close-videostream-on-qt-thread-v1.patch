@@ -1,0 +1,24 @@
+--- a/src/RdpConnection.cpp
++++ b/src/RdpConnection.cpp
+@@ -252,3 +252,7 @@ RdpConnection::~RdpConnection()
++    // A queued shutdown callback may never run once the Qt event loop exits.
++    // Close on VideoStream's GUI owner thread before freeing the FreeRDP peer.
++    d->videoStream->close();
++
+     if (d->peer) {
+         freerdp_peer_free(d->peer);
+     }
+@@ -558,7 +562,13 @@ bool RdpConnection::onClose()
+ {
+     d->clipboard->close();
+-    d->videoStream->close();
++    // This receive worker must never wait for the GUI thread: during server
++    // shutdown the GUI thread may be joining this very worker.
++    // If the queued close cannot run, the destructor closes before peer-free.
++    auto stream = d->videoStream.get();
++    QMetaObject::invokeMethod(stream, [stream] {
++        stream->close();
++    }, Qt::QueuedConnection);
+     setState(State::Closed);
+     return true;
+ }

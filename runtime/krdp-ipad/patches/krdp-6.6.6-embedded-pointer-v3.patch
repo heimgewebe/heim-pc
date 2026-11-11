@@ -1,0 +1,48 @@
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -173,7 +173,7 @@
+ void PlasmaScreencastV1Session::start()
+ {
+     if (auto vm = virtualMonitor()) {
+-        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata);
++        d->request = d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR") ? Screencasting::Embedded : Screencasting::Metadata);
+     } else if (!activeStream()) {
+         d->request = d->m_screencasting.createWorkspaceStream(Screencasting::Metadata);
+     }
+--- a/src/Cursor.h
++++ b/src/Cursor.h
+@@ -52,9 +52,9 @@
+     ~Cursor();
+ 
+     void update(const CursorUpdate &update);
++    void setCursorType(CursorType type);
+ 
+ private:
+-    void setCursorType(CursorType type);
+ 
+     class Private;
+     const std::unique_ptr<Private> d;
+--- a/server/SessionController.cpp
++++ b/server/SessionController.cpp
+@@ -47,13 +47,19 @@
+             session->setClipboardData(clipboard->getClipboard());
+         });
+ 
++        // The peer context is only available after the RDP handshake.
++        connect(connection, &KRdp::RdpConnection::stateChanged, this, [this](KRdp::RdpConnection::State state) {
++            if (state == KRdp::RdpConnection::State::Streaming && connection && qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR")) {
++                connection->cursor()->setCursorType(KRdp::Cursor::CursorType::Hidden);
++            }
++        });
+         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+     }
+ 
+     void onCursorUpdate(const PipeWireCursor &cursor)
+     {
+-        if (!connection) {
+-            return;
++        if (!connection || qEnvironmentVariableIntValue("KRDP_EMBED_CURSOR")) {
++            return; // Cursor embedded in video; no second RDP pointer shape.
+         }
+ 
+         KRdp::Cursor::CursorUpdate update;

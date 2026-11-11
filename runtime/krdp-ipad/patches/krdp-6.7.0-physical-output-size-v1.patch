@@ -1,0 +1,10 @@
+--- a/src/screencasting.cpp
++++ b/src/screencasting.cpp
+@@ -114,7 +114,7 @@ ScreencastingStream *Screencasting::createOutputStream(QScreen *screen, Screencasting::CursorMode mode)
+     auto stream = new ScreencastingStream(this);
+     stream->setObjectName(screen->name());
+     stream->d->init(d->stream_output(output, mode));
+-    stream->d->m_size = screen->virtualSize();
++    stream->d->m_size = screen->size();
+     return stream;
+ }

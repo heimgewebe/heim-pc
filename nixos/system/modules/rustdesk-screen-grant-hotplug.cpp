@@ -23,7 +23,7 @@ int converge(QGuiApplication &app, bool apply) {
     QStringList desired;
     for (const QScreen *screen: app.screens()) {
         const QString name=screen->name();
-        if (name!="DP-1" && name!="DP-2" && name!="Virtual-iPadRemote") {
+        if (name!="DP-1" && name!="DP-2" && name!="Virtual-iPadRemote" && name!="Virtual-iPadKrdp") {
             std::cerr << "UNKNOWN_OUTPUT_NAME\n";
             return 14;
         }
@@ -36,7 +36,7 @@ int converge(QGuiApplication &app, bool apply) {
     // krfb-virtualmonitor again when KWin retains its output can duplicate
     // Virtual-iPadRemote and produce black/transparent ScreenCast frames.
     // Preserve unattended DP-2-only operation rather than blocking grant repair.
-    if (!names.contains("DP-2") || desired.isEmpty() || desired.size()>3) return 16;
+    if (!names.contains("DP-2") || desired.isEmpty() || desired.size()>4) return 16;
     std::sort(desired.begin(), desired.end());
     QSet<QString> unique;
     for (const auto &id: desired) unique.insert(id);
@@ -45,28 +45,29 @@ int converge(QGuiApplication &app, bool apply) {
         // When DP-1 is re-enabled, KScreen can leave DP-1 and DP-2 both at 0,0.
         // Derive left-to-right positions from connector names and CURRENT
         // logical width, never hardcode indexes or framebuffer dimensions.
-        const QScreen *dp1=nullptr,*dp2=nullptr,*virtualScreen=nullptr;
-        for (const auto *screen: app.screens()) {
-            if (screen->name()=="DP-1") dp1=screen;
-            else if (screen->name()=="DP-2") dp2=screen;
-            else if (screen->name()=="Virtual-iPadRemote") virtualScreen=screen;
-        }
-        if (!apply || !dp1 || !dp2 || !virtualScreen || overlapRepairs>=3) {
+        // Keep each existing output on its own screen. Both iPad outputs
+        // are optional, but either can be present during physical hotplug.
+        if (!apply || overlapRepairs>=3) {
             std::cerr << "DUPLICATE_SCREEN_COORDINATES\n"; return 17;
         }
         overlapRepairs++;
-        const int dp2x=dp1->geometry().width();
-        const int virtx=dp2x+dp2->geometry().width();
-        const QStringList args{
-            QStringLiteral("output.DP-1.position.0,0"),
-            QString("output.DP-2.position.%1,0").arg(dp2x),
-            QString("output.Virtual-iPadRemote.position.%1,0").arg(virtx)
-        };
+        QStringList args;
+        int nextX=0;
+        for (const QString &connector: QStringList{
+                 QStringLiteral("DP-1"), QStringLiteral("DP-2"),
+                 QStringLiteral("Virtual-iPadRemote"), QStringLiteral("Virtual-iPadKrdp")}) {
+            for (const QScreen *screen: app.screens()) {
+                if (screen->name()!=connector) continue;
+                args.append(QString("output.%1.position.%2,0").arg(connector).arg(nextX));
+                nextX += screen->geometry().width();
+                break;
+            }
+        }
         const int code=QProcess::execute(QStringLiteral("kscreen-doctor"),args);
         if (code!=0) {
             std::cerr<<"LAYOUT_RECOVERY_FAILED "<<code<<"\n";return 18;
         }
-        std::cout<<"LAYOUT_RECOVERED_BY_CONNECTOR "<<dp2x<<","<<virtx<<std::endl;
+        std::cout<<"LAYOUT_RECOVERED_BY_CONNECTOR last_x="<<nextX<<std::endl;
         QTimer::singleShot(1500,&app,[&app](){converge(app,true);});
         return 0;
     }

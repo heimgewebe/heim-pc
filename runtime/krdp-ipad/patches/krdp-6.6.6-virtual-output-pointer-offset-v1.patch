@@ -1,0 +1,35 @@
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -5,6 +5,7 @@
+ #include "PlasmaScreencastV1Session.h"
+ 
+ #include <QGuiApplication>
++#include <QScreen>
+ #include <QMouseEvent>
+ #include <QQueue>
+ #include <QWaylandClientExtensionTemplate>
+@@ -224,6 +225,24 @@
+         auto me = std::static_pointer_cast<QMouseEvent>(event);
+         auto position = me->position();
+         auto logicalPosition = QPointF{(position.x() / size().width()) * logicalSize().width(), (position.y() / size().height()) * logicalSize().height()};
++        // FakeInput absolute positions are in KWin's global logical workspace.
++        // The virtual output may be beside physical monitors, not at (0,0).
++        if (const auto vm = virtualMonitor()) {
++            const QString outputName = QStringLiteral("Virtual-") + vm->name;
++            bool found = false;
++            for (const auto *screen : QGuiApplication::screens()) {
++                if (screen->name() == outputName) {
++                    logicalPosition += screen->geometry().topLeft();
++                    found = true;
++                    break;
++                }
++            }
++            // Never send input to a physical display if the virtual one is gone.
++            if (!found) {
++                qCWarning(KRDP) << "No virtual output found for RDP pointer" << outputName;
++                return;
++            }
++        }
+         d->remoteInterface->pointer_motion_absolute(wl_fixed_from_double(logicalPosition.x()), wl_fixed_from_double(logicalPosition.y()));
+         break;
+     }

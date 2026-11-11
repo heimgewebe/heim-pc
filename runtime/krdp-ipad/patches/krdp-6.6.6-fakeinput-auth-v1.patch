@@ -1,0 +1,13 @@
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -32,6 +32,10 @@
+     {
+         initialize();
+         Q_ASSERT(isActive());
++        // KWin requires explicit fake-input authentication before honoring events.
++        if (isActive()) {
++            authenticate(QStringLiteral("KRdp"), QStringLiteral("Remote desktop input"));
++        }
+     }
+ };
+ 

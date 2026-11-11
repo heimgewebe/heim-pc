@@ -1,0 +1,201 @@
+--- a/src/RdpConnection.cpp
++++ b/src/RdpConnection.cpp
+@@ -23,6 +23,7 @@
+ #include <freerdp/server/cliprdr.h>
+ 
+ #include <freerdp/channels/drdynvc.h>
++#include <freerdp/server/rdpei.h>
+ 
+ #include "Clipboard.h"
+ #include "Cursor.h"
+@@ -192,6 +193,59 @@
+     return FALSE;
+ }
+ 
++struct TouchInputBridge
++{
++    InputHandler *handler = nullptr;
++    RdpeiServerContext *context = nullptr;
++    UINT32 channelId = UINT32_MAX;
++};
++
++static UINT onTouchReady(RdpeiServerContext *)
++{
++    qCInfo(KRDP) << "RDP touch input ready";
++    return 0;
++}
++
++static UINT onTouchEvent(RdpeiServerContext *ctx, const RDPINPUT_TOUCH_EVENT *event)
++{
++    auto *bridge = static_cast<TouchInputBridge *>(ctx->user_data);
++    if (!bridge || !bridge->handler || !event) {
++        return 0;
++    }
++    for (UINT16 f = 0; f < event->frameCount; ++f) {
++        const auto &frame = event->frames[f];
++        for (UINT16 i = 0; i < frame.contactCount; ++i) {
++            const auto &contact = frame.contacts[i];
++            bridge->handler->touchContact(contact.contactId, contact.x, contact.y, contact.contactFlags);
++        }
++    }
++    return 0;
++}
++
++static BOOL touchChannelAssigned(RdpeiServerContext *ctx, UINT32 id)
++{
++    auto *bridge = static_cast<TouchInputBridge *>(ctx->user_data);
++    if (bridge) {
++        bridge->channelId = id;
++    }
++    return TRUE;
++}
++
++static BOOL touchChannelCreated(void *userdata, UINT32 id, INT32 status)
++{
++    auto *bridge = static_cast<TouchInputBridge *>(userdata);
++    if (!bridge || bridge->channelId != id || !bridge->context) {
++        return TRUE;
++    }
++    if (status >= 0) {
++        const UINT error = rdpei_server_send_sc_ready(bridge->context, RDPINPUT_PROTOCOL_V300, 0);
++        if (error) {
++            qCWarning(KRDP) << "Could not enable RDPEI touch channel:" << error;
++        }
++    }
++    return TRUE;
++}
++
+ class KRDP_NO_EXPORT RdpConnection::Private
+ {
+ public:
+@@ -206,6 +260,9 @@
+     std::unique_ptr<Cursor> cursor;
+     std::unique_ptr<NetworkDetection> networkDetection;
+     std::unique_ptr<Clipboard> clipboard;
++    RdpeiServerContext *touch = nullptr;
++    TouchInputBridge touchBridge;
++    bool touchStarted = false;
+ 
+     freerdp_peer *peer = nullptr;
+ 
+@@ -249,6 +306,14 @@
+         d->thread.join();
+     }
+ 
++    if (d->touch) {
++        if (d->touchStarted) {
++            (void)d->touch->Close(d->touch);
++        }
++        rdpei_server_context_free(d->touch);
++        d->touch = nullptr;
++    }
++
+     if (d->peer) {
+         freerdp_peer_free(d->peer);
+     }
+@@ -468,6 +533,26 @@
+         if (drdynvcJoined != lastDrdynvcJoined || drdynvcState != lastDrdynvcState) {
+             lastDrdynvcJoined = drdynvcJoined;
+             lastDrdynvcState = drdynvcState;
++        }
++
++        if (d->peer->connected && drdynvcJoined && drdynvcState == DRDYNVC_STATE_READY &&
++            qEnvironmentVariableIntValue("KRDP_RDPEI_TOUCH") && !d->touchStarted) {
++            if (!d->touch) {
++                d->touch = rdpei_server_context_new(context->virtualChannelManager);
++                if (d->touch) {
++                    d->touchBridge = {d->inputHandler.get(), d->touch, UINT32_MAX};
++                    d->touch->user_data = &d->touchBridge;
++                    d->touch->onClientReady = onTouchReady;
++                    d->touch->onTouchEvent = onTouchEvent;
++                    d->touch->onChannelIdAssigned = touchChannelAssigned;
++                    WTSVirtualChannelManagerSetDVCCreationCallback(context->virtualChannelManager,
++                                                                  touchChannelCreated, &d->touchBridge);
++                }
++            }
++            if (d->touch && !d->touch->Open(d->touch)) {
++                d->touchStarted = true;
++                qCInfo(KRDP) << "RDP touch channel started";
++            }
+         }
+ 
+         if (d->peer->connected && d->state == State::Activated && drdynvcJoined) {
+@@ -557,6 +642,15 @@
+ 
+ bool RdpConnection::onClose()
+ {
++    if (d->touch) {
++        if (d->touchStarted) {
++            (void)d->touch->Close(d->touch);
++            d->touchStarted = false;
++        }
++        rdpei_server_context_free(d->touch);
++        d->touch = nullptr;
++        d->touchBridge = {};
++    }
+     d->clipboard->close();
+     d->videoStream->close();
+     setState(State::Closed);
+--- a/src/InputHandler.cpp
++++ b/src/InputHandler.cpp
+@@ -69,6 +69,9 @@
+ 
+     return FALSE;
+ }
++
++#include <freerdp/channels/rdpei.h>
++#include <optional>
+ 
+ class KRDP_NO_EXPORT InputHandler::Private
+ {
+@@ -76,6 +79,7 @@
+     RdpConnection *session;
+     rdpInput *input;
+     QPointF lastMousePosition;
++    std::optional<uint32_t> primaryTouch;
+ };
+ 
+ InputHandler::InputHandler(KRdp::RdpConnection *session)
+@@ -97,6 +101,31 @@
+     input->ExtendedMouseEvent = inputExtendedMouseEvent;
+     input->KeyboardEvent = inputKeyboardEvent;
+     input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
++}
++
++void InputHandler::touchContact(uint32_t id, int32_t x, int32_t y, uint32_t flags)
++{
++    const QPointF position(x, y);
++    auto motion = [&](Qt::MouseButtons buttons) {
++        Q_EMIT inputEvent(std::make_shared<QMouseEvent>(QEvent::MouseMove, position, QPointF{},
++                                                      Qt::NoButton, buttons, Qt::NoModifier));
++    };
++    if (flags & RDPINPUT_CONTACT_FLAG_DOWN) {
++        if (d->primaryTouch.has_value()) {
++            return; // Leave additional fingers alone; do not corrupt the first drag.
++        }
++        d->primaryTouch = id;
++        motion(Qt::NoButton);
++        Q_EMIT inputEvent(std::make_shared<QMouseEvent>(QEvent::MouseButtonPress, position, QPointF{},
++                                                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier));
++    } else if (d->primaryTouch == id) {
++        motion(Qt::LeftButton);
++        if (flags & (RDPINPUT_CONTACT_FLAG_UP | RDPINPUT_CONTACT_FLAG_CANCELED)) {
++            Q_EMIT inputEvent(std::make_shared<QMouseEvent>(QEvent::MouseButtonRelease, position, QPointF{},
++                                                          Qt::LeftButton, Qt::NoButton, Qt::NoModifier));
++            d->primaryTouch.reset();
++        }
++    }
+ }
+ 
+ bool InputHandler::synchronizeEvent(uint32_t /*flags*/)
+--- a/src/InputHandler.h
++++ b/src/InputHandler.h
+@@ -28,6 +28,8 @@
+     Q_OBJECT
+ 
+ public:
++    // RDPEI single-contact touch maps to the same fake-input mouse path.
++    void touchContact(uint32_t id, int32_t x, int32_t y, uint32_t flags);
+     explicit InputHandler(RdpConnection *session);
+     ~InputHandler() override;
+ 
