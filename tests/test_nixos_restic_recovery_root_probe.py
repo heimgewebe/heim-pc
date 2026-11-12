@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import stat
@@ -400,6 +402,47 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                     probe.main()
                 self.assertEqual(restic.call_args.args[:2], ("check", "--read-data-subset=6/10"))
             self.assertFalse(existing.exists())
+
+    def test_failed_oneshot_cleanup_revokes_even_when_python_was_killed(self) -> None:
+        # Evaluate the Nix-embedded ExecStopPost shell branch in a private
+        # directory, never touching the real repository or recovery proof.
+        nix = (SOURCE_FILE.parent / "restic-seagate-backup.nix").read_text()
+        marker = 'ExecStopPost = "${pkgs.writeShellScript "heim-pc-restic-revoke-failed-proof" ' + "''"
+        self.assertEqual(nix.count(marker), 1)
+        shell = nix.split(marker, 1)[1].split("      ''}\";", 1)[0]
+        self.assertIn("$SERVICE_RESULT", shell)
+        self.assertIn("$EXIT_CODE", shell)
+        self.assertIn("$EXIT_STATUS", shell)
+        self.assertIn("/var/lib/heim-pc-restic-recovery-probe/proof.json", shell)
+        command = shutil.which("rm")
+        self.assertIsNotNone(command)
+        cases = (
+            ("success", "exited", "0", False),
+            ("success", "killed", "TERM", True),
+            ("signal", "killed", "TERM", True),
+            ("signal", "killed", "KILL", True),
+            ("timeout", "killed", "KILL", True),
+            ("exit-code", "exited", "1", True),
+            ("success", "exited", "1", True),
+        )
+        with tempfile.TemporaryDirectory() as state:
+            proof = Path(state) / "proof.json"
+            runnable = shell.replace("${pkgs.coreutils}/bin/rm", str(command)).replace(
+                "/var/lib/heim-pc-restic-recovery-probe/proof.json", str(proof)
+            )
+            self.assertNotIn("${pkgs.coreutils}", runnable)
+            for result, exit_code, exit_status, revoke in cases:
+                with self.subTest(result=result, exit_code=exit_code, exit_status=exit_status):
+                    proof.write_bytes(b"previous genuinely verified proof")
+                    completed = subprocess.run(
+                        ["/bin/sh", "-c", runnable],
+                        env={"SERVICE_RESULT": result,
+                             "EXIT_CODE": exit_code,
+                             "EXIT_STATUS": exit_status},
+                        capture_output=True, timeout=5,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(proof.exists(), not revoke)
 
     def test_non_root_execution_rejected_before_touching_proof(self) -> None:
         with patch.object(probe.os, "geteuid", return_value=1000):
