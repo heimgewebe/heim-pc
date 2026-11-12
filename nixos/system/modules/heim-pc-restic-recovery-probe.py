@@ -426,41 +426,48 @@ def main() -> int:
     directory = STATE.lstat()
     if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
         raise RuntimeError("root proof directory is not trusted")
-    # Never leave old success evidence after a failed new proof.
-    PROOF.unlink(missing_ok=True)
-    started_at = int(time.time())
-    mounted_device = _mount_identity()
-    backup_run = _backup_timer_ready()
-    snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
-    restored_sha = _restore_digest(snapshot_id)
-    part = _next_check_part()
-    # Ten successful daily partitions cover the entire repository exactly once.
-    check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
-    _restic("check", check_mode, "--retry-lock", "45m", timeout=65 * 60)
-    if _mount_identity() != mounted_device:
-        raise RuntimeError("backup mount identity changed while proving recovery")
-    _require_backup_run_unchanged(backup_run)
-    completed = int(time.time())
-    if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
-        raise RuntimeError("snapshot stale after Restic check")
-    _commit_check_part(part)
-    # The v1 proof is consumed by Grabowski and its rootbroker with an exact
-    # field set. Rotation state belongs exclusively to check-cursor.json.
-    _write_proof({
-        "schema_version": 1,
-        "kind": "heim_pc.nixos_restic_recovery_root_proof",
-        "started_at_unix": started_at,
-        "completed_at_unix": completed,
-        "snapshot_id": snapshot_id,
-        "snapshot_time_unix": snapshot_time,
-        "repository_id": REPOSITORY_ID,
-        "backup_uuid": BACKUP_UUID,
-        "backup_source": mounted_device,
-        "restore_sha256": restored_sha,
-        "restore_probe_valid": True,
-        "repository_check_valid": True,
-    })
-    return 0
+    # Retain a separately freshness-validated previous proof DURING the new
+    # restore/check; replace it atomically on success, revoke it on failure.
+    # The broker's mtime/started_at dispatch checks forbid satisfying a
+    # NEW invocation with this prior proof.
+    try:
+        started_at = int(time.time())
+        mounted_device = _mount_identity()
+        backup_run = _backup_timer_ready()
+        snapshot_id, snapshot_time = _snapshot_for_backup_run(started_at, backup_run)
+        restored_sha = _restore_digest(snapshot_id)
+        part = _next_check_part()
+        # Ten successful daily partitions cover the entire repository exactly once.
+        check_mode = f"--read-data-subset={part}/{CHECK_PARTS}"
+        _restic("check", check_mode, "--retry-lock", "45m", timeout=65 * 60)
+        if _mount_identity() != mounted_device:
+            raise RuntimeError("backup mount identity changed while proving recovery")
+        _require_backup_run_unchanged(backup_run)
+        completed = int(time.time())
+        if not 0 <= completed - snapshot_time <= MAX_AGE_SECONDS:
+            raise RuntimeError("snapshot stale after Restic check")
+        _commit_check_part(part)
+        # The v1 proof is consumed by Grabowski and its rootbroker with an exact
+        # field set. Rotation state belongs exclusively to check-cursor.json.
+        _write_proof({
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_restic_recovery_root_proof",
+            "started_at_unix": started_at,
+            "completed_at_unix": completed,
+            "snapshot_id": snapshot_id,
+            "snapshot_time_unix": snapshot_time,
+            "repository_id": REPOSITORY_ID,
+            "backup_uuid": BACKUP_UUID,
+            "backup_source": mounted_device,
+            "restore_sha256": restored_sha,
+            "restore_probe_valid": True,
+            "repository_check_valid": True,
+        })
+        return 0
+    except Exception:
+        # A failed integrity check must NEVER leave a stale success proof.
+        PROOF.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":
