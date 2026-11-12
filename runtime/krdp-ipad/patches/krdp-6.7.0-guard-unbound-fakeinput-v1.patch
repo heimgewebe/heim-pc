@@ -1,0 +1,12 @@
+diff --git a/src/PlasmaScreencastV1Session.cpp b/src/PlasmaScreencastV1Session.cpp
+--- a/src/PlasmaScreencastV1Session.cpp
++++ b/src/PlasmaScreencastV1Session.cpp
+@@ -163,4 +163,7 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
+ {
+     d->remoteInterface = new FakeInput();
+-    d->remoteInterface->authenticate(QStringLiteral("krdpserver"), QString());
++    // An RDP connection can arrive before KWin binds the fake-input protocol.
++    if (d->remoteInterface->isActive()) {
++        d->remoteInterface->authenticate(QStringLiteral("krdpserver"), QString());
++    }
+ }

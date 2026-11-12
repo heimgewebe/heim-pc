@@ -1,0 +1,110 @@
+diff --git a/server/main.cpp b/server/main.cpp
+--- a/server/main.cpp
++++ b/server/main.cpp
+@@ -44,6 +44,7 @@
+         {u"certificate"_s, u"The TLS certificate file to use."_s, u"certificate"_s, u"server.crt"_s},
+         {u"certificate-key"_s, u"The TLS certificate key to use."_s, u"certificate-key"_s, u"server.key"_s},
+         {u"monitor"_s, u"The index of the monitor to use when streaming."_s, u"monitor"_s, u"-1"_s},
++        {u"monitor-name"_s, u"Preferred physical monitor output name (e.g. DP-2), resolved on each connection."_s, u"monitor-name"_s},
+         {u"virtual-monitor"_s,
+          u"Creates a new virtual output to connect to (WIDTHxHEIGHT@SCALE, e.g. 1920x1080@1). Incompatible with --monitor."_s,
+          u"data"_s,
+@@ -126,6 +127,10 @@
+     }
+ 
+     SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
++    if (parser.isSet(u"monitor-name"_s) && (parser.isSet(u"monitor"_s) || parser.isSet(u"virtual-monitor"_s))) {
++        qWarning() << "--monitor-name must not be combined with --monitor or --virtual-monitor";
++        return 1;
++    }
+     if (parser.isSet(u"virtual-monitor"_s)) {
+         const QString vmData = parser.value(u"virtual-monitor"_s);
+         const QRegularExpression rx(uR"((\d+)x(\d+)@([\d.]+))"_s);
+@@ -136,6 +141,10 @@
+         }
+         controller.setVirtualMonitor({vmData, {match.capturedView(1).toInt(), match.capturedView(2).toInt()}, match.capturedView(3).toDouble()});
+     } else {
+-        controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
++        if (parser.isSet(u"monitor-name"_s)) {
++            controller.setMonitorName(parser.value(u"monitor-name"_s));
++        } else {
++            controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
++        }
+     }
+     controller.setQuality(parserValueWithDefault(u"quality", config->quality()));
+diff --git a/server/SessionController.h b/server/SessionController.h
+--- a/server/SessionController.h
++++ b/server/SessionController.h
+@@ -9,6 +9,7 @@
+ #include <vector>
+ 
+ #include <QObject>
++#include <QString>
+ 
+ namespace KRdp
+ {
+@@ -30,6 +31,7 @@
+ 
+     void setVirtualMonitor(const KRdp::VirtualMonitor &vm);
+     void setMonitorIndex(const std::optional<int> &index);
++    void setMonitorName(const QString &name);
+     void setQuality(const std::optional<int> &quality);
+     void setSNIStatus(const KRdp::RdpConnection::State state);
+     void stopFromSNI();
+@@ -41,5 +43,6 @@
+     KRdp::Server *m_server = nullptr;
+     SessionType m_sessionType;
+     std::optional<int> m_monitorIndex;
++    std::optional<QString> m_monitorName;
+     std::optional<int> m_quality;
+     std::optional<KRdp::VirtualMonitor> m_virtualMonitor;
+diff --git a/server/SessionController.cpp b/server/SessionController.cpp
+--- a/server/SessionController.cpp
++++ b/server/SessionController.cpp
+@@ -6,6 +6,9 @@
+ #include <QCoreApplication>
+ #include <QDBusInterface>
+ #include <QMenu>
++#include <QDebug>
++#include <QGuiApplication>
++#include <QScreen>
+ 
+ #include <KLocalizedString>
+ 
+@@ -118,6 +121,11 @@
+     m_monitorIndex = index;
+ }
+ 
++void SessionController::setMonitorName(const QString &name)
++{
++    m_monitorName = name;
++}
++
+ void SessionController::setVirtualMonitor(const KRdp::VirtualMonitor &virtualMonitor)
+ {
+     m_virtualMonitor = virtualMonitor;
+@@ -134,6 +142,24 @@
+     auto wrapper = std::make_unique<SessionWrapper>(newConnection, makeSession(), m_sni);
+     if (m_virtualMonitor) {
+         wrapper->session->setVirtualMonitor(*m_virtualMonitor);
++    } else if (m_monitorName) {
++        // Qt reorders QGuiApplication::screens() across hotplug. Resolve the
++        // stable connector name afresh for every RDP client, not once at boot.
++        const auto screens = QGuiApplication::screens();
++        int preferredIndex = -1;
++        for (int i = 0; i < screens.size(); ++i) {
++            if (screens.at(i)->name() == *m_monitorName) {
++                preferredIndex = i;
++                break;
++            }
++        }
++        if (preferredIndex < 0) {
++            // Preserve remote access if the preferred monitor was unplugged:
++            // the current primary output is then a functional fallback.
++            qWarning() << "Preferred KRDP monitor unavailable:" << *m_monitorName << "- falling back to first output";
++            preferredIndex = 0;
++        }
++        wrapper->session->setActiveStream(preferredIndex);
+     } else if (m_monitorIndex) {
+         wrapper->session->setActiveStream(*m_monitorIndex);
+     }

@@ -3,6 +3,13 @@ let
   cfg = config.heimPc.desktop;
   rustdesk151AppDir = import ./rustdesk151-appdir.nix { inherit pkgs; };
   rustdeskGrantSync = import ./rustdesk-screen-grant-package.nix { inherit pkgs; };
+  # DrKonqi 6.6.6's startup --pickup stays idle when stale crash metadata
+  # has no retained core file. Quit when the journal replay reaches EOF.
+  drkonqiPickup = pkgs.kdePackages.drkonqi.overrideAttrs (old: {
+    patches = (old.patches or []) ++ [
+      ./patches/drkonqi-6.6.6-pickup-at-log-end.patch
+    ];
+  });
 in {
   options.heimPc.desktop.enable = lib.mkEnableOption "KDE Plasma/Wayland workstation profile";
   config = lib.mkIf cfg.enable {
@@ -114,6 +121,18 @@ in {
         Restart = "on-failure";
         RestartSec = "3s";
       };
+    };
+
+    # Repair only the finite login-time replay: if all historical core
+    # files have expired, DrKonqi must terminate at journal EOF rather than
+    # idle until KDE's 30-minute RuntimeMaxSec failure. The socket-activated
+    # per-crash launcher and normal KDE crash reporting stay unchanged.
+    systemd.user.services."drkonqi-coredump-pickup" = {
+      overrideStrategy = "asDropin";
+      serviceConfig.ExecStart = lib.mkForce [
+        ""
+        "${drkonqiPickup}/libexec/drkonqi-coredump-processor --settle-first --pickup --uid %U"
+      ];
     };
 
     # A headless systemd --user manager has no Qt display. Without this guard,

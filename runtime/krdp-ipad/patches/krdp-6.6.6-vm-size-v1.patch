@@ -1,0 +1,10 @@
+--- a/src/screencasting.cpp
++++ b/src/screencasting.cpp
+@@ -148,6 +148,7 @@
+ {
+     auto stream = new ScreencastingStream(this);
+     stream->d->init(d->stream_virtual_output(name, resolution.width(), resolution.height(), wl_fixed_from_double(dpr), mode));
++    stream->d->m_size = (QSizeF(resolution) / dpr).toSize();
+     return stream;
+ }
+ 

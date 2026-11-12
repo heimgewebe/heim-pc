@@ -1,0 +1,8 @@
+--- a/src/RdpConnection.cpp
++++ b/src/RdpConnection.cpp
+@@ -355,4 +355,5 @@
+     freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, true);
+     freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, false);
++    freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, false);
+ 
+     freerdp_settings_set_uint32(settings, FreeRDP_OsMajorType, OSMAJORTYPE_UNIX);

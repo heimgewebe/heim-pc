@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "f6848de1b8a3c6c84ddbaa2ffbefc68a65dd014e"
-TARBALL_HASH = "sha256-DSifXT4usSvSQoMcNviOlDarnToAS4VRdtM6H4Xs+gU="
+REVISION = "ceae00fec86321ef262c8992a593ffd651cbc0f0"
+TARBALL_HASH = "sha256-8DaOZacTNoU8qAMyLuJRJIp+0E7BxVTGotFczqo3bpw="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -177,7 +177,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "f6848de1-nixos-lock264e747ad05a-contract7130dc15a144"
+        release_id = "ceae00fe-nixos-lock264e747ad05a-contract7130dc15a144"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -559,6 +559,8 @@ class GrabowskiNixEntrypointMetadataRegression(unittest.TestCase):
                         patch.object(adapter, "_sha", side_effect=fixture_hash),
                         patch.object(adapter, "_contract_entries", return_value=({"grabowski_mcp": module_relative}, {})),
                         patch.object(adapter.importlib.util, "find_spec", return_value=SimpleNamespace(origin=str(module_path))),
+                        # Model the trusted direct interpreter, not a Nix python.withPackages shim.
+                        patch.object(adapter.sys, "executable", str(Path("/proc/self/exe").resolve(strict=True))),
                     ):
                         result = adapter.deployment_metadata(
                             module_path, expected_agent_sha256=agent_sha
