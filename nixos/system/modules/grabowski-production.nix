@@ -356,6 +356,36 @@ in
         SystemCallArchitectures = "native";
       };
     };
+    # The NixOS system operator and user tunnel must keep their existing split.
+    # Reuse the authenticated tools/list observer; do not substitute its
+    # server-loopback receipt for a ChatGPT platform publication receipt.
+    systemd.user.services."grabowski-client-snapshot-refresh" = lib.mkIf admit {
+      description = "Renew source-bound Grabowski MCP tools/list and schema snapshot";
+      after = [ "tunnel-client-grabowski.service" "grabowski-transport-ingress.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        WorkingDirectory = "/home/alex";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId}";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+        ];
+        TimeoutStartSec = "45s";
+        UMask = "0077";
+      };
+    };
+    systemd.user.timers."grabowski-client-snapshot-refresh" = lib.mkIf admit {
+      description = "Keep the existing Grabowski connector snapshot fresh";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnStartupSec = "90s";
+        OnUnitActiveSec = "2min";
+        AccuracySec = "15s";
+        Unit = "grabowski-client-snapshot-refresh.service";
+      };
+    };
+
     # The pinned Grabowski runtime already reconciles Captain-verified merges
     # into RepoGround via its existing targeted publisher. Preserve that
     # post-merge path after the NixOS system-service migration; no second
