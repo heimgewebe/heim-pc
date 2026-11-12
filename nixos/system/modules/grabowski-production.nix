@@ -364,7 +364,10 @@ in
       description = "Reconcile verified Captain merges into RepoGround publications";
       wants = [ "grabowski-operator.service" "user@1000.service" ];
       after = [ "grabowski-operator.service" "user@1000.service" ];
-      path = [ cfg.operatorPackage pkgs.git pkgs.openssh pkgs.systemd ];
+      # RepoGround's fleet publisher uses #!/usr/bin/env bash; without bash
+      # in this system service PATH the inventory probe exits 127 and
+      # historical nonmember merge follow-ups are retried indefinitely.
+      path = [ cfg.operatorPackage pkgs.bash pkgs.git pkgs.openssh pkgs.systemd ];
       serviceConfig = {
         Type = "oneshot";
         User = "alex";
