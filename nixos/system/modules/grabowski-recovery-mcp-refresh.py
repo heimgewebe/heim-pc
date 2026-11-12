@@ -19,7 +19,10 @@ MCP_URL = "http://127.0.0.1:18181/mcp"
 REFRESH_AFTER_SECONDS = 11 * 60 * 60
 TOOL_TIMEOUT = timedelta(minutes=90)
 BUSY_RETRY_INTERVAL_SECONDS = 60
-BUSY_RETRY_ATTEMPTS = 25  # shorter than the 100-minute systemd service timeout
+BUSY_RETRY_ATTEMPTS = 25
+# Leave two minutes below TimeoutStartSec=100min for context-manager cleanup.
+REFRESH_BUDGET_SECONDS = 98 * 60
+STATUS_TIMEOUT = timedelta(seconds=50)
 PREREQUISITE_CHECKS = (
     "backup_timer_enabled",
     "backup_timer_active",
@@ -194,19 +197,32 @@ def _new_backup_proven(status: dict, *, now: int) -> bool:
     ) == "skip"
 
 
-async def _probe_or_wait(session) -> tuple[dict | None, dict | None]:
+def _remaining_timeout(deadline: float, limit: timedelta, *, reserve: float = 0) -> timedelta:
+    remaining = deadline - time.monotonic() - reserve
+    if remaining <= 0:
+        raise RuntimeError("recovery refresh time budget exhausted")
+    return min(limit, timedelta(seconds=remaining))
+
+
+async def _probe_or_wait(session, *, deadline: float) -> tuple[dict | None, dict | None]:
     """Wait for an existing Restic probe; never bypass its exclusive lock."""
     for attempt in range(BUSY_RETRY_ATTEMPTS + 1):
         try:
             return await _call(
-                session, "grabowski_recovery_server_probe", timeout=TOOL_TIMEOUT
+                session, "grabowski_recovery_server_probe", timeout=_remaining_timeout(
+                    deadline, TOOL_TIMEOUT, reserve=STATUS_TIMEOUT.total_seconds()
+                )
             ), None
         except RecoveryRepositoryBusy:
             if attempt == BUSY_RETRY_ATTEMPTS:
                 raise RuntimeError("recovery repository remains busy after bounded wait")
-            await asyncio.sleep(BUSY_RETRY_INTERVAL_SECONDS)
+            await asyncio.sleep(_remaining_timeout(
+                deadline, timedelta(seconds=BUSY_RETRY_INTERVAL_SECONDS),
+                reserve=STATUS_TIMEOUT.total_seconds(),
+            ).total_seconds())
             status = await _call(
-                session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
             )
             if _new_backup_proven(status, now=int(time.time())):
                 return None, status
@@ -214,6 +230,7 @@ async def _probe_or_wait(session) -> tuple[dict | None, dict | None]:
 
 
 async def refresh() -> None:
+    deadline = time.monotonic() + REFRESH_BUDGET_SECONDS
     # Keep one authenticated service entrypoint. The already running Grabowski
     # systemd MainPID, never this unprivileged timer client, talks to Rootbroker.
     from mcp import ClientSession
@@ -225,9 +242,13 @@ async def refresh() -> None:
         async with ClientSession(
             reader, writer, read_timeout_seconds=TOOL_TIMEOUT
         ) as session:
-            await session.initialize()
+            await asyncio.wait_for(
+                session.initialize(),
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT).total_seconds(),
+            )
             before = await _call(
-                session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
             )
             now = int(time.time())
             decision = decide(
@@ -240,7 +261,7 @@ async def refresh() -> None:
                     "snapshot_id": before.get("server_recovery", {}).get("snapshot_id"),
                 }, sort_keys=True), flush=True)
                 return
-            proof, concurrent = await _probe_or_wait(session)
+            proof, concurrent = await _probe_or_wait(session, deadline=deadline)
             if concurrent is not None:
                 print(json.dumps({
                     "status": "current", "source": "concurrent-verified-recovery",
@@ -249,7 +270,8 @@ async def refresh() -> None:
                 return
             require_published_proof(proof)
             after = await _call(
-                session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
             )
             canonical = after.get("server_recovery")
             source = after.get("server_recovery_source_publication")

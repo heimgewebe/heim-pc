@@ -252,7 +252,9 @@ class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
                                    new=AsyncMock()) as sleep, patch.object(
             refresh, "latest_completed_backup_unix", return_value=NOW - 20
         ), patch.object(refresh.time, "time", return_value=NOW):
-            proof, status = await refresh._probe_or_wait(object())
+            proof, status = await refresh._probe_or_wait(
+                object(), deadline=refresh.time.monotonic() + refresh.REFRESH_BUDGET_SECONDS
+            )
         self.assertIsNone(proof)
         self.assertIs(status, done)
         self.assertEqual(call.await_count, 2)
@@ -268,7 +270,9 @@ class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
                                    new=AsyncMock()), patch.object(
             refresh, "latest_completed_backup_unix", return_value=NOW - 20
         ), patch.object(refresh.time, "time", return_value=NOW):
-            proof, status = await refresh._probe_or_wait(object())
+            proof, status = await refresh._probe_or_wait(
+                object(), deadline=refresh.time.monotonic() + refresh.REFRESH_BUDGET_SECONDS
+            )
         self.assertIs(proof, result)
         self.assertIsNone(status)
         self.assertEqual(call.await_count, 3)
@@ -283,7 +287,77 @@ class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
             refresh, "latest_completed_backup_unix", return_value=NOW - 20
         ), patch.object(refresh.time, "time", return_value=NOW):
             with self.assertRaisesRegex(RuntimeError, "remains busy"):
-                await refresh._probe_or_wait(object())
+                await refresh._probe_or_wait(
+                    object(), deadline=refresh.time.monotonic() + refresh.REFRESH_BUDGET_SECONDS
+                )
+
+    async def test_late_busy_window_reduces_eventual_probe_timeout(self):
+        clock = [100.0]
+        deadline = clock[0] + refresh.REFRESH_BUDGET_SECONDS
+        calls = []
+        result = {"snapshot_id": "freshabcd"}
+
+        async def call(_session, name, *, timeout):
+            calls.append((name, timeout.total_seconds(), clock[0]))
+            self.assertLess(clock[0], deadline)
+            if name == "grabowski_recovery_status":
+                clock[0] += 50
+                return {}
+            if len(calls) == 1:
+                # A late lock conflict after a long initial request.
+                clock[0] += 2000
+                raise refresh.RecoveryRepositoryBusy("busy")
+            return result
+
+        async def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(refresh.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(refresh, "_call", side_effect=call), \
+                patch.object(refresh.asyncio, "sleep", side_effect=sleep):
+            proof, status = await refresh._probe_or_wait(object(), deadline=deadline)
+        self.assertIs(proof, result)
+        self.assertIsNone(status)
+        self.assertEqual(calls[0][1], refresh.TOOL_TIMEOUT.total_seconds())
+        self.assertEqual(calls[-1][1], deadline - clock[0] - 50)
+        self.assertLess(calls[-1][1], refresh.TOOL_TIMEOUT.total_seconds())
+
+    async def test_budget_exhaustion_bounds_sleep_status_and_stops_probe(self):
+        for remaining in (0, 50, 70, 120):
+            with self.subTest(remaining=remaining):
+                clock = [100.0]
+                deadline = clock[0] + remaining
+                calls = []
+                sleeps = []
+
+                async def call(_session, name, *, timeout):
+                    self.assertLess(clock[0], deadline)
+                    seconds = timeout.total_seconds()
+                    self.assertLessEqual(seconds, deadline - clock[0])
+                    calls.append((name, seconds))
+                    if name == "grabowski_recovery_server_probe":
+                        raise refresh.RecoveryRepositoryBusy("busy")
+                    clock[0] += seconds
+                    return {}
+
+                async def sleep(seconds):
+                    sleeps.append(seconds)
+                    clock[0] += seconds + 10
+
+                with patch.object(refresh.time, "monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(refresh, "_call", side_effect=call), \
+                        patch.object(refresh.asyncio, "sleep", side_effect=sleep):
+                    with self.assertRaisesRegex(RuntimeError, "time budget exhausted"):
+                        await refresh._probe_or_wait(object(), deadline=deadline)
+                if remaining <= 50:
+                    self.assertEqual(calls, [])
+                    self.assertEqual(sleeps, [])
+                else:
+                    self.assertEqual(sleeps, [min(60, remaining - 50)])
+                    self.assertEqual(calls, [
+                        ("grabowski_recovery_server_probe", remaining - 50),
+                        ("grabowski_recovery_status", min(50, remaining - sleeps[0] - 10)),
+                    ])
 
     async def test_other_probe_failures_do_not_trigger_retry(self):
         with patch.object(refresh, "_call", new=AsyncMock(
@@ -291,7 +365,9 @@ class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
         )) as call, patch.object(refresh.asyncio, "sleep",
                                  new=AsyncMock()) as sleep:
             with self.assertRaisesRegex(RuntimeError, "integrity failed"):
-                await refresh._probe_or_wait(object())
+                await refresh._probe_or_wait(
+                    object(), deadline=refresh.time.monotonic() + refresh.REFRESH_BUDGET_SECONDS
+                )
         call.assert_awaited_once()
         sleep.assert_not_awaited()
 
