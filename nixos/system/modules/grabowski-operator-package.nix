@@ -7,7 +7,7 @@ let
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-nSSWyw5IrOMjmLfJQeJP09XkJ7iGgm4o4Y+NGWknVBw=";
+    hash = "sha256-eKYtgKkipw1vx+yrzzaX0CaexHmGdVaoo2NN5kb2ENI=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;

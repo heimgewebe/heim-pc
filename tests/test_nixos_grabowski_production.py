@@ -13,7 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
 REVISION = "fb6b45c5b48a350b3e7100b285af68b2f0ddfa7e"
-TARBALL_HASH = "sha256-nSSWyw5IrOMjmLfJQeJP09XkJ7iGgm4o4Y+NGWknVBw="
+TARBALL_HASH = "sha256-eKYtgKkipw1vx+yrzzaX0CaexHmGdVaoo2NN5kb2ENI="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
