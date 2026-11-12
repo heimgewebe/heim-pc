@@ -12,8 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "fb6b45c5b48a350b3e7100b285af68b2f0ddfa7e"
-TARBALL_HASH = "sha256-eKYtgKkipw1vx+yrzzaX0CaexHmGdVaoo2NN5kb2ENI="
+REVISION = "46e6c75c16a496f3b686bd1071ff6ef480313e0f"
+TARBALL_HASH = "sha256-Bz2ekavkDLEwlZsq+/scdk8+aN6MoVVOXjTpbxJjVQ4="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -177,7 +177,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "fb6b45c5-nixos-lock264e747ad05a-contract7130dc15a144"
+        release_id = "46e6c75c-nixos-lock264e747ad05a-contracte4854ca1a9f5"
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)
@@ -200,7 +200,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         # the previous grabowski_operator.py to grabowski_operator_core.
         self.assertIn('contract.get("source") == "src/grabowski_runtime.py"', op)
         self.assertIn('len(expected) == 207', op)
-        self.assertIn('len(supporting) != 133', op)
+        self.assertIn('len(supporting) != 134', op)
         integrity = (MODULES / 'grabowski-nixos-integrity.py').read_text()
         self.assertIn('len(tools) != 207', integrity)
         self.assertIn('len(set(tools)) != 207', integrity)
