@@ -14,7 +14,9 @@ class RepoGroundPostMergeNixOSContractTests(unittest.TestCase):
         service = data.split(
             f'systemd.services."{NAME}" = lib.mkIf admit {{', 1
         )[1].split("systemd.timers.", 1)[0]
-        self.assertIn('path = [ cfg.operatorPackage pkgs.git pkgs.openssh pkgs.systemd ];', service)
+        # The publisher wrapper has a /usr/bin/env bash shebang, and the
+        # unit PATH cannot assume an interactive shell environment.
+        self.assertIn('path = [ cfg.operatorPackage pkgs.bash pkgs.git pkgs.openssh pkgs.systemd ];', service)
         self.assertIn(
             '${cfg.operatorPackage}/bin/python3 -I -B -m '
             'grabowski_repoground_post_merge --reconcile-audit-followups '
