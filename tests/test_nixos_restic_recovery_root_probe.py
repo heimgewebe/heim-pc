@@ -5,7 +5,10 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 import stat
 import tempfile
 import unittest
@@ -349,11 +352,97 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                   "restore_sha256":"b"*64}
         with tempfile.TemporaryDirectory() as state:
             with patch.object(probe, "STATE", Path(state)), patch.object(probe, "PROOF", Path(state)/"proof.json"):
-                probe._write_proof(record)
                 result = Path(state)/"proof.json"
+                result.write_bytes(b"previous valid proof")
+                previous_inode = result.stat().st_ino
+                probe._write_proof(record)
+                self.assertNotEqual(result.stat().st_ino, previous_inode)
                 self.assertEqual(json.loads(result.read_text()), record)
                 self.assertEqual(stat.S_IMODE(result.stat().st_mode), 0o644)
                 self.assertEqual(list(Path(state).iterdir()), [result])
+
+    def test_old_proof_available_during_check_but_revoked_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            existing = Path(state) / "proof.json"
+            old_proof = b'{"previous":"root-verified-snapshot"}\\n'
+            existing.write_bytes(old_proof)
+            def fail_after_observing_old_proof(*args, **kwargs):
+                self.assertEqual(existing.read_bytes(), old_proof)
+                raise RuntimeError("simulated integrity check failure")
+
+            root_state = SimpleNamespace(
+                lstat=lambda: SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700, st_uid=0
+                )
+            )
+            with (
+                patch.object(probe.sys, "argv", ["root-proof.py"]),
+                patch.object(probe, "STATE", root_state),
+                patch.object(probe, "PROOF", existing),
+                patch.object(probe.os, "geteuid", return_value=0),
+                patch.object(probe, "_mount_identity", return_value="/dev/sda1"),
+                patch.object(
+                    probe, "_backup_timer_ready",
+                    return_value=("a" * 32, 100, 200, 100000, 300000),
+                ),
+                patch.object(
+                    probe, "_snapshot_for_backup_run",
+                    return_value=("b" * 64, 150),
+                ),
+                patch.object(probe, "_restore_digest", return_value="c" * 64),
+                patch.object(probe, "_next_check_part", return_value=6),
+                patch.object(
+                    probe, "_restic",
+                    side_effect=fail_after_observing_old_proof,
+                ) as restic,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "simulated integrity check failure"
+                ):
+                    probe.main()
+                self.assertEqual(restic.call_args.args[:2], ("check", "--read-data-subset=6/10"))
+            self.assertFalse(existing.exists())
+
+    def test_failed_oneshot_cleanup_revokes_even_when_python_was_killed(self) -> None:
+        # Evaluate the Nix-embedded ExecStopPost shell branch in a private
+        # directory, never touching the real repository or recovery proof.
+        nix = (SOURCE_FILE.parent / "restic-seagate-backup.nix").read_text()
+        marker = 'ExecStopPost = "${pkgs.writeShellScript "heim-pc-restic-revoke-failed-proof" ' + "''"
+        self.assertEqual(nix.count(marker), 1)
+        shell = nix.split(marker, 1)[1].split("      ''}\";", 1)[0]
+        self.assertIn("$SERVICE_RESULT", shell)
+        self.assertIn("$EXIT_CODE", shell)
+        self.assertIn("$EXIT_STATUS", shell)
+        self.assertIn("/var/lib/heim-pc-restic-recovery-probe/proof.json", shell)
+        command = shutil.which("rm")
+        self.assertIsNotNone(command)
+        cases = (
+            ("success", "exited", "0", False),
+            ("success", "killed", "TERM", True),
+            ("signal", "killed", "TERM", True),
+            ("signal", "killed", "KILL", True),
+            ("timeout", "killed", "KILL", True),
+            ("exit-code", "exited", "1", True),
+            ("success", "exited", "1", True),
+        )
+        with tempfile.TemporaryDirectory() as state:
+            proof = Path(state) / "proof.json"
+            runnable = shell.replace("${pkgs.coreutils}/bin/rm", str(command)).replace(
+                "/var/lib/heim-pc-restic-recovery-probe/proof.json", str(proof)
+            )
+            self.assertNotIn("${pkgs.coreutils}", runnable)
+            for result, exit_code, exit_status, revoke in cases:
+                with self.subTest(result=result, exit_code=exit_code, exit_status=exit_status):
+                    proof.write_bytes(b"previous genuinely verified proof")
+                    completed = subprocess.run(
+                        ["/bin/sh", "-c", runnable],
+                        env={"SERVICE_RESULT": result,
+                             "EXIT_CODE": exit_code,
+                             "EXIT_STATUS": exit_status},
+                        capture_output=True, timeout=5,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(proof.exists(), not revoke)
 
     def test_non_root_execution_rejected_before_touching_proof(self) -> None:
         with patch.object(probe.os, "geteuid", return_value=1000):
