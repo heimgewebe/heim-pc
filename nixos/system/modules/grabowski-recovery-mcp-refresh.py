@@ -18,6 +18,11 @@ import time
 MCP_URL = "http://127.0.0.1:18181/mcp"
 REFRESH_AFTER_SECONDS = 11 * 60 * 60
 TOOL_TIMEOUT = timedelta(minutes=90)
+BUSY_RETRY_INTERVAL_SECONDS = 60
+BUSY_RETRY_ATTEMPTS = 25
+# Leave two minutes below TimeoutStartSec=100min for context-manager cleanup.
+REFRESH_BUDGET_SECONDS = 98 * 60
+STATUS_TIMEOUT = timedelta(seconds=50)
 PREREQUISITE_CHECKS = (
     "backup_timer_enabled",
     "backup_timer_active",
@@ -147,17 +152,85 @@ def require_published_proof(proof: dict) -> str:
     return snapshot_id
 
 
+class RecoveryRepositoryBusy(RuntimeError):
+    """Only the exact server-side exclusive Restic operation-lock conflict."""
+
+
 async def _call(session, name: str, *, timeout: timedelta) -> dict:
-    result = await session.call_tool(
-        name, dict(TOOL_ARGUMENTS), read_timeout_seconds=timeout,
-    )
+    try:
+        result = await session.call_tool(
+            name, dict(TOOL_ARGUMENTS), read_timeout_seconds=timeout,
+        )
+    except Exception as exc:
+        if (name == "grabowski_recovery_server_probe"
+                and "local recovery repository operation is busy" in str(exc)):
+            raise RecoveryRepositoryBusy("recovery repository operation is busy") from exc
+        raise
+    if result.isError:
+        parts = result.content or ()
+        if (name == "grabowski_recovery_server_probe"
+                and any(isinstance(getattr(part, "text", None), str)
+                        and "local recovery repository operation is busy"
+                        in part.text for part in parts)):
+            raise RecoveryRepositoryBusy("recovery repository operation is busy")
+        raise RuntimeError(name + " failed; no verified recovery proof")
     value = result.structuredContent
-    if result.isError or not isinstance(value, dict):
+    if not isinstance(value, dict):
         raise RuntimeError(name + " did not return valid structured evidence")
     return value
 
 
+def _new_backup_proven(status: dict, *, now: int) -> bool:
+    """Accept another worker's proof only after complete canonical readback."""
+    if not isinstance(status, dict):
+        return False
+    finished = latest_completed_backup_unix(now=now)
+    canonical = status.get("server_recovery")
+    if (type(finished) is not int or not isinstance(canonical, dict)
+            or type(canonical.get("generated_at_unix")) is not int
+            or canonical["generated_at_unix"] < finished
+            or not isinstance(status.get("checks"), dict)
+            or not all(v is True for v in status["checks"].values())):
+        return False
+    return decide(
+        status, now=now, latest_backup_finished_unix=finished
+    ) == "skip"
+
+
+def _remaining_timeout(deadline: float, limit: timedelta, *, reserve: float = 0) -> timedelta:
+    remaining = deadline - time.monotonic() - reserve
+    if remaining <= 0:
+        raise RuntimeError("recovery refresh time budget exhausted")
+    return min(limit, timedelta(seconds=remaining))
+
+
+async def _probe_or_wait(session, *, deadline: float) -> tuple[dict | None, dict | None]:
+    """Wait for an existing Restic probe; never bypass its exclusive lock."""
+    for attempt in range(BUSY_RETRY_ATTEMPTS + 1):
+        try:
+            return await _call(
+                session, "grabowski_recovery_server_probe", timeout=_remaining_timeout(
+                    deadline, TOOL_TIMEOUT, reserve=STATUS_TIMEOUT.total_seconds()
+                )
+            ), None
+        except RecoveryRepositoryBusy:
+            if attempt == BUSY_RETRY_ATTEMPTS:
+                raise RuntimeError("recovery repository remains busy after bounded wait")
+            await asyncio.sleep(_remaining_timeout(
+                deadline, timedelta(seconds=BUSY_RETRY_INTERVAL_SECONDS),
+                reserve=STATUS_TIMEOUT.total_seconds(),
+            ).total_seconds())
+            status = await _call(
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
+            )
+            if _new_backup_proven(status, now=int(time.time())):
+                return None, status
+    raise AssertionError("unreachable retry state")
+
+
 async def refresh() -> None:
+    deadline = time.monotonic() + REFRESH_BUDGET_SECONDS
     # Keep one authenticated service entrypoint. The already running Grabowski
     # systemd MainPID, never this unprivileged timer client, talks to Rootbroker.
     from mcp import ClientSession
@@ -169,9 +242,13 @@ async def refresh() -> None:
         async with ClientSession(
             reader, writer, read_timeout_seconds=TOOL_TIMEOUT
         ) as session:
-            await session.initialize()
+            await asyncio.wait_for(
+                session.initialize(),
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT).total_seconds(),
+            )
             before = await _call(
-                session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
             )
             now = int(time.time())
             decision = decide(
@@ -184,12 +261,17 @@ async def refresh() -> None:
                     "snapshot_id": before.get("server_recovery", {}).get("snapshot_id"),
                 }, sort_keys=True), flush=True)
                 return
-            proof = await _call(
-                session, "grabowski_recovery_server_probe", timeout=TOOL_TIMEOUT
-            )
+            proof, concurrent = await _probe_or_wait(session, deadline=deadline)
+            if concurrent is not None:
+                print(json.dumps({
+                    "status": "current", "source": "concurrent-verified-recovery",
+                    "snapshot_id": concurrent["server_recovery"]["snapshot_id"],
+                }, sort_keys=True), flush=True)
+                return
             require_published_proof(proof)
             after = await _call(
-                session, "grabowski_recovery_status", timeout=timedelta(seconds=50)
+                session, "grabowski_recovery_status",
+                timeout=_remaining_timeout(deadline, STATUS_TIMEOUT)
             )
             canonical = after.get("server_recovery")
             source = after.get("server_recovery_source_publication")
