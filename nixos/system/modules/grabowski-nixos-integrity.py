@@ -20,10 +20,10 @@ import stat
 import sys
 from typing import Any
 
-PINNED_RELEASE = "fb6b45c5-nixos-lock264e747ad05a-contract7130dc15a144"
-PINNED_REVISION = "fb6b45c5b48a350b3e7100b285af68b2f0ddfa7e"
+PINNED_RELEASE = "46e6c75c-nixos-lock264e747ad05a-contracte4854ca1a9f5"
+PINNED_REVISION = "46e6c75c16a496f3b686bd1071ff6ef480313e0f"
 PINNED_LOCK_SHA256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
-ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-fb6b45c5\Z")
+ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-46e6c75c\Z")
 REQUIRED_MODULE = "lib/python3.12/site-packages/grabowski_mcp.py"
 MANIFEST_RELATIVE = "share/grabowski/nixos-integrity-manifest.json"
 CONTRACT_RELATIVE = "share/grabowski/config/runtime-entrypoint.json"
@@ -82,7 +82,7 @@ def _contract_entries(contract: dict[str, Any]) -> tuple[dict[str, str], dict[st
     if not isinstance(tools, list) or len(tools) != 207 or len(set(tools)) != 207:
         raise ValueError("207-tool contract absent")
     supporting = contract.get("supporting_sources")
-    if not isinstance(supporting, list) or len(supporting) != 133:
+    if not isinstance(supporting, list) or len(supporting) != 134:
         raise ValueError("canonical source mapping incomplete")
     modules = {}
     for entry in [{"module": contract["module"], "source": contract["source"]}, *supporting]:
