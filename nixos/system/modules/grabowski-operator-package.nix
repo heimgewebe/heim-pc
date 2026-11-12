@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "fb6b45c5b48a350b3e7100b285af68b2f0ddfa7e";
-  releaseId = "fb6b45c5-nixos-lock264e747ad05a-contract7130dc15a144";
+  sourceRevision = "46e6c75c16a496f3b686bd1071ff6ef480313e0f";
+  releaseId = "46e6c75c-nixos-lock264e747ad05a-contracte4854ca1a9f5";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-eKYtgKkipw1vx+yrzzaX0CaexHmGdVaoo2NN5kb2ENI=";
+    hash = "sha256-Bz2ekavkDLEwlZsq+/scdk8+aN6MoVVOXjTpbxJjVQ4=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -41,7 +41,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "fb6b45c5";
+  version = "46e6c75c";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -109,7 +109,7 @@ if not (isinstance(expected, list) and len(expected) == 207
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
-if not isinstance(supporting, list) or len(supporting) != 133:
+if not isinstance(supporting, list) or len(supporting) != 134:
     raise SystemExit("canonical runtime module mapping changed")
 entries = [{"module": contract["module"], "source": contract["source"]}, *supporting]
 seen = set()
@@ -213,14 +213,6 @@ for entry in entries:
                 raise SystemExit("unexpected pinned task capture Python topology")
             content = content.replace(old, new, 1)
         dst.write_text(content)
-    if original == 'src/grabowski_bureau_runtime_refresh_executor.py':
-        content = dst.read_text()
-        # Adapt only the exact pinned FHS binary to an immutable NixOS output.
-        old = 'CANONICAL_FINDMNT = Path("/usr/bin/findmnt")'
-        new = 'CANONICAL_FINDMNT = Path("${pkgs.util-linux}/bin/findmnt")'
-        if content.count(old) != 1:
-            raise SystemExit("pinned Bureau findmnt source topology changed")
-        dst.write_text(content.replace(old, new, 1))
     if original == "src/grabowski_fleet.py":
         content = dst.read_text()
         imports = "import stat\nfrom typing import Any, Sequence"
