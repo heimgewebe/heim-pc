@@ -133,6 +133,16 @@
       User = "root";
       Group = "root";
       ExecStart = "${pkgs.python3}/bin/python3 -I -B ${./heim-pc-restic-recovery-probe.py}";
+      # A SIGTERM/SIGKILL or a timeout bypasses the Python exception handler.
+      # systemd runs ExecStopPost with the actual result and exit metadata.
+      # A normal successful verification keeps the new atomically written proof.
+      ExecStopPost = "${pkgs.writeShellScript "heim-pc-restic-revoke-failed-proof" ''
+        if [ "$SERVICE_RESULT" != "success" ] ||
+           [ "$EXIT_CODE" != "exited" ] ||
+           [ "$EXIT_STATUS" != "0" ]; then
+          exec ${pkgs.coreutils}/bin/rm -f -- /var/lib/heim-pc-restic-recovery-probe/proof.json
+        fi
+      ''}";
       Environment = [
         "PATH=${lib.makeBinPath [ pkgs.restic pkgs.util-linux pkgs.systemd pkgs.coreutils ]}"
         "LC_ALL=C"

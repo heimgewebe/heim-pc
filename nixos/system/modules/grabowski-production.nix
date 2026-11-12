@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "ceae00fe-nixos-lock264e747ad05a-contract7130dc15a144";
-  expectedRevision = "ceae00fec86321ef262c8992a593ffd651cbc0f0";
+  expectedReleaseId = "fb6b45c5-nixos-lock264e747ad05a-contract7130dc15a144";
+  expectedRevision = "fb6b45c5b48a350b3e7100b285af68b2f0ddfa7e";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -364,7 +364,10 @@ in
       description = "Reconcile verified Captain merges into RepoGround publications";
       wants = [ "grabowski-operator.service" "user@1000.service" ];
       after = [ "grabowski-operator.service" "user@1000.service" ];
-      path = [ cfg.operatorPackage pkgs.git pkgs.openssh pkgs.systemd ];
+      # RepoGround's fleet publisher uses #!/usr/bin/env bash; without bash
+      # in this system service PATH the inventory probe exits 127 and
+      # historical nonmember merge follow-ups are retried indefinitely.
+      path = [ cfg.operatorPackage pkgs.bash pkgs.git pkgs.openssh pkgs.systemd ];
       serviceConfig = {
         Type = "oneshot";
         User = "alex";
