@@ -1,4 +1,4 @@
-{ options, pkgs, ... }:
+{ config, lib, options, pkgs, ... }:
 let
   journalLimits = {
     SystemMaxUse = "1G";
@@ -7,6 +7,17 @@ let
 in
 {
   environment.systemPackages = [ pkgs.btop ];
+
+  # Scrub checks the complete Btrfs volume, independently of its subvolumes.
+  # The ext4 prototype/VM must not schedule a nonexistent Btrfs mount.
+  services.btrfs.autoScrub = lib.mkIf (
+    builtins.hasAttr "/persist" config.fileSystems
+    && config.fileSystems."/persist".fsType == "btrfs"
+  ) {
+    enable = true;
+    fileSystems = [ "/persist" ];
+    interval = "monthly";
+  };
 
   # NixOS 26.11 replaces extraConfig with RFC42-style settings.Journal.
   # Keep the exact values on 26.05 without changing the running generation.
