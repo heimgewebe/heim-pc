@@ -356,6 +356,54 @@ in
         SystemCallArchitectures = "native";
       };
     };
+    # Run only the already-proven worktree-hygiene subroutine.  The combined
+    # job-retention scanner currently returns degraded on protected old jobs;
+    # that unrelated backlog must not disable ordinary Git worktree cleanup.
+    systemd.services."grabowski-worktree-hygiene" = lib.mkIf admit {
+      description = "Bounded Grabowski worktree archival and cleanup";
+      wants = [ "grabowski-operator.service" "network-online.target" ];
+      after = [ "grabowski-operator.service" "network-online.target" ];
+      path = [ cfg.operatorPackage pkgs.git pkgs.gh pkgs.coreutils pkgs.findutils pkgs.systemd pkgs.openssh ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-worktree-hygiene.py} ${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+          "XDG_CACHE_HOME=/var/cache/grabowski-worktree-hygiene"
+          "PYTHONDONTWRITEBYTECODE=1"
+        ];
+        CacheDirectory = "grabowski-worktree-hygiene";
+        CacheDirectoryMode = "0700";
+        TimeoutStartSec = "12min";
+        MemoryMax = "1G";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ReadWritePaths = [
+          "-/home/alex/.local/state/grabowski"
+          "-/home/alex/repos"
+        ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-worktree-hygiene" = lib.mkIf admit {
+      description = "Periodically clean merged, recoverable Grabowski worktrees";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "hourly";
+        RandomizedDelaySec = "5min";
+        Persistent = true;
+        Unit = "grabowski-worktree-hygiene.service";
+      };
+    };
+
     # The NixOS system operator and user tunnel must keep their existing split.
     # Reuse the authenticated tools/list observer; do not substitute its
     # server-loopback receipt for a ChatGPT platform publication receipt.
