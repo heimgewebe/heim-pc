@@ -1212,16 +1212,20 @@ PY
           assert broker.MemoryDenyWriteExecute;
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
-          assert operator.ProtectHome == "read-only";
+          assert operator.ProtectHome == false && operator.PrivateTmp == false;
           assert operator.CacheDirectory == "grabowski-xdg";
           assert operator.CacheDirectoryMode == "0700";
           assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-xdg" operator.Environment;
           assert builtins.all
             (entry:
               let normalized = nixpkgs.lib.removePrefix "-" entry;
-              in normalized != "/home/alex"
-                && !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
+              in !(nixpkgs.lib.hasPrefix "/home/alex/.cache" normalized))
             operator.ReadWritePaths;
+          # ProtectSystem=strict requires explicit write exceptions even with
+          # ProtectHome=false and PrivateTmp=false.
+          assert builtins.elem "/home/alex" operator.ReadWritePaths;
+          assert builtins.elem "/tmp" operator.ReadWritePaths;
+          assert builtins.elem "/var/tmp" operator.ReadWritePaths;
           # The Restic repository lock mount is available only to the root probe.
           assert builtins.elem "-/home/alex/.local/state/chronik/data" operator.ReadWritePaths;
           assert builtins.elem "d /home/alex/.local/state/chronik 0700 alex users -" proof.systemd.tmpfiles.rules;
