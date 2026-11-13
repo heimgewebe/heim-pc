@@ -479,3 +479,23 @@ class DeclarationTests(unittest.TestCase):
     def test_two_recovery_opportunities_after_native_backup(self):
         module = MODULE.read_text()
         self.assertIn('OnCalendar = "*-*-* 09,21:15:00";', module)
+        self.assertIn('RandomizedDelaySec = "10m";', module)
+        self.assertIn('Persistent = true;', module)
+        self.assertIn('Unit = "grabowski-recovery-refresh.service";', module)
+        self.assertEqual(refresh.REFRESH_AFTER_SECONDS, 11 * 60 * 60)
+
+    def test_only_complete_mcp_publication_method_is_invoked(self):
+        source = SCRIPT.read_text()
+        self.assertIn('"grabowski_recovery_server_probe"', source)
+        self.assertIn('"grabowski_recovery_status"', source)
+        self.assertIn('127.0.0.1:18181/mcp', source)
+        self.assertIn('"--timestamp=unix"', source)
+        self.assertNotIn('shell=True', source)
+        self.assertNotIn('sudo ', source)
+        self.assertNotIn('restic restore', source)
+        self.assertIn('all(v is True for v in after["checks"].values())', source)
+        self.assertIn('while isinstance(exc, BaseExceptionGroup)', source)
+
+
+if __name__ == "__main__":
+    unittest.main()
