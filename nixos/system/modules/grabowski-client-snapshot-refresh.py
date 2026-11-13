@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -46,31 +47,72 @@ def _tunnel_identity() -> tuple[int, int]:
     return pid, start_ticks
 
 
+def _previous_observation_session(tunnel_session_id: str) -> str:
+    """Reuse only a verified receipt from this tunnel when deciding renewal.
+
+    Each renewed MCP ClientSession is a distinct signed observation. The
+    watchdog's persistent marker remains tied to the long-lived tunnel PID.
+    """
+    try:
+        with snapshots._state_lock():
+            receipt = snapshots._read_private_json(snapshots.SNAPSHOT_PATH)
+        snapshots._validate_receipt(receipt)
+    except (OSError, ValueError, snapshots.ClientSnapshotError):
+        return tunnel_session_id
+
+    declaration = receipt.get("client_declaration")
+    if not isinstance(declaration, dict):
+        return tunnel_session_id
+    if declaration.get("client_id") != snapshots.AUTO_REFRESH_CLIENT_ID:
+        return tunnel_session_id
+    observed_session = declaration.get("session_id")
+    if observed_session == tunnel_session_id:
+        return tunnel_session_id  # Original watchdog receipt, before this fix.
+    if isinstance(observed_session, str) and re.fullmatch(
+        re.escape(tunnel_session_id) + r"-observation-[0-9]{10,13}",
+        observed_session,
+    ):
+        return observed_session
+    return tunnel_session_id
+
+
 def refresh(expected_release_id: str, *, now_unix: int | None = None) -> dict:
     pid, ticks = _tunnel_identity()
-    session_id = snapshots.connector_session_id(pid, ticks)
+    tunnel_session_id = snapshots.connector_session_id(pid, ticks)
     now = int(time.time()) if now_unix is None else now_unix
     previous, observer_invalid = snapshots._observer_session_state()
+    observed_session_id = _previous_observation_session(tunnel_session_id)
     reason = snapshots._snapshot_refresh_reason(
-        session_id=session_id,
+        session_id=observed_session_id,
         expected_release_id=expected_release_id,
         now_unix=now,
-        last_observed_session_id=previous,
+        last_observed_session_id=None,
         observer_state_invalid=observer_invalid,
     )
+    if previous is not None and previous != tunnel_session_id:
+        reason = "connector-session-changed"
     if reason is None:
         if previous is None:
             snapshots._write_observer_state(
-                session_id=session_id, release_id=expected_release_id, now_unix=now,
+                session_id=tunnel_session_id,
+                release_id=expected_release_id,
+                now_unix=now,
             )
         return {"state": "not_due"}
+
+    # A new tools/list call is a new real MCP client session, not a replay of
+    # the previously signed one-call mutation. The server still rejects any
+    # repeated exact packet. Never resend a session identity from a receipt.
+    new_observation_session_id = f"{tunnel_session_id}-observation-{now}"
+    if new_observation_session_id == observed_session_id:
+        raise RuntimeError("same observation session was already recorded")
 
     capability = snapshots._read_transport_connector_capability(
         snapshots.AUTO_REFRESH_CONNECTOR_TOKEN_PATH
     )
     result = asyncio.run(snapshots._observe_and_bind_snapshot(
         mcp_url=snapshots.AUTO_REFRESH_MCP_URL,
-        session_id=session_id,
+        session_id=new_observation_session_id,
         connector_capability=capability,
         timeout_seconds=25.0,
     ))
@@ -81,7 +123,7 @@ def refresh(expected_release_id: str, *, now_unix: int | None = None) -> dict:
     ):
         raise RuntimeError("signed MCP snapshot refresh did not verify this NixOS release")
     snapshots._write_observer_state(
-        session_id=session_id, release_id=expected_release_id, now_unix=now,
+        session_id=tunnel_session_id, release_id=expected_release_id, now_unix=now,
     )
     return {
         "state": "renewed",
