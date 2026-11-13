@@ -156,23 +156,83 @@ class RecoveryRepositoryBusy(RuntimeError):
     """Only the exact server-side exclusive Restic operation-lock conflict."""
 
 
-async def _call(session, name: str, *, timeout: timedelta) -> dict:
-    try:
-        result = await session.call_tool(
-            name, dict(TOOL_ARGUMENTS), read_timeout_seconds=timeout,
-        )
-    except Exception as exc:
-        if (name == "grabowski_recovery_server_probe"
-                and "local recovery repository operation is busy" in str(exc)):
-            raise RecoveryRepositoryBusy("recovery repository operation is busy") from exc
-        raise
-    if result.isError:
-        parts = result.content or ()
-        if (name == "grabowski_recovery_server_probe"
-                and any(isinstance(getattr(part, "text", None), str)
-                        and "local recovery repository operation is busy"
-                        in part.text for part in parts)):
+async def _call_verified_recovery_probe(session, *, timeout: timedelta) -> dict:
+    """Execute the zero-argument mutating MCP tool through its exact transport challenge.
+
+    The loopback timer is a separate MCP client: direct mutating calls are
+    refused until a fresh intent-bound challenge has been atomically consumed.
+    Never retry an ambiguous execute response; the root probe may be running.
+    """
+    tool = "grabowski_recovery_server_probe"
+    target_arguments = {}
+    envelope = {"name": "transport-roundtrip", "profile": "operator",
+                "allow_mutation": True}
+    begin = await session.call_tool(
+        "grip_run",
+        {**envelope, "parameters": {
+            "action": "begin", "target_tool_name": tool,
+            "target_arguments": target_arguments,
+        }},
+        read_timeout_seconds=min(timeout, STATUS_TIMEOUT),
+    )
+    begun = getattr(begin, "structuredContent", None)
+    if (begin.isError or not isinstance(begun, dict)
+            or begun.get("status") != "passed"):
+        raise RuntimeError("recovery transport challenge not admitted")
+    begin_output = begun.get("output")
+    challenge = (begin_output.get("challenge_receipt_sha256")
+                 if isinstance(begin_output, dict) else None)
+    if not isinstance(challenge, str) or not re.fullmatch(r"[0-9a-f]{64}", challenge):
+        raise RuntimeError("recovery transport challenge receipt is invalid")
+
+    execute = await session.call_tool(
+        "grip_run",
+        {**envelope, "parameters": {
+            "action": "execute", "challenge_receipt_sha256": challenge,
+            "target_tool_name": tool, "target_arguments": target_arguments,
+        }},
+        read_timeout_seconds=timeout,
+    )
+    executed = getattr(execute, "structuredContent", None)
+    if not isinstance(executed, dict):
+        raise RuntimeError("recovery transport execute outcome is unknown")
+    output = executed.get("output")
+    output = output if isinstance(output, dict) else {}
+    if execute.isError or executed.get("status") != "passed":
+        error = output.get("target_error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and (
+                "local recovery repository operation is busy" in message):
             raise RecoveryRepositoryBusy("recovery repository operation is busy")
+        # No blind retry: execution may have reached the root broker already.
+        raise RuntimeError(
+            "verified recovery transport failed: "
+            + (message[:180] if isinstance(message, str)
+               else str(output.get("state", "unknown"))[:80])
+        )
+    if (output.get("state") != "executed"
+            or output.get("application_result_observed") is not True):
+        raise RuntimeError("recovery transport has no successful target result")
+    target = output.get("target_result")
+    if not isinstance(target, dict) or (
+            target.get("isError") is True or target.get("is_error") is True):
+        raise RuntimeError("recovery target result is unavailable or failed")
+    # FastMCP ToolResult may serialize Pydantic fields by name or alias.
+    proof = target.get("structured_content")
+    if not isinstance(proof, dict):
+        proof = target.get("structuredContent")
+    if not isinstance(proof, dict):
+        raise RuntimeError("recovery target returned no structured root proof")
+    return proof
+
+
+async def _call(session, name: str, *, timeout: timedelta) -> dict:
+    if name == "grabowski_recovery_server_probe":
+        return await _call_verified_recovery_probe(session, timeout=timeout)
+    result = await session.call_tool(
+        name, dict(TOOL_ARGUMENTS), read_timeout_seconds=timeout,
+    )
+    if result.isError:
         raise RuntimeError(name + " failed; no verified recovery proof")
     value = result.structuredContent
     if not isinstance(value, dict):
