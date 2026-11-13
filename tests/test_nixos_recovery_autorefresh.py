@@ -220,29 +220,119 @@ class PublishedProofTests(unittest.TestCase):
                 refresh.require_published_proof(proof)
 
 
-class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_only_exact_busy_response_is_retryable(self):
-        class Session:
-            def __init__(self, result):
-                self.result = result
+class TransportProbeTests(unittest.IsolatedAsyncioTestCase):
+    class Session:
+        def __init__(self, *results):
+            self.results = list(results)
+            self.calls = []
 
-            async def call_tool(self, *_args, **_kwargs):
-                return self.result
+        async def call_tool(self, name, arguments, **kwargs):
+            self.calls.append((name, arguments, kwargs))
+            if not self.results:
+                raise AssertionError("unplanned duplicate MCP call")
+            return self.results.pop(0)
 
-        busy = SimpleNamespace(isError=True, structuredContent=None,
-            content=[SimpleNamespace(text="Error: local recovery repository operation is busy")])
+    @staticmethod
+    def begin(challenge="a" * 64):
+        return SimpleNamespace(
+            isError=False,
+            structuredContent={"status": "passed", "output": {
+                "challenge_receipt_sha256": challenge,
+            }},
+        )
+
+    @staticmethod
+    def executed(*, target_result=None, error=None, state="executed",
+                 status="passed", is_error=False):
+        return SimpleNamespace(
+            isError=is_error,
+            structuredContent={
+                "status": status,
+                "output": {
+                    "state": state,
+                    "application_result_observed": status == "passed",
+                    "target_result": target_result,
+                    "target_error": error,
+                },
+            },
+        )
+
+    async def test_exact_zero_argument_target_has_bound_begin_and_execute(self):
+        proof = PublishedProofTests.valid()
+        for field in (None, "structuredContent", "structured_content"):
+            with self.subTest(field=field):
+                target_result = proof if field is None else {field: proof}
+                session = self.Session(self.begin(),
+                    self.executed(target_result=target_result))
+                result = await refresh._call(
+                    session, "grabowski_recovery_server_probe",
+                    timeout=refresh.TOOL_TIMEOUT,
+                )
+                self.assertEqual(result, proof)
+                self.assertEqual(len(session.calls), 2)
+                first, last = session.calls
+                self.assertEqual([call[0] for call in session.calls],
+                                 ["grip_run", "grip_run"])
+                for call in (first, last):
+                    self.assertEqual(call[1]["name"], "transport-roundtrip")
+                    self.assertTrue(call[1]["allow_mutation"])
+                    self.assertEqual(call[1]["parameters"]["target_tool_name"],
+                                     "grabowski_recovery_server_probe")
+                    self.assertEqual(call[1]["parameters"]["target_arguments"], {})
+                self.assertEqual(first[1]["parameters"]["action"], "begin")
+                self.assertEqual(last[1]["parameters"]["action"], "execute")
+                self.assertEqual(last[1]["parameters"]["challenge_receipt_sha256"],
+                                 "a" * 64)
+
+    async def test_busy_retry_only_for_exact_target_error(self):
+        session = self.Session(self.begin(), self.executed(
+            status="failed", state="target_failed",
+            error={"type": "RuntimeError",
+                   "message": "local recovery repository operation is busy"},
+        ))
         with self.assertRaises(refresh.RecoveryRepositoryBusy):
-            await refresh._call(Session(busy), "grabowski_recovery_server_probe",
+            await refresh._call(session, "grabowski_recovery_server_probe",
                                 timeout=refresh.TOOL_TIMEOUT)
-        with self.assertRaises(RuntimeError) as unexpected:
-            await refresh._call(Session(busy), "grabowski_recovery_status",
+        self.assertEqual(len(session.calls), 2)
+        failed = self.Session(self.begin(), self.executed(
+            status="failed", state="target_failed",
+            error={"type": "RuntimeError", "message": "repository integrity failed"},
+        ))
+        with self.assertRaisesRegex(RuntimeError, "integrity failed"):
+            await refresh._call(failed, "grabowski_recovery_server_probe",
                                 timeout=refresh.TOOL_TIMEOUT)
-        self.assertNotIsInstance(unexpected.exception, refresh.RecoveryRepositoryBusy)
-        invalid = SimpleNamespace(isError=False, structuredContent=None, content=[])
-        with self.assertRaises(RuntimeError):
-            await refresh._call(Session(invalid), "grabowski_recovery_server_probe",
-                                timeout=refresh.TOOL_TIMEOUT)
+        self.assertEqual(len(failed.calls), 2)
 
+    async def test_missing_challenge_or_ambiguous_result_never_retries(self):
+        invalid_challenge = self.Session(self.begin(challenge="not a digest"))
+        with self.assertRaisesRegex(RuntimeError, "challenge receipt"):
+            await refresh._call(invalid_challenge, "grabowski_recovery_server_probe",
+                                timeout=refresh.TOOL_TIMEOUT)
+        self.assertEqual(len(invalid_challenge.calls), 1)
+        for returned in (
+            SimpleNamespace(isError=False, structuredContent=None),
+            self.executed(target_result={}, is_error=True),
+            self.executed(target_result={}),
+            self.executed(target_result={"structured_content": None}),
+        ):
+            with self.subTest(returned=returned):
+                session = self.Session(self.begin(), returned)
+                with self.assertRaises(RuntimeError):
+                    await refresh._call(session, "grabowski_recovery_server_probe",
+                                        timeout=refresh.TOOL_TIMEOUT)
+                self.assertEqual(len(session.calls), 2)
+
+    async def test_readonly_recovery_status_bypasses_mutating_handshake(self):
+        status = current_status()
+        session = self.Session(SimpleNamespace(
+            isError=False, structuredContent=status))
+        self.assertIs(await refresh._call(
+            session, "grabowski_recovery_status", timeout=refresh.STATUS_TIMEOUT),
+            status)
+        self.assertEqual(session.calls[0][0], "grabowski_recovery_status")
+
+
+class BusyProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_other_worker_published_latest_proof_without_duplicate_probe(self):
         done = current_status()
         done["server_recovery"]["generated_at_unix"] = NOW - 5
