@@ -24,8 +24,8 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
         self.assertIn('CacheDirectoryMode = "0700";', operator)
         self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
-        self.assertIn('ProtectHome = "read-only";', operator)
-        self.assertNotIn("ProtectHome = false;", operator)
+        self.assertIn("ProtectHome = false;", operator)
+        self.assertIn("PrivateTmp = false;", operator)
         writable = operator.split("ReadWritePaths = [", 1)[1].split("];", 1)[0]
         normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
         self.assertIn("/home/alex/.local/state/chronik/data", normalized)
@@ -344,7 +344,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         operator = prod.split("systemd.services.grabowski-operator = lib.mkIf admit {", 1)[1]
         self.assertIn('ProtectSystem = "strict";', operator)
-        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertIn("ProtectHome = false;", operator)
         self.assertIn('CacheDirectory = "grabowski-xdg";', operator)
         self.assertIn('CacheDirectoryMode = "0700";', operator)
         self.assertIn('"XDG_CACHE_HOME=/var/cache/grabowski-xdg"', operator)
@@ -364,7 +364,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         )
         self.assertIn('"GRABOWSKI_BWRAP_BIN=${pkgs.bubblewrap}/bin/bwrap"', environment)
         self.assertNotIn('"PATH=/home/alex/.nix-profile/bin:', environment)
-        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertIn("ProtectHome = false;", operator)
 
     def test_nix_cache_coldstart_tmpfiles_provisions_absent_directories(self):
         prod = (MODULES / "grabowski-production.nix").read_text()
@@ -429,7 +429,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
             ("d /home/alex/worktrees 0700 alex users -", 0o700),
         )
         # The operator's real writable home paths must all be provisioned.
-        self.assertIn('ProtectHome = "read-only";', operator)
+        self.assertIn("ProtectHome = false;", operator)
         for line, _mode in expected:
             absolute = line.split()[1]
             self.assertIn(f'"{line}"', rules)

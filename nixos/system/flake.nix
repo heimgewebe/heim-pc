@@ -1212,7 +1212,7 @@ PY
           assert broker.MemoryDenyWriteExecute;
           # Private 0700 systemd cache supports all XDG-aware CLI tools;
           # Nix and gh must not silently reopen protected home caches.
-          assert operator.ProtectHome == "read-only";
+          assert operator.ProtectHome == false && operator.PrivateTmp == false;
           assert operator.CacheDirectory == "grabowski-xdg";
           assert operator.CacheDirectoryMode == "0700";
           assert builtins.elem "XDG_CACHE_HOME=/var/cache/grabowski-xdg" operator.Environment;
