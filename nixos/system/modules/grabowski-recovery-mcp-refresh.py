@@ -217,10 +217,14 @@ async def _call_verified_recovery_probe(session, *, timeout: timedelta) -> dict:
     if not isinstance(target, dict) or (
             target.get("isError") is True or target.get("is_error") is True):
         raise RuntimeError("recovery target result is unavailable or failed")
-    # FastMCP ToolResult may serialize Pydantic fields by name or alias.
+    # The atomic FastMCP dispatcher returns the tool's mapping directly.
+    # Allow wrapped ToolResult fields too; require_published_proof validates
+    # the complete root/source/canonical structure before acceptance.
     proof = target.get("structured_content")
     if not isinstance(proof, dict):
         proof = target.get("structuredContent")
+    if not isinstance(proof, dict) and isinstance(target.get("root_proof"), dict):
+        proof = target
     if not isinstance(proof, dict):
         raise RuntimeError("recovery target returned no structured root proof")
     return proof
