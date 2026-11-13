@@ -17,7 +17,7 @@ TARBALL_HASH = "sha256-03dhSIyWfXG+B9uOvZV6gk0QlMoP/BarVDKYLHhRLkE="
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
-    def test_systemd_gh_cache_is_private_with_protected_home(self):
+    def test_systemd_operator_home_and_shared_tmp_writable_under_strict_system(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1].split('\n    };', 1)[0]
@@ -30,13 +30,18 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         normalized = [entry.removeprefix("-") for entry in re.findall(r'"([^"]+)"', writable)]
         self.assertIn("/home/alex/.local/state/chronik/data", normalized)
         self.assertNotIn("/home/alex/.local/state/chronik", normalized)
-        self.assertNotIn("/home/alex", normalized)
+        # ProtectSystem=strict otherwise keeps these real user paths read-only.
+        for path in ("/home/alex", "/tmp", "/var/tmp"):
+            self.assertIn(path, normalized)
+        self.assertIn('ProtectSystem = "strict";', operator)
         self.assertFalse(any(path.startswith("/home/alex/.cache") for path in normalized))
         self.assertNotIn('BindPaths = ', operator)
         self.assertIn('assert operator.CacheDirectory == "grabowski-xdg";', flake)
         self.assertIn('assert operator.CacheDirectoryMode == "0700";', flake)
         self.assertIn('nixpkgs.lib.removePrefix "-" entry', flake)
         self.assertIn('assert !(builtins.elem "-/home/alex/.cache/nix" operator.ReadWritePaths);', flake)
+        for path in ("/home/alex", "/tmp", "/var/tmp"):
+            self.assertIn(f'assert builtins.elem "{path}" operator.ReadWritePaths;', flake)
 
     def test_node_v8_jit_is_allowed_only_in_unprivileged_operator(self):
         production = (MODULES / "grabowski-production.nix").read_text()

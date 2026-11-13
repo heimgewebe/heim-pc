@@ -339,10 +339,15 @@ in
         ProtectSystem = "strict";
         ProtectHome = false;
         # Root-owned recovery uses its own sandbox and repository lock.
-        # These paths stay listed as the operator's provisioned state roots.
-        # XDG caches live in the private systemd CacheDirectory; the legacy
-        # home Nix cache is intentionally no longer a writable exception.
+        # ProtectSystem=strict also remounts /home and /tmp read-only.
+        # Restore normal user writes only inside alex's home and shared temp;
+        # /etc, /usr and other system locations remain protected.
+        # The narrower paths below still document provisioned state roots.
+        # XDG caches continue to use the dedicated CacheDirectory.
         ReadWritePaths = [
+          "/home/alex"
+          "/tmp"
+          "/var/tmp"
           "-/home/alex/.local/state/grabowski"
           "-/home/alex/.local/state/bureau"
           # Only Chronik's ledger and lock directory must be writable.
