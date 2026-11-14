@@ -19,6 +19,18 @@ TEST_SOURCE_REVISION = "a" * 40
 
 
 class T(unittest.TestCase):
+    def test_lifecycle_du_count_links_is_conservative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "original"
+            original.write_bytes(b"test-hardlink")
+            os.link(original, Path(tmp) / "duplicate")
+            def measure(flag):
+                result = subprocess.run(
+                    ["du", flag, tmp], text=True, capture_output=True, check=True
+                )
+                return int(result.stdout.split()[0])
+            self.assertEqual(measure("-sbl") - measure("-sb"), original.stat().st_size)
+
     def test_root_flake_is_thin_adapter(self):
         root_flake = (ROOT / "flake.nix").read_text()
         nested = (SOURCE / "flake.nix").read_text()
@@ -652,6 +664,9 @@ class T(unittest.TestCase):
         # Upstream determines whether to use ScreenCast via ps and grep.
         self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
         self.assertIn('test -x "$out/bin/ps"', pkg)
+        # AppRun evaluates the registry variable with HOME unset in --server.
+        self.assertIn("GST_REGISTRY=/home/alex/.cache/gstreamer-1.0/registry-rustdesk-native151.bin", pkg)
+        self.assertNotIn("GST_REGISTRY=$HOME", pkg)
         self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
         self.assertIn('"$2" != "alex"', sudo)
         self.assertIn('"$2" != "--server"', sudo)
@@ -1137,6 +1152,9 @@ class T(unittest.TestCase):
         self.assertIn('"d /persist/heim-pc 0700 root root -"', lifecycle_module)
         self.assertIn('"d /persist/heim-pc/nix-lifecycle 0700 root root -"', lifecycle_module)
         self.assertIn("heim-pc-nix-lifecycle-audit", lifecycle_module)
+        self.assertIn("du -sbl /nix/store", lifecycle_module)
+        self.assertNotIn("du -sb /nix/store", lifecycle_module)
+        self.assertIn('store_bytes_semantics: "apparent-upper-bound-count-hardlinks"', lifecycle_module)
         self.assertNotIn("nix-collect-garbage", lifecycle_module)
         self.assertIn("../../modules/nix-lifecycle.nix", host)
 
