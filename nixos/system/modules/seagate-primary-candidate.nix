@@ -69,6 +69,11 @@
   # enrolled; Pop!_OS's machine identity is not copied or shared.
   services.tailscale.enable = true;
 
+  # Monitor the actual Seagate workstation disks via native SMART health checks.
+  services.smartd.enable = true;
+  # SMART polling must not wake sleeping USB backup or fallback disks.
+  services.smartd.defaults.autodetected = "-a -n standby";
+
   # The one-shot first-boot remote profile allowed these conveniences.
   # They are explicitly forbidden in a permanent primary-system candidate.
   services.getty.autologinUser = lib.mkForce null;
