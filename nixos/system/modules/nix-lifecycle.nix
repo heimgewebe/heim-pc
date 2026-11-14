@@ -43,16 +43,24 @@ let
         last_known_good="$(head -n 1 -- "$marker")"
       fi
 
+      # Nix's global --gc --print-roots scan consumed over 20 GiB on this
+      # host. Ask Nix itself only for roots relevant to the protected boot
+      # default and last-known-good paths. A failed query stays fail-closed.
       gc_root_readback_ok=true
-      if roots="$(${pkgs.nix}/bin/nix-store --gc --print-roots 2>/dev/null)"; then
-        if [ -n "$roots" ]; then
-          root_count="$(printf '%s\n' "$roots" | awk 'NF { count += 1 } END { print count + 0 }')"
+      if [ -n "$boot_default" ] && [ -n "$last_known_good" ]; then
+        if roots="$(${pkgs.nix}/bin/nix-store --query --roots "$boot_default" "$last_known_good" 2>/dev/null)"; then
+          if [ -n "$roots" ]; then
+            root_count="$(printf '%s\n' "$roots" | awk 'NF { count += 1 } END { print count + 0 }')"
+          else
+            root_count=0
+          fi
         else
+          # Discard partial stdout; a failed query is not root evidence.
+          roots=""
           root_count=0
+          gc_root_readback_ok=false
         fi
       else
-        # Never reinterpret a failed or partial enumeration as trustworthy
-        # evidence. Discard any partial stdout and publish a blocked audit.
         roots=""
         root_count=0
         gc_root_readback_ok=false
@@ -122,7 +130,7 @@ let
             ;;
         esac
       fi
-      if [ "$gc_root_readback_ok" != true ]; then
+      if [ "$gc_root_readback_ok" != true ] && [ -n "$boot_default" ] && [ -n "$last_known_good" ]; then
         readiness=blocked-gc-root-enumeration-failed
       fi
       tmp="$(mktemp "$state_dir/.latest.XXXXXX")"
@@ -155,6 +163,7 @@ let
           efi_boot_default_gc_rooted: $efi_default_gc_rooted,
           last_known_good_system: $last_known_good,
           gc_root_count: $gc_root_count,
+          gc_root_count_scope: "protected-boot-and-last-known-good",
           gc_root_readback_ok: $gc_root_readback_ok,
           last_known_good_gc_rooted: $last_known_good_gc_rooted,
           last_known_good_is_system_generation: $last_known_good_is_system_generation,
