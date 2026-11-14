@@ -82,7 +82,9 @@ let
         done
         return 1
       }
-      store_bytes="$(du -sb /nix/store | awk '{print $1}')"
+      # Conservative upper bound: count hardlinked bytes per path, avoiding
+      # du's expensive inode-dedup table on large Nix stores.
+      store_bytes="$(du -sbl /nix/store | awk '{print $1}')"
 
       readiness=ready
       [ -n "$running" ] || readiness=blocked-missing-running-system
@@ -157,6 +159,7 @@ let
           last_known_good_gc_rooted: $last_known_good_gc_rooted,
           last_known_good_is_system_generation: $last_known_good_is_system_generation,
           store_bytes: $store_bytes,
+          store_bytes_semantics: "apparent-upper-bound-count-hardlinks",
           automatic_gc_authorized: false,
           readiness: $readiness
         }' > "$tmp"
