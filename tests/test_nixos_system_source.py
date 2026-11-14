@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-ROOT_LOCK_SHA256 = "d00016c0b35a7b9e1516e4ea99d4a29a12709c64763cee781faa03f4abc11905"
+ROOT_LOCK_SHA256 = "e9d9e3d30be8c9f88740a946210dd9ad775e1fac60d9315b48d46332114e94d3"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -45,7 +45,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/7e137bf147b444d8359278043e6a08c6996adb36";',
+            'nixer.url = "github:heimgewebe/nixer/fc2f098df0a1e9420dc1ca184dec98bc90b5ae21";',
             nested,
         )
 
@@ -56,8 +56,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-+Dq1kTHMkY0Oh42gVONglO534qlb7tm9JFhHb43lmhU="
-        rev = "7e137bf147b444d8359278043e6a08c6996adb36"
+        nar = "sha256-GwSgYtCLCOPKw3tHaItQ+MkuEKKHAtcI7QbdbW3Q+Vo="
+        rev = "fc2f098df0a1e9420dc1ca184dec98bc90b5ae21"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -1061,7 +1061,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "7e137bf147b444d8359278043e6a08c6996adb36",
+            "fc2f098df0a1e9420dc1ca184dec98bc90b5ae21",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
