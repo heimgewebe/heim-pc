@@ -43,9 +43,9 @@ let
         last_known_good="$(head -n 1 -- "$marker")"
       fi
 
-      # Nix's global --gc --print-roots scan consumed over 20 GiB on this
-      # host. Ask Nix itself only for roots relevant to the protected boot
-      # default and last-known-good paths. A failed query stays fail-closed.
+      # The former full audit used over 20 GiB including its global GC-root
+      # query and full-store walk. Query Nix only for the protected boot
+      # default and last-known-good paths; failed queries stay fail-closed.
       gc_root_readback_ok=true
       if [ -n "$boot_default" ] && [ -n "$last_known_good" ]; then
         if roots="$(${pkgs.nix}/bin/nix-store --query --roots "$boot_default" "$last_known_good" 2>/dev/null)"; then
