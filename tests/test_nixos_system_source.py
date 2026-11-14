@@ -652,6 +652,9 @@ class T(unittest.TestCase):
         # Upstream determines whether to use ScreenCast via ps and grep.
         self.assertIn('ln -s ${pkgs.procps}/bin/ps "$out/bin/ps"', pkg)
         self.assertIn('test -x "$out/bin/ps"', pkg)
+        # AppRun evaluates the registry variable with HOME unset in --server.
+        self.assertIn("GST_REGISTRY=/home/alex/.cache/gstreamer-1.0/registry-rustdesk-native151.bin", pkg)
+        self.assertNotIn("GST_REGISTRY=$HOME", pkg)
         self.assertIn("--reuid=1000 --regid=100 --init-groups", sudo)
         self.assertIn('"$2" != "alex"', sudo)
         self.assertIn('"$2" != "--server"', sudo)
