@@ -72,7 +72,9 @@ pkgs.appimageTools.extractType2 {
     sed -i "s|^GST_PLUGIN_SYSTEM_PATH=.*|GST_PLUGIN_SYSTEM_PATH=${gstPlugins}|" "$out/AppRun.env"
     sed -i 's|^GST_PLUGIN_SCANNER=.*|GST_PLUGIN_SCANNER=${pkgs.gst_all_1.gstreamer.out}/libexec/gstreamer-1.0/gst-plugin-scanner|' "$out/AppRun.env"
 
-    printf '\nGST_REGISTRY=$HOME/.cache/gstreamer-1.0/registry-rustdesk-native151.bin\nSPA_PLUGIN_DIR=${pkgs.pipewire}/lib/spa-0.2\n' >> "$out/AppRun.env"
+    # The RustDesk AppRun server runs without HOME and expands $HOME to empty.
+    # Use the fixed UID1000 KDE user's writable registry path, not /.cache.
+    printf '\nGST_REGISTRY=/home/alex/.cache/gstreamer-1.0/registry-rustdesk-native151.bin\nSPA_PLUGIN_DIR=${pkgs.pipewire}/lib/spa-0.2\n' >> "$out/AppRun.env"
     test -x "$out/bin/sudo"
     test -x "$out/bin/loginctl"
     test -x "$out/bin/ps"
