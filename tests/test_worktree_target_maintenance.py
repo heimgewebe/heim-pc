@@ -121,6 +121,45 @@ class WorktreeTargetMaintenanceTests(unittest.TestCase):
         with_id.pop("plan_sha256", None)
         plan["plan_sha256"] = maintenance.canonical_sha256(with_id)
 
+    def test_missing_optional_root_is_dormant(self) -> None:
+        future = self.base / "future-worktrees"
+        self.policy_value["repositories"][0]["worktree_roots"].append(str(future))
+        self.policy_path.write_text(json.dumps(self.policy_value), encoding="utf-8")
+        policy = maintenance.load_policy(self.policy_path)
+        self.assertEqual(
+            policy["repositories"][0]["worktree_roots"], [str(self.worktree_root)]
+        )
+        self.assertFalse(future.exists())
+
+    def test_all_missing_optional_roots_produce_no_candidates(self) -> None:
+        future = self.base / "future-worktrees"
+        self.policy_value["repositories"][0]["worktree_roots"] = [str(future)]
+        self.policy_path.write_text(json.dumps(self.policy_value), encoding="utf-8")
+        policy = maintenance.load_policy(self.policy_path)
+        self.assertEqual(policy["repositories"][0]["worktree_roots"], [])
+        plan = maintenance.collect_plan(
+            policy,
+            state_root=self.state_root,
+            inventory_provider=self.inventory(),
+            observer=self.observation,
+        )
+        self.assertEqual(plan["selected"], [])
+        self.assertEqual(plan["total_target_bytes"], 0)
+
+    def test_existing_symlink_root_and_missing_repo_fail_closed(self) -> None:
+        linked = self.base / "linked-worktrees"
+        linked.symlink_to(self.worktree_root, target_is_directory=True)
+        self.policy_value["repositories"][0]["worktree_roots"] = [str(linked)]
+        self.policy_path.write_text(json.dumps(self.policy_value), encoding="utf-8")
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "not a canonical directory"):
+            maintenance.load_policy(self.policy_path)
+
+        self.policy_value["repositories"][0]["repository"] = str(self.base / "retired-repo")
+        self.policy_value["repositories"][0]["worktree_roots"] = [str(self.worktree_root)]
+        self.policy_path.write_text(json.dumps(self.policy_value), encoding="utf-8")
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "repository cannot be inspected"):
+            maintenance.load_policy(self.policy_path)
+
     def test_selects_only_old_clean_unreferenced_target(self) -> None:
         policy = maintenance.load_policy(self.policy_path)
         plan = maintenance.collect_plan(

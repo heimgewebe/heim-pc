@@ -12,17 +12,6 @@
   "max_tree_entries": 2000000,
   "repositories": [
     {
-      "repository": "/home/alex/repos/weltgewebe",
-      "worktree_roots": [
-        "/home/alex/repos/.weltgewebe-standalone",
-        "/home/alex/repos/.weltgewebe-worktrees",
-        "/home/alex/worktrees",
-        "/home/alex/repos/.weltgewebe-audit-implementation",
-        "/home/alex/repos/.weltgewebe-audit-main-20260717",
-        "/home/alex/repos/.weltgewebe-release-worktrees"
-      ]
-    },
-    {
       "repository": "/home/alex/repos/semantAH",
       "worktree_roots": [
         "/home/alex/repos/.semantah-worktrees",
@@ -30,29 +19,10 @@
       ]
     },
     {
-      "repository": "/home/alex/repos/heimlern",
-      "worktree_roots": [
-        "/home/alex/repos/.heimlern-worktrees",
-        "/home/alex/repos/.operator-redundancy-worktrees"
-      ]
-    },
-    {
-      "repository": "/home/alex/repos/hausKI",
-      "worktree_roots": [
-        "/home/alex/repos/.hauski-worktrees"
-      ]
-    },
-    {
       "repository": "/home/alex/repos/audio",
       "worktree_roots": [
         "/home/alex/repos/.audio-standalone",
         "/home/alex/repos/.audio-worktrees"
-      ]
-    },
-    {
-      "repository": "/home/alex/repos/hausKI-audio",
-      "worktree_roots": [
-        "/home/alex/repos/.hauski-audio-worktrees"
       ]
     },
     {

@@ -93,6 +93,29 @@ def canonical_existing_directory(raw: Any, *, label: str, owner_uid: int) -> Pat
         raise MaintenanceError(f"{label} owner mismatch: {path}")
     return path
 
+def canonical_optional_worktree_root(raw: Any, *, owner_uid: int) -> Path | None:
+    """Missing configured roots are dormant; existing roots stay strictly validated."""
+    label = "worktree_root"
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise MaintenanceError(f"{label} is invalid")
+    path = Path(raw)
+    if not path.is_absolute() or os.path.normpath(raw) != raw:
+        raise MaintenanceError(f"{label} must be canonical and absolute")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # A future root must not traverse a symlink in its existing ancestors.
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise MaintenanceError(f"{label} cannot be inspected: {path}") from exc
+        if resolved != path:
+            raise MaintenanceError(f"{label} is not a canonical directory: {path}")
+        return None
+    except OSError as exc:
+        raise MaintenanceError(f"{label} cannot be inspected: {path}") from exc
+    return canonical_existing_directory(raw, label=label, owner_uid=owner_uid)
+
 
 def bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
@@ -136,7 +159,11 @@ def load_policy(path: Path) -> dict[str, Any]:
         roots_value = record["worktree_roots"]
         if not isinstance(roots_value, list) or not roots_value:
             raise MaintenanceError("worktree_roots must be non-empty")
-        roots = [canonical_existing_directory(item, label="worktree_root", owner_uid=owner_uid) for item in roots_value]
+        roots = []
+        for item in roots_value:
+            root = canonical_optional_worktree_root(item, owner_uid=owner_uid)
+            if root is not None:
+                roots.append(root)
         if str(repository) in seen_repositories:
             raise MaintenanceError("repository is duplicated")
         seen_repositories.add(str(repository))
