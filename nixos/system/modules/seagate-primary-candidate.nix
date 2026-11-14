@@ -71,6 +71,10 @@
 
   # Monitor the actual Seagate workstation disks via native SMART health checks.
   services.smartd.enable = true;
+  # This host runs KDE/Wayland. The xmessage default targets DISPLAY=":",
+  # which is not a usable Wayland desktop notification channel.
+  services.smartd.notifications.x11.enable = false;
+  services.smartd.notifications.systembus-notify.enable = true;
   # SMART polling must not wake sleeping USB backup or fallback disks.
   services.smartd.defaults.autodetected = "-a -n standby";
 

@@ -19,6 +19,16 @@ TEST_SOURCE_REVISION = "a" * 40
 
 
 class T(unittest.TestCase):
+    def test_smartd_alerts_reach_kde_wayland_without_xmessage(self):
+        host = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
+        self.assertIn("services.smartd.enable = true;", host)
+        self.assertIn(
+            "services.smartd.notifications.systembus-notify.enable = true;",
+            host,
+        )
+        self.assertIn("services.smartd.notifications.x11.enable = false;", host)
+        self.assertIn('services.smartd.defaults.autodetected = "-a -n standby";', host)
+
     def test_lifecycle_du_count_links_is_conservative(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = Path(tmp) / "original"
