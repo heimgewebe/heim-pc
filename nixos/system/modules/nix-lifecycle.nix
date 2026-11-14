@@ -90,9 +90,20 @@ let
         done
         return 1
       }
-      # Conservative upper bound: count hardlinked bytes per path, avoiding
-      # du's expensive inode-dedup table on large Nix stores.
-      store_bytes="$(du -sbl /nix/store | awk '{print $1}')"
+      # A full du walk of /nix/store causes large kernel dentry/inode slabs,
+      # even when the du process itself uses little RAM. For capacity budgeting
+      # use the containing filesystem's allocated/available bytes in O(1).
+      # The used value is a conservative upper bound, not a store-only size.
+      store_budget_readback_ok=true
+      if store_budget="$(df -B1 --output=used,avail /nix/store |
+          awk 'NR == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { print $1, $2; found=1 }
+               END { if (!found) exit 1 }')"; then
+        read -r store_bytes store_available_bytes <<< "$store_budget"
+      else
+        store_bytes=0
+        store_available_bytes=0
+        store_budget_readback_ok=false
+      fi
 
       readiness=ready
       [ -n "$running" ] || readiness=blocked-missing-running-system
@@ -133,6 +144,9 @@ let
       if [ "$gc_root_readback_ok" != true ] && [ -n "$boot_default" ] && [ -n "$last_known_good" ]; then
         readiness=blocked-gc-root-enumeration-failed
       fi
+      if [ "$store_budget_readback_ok" != true ]; then
+        readiness=blocked-store-budget-unavailable
+      fi
       tmp="$(mktemp "$state_dir/.latest.XXXXXX")"
       trap 'rm -f -- "$tmp"' EXIT
       jq -n \
@@ -151,6 +165,8 @@ let
         --argjson last_known_good_gc_rooted "$last_known_good_gc_rooted" \
         --argjson last_known_good_is_system_generation "$last_known_good_is_system_generation" \
         --argjson store_bytes "$store_bytes" \
+        --argjson store_available_bytes "$store_available_bytes" \
+        --argjson store_budget_readback_ok "$store_budget_readback_ok" \
         '{
           schema_version: 1,
           kind: $kind,
@@ -168,7 +184,9 @@ let
           last_known_good_gc_rooted: $last_known_good_gc_rooted,
           last_known_good_is_system_generation: $last_known_good_is_system_generation,
           store_bytes: $store_bytes,
-          store_bytes_semantics: "apparent-upper-bound-count-hardlinks",
+          store_bytes_semantics: "filesystem-used-upper-bound-includes-non-store",
+          store_available_bytes: $store_available_bytes,
+          store_budget_readback_ok: $store_budget_readback_ok,
           automatic_gc_authorized: false,
           readiness: $readiness
         }' > "$tmp"
