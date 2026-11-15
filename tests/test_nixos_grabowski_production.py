@@ -12,8 +12,21 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ROOT / "nixos" / "system" / "modules"
-REVISION = "6404f7c40247b1160c1750bff939f6f2a7d507ef"
-TARBALL_HASH = "sha256-mnP1ux1+0BUgzR7isR4DmlpxoGKGBpvvBREvaYiYwI0="
+# Keep independent operator/broker/Flake identity comparisons, but take
+# the expected revision from production and archive hash from the operator.
+# A normal source-pin upgrade should not require another test-only version bump.
+_production_source = (MODULES / "grabowski-production.nix").read_text()
+_operator_source = (MODULES / "grabowski-operator-package.nix").read_text()
+
+def _pinned_value(source: str, field: str) -> str:
+    match = re.search(rf'(?m)^\s*{re.escape(field)} = "([^"]+)";$', source)
+    if match is None:
+        raise RuntimeError(f"canonical Grabowski pin field missing: {field}")
+    return match.group(1)
+
+REVISION = _pinned_value(_production_source, "expectedRevision")
+RELEASE = _pinned_value(_production_source, "expectedReleaseId")
+TARBALL_HASH = _pinned_value(_operator_source, "hash")
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
@@ -182,7 +195,7 @@ class GrabowskiProductionPackagingTests(unittest.TestCase):
         broker = (MODULES / "grabowski-broker-package.nix").read_text()
         prod = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
-        release_id = "6404f7c4-nixos-lock264e747ad05a-contracte4854ca1a9f5"
+        release_id = RELEASE
         lock_sha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
         self.assertIn('releaseId = "' + release_id + '";', op)
         self.assertIn('releaseId = "' + release_id + '";', broker)

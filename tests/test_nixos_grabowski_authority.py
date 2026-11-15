@@ -1,6 +1,7 @@
 """Offline negative tests of NixOS Rootbroker unit and executable trust."""
 import os
 from pathlib import Path
+import re
 import runpy
 import tempfile
 from types import SimpleNamespace
@@ -11,6 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 AUTH = ROOT / "nixos/system/modules/grabowski-nixos-unit-authority.py"
 # run_path does not create __pycache__ inside the immutable Nix flake source.
 authority = SimpleNamespace(**runpy.run_path(str(AUTH), run_name="nixos_authority_test"))
+# The positive fixture follows the canonical package version, independent
+# of the unit authority regex; a mismatch must still fail the trust test.
+_operator_source = (ROOT / "nixos/system/modules/grabowski-operator-package.nix").read_text()
+_operator_match = re.search(r'(?m)^  pname = "grabowski-operator";\n  version = "([0-9a-f]{8})";$', _operator_source)
+if _operator_match is None:
+    raise RuntimeError("canonical Grabowski operator package version missing")
+OPERATOR_VERSION = _operator_match.group(1)
 
 
 class TestNixOSRootbrokerAuthority(unittest.TestCase):
@@ -38,7 +46,7 @@ class TestNixOSRootbrokerAuthority(unittest.TestCase):
         self.fragment = self.sysunits / "grabowski-operator.service"
         self.fragment.symlink_to(self.unit_file)
         self.uid = os.getuid()
-        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-6404f7c4")
+        self.operator_pkg = self.store / ("b" * 32 + "-grabowski-operator-" + OPERATOR_VERSION)
         (self.operator_pkg / "bin").mkdir(parents=True, mode=0o700)
         self.entry = self.operator_pkg / "bin" / "grabowski-operator"
         self.entry.write_text("#!/bin/sh\nexit 0\n")
