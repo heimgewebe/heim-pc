@@ -48,6 +48,16 @@ class Tests(unittest.TestCase):
         self.step(21, "unobservable")
         self.assertEqual(self.calls, [("ALARM", "unobservable")])
 
+    def test_long_offline_pc_does_not_instantly_alarm_on_one_ssh_failure(self):
+        # The PC can be powered off for hours while Heimberry stays healthy.
+        self.step(0, "healthy", 1)
+        self.step(90, "unobservable")
+        self.assertEqual(self.calls, [])
+        self.step(109, "unobservable")
+        self.assertEqual(self.calls, [])
+        self.step(111, "unobservable")
+        self.assertEqual(self.calls, [("ALARM", "unobservable")])
+
     def test_check_only_no_effects(self):
         x = self.step(0, "stale", 2400, dry=True)
         self.assertEqual(x["transition"], "ALARM")

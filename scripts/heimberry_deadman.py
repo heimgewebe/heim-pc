@@ -98,9 +98,10 @@ def decision(before, obs, now):
     first_bad = parse_date(before["first_bad"]) or now
     after["first_bad"] = iso(first_bad)
     duration = (now - first_bad).total_seconds()
-    good = parse_date(before["last_good"])
-    if good and good <= now:
-        duration = max(duration, (now - good).total_seconds())
+    # A sleeping/rebooting Heim-PC may have an old last_good timestamp;
+    # one transient SSH failure after wake must not become an instant alert.
+    # Stale heartbeat age is direct Pi evidence; SSH loss needs continuous
+    # locally observed failure duration since first_bad.
     if obs["kind"] == "stale":
         duration = max(duration, obs["age_seconds"])
     if duration >= SECONDS and not before["alerted"]:
