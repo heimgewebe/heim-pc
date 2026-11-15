@@ -409,7 +409,7 @@ NixOS boot, independently boot Pop!_OS again and record both observations.
 `modules/selfhosted-suite.nix` adds the native NixOS services to
 `heim-pc-seagate-grabowski-headless-candidate`, the complete physical
 workstation/operator/Restic target. `heimPc.selfhostedSuite.enable` is its
-separate switch. Service declarations require a physical profile, an enabled
+separate switch. Service declarations require the active Day-2 profile, an enabled
 desktop and a declared `/persist` mount. The generic host imports the option
 without enabling it; VM, live media, Stage0, reduced candidates and the
 non-installable prototype acquire no application services. No boot, recovery,

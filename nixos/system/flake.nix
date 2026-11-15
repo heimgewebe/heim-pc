@@ -414,7 +414,6 @@
       # until separate host authority and runtime acceptance exist.
       nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
-          specialArgs.heimPcProfile.physical = true;
           modules = [
             ./modules/restic-seagate-backup.nix
             ./modules/selfhosted-suite.nix

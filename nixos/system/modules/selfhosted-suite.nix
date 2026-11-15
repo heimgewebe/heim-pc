@@ -1,7 +1,7 @@
-{ config, lib, pkgs, heimPcProfile ? { }, ... }:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.heimPc.selfhostedSuite;
-  eligible = (heimPcProfile.physical or false)
+  eligible = config.heimPc.day2Activation.enable
     && config.heimPc.desktop.enable
     && builtins.hasAttr "/persist" config.fileSystems;
   root = "/persist/selfhosted-suite";
