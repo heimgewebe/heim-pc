@@ -110,6 +110,37 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         self.assertIn('SystemCallFilter = "~@mount @module @reboot @swap";', production)
         self.assertNotIn("environment.etc.\"grabowski/privileged-actions.json\"", production)
 
+    def test_reduced_seagate_candidates_are_not_live_switchable(self):
+        primary = self.flake.split(
+            "nixosConfigurations.heim-pc-seagate-primary-candidate =", 1
+        )[1].split("nixosConfigurations.heim-pc-vm =", 1)[0]
+        self.assertIn("system.switch.enable = lib.mkDefault false;", primary)
+        self.assertIn("system.switch.enable = lib.mkForce true;", self.candidate)
+        prototype = self.flake.split(
+            "prototype-non-switchable-contract =", 1
+        )[1].split("stage0-no-usb-contract =", 1)[0]
+        self.assertIn("assert !primary.system.switch.enable;", prototype)
+        for contract, after, expected in (
+            (
+                "seagate-primary-candidate-contract =",
+                "seagate-workstation-candidate-contract =", "!",
+            ),
+            (
+                "seagate-workstation-candidate-contract =",
+                "seagate-nixer-headless-contract =", "!",
+            ),
+            (
+                "seagate-nixer-headless-contract =",
+                "seagate-grabowski-headless-contract =", "!",
+            ),
+            (
+                "seagate-grabowski-headless-contract =",
+                "grabowski-production-unit-contract =", "",
+            ),
+        ):
+            segment = self.flake.split(contract, 1)[1].split(after, 1)[0]
+            self.assertIn(f"assert {expected}cfg.system.switch.enable;", segment)
+
 
 if __name__ == "__main__":
     unittest.main()
