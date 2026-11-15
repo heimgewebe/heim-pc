@@ -40,4 +40,40 @@ in
   # Keep the NixOS hardware watchdog under systemd PID 1.
   systemd.settings.Manager.RuntimeWatchdogSec =
     lib.mkIf physicalHost "2min";
+
+  # Small independent system-timer probe, not another long-running daemon.
+  # This host remains able to check Heimberry when no graphical session runs.
+  systemd.services.heimberry-deadman = lib.mkIf physicalHost {
+    description = "Independent Heimberry watcher heartbeat check";
+    after = [ "network.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "alex";
+      Group = "users";
+      StateDirectory = "heimberry-deadman";
+      StateDirectoryMode = "0700";
+      Environment = [
+        "HOME=/home/alex"
+        "PATH=${lib.makeBinPath [ pkgs.openssh pkgs.coreutils ]}"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 -B ${../../../scripts/heimberry_deadman.py}";
+      TimeoutStartSec = "45s";
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = "read-only";
+      PrivateTmp = true;
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      UMask = "0077";
+    };
+  };
+  systemd.timers.heimberry-deadman = lib.mkIf physicalHost {
+    description = "Check independent Heimberry heartbeat every five minutes";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5min";
+      OnUnitInactiveSec = "5min";
+      AccuracySec = "30s";
+      Unit = "heimberry-deadman.service";
+    };
+  };
 }
