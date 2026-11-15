@@ -4,6 +4,7 @@ These tests cannot replace the existing original-operator KVM proof, a real
 Seagate root-owned policy, or a physical reboot/recovery acceptance test.
 """
 from pathlib import Path
+import re
 import unittest
 
 
@@ -11,7 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 FLAKE = ROOT / "nixos/system/flake.nix"
 BASE = ROOT / "nixos/system/modules/seagate-primary-candidate.nix"
 PRODUCTION = ROOT / "nixos/system/modules/grabowski-production.nix"
-RELEASE = "6404f7c4-nixos-lock264e747ad05a-contracte4854ca1a9f5"
+# Compare the independent Flake candidate against the canonical production
+# release rather than duplicating a version literal in the test.
+_release_match = re.search(
+    r'(?m)^\s*expectedReleaseId = "([^"]+)";$', PRODUCTION.read_text()
+)
+if _release_match is None:
+    raise RuntimeError("canonical Grabowski production release identity missing")
+RELEASE = _release_match.group(1)
 
 
 class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
