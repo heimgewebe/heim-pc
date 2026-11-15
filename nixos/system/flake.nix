@@ -337,7 +337,10 @@
         inherit system;
         modules = [
           ./modules/seagate-primary-candidate.nix
-          ({ ... }: {
+          ({ lib, ... }: {
+            # The reduced migration candidate has no Grabowski/Nixer/backup
+            # services. Keep it buildable, never live-switchable on the real PC.
+            system.switch.enable = lib.mkDefault false;
             # Candidate runtime identity must bind to the exact clean source.
             # Source-only evaluations from a dirty checkout are not releases.
             system.configurationRevision = sourceRevision;
@@ -415,7 +418,10 @@
             ./modules/restic-seagate-backup.nix
             ./modules/fotoatelier.nix
             ./modules/grosser-adler.nix
-            ({ pkgs, ... }: {
+            ({ pkgs, lib, ... }: {
+              # Only the complete Grabowski/Nixer/Restic successor may
+              # replace the active workstation's systemd service set.
+              system.switch.enable = lib.mkForce true;
               # The original operator's bounded task/job tools call systemd-run --user.
               # Enable this manager only for the full, explicit Grabowski successor.
               users.users.alex.linger = pkgs.lib.mkForce true;
@@ -873,9 +879,9 @@ PY
             printf '%s\n' ${operator} > "$out/operator-store-path"
           '';
 
-        # A buildable prototype must not be live-switchable: its placeholder
-        # root and absent remote services were responsible for a host lockout.
-        # The real Seagate primary candidate retains normal switch support.
+        # A buildable reduced source-only system must not be live-switchable:
+        # switching to the primary candidate stopped Grabowski, Nixer and
+        # backup services on the running workstation.
         prototype-non-switchable-contract =
           let
             prototype = self.nixosConfigurations.heim-pc.config;
@@ -884,7 +890,7 @@ PY
           assert prototype.fileSystems."/".device == "/dev/disk/by-label/NIXOS_PROTOTYPE_DO_NOT_INSTALL";
           assert !prototype.system.switch.enable;
           assert !prototype.services.openssh.enable && !prototype.services.tailscale.enable;
-          assert primary.system.switch.enable;
+          assert !primary.system.switch.enable;
           assert primary.services.openssh.enable && primary.services.tailscale.enable;
           pkgs.runCommand "heim-pc-prototype-non-switchable-contract" {} ''
             mkdir -p "$out"
@@ -917,6 +923,7 @@ PY
           in
           assert cfg.networking.hostName == "heim-pc";
           assert cfg.system.configurationRevision == sourceRevision;
+          assert !cfg.system.switch.enable;
           assert builtins.match "^[0-9a-f]{40}$" cfg.system.configurationRevision != null;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert builtins.all (option: builtins.elem option cfg.fileSystems."/nix".options) [ "subvol=@nix" "compress=zstd" ];
@@ -955,6 +962,7 @@ PY
           let cfg = self.nixosConfigurations.heim-pc-seagate-workstation-candidate.config;
           in
           assert cfg.system.configurationRevision == sourceRevision;
+          assert !cfg.system.switch.enable;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
@@ -990,6 +998,7 @@ PY
             sc = unit.serviceConfig;
           in
           assert cfg.system.configurationRevision == sourceRevision;
+          assert !cfg.system.switch.enable;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
           assert !cfg.boot.loader.efi.canTouchEfiVariables;
@@ -1044,6 +1053,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.releaseId ==
             "6404f7c4-nixos-lock264e747ad05a-contracte4854ca1a9f5";
           assert cfg.system.configurationRevision == sourceRevision;
+          assert cfg.system.switch.enable;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
           assert cfg.fileSystems."/boot".device == "/dev/disk/by-label/NIXOS2_EFI";
           assert cfg.fileSystems."/persist".fsType == "btrfs";
