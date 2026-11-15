@@ -190,6 +190,7 @@ jobs:
         run: >-
           nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
           .#checks.x86_64-linux.profile-contract
+          .#checks.x86_64-linux.selfhosted-suite-contract
           .#checks.x86_64-linux.host-protection-contract
           .#checks.x86_64-linux.recovery-readiness-contract
           .#checks.x86_64-linux.intentional-break-rejected

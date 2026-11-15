@@ -403,3 +403,133 @@ server, repository password or Nix-store password. Review the installed loader
 files on the Seagate ESP and the WD before/after fingerprint; do not update
 EFI/NVRAM and do not rely on an unverified fallback boot entry. After an actual
 NixOS boot, independently boot Pop!_OS again and record both observations.
+
+## Local application suite — declaration only (2026-11-15)
+
+`modules/selfhosted-suite.nix` adds the native NixOS services to
+`heim-pc-seagate-grabowski-headless-candidate`, the complete physical
+workstation/operator/Restic target. `heimPc.selfhostedSuite.enable` is its
+separate switch. Service declarations require a physical profile, an enabled
+desktop and a declared `/persist` mount. The generic host imports the option
+without enabling it; VM, live media, Stage0, reduced candidates and the
+non-installable prototype acquire no application services. No boot, recovery,
+source-provenance, firewall or backup policy is relaxed.
+
+| Application | Local HTTP port | Initial state |
+| --- | --- | --- |
+| Paperless-ngx | 28981 | SQLite; German + English OCR; empty private consume directory; no administrator yet |
+| Audiobookshelf | 13378 | Empty configuration and library directory; no configured library or automatic user-path scan |
+| Readeck | 8001 | SQLite and private data directory; first-user setup required |
+| Immich | 2283 (reserved) | **Disabled**, including PostgreSQL, its Valkey instance and media directories |
+
+All declared HTTP listeners bind only to loopback. The selected ports are
+distinct and do not overlap existing repository listener declarations; live
+port availability must be checked again before activation. No reverse proxy,
+Tailscale Serve/Funnel, port forwarding, paid API, cloud subscription or
+credential is provisioned. Paperless uses the native Valkey integration over
+a Unix socket with TCP disabled. Tika/Gotenberg are unnecessary for this slice.
+
+The unchanged root flake lock pins Nixpkgs
+`fa1373130d5a21c040a47c5dbe1913d59ed91808`. Its `immich-2.7.5` is marked
+insecure (CVE-2026-59258, CVE-2026-82272; upstream 2.x no longer maintained).
+`heimPc.selfhostedSuite.immich.enable` therefore defaults to false. Its dormant
+native configuration provides peer-authenticated PostgreSQL over a Unix
+socket, no PostgreSQL TCP listener, a separate socket-only Valkey instance,
+and new empty media storage. ML, maps, reverse geocoding, library scanning and
+watching are disabled. Do not enable it or add an insecure-package exception:
+first supply a separately reviewed supported package/module combination.
+The regression check intentionally verifies the current package refusal;
+update that expectation as part of resolving the blocker.
+
+### Storage and restore boundary
+
+All authoritative suite state lives under `/persist/selfhosted-suite` on the
+existing `@persist`, following the
+[Seagate storage/restore contract at baseline b5eb38f](https://github.com/heimgewebe/heim-pc/blob/b5eb38f17fda8a359a3740057dfff24353468d88/nixos/architecture/seagate-primary-20261023.md#L90-L100),
+also located through the revision-matched read-only RepoGround bundle.
+The parent permits traversal only; each service directory
+is private (0700) and owned by its dedicated service account. No interactive
+user gains extra groups. Paperless uses its native absolute data paths.
+Audiobookshelf, Readeck and Valkey retain their native `/var/lib` StateDirectory
+paths through service-private bind mounts; the bind sources are provisioned
+by tmpfiles and the services require the `/persist` mount. Readeck uses a
+dedicated static system account to own this backing directory, retaining the
+native sandbox. No global mount or symlink replaces existing service state.
+
+The current Restic job includes `/persist`, but **coverage is not a consistent
+database backup or restore proof**. Its existing private excludes must be
+checked by the later deployment operator without publishing their contents.
+Live SQLite/PostgreSQL file copies cannot establish application recovery.
+Immich's built-in scheduled `.sql.gz` dumps are disabled: the existing Restic
+contract deliberately excludes that format. This task adds no database export,
+backup execution, data migration or real document/media import.
+
+Before productive imports, use synthetic data to prove a consistent cold
+backup: stop the suite's writers (all four Paperless units, Audiobookshelf,
+Readeck and, if later admitted, Immich and PostgreSQL), complete a verified
+Restic snapshot with the exact required directories, then restart the same
+units even if backup fails. Restore into a disposable isolated location with
+matching software and ownership; verify login, SQLite integrity, documents,
+bookmarks and media. Include PostgreSQL roles/extensions and media together
+when Immich becomes admissible. Do not restore over live state. Preserve the
+existing independent recovery probe and fallback generations. A future import
+phase also needs a recurring consistent-backup procedure, not only this initial
+probe. **No automatic phone upload/synchronization before that proof.**
+
+### Later activation and iPad access
+
+1. Obtain a clean commit in this branch, evaluate the physical target and
+   Proof-VM from that exact Git revision and run the suite contract check.
+   Build through `scripts/managed_build.py` / the canonical production-prepare
+   route. This declaration does not authorize a switch or root action.
+2. Recheck host port availability, `/persist`, available disk space, concurrent
+   work, fresh Restic restore evidence and the protected rollback generation.
+   Then perform the separately authorized deployment using the existing
+   activation path. Inspect service status, actual bind addresses, ownership
+   and mount-namespace backing before opening any application.
+3. On the host's local browser, initialize Paperless with the native
+   `paperless-manage createsuperuser` command (operator executes it privately;
+   never store the password in Git, command arguments or receipts). Complete
+   Audiobookshelf and Readeck's initial administrator setup locally with strong
+   private passwords. Verify logout/login and restart persistence. Create only
+   an empty Audiobookshelf library at `/var/lib/audiobookshelf/library` when
+   explicitly needed; do not select an existing home/media directory. Immich's
+   first administrator and new library remain deferred until its blocker is
+   resolved. Do not import existing libraries or enable mobile backup.
+4. For the iPad, first use an authenticated SSH local-forward over the existing
+   Tailnet to the host's loopback port, binding the iPad end locally as well.
+   The application still requires its own login. For a later browser-friendly
+   Tailnet HTTPS route, review the existing transport capability, Tailnet ACLs,
+   TLS, WebSockets, application origin/CSRF settings and authentication in a
+   separate slice after onboarding and restore verification. No public ingress
+   or Funnel is needed. This phase creates no remote access route.
+
+Turning `heimPc.selfhostedSuite.enable` off removes the service declarations;
+it does not delete `/persist/selfhosted-suite`. Never automatically remove
+state on rollback. These are fresh instances: existing service data, if found
+at deployment, requires reconciliation before starting a new instance.
+
+### Phase A validation
+
+`tests/selfhosted-suite.nix` checks the effective native options, distinct local
+ports, permissions/backing paths, disabled Immich dependencies, the package
+refusal, explicit off-switch and forced-on negative VM/prototype/headless
+cases. It compares filesystem, boot and Restic settings with the disabled
+configuration. CI includes `checks.x86_64-linux.selfhosted-suite-contract`.
+
+The scoped Phase A environment evaluated this contract and seven existing
+contracts successfully with the unchanged flake pins, and evaluated the
+Proof-VM system derivation. All 68 existing `test_nixos_system_source.py` tests
+passed using the already deployed operator Python (the default interpreter
+lacks PyYAML). Flake-lock and installed Operator-Entry projection checks passed.
+The physical service options and generated application units evaluated with
+only the existing clean-Git-revision assertion outstanding. Physical toplevel
+and `seagate-primary-candidate-contract` remain blocked by that assertion:
+the worktree's Git metadata is read-only in the scoped environment, preventing
+staging/commit. Evaluations used `path:.` to include new files, without changing
+input locks or inventing a source revision. No derivations were built or booted.
+The managed-build plan rejected a direct Nix worker; the canonical prepare
+route remains required for builds. Live leases/tasks and host socket checks
+were unavailable through the connector's approval policy. None of these checks
+establishes deployed application readiness, a successful restore or a clean
+committed release.

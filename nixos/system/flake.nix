@@ -414,8 +414,10 @@
       # until separate host authority and runtime acceptance exist.
       nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate =
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
+          specialArgs.heimPcProfile.physical = true;
           modules = [
             ./modules/restic-seagate-backup.nix
+            ./modules/selfhosted-suite.nix
             ./modules/fotoatelier.nix
             ./modules/grosser-adler.nix
             ({ pkgs, lib, ... }: {
@@ -429,6 +431,7 @@
               # is not imported by this actual headless operator candidate.
               users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
               heimPc.grosserAdler.enable = true;
+              heimPc.selfhostedSuite.enable = true;
               # Do not block activation of a known previous NixOS generation
               # merely because its kernel, systemd or Nix is older.
               # Keep a bounded compressed swap fallback on the real Seagate
@@ -543,6 +546,12 @@
       };
 
       checks.${system} = {
+        selfhosted-suite-contract = import ./tests/selfhosted-suite.nix {
+          inherit pkgs;
+          physical = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate;
+          vm = self.nixosConfigurations.heim-pc-vm;
+          prototype = self.nixosConfigurations.heim-pc;
+        };
         # Built artifact admission, not a live privileged-action or boot test.
         # This check forces BOTH immutable binaries into the closure, verifies
         # the complete locked operator startup import and compares the release
