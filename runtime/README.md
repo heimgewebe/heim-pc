@@ -16,3 +16,9 @@ Documents in this zone should follow the canonical schema with the `role: realit
 ## Program inventory boundary
 
 `program-inventory-summary.md` and `program-inventory.v1.json` are reviewable point-in-time observations of the program surface. Their embedded `observed_at` timestamp defines their authority; they do not establish present runtime after that timestamp. Large raw CSV/TXT inventories stay local under `~/.local/share/heim-utilities/program-inventory/` and are not committed.
+
+Die bisherigen Programminventare sind HISTORISCHE Pop!_OS-Snapshots vom
+9. Juli 2026. Der separate [NixOS-Report](nixos-program-inventory.md) wird mit
+`python3 scripts/generate_nixos_program_inventory.py` aus kuratierten Metadaten
+erneuert. Er ist ein nichtkanonischer point-in-time Report; Fehler bleiben sichtbar.
+[Host-lokale App-Rollen und Restore-Quellen](selfhosted-apps.md) ergänzen ihn.

@@ -1,0 +1,643 @@
+{
+  "cli": {
+    "ffmpeg": {
+      "exit_code": 127,
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "ffmpeg -version",
+      "status": "unavailable"
+    },
+    "gh": {
+      "exit_code": 0,
+      "items": [
+        "2.103.3"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "gh --version",
+      "status": "ok"
+    },
+    "git": {
+      "exit_code": 0,
+      "items": [
+        "2.54.0"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "git --version",
+      "status": "ok"
+    },
+    "jq": {
+      "exit_code": 0,
+      "items": [
+        "1.8.2"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "jq --version",
+      "status": "ok"
+    },
+    "mcp-inspector": {
+      "exit_code": 0,
+      "items": [
+        "2.14.0"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "mcp-inspector --version",
+      "status": "ok"
+    },
+    "nix": {
+      "exit_code": 0,
+      "items": [
+        "2.34.9"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "nix --version",
+      "status": "ok"
+    },
+    "node": {
+      "exit_code": 0,
+      "items": [
+        "24.22.1"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "node --version",
+      "status": "ok"
+    },
+    "npm": {
+      "exit_code": 0,
+      "items": [
+        "11.19.1"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "npm --version",
+      "status": "ok"
+    },
+    "ocrmypdf": {
+      "exit_code": 0,
+      "items": [
+        "17.4.2"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "ocrmypdf --version",
+      "status": "ok"
+    },
+    "podman": {
+      "exit_code": 0,
+      "items": [
+        "5.8.9"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "podman --version",
+      "status": "ok"
+    },
+    "python3": {
+      "exit_code": 0,
+      "items": [
+        "3.13.17"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "python3 --version",
+      "status": "ok"
+    },
+    "restic": {
+      "exit_code": 0,
+      "items": [
+        "0.18.1"
+      ],
+      "observed_at": "2026-11-16T17:53:25+00:00",
+      "source": "restic version",
+      "status": "ok"
+    },
+    "rg": {
+      "exit_code": 0,
+      "items": [
+        "15.1.0"
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "rg --version",
+      "status": "ok"
+    },
+    "tesseract": {
+      "exit_code": 0,
+      "items": [
+        "5.5.3"
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "tesseract --version",
+      "status": "ok"
+    },
+    "uv": {
+      "exit_code": 127,
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "uv --version",
+      "status": "unavailable"
+    }
+  },
+  "completed_at": "2026-11-16T17:53:26+00:00",
+  "desktop_apps": {
+    "exit_code": 0,
+    "items": [
+      {
+        "id": "xfce4-about",
+        "name": "About Xfce"
+      },
+      {
+        "id": "xfce4-accessibility-settings",
+        "name": "Accessibility"
+      },
+      {
+        "id": "nm-connection-editor",
+        "name": "Advanced Network Configuration"
+      },
+      {
+        "id": "xfce-ui-settings",
+        "name": "Appearance"
+      },
+      {
+        "id": "xfce4-appfinder",
+        "name": "Application Finder"
+      },
+      {
+        "id": "org.kde.ark",
+        "name": "Ark"
+      },
+      {
+        "id": "btop",
+        "name": "btop++"
+      },
+      {
+        "id": "thunar-bulk-rename",
+        "name": "Bulk Rename"
+      },
+      {
+        "id": "xfce4-color-settings",
+        "name": "Color Profiles"
+      },
+      {
+        "id": "org.kde.drkonqi.coredump.gui",
+        "name": "Crashed Processes Viewer"
+      },
+      {
+        "id": "xfce4-mime-settings",
+        "name": "Default Applications"
+      },
+      {
+        "id": "xfce-backdrop-settings",
+        "name": "Desktop"
+      },
+      {
+        "id": "org.kde.discover",
+        "name": "Discover"
+      },
+      {
+        "id": "xfce-display-settings",
+        "name": "Display"
+      },
+      {
+        "id": "org.kde.dolphin",
+        "name": "Dolphin"
+      },
+      {
+        "id": "org.kde.elisa",
+        "name": "Elisa"
+      },
+      {
+        "id": "org.kde.plasma.emojier",
+        "name": "Emoji Selector"
+      },
+      {
+        "id": "xfce4-file-manager",
+        "name": "File Manager"
+      },
+      {
+        "id": "gvim",
+        "name": "GVim"
+      },
+      {
+        "id": "org.kde.gwenview",
+        "name": "Gwenview"
+      },
+      {
+        "id": "org.kde.khelpcenter",
+        "name": "Help Center"
+      },
+      {
+        "id": "org.kde.kinfocenter",
+        "name": "Info Center"
+      },
+      {
+        "id": "org.kde.kate",
+        "name": "Kate"
+      },
+      {
+        "id": "kdesystemsettings",
+        "name": "KDE System Settings"
+      },
+      {
+        "id": "xfce-keyboard-settings",
+        "name": "Keyboard"
+      },
+      {
+        "id": "org.kde.konsole",
+        "name": "Konsole"
+      },
+      {
+        "id": "org.kde.kwalletmanager",
+        "name": "KWalletManager"
+      },
+      {
+        "id": "org.kde.kwrite",
+        "name": "KWrite"
+      },
+      {
+        "id": "LocalSend",
+        "name": "LocalSend"
+      },
+      {
+        "id": "xfce4-session-logout",
+        "name": "Log Out"
+      },
+      {
+        "id": "xfce4-mail-reader",
+        "name": "Mail Reader"
+      },
+      {
+        "id": "org.kde.kmenuedit",
+        "name": "Menu Editor"
+      },
+      {
+        "id": "xfce-mouse-settings",
+        "name": "Mouse and Touchpad"
+      },
+      {
+        "id": "org.xfce.mousepad",
+        "name": "Mousepad"
+      },
+      {
+        "id": "nixos-manual",
+        "name": "NixOS Manual"
+      },
+      {
+        "id": "xfce4-notifyd-config",
+        "name": "Notifications"
+      },
+      {
+        "id": "nvidia-settings",
+        "name": "NVIDIA X Server Settings"
+      },
+      {
+        "id": "org.kde.okular",
+        "name": "Okular"
+      },
+      {
+        "id": "panel-preferences",
+        "name": "Panel"
+      },
+      {
+        "id": "org.xfce.Parole",
+        "name": "Parole Media Player"
+      },
+      {
+        "id": "com.github.jeromerobert.pdfarranger",
+        "name": "PDF Arranger"
+      },
+      {
+        "id": "xfce4-power-manager-settings",
+        "name": "Power Manager"
+      },
+      {
+        "id": "org.kde.qrca",
+        "name": "Qrca"
+      },
+      {
+        "id": "org.xfce.ristretto",
+        "name": "Ristretto Image Viewer"
+      },
+      {
+        "id": "xfce4-run",
+        "name": "Run Program..."
+      },
+      {
+        "id": "xfce4-screenshooter",
+        "name": "Screenshot"
+      },
+      {
+        "id": "xfce-session-settings",
+        "name": "Session and Startup"
+      },
+      {
+        "id": "xfce4-settings-editor",
+        "name": "Settings Editor"
+      },
+      {
+        "id": "xfce-settings-manager",
+        "name": "Settings Manager"
+      },
+      {
+        "id": "org.kde.spectacle",
+        "name": "Spectacle"
+      },
+      {
+        "id": "org.kde.plasma-systemmonitor",
+        "name": "System Monitor"
+      },
+      {
+        "id": "systemsettings",
+        "name": "System Settings"
+      },
+      {
+        "id": "xfce4-taskmanager",
+        "name": "Task Manager"
+      },
+      {
+        "id": "xfce4-terminal-emulator",
+        "name": "Terminal Emulator"
+      },
+      {
+        "id": "thunar",
+        "name": "Thunar File Manager"
+      },
+      {
+        "id": "thunar-settings",
+        "name": "Thunar Preferences"
+      },
+      {
+        "id": "vim",
+        "name": "Vim"
+      },
+      {
+        "id": "org.pulseaudio.pavucontrol",
+        "name": "Volume Control"
+      },
+      {
+        "id": "xfce4-web-browser",
+        "name": "Web Browser"
+      },
+      {
+        "id": "xfce-wm-settings",
+        "name": "Window Manager"
+      },
+      {
+        "id": "xfce-wmtweaks-settings",
+        "name": "Window Manager Tweaks"
+      },
+      {
+        "id": "xfce-workspaces-settings",
+        "name": "Workspaces"
+      },
+      {
+        "id": "xfce4-screensaver-preferences",
+        "name": "Xfce Screensaver"
+      },
+      {
+        "id": "xfce4-terminal",
+        "name": "Xfce Terminal"
+      },
+      {
+        "id": "xterm",
+        "name": "XTerm"
+      }
+    ],
+    "observed_at": "2026-11-16T17:53:25+00:00",
+    "source": "NixOS system desktop entries (system-only)",
+    "status": "ok"
+  },
+  "flatpak": {
+    "exit_code": 127,
+    "observed_at": "2026-11-16T17:53:25+00:00",
+    "source": "flatpak list --app --columns=application,name,version",
+    "status": "unavailable"
+  },
+  "nix_profiles": {
+    "exit_code": 0,
+    "items": [
+      "bubblewrap",
+      "claude-code",
+      "codex",
+      "de_DE",
+      "de_DE-1",
+      "discord",
+      "google-chrome",
+      "hunspell",
+      "kdialog",
+      "libreoffice-qt",
+      "localsend",
+      "pdfarranger",
+      "podman-compose",
+      "pulseaudio",
+      "python3.13-ocrmypdf",
+      "qpdf",
+      "rustdesk-flutter",
+      "signal-desktop",
+      "spotify",
+      "tesseract"
+    ],
+    "observed_at": "2026-11-16T17:53:25+00:00",
+    "source": "nix profile list --json",
+    "status": "ok"
+  },
+  "observed_at": "2026-11-16T17:53:25+00:00",
+  "os": {
+    "exit_code": 0,
+    "items": [
+      {
+        "name": "NixOS",
+        "version": "26.05.20261031.fa13731"
+      }
+    ],
+    "observed_at": "2026-11-16T17:53:25+00:00",
+    "source": "nixos-version",
+    "status": "ok"
+  },
+  "podman": {
+    "exit_code": 0,
+    "items": [
+      {
+        "image_version": "2.37.2",
+        "name": "heimgewebe-audiobookshelf"
+      },
+      {
+        "image_version": "2.0.2-stable",
+        "name": "heimgewebe-filebrowser"
+      },
+      {
+        "image_version": "2024.10.22-7ca5933",
+        "name": "heimgewebe-it-tools"
+      },
+      {
+        "image_version": "8.1",
+        "name": "heimgewebe-paperless_paperless-broker_1"
+      },
+      {
+        "image_version": "3.4.2",
+        "name": "heimgewebe-paperless_paperless-web_1"
+      },
+      {
+        "image_version": "2.19.1",
+        "name": "heimgewebe-penpot_penpot-backend_1"
+      },
+      {
+        "image_version": "2.19.1",
+        "name": "heimgewebe-penpot_penpot-exporter_1"
+      },
+      {
+        "image_version": "2.19.1",
+        "name": "heimgewebe-penpot_penpot-frontend_1"
+      },
+      {
+        "image_version": "15",
+        "name": "heimgewebe-penpot_penpot-postgres_1"
+      },
+      {
+        "image_version": "8.1",
+        "name": "heimgewebe-penpot_penpot-valkey_1"
+      },
+      {
+        "image_version": "0.23.5",
+        "name": "heimgewebe-readeck"
+      },
+      {
+        "image_version": "v3.4.1",
+        "name": "immich_machine_learning"
+      },
+      {
+        "image_version": "digest-pinned",
+        "name": "immich_postgres"
+      },
+      {
+        "image_version": "digest-pinned",
+        "name": "immich_redis"
+      },
+      {
+        "image_version": "v3.4.1",
+        "name": "immich_server"
+      }
+    ],
+    "observed_at": "2026-11-16T17:53:25+00:00",
+    "source": "podman ps --all --format {{.Names}}\t{{.Image}}",
+    "status": "ok"
+  },
+  "role": "reality",
+  "schema": "nixos-program-inventory.v1",
+  "scope": "heim-pc; curated metadata; no health or completeness claim",
+  "temporal_scope": "point_in_time",
+  "units": {
+    "system:podman.service": {
+      "exit_code": 1,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "linked"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --system is-enabled podman.service",
+      "status": "ok"
+    },
+    "system:restic-backups-heim-pc.service": {
+      "exit_code": 1,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "linked"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --system is-enabled restic-backups-heim-pc.service",
+      "status": "ok"
+    },
+    "system:restic-backups-heim-pc.timer": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "enabled"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --system is-enabled restic-backups-heim-pc.timer",
+      "status": "ok"
+    },
+    "user:heimgewebe-audiobookshelf.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "generated"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-audiobookshelf.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-filebrowser.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "generated"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-filebrowser.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-immich.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "enabled"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-immich.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-it-tools.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "generated"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-it-tools.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-paperless.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "enabled"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-paperless.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-penpot.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "enabled"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-penpot.service",
+      "status": "ok"
+    },
+    "user:heimgewebe-readeck.service": {
+      "exit_code": 0,
+      "items": [
+        {
+          "exists": true,
+          "is_enabled": "generated"
+        }
+      ],
+      "observed_at": "2026-11-16T17:53:26+00:00",
+      "source": "systemctl --user is-enabled heimgewebe-readeck.service",
+      "status": "ok"
+    }
+  }
+}
