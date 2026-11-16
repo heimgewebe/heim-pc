@@ -45,7 +45,7 @@ Die bisherige Kartografie-Rolle bleibt erhalten, wird aber unter diese Entrée-R
 * [AGENTS.md](AGENTS.md) – Agenten-/LLM-Einstieg mit Arbeitsregeln und Stop-Kriterien
 * [Operatorium-Entrée](architecture/operatorium-entry.md) – normative Rolle dieses Repositories
 * [Home-Entry Runtime Note](runtime/home-entry.md) – lokale Projektion, Pointer-Logik und Grenzen
-* [NixOS-Programminventar](runtime/nixos-program-inventory.md) – erneuerbarer, zeitgebundener Report; [App-Rollen und Restore-Quellen](runtime/selfhosted-apps.md)
+* NixOS-Programminventar: `python3 scripts/generate_nixos_program_inventory.py` erzeugt einen lokalen zeitgebundenen Report unter `~/.local/state/heim-pc/inventory/`; [App-Rollen und Restore-Quellen](docs/heim-pc-apps.md)
 * [Software-Inventar](runtime/software-inventory.md) und [Programminventar](runtime/program-inventory-summary.md) – HISTORISCHE Pop!_OS-Snapshots vom 9. Juli 2026; keine aktuelle NixOS-Liste
 * [SYSTEM_MAP.md](SYSTEM_MAP.md) – generierte Karte der kanonischen heim-pc-Dokumentation
 * [Sicherheit](architecture/security.md) – Datenpolitik und Tabuflächen

@@ -10,7 +10,7 @@ observed_at: "2026-11-16"
 Host-lokale Orientierung nach Operatorauftrag vom 16. November 2026, keine
 zweite Systemkarte. Die kuratierte Rollenzuordnung steht in
 `scripts/generate_nixos_program_inventory.py` (`APPS`); Beobachtungen stehen im
-[NixOS-Report](nixos-program-inventory.md). Ein Rolleneintrag beweist weder
+NixOS-Report unter `~/.local/state/heim-pc/inventory/nixos-program-inventory.md`. Ein Rolleneintrag beweist weder
 Installation noch laufenden Dienst. Kostenlose Selbsthosting-Nutzung bedeutet
 hier keine automatische Cloud- oder API-Freigabe.
 
@@ -26,7 +26,7 @@ hier keine automatische Cloud- oder API-Freigabe.
 | ntfy Heimberry | Benachrichtigungen | Heimberry, **kein Heim-PC-Dienst** | Heimberry: `/etc/systemd/system/ntfy.service.d/10-heimgewebe.conf`; kein Heim-PC-Dienst |
 | MCP Inspector | MCP-Werkzeuge interaktiv prüfen | on-demand CLI, kein Daemon | `~/.local/bin/mcp-inspector` und `~/.local/opt/heimgewebe-mcp-inspector`; Generator prüft nur `mcp-inspector --version`, kein `npx`-Download |
 
-Die Quellpfadklassen stammen aus dem Operatorauftrag; Konfigurationsinhalte
+Die Quellpfadklassen wurden an installierten Dienstdefinitionen verifiziert; Konfigurationsinhalte
 werden weder gelesen noch kopiert. Bei abweichenden Unit-/Containernamen muss
 die Allowlist anhand der zuständigen lokalen Authority gezielt angepasst werden.
 `is-enabled` beweist keine aktuelle Aktivität; Containerexistenz keine Health.

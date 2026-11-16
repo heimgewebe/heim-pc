@@ -184,7 +184,7 @@ def render(snapshot):
              "`unavailable`: Befehl fehlt. `error`: Abfrage/Format fehlgeschlagen; keine leere Installation ableiten.",
              "", "Erneuern (ohne Installation/Downloads): `python3 scripts/generate_nixos_program_inventory.py`.",
              "JSON: [nixos-program-inventory.v1.json](nixos-program-inventory.v1.json). "
-             "Rollen/Restore: [selfhosted-apps.md](selfhosted-apps.md).", "",
+             "App-Rollen/Restore: versionierte Heim-PC-Notiz unter docs/heim-pc-apps.md.", "",
              "Die [Juli-Programme](program-inventory-summary.md) und das [Softwareinventar](software-inventory.md) "
              "bleiben HISTORISCHE Pop!_OS-Quellen vom 9. Juli 2026.", ""]
     observations = [(key, snapshot[key]) for key in ("os", "desktop_apps", "nix_profiles", "flatpak", "podman")]
@@ -211,7 +211,7 @@ def write_outputs(snapshot, directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "runtime")
+    parser.add_argument("--output-dir", type=Path, default=Path.home() / ".local/state/heim-pc/inventory")
     args = parser.parse_args()
     write_outputs(collect(), args.output_dir)
 
