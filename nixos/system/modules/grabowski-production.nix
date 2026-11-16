@@ -407,7 +407,7 @@ in
       description = "Periodically clean merged, recoverable Grabowski worktrees";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnCalendar = "hourly";
+        OnCalendar = "*-*-* 00/2:00:00";
         RandomizedDelaySec = "5min";
         Persistent = true;
         Unit = "grabowski-worktree-hygiene.service";
