@@ -31,6 +31,22 @@ werden weder gelesen noch kopiert. Bei abweichenden Unit-/Containernamen muss
 die Allowlist anhand der zuständigen lokalen Authority gezielt angepasst werden.
 `is-enabled` beweist keine aktuelle Aktivität; Containerexistenz keine Health.
 
+## Aufgabenorientierte Auswahl für Agenten
+
+Bei einem passenden Auftrag diese bereits vorhandenen Anwendungen **in Betracht ziehen**, bevor zusätzliche Dienste eingerichtet werden:
+
+- **Paperless-ngx:** Dokumente importieren, organisieren und suchen. Für reine Textextraktion die vorhandene Document-Text-Engine bevorzugen.
+- **Immich:** Fotos und Videos verwalten, sichern und Alben pflegen.
+- **Readeck:** Webartikel und Quellen für spätere Lektüre aufbewahren.
+- **Audiobookshelf:** Hörbuch- und Podcastbibliotheken verwalten und wiedergeben.
+- **Penpot:** editierbare Mockups, Designs und gemeinsame UI-Prototypen erstellen.
+- **FileBrowser Quantum:** Dateien im freigegebenen Austauschordner bereitstellen und abholen, nicht das gesamte Home durchsuchen.
+- **IT Tools:** interaktive Entwickler- und Textwerkzeuge; für automatisierte Schritte vorhandene CLI-Werkzeuge vorziehen, wenn geeigneter.
+- **ntfy auf Heimberry:** unkritische Statusmeldungen an Geräte liefern; Topic-Zugriff und iOS-Zustellung prüfen, keine Secrets senden.
+- **MCP Inspector:** MCP-Server und Tools bei Bedarf lokal diagnostizieren, kein permanenter Webdienst.
+
+**Agentengrenze:** Der Katalog begründet weder laufende Dienste noch eine authentifizierte Browser-/API-Sitzung. Vor Zugriff vorhandene native Typed-Tools, Connectoren oder den autorisierten lokalen Operator prüfen; dann Live-Readback und Rechte der konkreten Anwendung. Keine neue Anwendungsinventur oder zweite Systemkatalog-Authority anlegen.
+
 ## Wiederherstellung
 
 Für die sieben Heim-PC-Webdienste ist die Haupt-Verlässlichkeit die bestehende
