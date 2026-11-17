@@ -14,6 +14,10 @@ Chronik (`~/repos/chronik`) ist das append-only Gedächtnis: `agent.ledger` (Gra
 
 Dauerhafte, belegte Erkenntnisse am Ende einer Aufgabe über `tools/knowledge_ledger.py capture` erfassen (Vertrag: `~/repos/chronik/docs/chronik/knowledge-ledger-v1.md`). Keine Routine, keine Vermutungen ohne Beleg, keine Chats, Logs oder Geheimnisse; `implemented` ist nicht `production_verified`.
 
+## Vorhandene Heim-PC-Programme
+
+Bei einer Aufgabe, für die eine lokal installierte Anwendung nützlich sein könnte, die kuratierte Übersicht `~/repos/heim-pc/docs/heim-pc-apps.md` verwenden; weitere Programme über den aktuellen lokalen Inventarbericht `~/.local/state/heim-pc/inventory/nixos-program-inventory.md` suchen. Native typed Werkzeuge bevorzugen, App-Readiness und Auth vor Nutzung prüfen und keinen Parallelservice nur wegen fehlender Erinnerung aufbauen. Für reine Repository-Codearbeit nicht pauschal laden.
+
 ## Systemweite Orientierung
 
 Konsultiere den kanonischen Systemkatalog unter `/home/alex/repos/systemkatalog`, wenn eine Frage:

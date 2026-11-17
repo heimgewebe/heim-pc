@@ -12,6 +12,10 @@ Lies zuerst:
 
 Für ChatGPT über Grabowski beginnt der Live-Check mit `grabowski_status(view="evidence")`, `grabowski_agent_bootstrap()` und `grabowski_context(profile="concise")`.
 
+## Vorhandene Heim-PC-Apps und Werkzeuge
+
+Bei Aufgaben zu Dokumenten, Fotos, Artikeln, Hörbüchern, Design, Dateiaustausch, Benachrichtigungen oder MCP-Diagnose vor Neuinstallation die vorhandenen Optionen in `~/repos/heim-pc/docs/heim-pc-apps.md` nach Zweck auswählen. Andere Desktop- und CLI-Programme stehen im zeitgebundenen lokalen Bericht `~/.local/state/heim-pc/inventory/nixos-program-inventory.md` (bei Bedarf mit `python3 ~/repos/heim-pc/scripts/generate_nixos_program_inventory.py` erneuern). Eine passende native Grabowski-/Connector-Oberfläche hat Vorrang; tatsächliche Dienstverfügbarkeit, Authentifizierung, Berechtigung und Funktion vor Anwendung prüfen. Diese Dokumentation ist keine Tool-, Login- oder Dateneinsichtsfreigabe.
+
 ## Chronik: Gedächtnis zuerst
 
 Chronik (`~/repos/chronik`) ist das append-only Gedächtnis: `agent.ledger` (Grabowski-Laufereignisse) und `knowledge.ledger` (bestätigte Ursachen, Reparaturen, Entscheidungen, Widerlegungen, offene Probleme). Vor nichttrivialer Heimgewebe-Arbeit, Statusfragen oder der Fortsetzung einer Diagnose zuerst gezielt dort nachschlagen (Grabowski: `grabowski_agent_bootstrap(repo=...)` liefert `chronik_first` inklusive `knowledge`; lokal: `tools/knowledge_ledger.py search` der installierten Release, siehe `appendOnlyHistory` im Host-Vertrag). Danach den Ist-Zustand frisch über Git, GitHub und Runtime prüfen; Historie ist keine Live-Wahrheit und keine Retry-Autorität.

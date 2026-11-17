@@ -306,6 +306,64 @@ class OperatorEntryTests(unittest.TestCase):
             contract["doesNotEstablish"],
         )
 
+    def test_host_applications_are_discoverable_without_new_execution_authority(self) -> None:
+        contract = json.loads(
+            (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+        )
+        apps = contract["truthSources"]["hostApplications"]
+        self.assertEqual(apps["scope"], "host_local_software_selection")
+        self.assertEqual(apps["authority"], "orientation_only")
+        self.assertEqual(
+            apps["guide"], "${HOME}/repos/heim-pc/docs/heim-pc-apps.md"
+        )
+        self.assertEqual(
+            apps["observedInventory"],
+            "${HOME}/.local/state/heim-pc/inventory/nixos-program-inventory.v1.json",
+        )
+        self.assertEqual(
+            apps["refreshArgv"],
+            ["python3", "${HOME}/repos/heim-pc/scripts/generate_nixos_program_inventory.py"],
+        )
+        scope = next(x for x in contract["entrySequence"] if x["id"] == "scope_classification")
+        self.assertEqual(
+            scope["hostApplicationLookup"]["source"], "truthSources.hostApplications"
+        )
+        self.assertEqual(scope["hostApplicationLookup"]["effect"], "read_only_orientation_before_tool_selection")
+        self.assertIn("client_or_agent_authenticated_access", apps["doesNotEstablish"])
+        for pointer in (
+            "config/agents/home-AGENTS.md",
+            "config/agents/repos-root-AGENTS.md",
+            "README.md",
+        ):
+            agent_guide = (ROOT / pointer).read_text(encoding="utf-8")
+            self.assertIn("docs/heim-pc-apps.md", agent_guide)
+        guide = (ROOT / "docs/heim-pc-apps.md").read_text(encoding="utf-8")
+        for app in (
+            "Paperless", "Immich", "Readeck", "Audiobookshelf", "Penpot",
+            "FileBrowser Quantum", "IT Tools", "ntfy", "MCP Inspector"
+        ):
+            self.assertIn(app, guide)
+        self.assertIn("authentifizierte Browser-/API-Sitzung", guide)
+
+    def test_checker_blocks_broken_app_orientation_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            contract = json.loads(
+                (ROOT / "manifest/operator-entry.v1.json").read_text(encoding="utf-8")
+            )
+            contract["truthSources"]["hostApplications"]["guide"] = "/tmp/untrusted"
+            contract["truthSources"]["hostApplications"]["authority"] = "app_executor"
+            next(item for item in contract["entrySequence"] if item["id"] == "scope_classification")["hostApplicationLookup"]["effect"] = "execute_apps"
+            contract_path = tmp_path / "operator-entry.v1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            with patch.object(checker, "CONTRACT_PATH", contract_path):
+                receipt = checker.check(home=tmp_path, require_installed=False)
+            self.assertFalse(receipt["valid"])
+            joined = "\n".join(receipt["errors"])
+            self.assertIn("orientation-only", joined)
+            self.assertIn("canonical host locator", joined)
+            self.assertIn("non-authorizing app catalog", joined)
+
     def test_ai_context_routes_to_operator_entry(self) -> None:
         ai_context = (ROOT / ".ai-context.yml").read_text(encoding="utf-8")
         self.assertIn("role: operator-entry", ai_context)
