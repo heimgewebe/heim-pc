@@ -218,6 +218,13 @@ in
 
   nix.gc.automatic = lib.mkForce false;
 
+  # This obsolete one-shot physical firstboot rollback is still wanted by a
+  # legacy /usr/local/lib/systemd/system/timers.target.wants link. The booted
+  # NixOS root is read-only, so prefer two normal declarative unit masks over
+  # remounting the live system just to remove those old files.
+  systemd.timers."heim-pc-gen39-firstboot-rollback".enable = false;
+  systemd.services."heim-pc-gen39-firstboot-rollback".enable = false;
+
   environment.etc."heim-pc/nix-lifecycle-contract.json".source =
     ../../production/nix-lifecycle-contract-v1.json;
 
