@@ -600,6 +600,46 @@ def check(*, home: Path, require_installed: bool) -> dict[str, Any]:
     if missing_sources:
         errors.append(f"truthSources missing: {', '.join(missing_sources)}")
 
+    host_apps = _require_object(
+        truth_sources.get("hostApplications"), "truthSources.hostApplications", errors
+    )
+    if host_apps.get("scope") != "host_local_software_selection":
+        errors.append("truthSources.hostApplications.scope must remain host-local")
+    if host_apps.get("authority") != "orientation_only":
+        errors.append("truthSources.hostApplications.authority must remain orientation-only")
+    expected_app_paths = {
+        "guide": "${HOME}/repos/heim-pc/docs/heim-pc-apps.md",
+        "observedInventory": "${HOME}/.local/state/heim-pc/inventory/nixos-program-inventory.v1.json",
+    }
+    for field, expected in expected_app_paths.items():
+        _require_host_path(host_apps.get(field), f"truthSources.hostApplications.{field}", errors)
+        if host_apps.get(field) != expected:
+            errors.append(f"truthSources.hostApplications.{field} must name canonical host locator")
+    if host_apps.get("refreshArgv") != [
+        "python3", "${HOME}/repos/heim-pc/scripts/generate_nixos_program_inventory.py"
+    ]:
+        errors.append("truthSources.hostApplications.refreshArgv must use existing inventory generator")
+    signals = host_apps.get("taskSignals")
+    if not isinstance(signals, list) or not signals or any(
+        not isinstance(item, str) or not item.strip() for item in signals
+    ):
+        errors.append("truthSources.hostApplications.taskSignals must be a non-empty string list")
+    limits = host_apps.get("doesNotEstablish")
+    required_limits = {
+        "current_installation_or_health",
+        "client_or_agent_authenticated_access",
+        "execution_or_secret_access_authority",
+    }
+    if not isinstance(limits, list) or not required_limits.issubset(set(limits)):
+        errors.append("truthSources.hostApplications.doesNotEstablish must preserve authority boundaries")
+    expected_app_lookup = {
+        "source": "truthSources.hostApplications",
+        "when": "host_local_task_may_use_installed_application",
+        "effect": "read_only_orientation_before_tool_selection",
+    }
+    if entry_by_id.get("scope_classification", {}).get("hostApplicationLookup") != expected_app_lookup:
+        errors.append("scope_classification.hostApplicationLookup must use non-authorizing app catalog")
+
     source_policy = _require_object(contract.get("sourcePolicy"), "sourcePolicy", errors)
     excluded_paths = {
         item.get("path")
