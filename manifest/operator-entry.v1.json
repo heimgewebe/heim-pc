@@ -303,7 +303,12 @@
         "host_runtime",
         "task_selection",
         "historical_evidence"
-      ]
+      ],
+      "hostApplicationLookup": {
+        "source": "truthSources.hostApplications",
+        "when": "host_local_task_may_use_installed_application",
+        "effect": "read_only_orientation_before_tool_selection"
+      }
     },
     {
       "id": "native_capability_discovery",
@@ -470,6 +475,35 @@
     "visualProjection": {
       "repository": "${HOME}/repos/schauwerk",
       "authority": "projection_only"
+    },
+    "hostApplications": {
+      "scope": "host_local_software_selection",
+      "authority": "orientation_only",
+      "guide": "${HOME}/repos/heim-pc/docs/heim-pc-apps.md",
+      "observedInventory": "${HOME}/.local/state/heim-pc/inventory/nixos-program-inventory.v1.json",
+      "refreshArgv": [
+        "python3",
+        "${HOME}/repos/heim-pc/scripts/generate_nixos_program_inventory.py"
+      ],
+      "taskSignals": [
+        "document_management",
+        "personal_photo_management",
+        "web_reading",
+        "audiobooks",
+        "design_prototyping",
+        "file_exchange",
+        "notifications",
+        "developer_utilities",
+        "mcp_diagnostics"
+      ],
+      "selectionRule": "For relevant host-local tasks consult the app guide and observed inventory, prefer existing typed authorities, verify actual service/CLI readiness and permitted authenticated access, and reuse before installing a replacement.",
+      "doesNotEstablish": [
+        "current_installation_or_health",
+        "client_or_agent_authenticated_access",
+        "execution_or_secret_access_authority",
+        "public_network_access",
+        "cloud_or_metered_use_authorization"
+      ]
     }
   },
   "sourcePolicy": {
