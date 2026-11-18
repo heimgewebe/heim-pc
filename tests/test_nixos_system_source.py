@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-ROOT_LOCK_SHA256 = "e9d9e3d30be8c9f88740a946210dd9ad775e1fac60d9315b48d46332114e94d3"
+ROOT_LOCK_SHA256 = "594231545410ccbd05838f279bff11feece3c4c7f94f7d2b5781dbfe56758107"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -55,7 +55,7 @@ class T(unittest.TestCase):
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
         self.assertIn(
-            'nixer.url = "github:heimgewebe/nixer/fc2f098df0a1e9420dc1ca184dec98bc90b5ae21";',
+            'nixer.url = "github:heimgewebe/nixer/b229f81de906cc28b3e9cf8d29bf757232b6ed97";',
             nested,
         )
 
@@ -66,8 +66,8 @@ class T(unittest.TestCase):
         root_lock = json.loads((ROOT / "flake.lock").read_text())
         system_lock = json.loads((SOURCE / "flake.lock").read_text())
         pin = trust["inputs"]["nixer"]
-        nar = "sha256-GwSgYtCLCOPKw3tHaItQ+MkuEKKHAtcI7QbdbW3Q+Vo="
-        rev = "fc2f098df0a1e9420dc1ca184dec98bc90b5ae21"
+        nar = "sha256-DifPUlAmQ7/dgzQVwozPiyy9xjO7VqpSLEuRv3pyBl0="
+        rev = "b229f81de906cc28b3e9cf8d29bf757232b6ed97"
         self.assertEqual(pin["required_nar_hash"], nar)
         self.assertEqual(pin["required_revision"], rev)
         self.assertRegex(nar, r"^sha256-[A-Za-z0-9+/]{43}=$")
@@ -1071,7 +1071,7 @@ class T(unittest.TestCase):
         self.assertEqual(trust["nix"]["experimental_features"], ["nix-command", "flakes"])
         self.assertEqual(
             trust["inputs"]["nixer"]["required_revision"],
-            "fc2f098df0a1e9420dc1ca184dec98bc90b5ae21",
+            "b229f81de906cc28b3e9cf8d29bf757232b6ed97",
         )
         self.assertTrue(trust["inputs"]["nixer"]["owns_runtime_nixpkgs"])
         self.assertIn("nix.settings", trust_module)
