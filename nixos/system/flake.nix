@@ -449,7 +449,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "6585f50a-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+                  "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5";
               };
             })
           ];
@@ -555,8 +555,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "6585f50a-nixos-lock264e747ad05a-contracte4854ca1a9f5";
-            revision = "6585f50a5ee2e99389215c9606c3c6738f733341";
+            release = "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+            revision = "ab3c6dd5f4836e3150ce559dc03203169e754862";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -1051,7 +1051,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "6585f50a-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+            "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.system.switch.enable;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
@@ -1107,7 +1107,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "6585f50a-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+            release = "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
@@ -1146,7 +1146,7 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "6585f50a5ee2e99389215c9606c3c6738f733341";
+            == "ab3c6dd5f4836e3150ce559dc03203169e754862";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
