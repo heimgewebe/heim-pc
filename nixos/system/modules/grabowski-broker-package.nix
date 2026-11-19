@@ -2,16 +2,16 @@
 let
   # Same protected, verified NixOS-compatible Grabowski Git source as the operator.
   # This publicly verifiable source archive contains no live host credentials.
-  sourceRevision = "e9478481617b7ccfd9c477d964718f8bb4d0f20a";
-  releaseId = "e9478481-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+  sourceRevision = "d29ac4248c97951d7d13fa512ba30e04bc1f0a53";
+  releaseId = "d29ac424-nixos-lock264e747ad05a-contracte4854ca1a9f5";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-9jxjXRFFFOuTULnwW8MbXS2LjbeF5Pah0nbwldEHTYM=";
+    hash = "sha256-ROtuyLkO8S36Pqw2CKv31BtxtZ1XhUe6PV+AB76eHYk=";
   };
 
   # Build the EXISTING root-owned production broker, not a second API.
-  brokerPackage = pkgs.runCommand "grabowski-rootbroker-source-e9478481" {
+  brokerPackage = pkgs.runCommand "grabowski-rootbroker-source-d29ac424" {
     nativeBuildInputs = [ pkgs.makeWrapper pkgs.gnutar pkgs.gzip ];
     passthru = {
       inherit sourceRevision releaseId lockSha256;
