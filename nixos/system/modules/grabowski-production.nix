@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "d29ac424-nixos-lock264e747ad05a-contracte4854ca1a9f5";
-  expectedRevision = "d29ac4248c97951d7d13fa512ba30e04bc1f0a53";
+  expectedReleaseId = "0b371ce0-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+  expectedRevision = "0b371ce0445fa5d71a555507bb11473c57a7a758";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
