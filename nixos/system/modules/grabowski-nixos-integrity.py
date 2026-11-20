@@ -20,10 +20,10 @@ import stat
 import sys
 from typing import Any
 
-PINNED_RELEASE = "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5"
-PINNED_REVISION = "ab3c6dd5f4836e3150ce559dc03203169e754862"
+PINNED_RELEASE = "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb"
+PINNED_REVISION = "e7962c1e25b123c5880bf7cb96d2fcd02f1ff0c0"
 PINNED_LOCK_SHA256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3"
-ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-ab3c6dd5\Z")
+ROOT_RE = re.compile(r"/nix/store/[0-9a-z]{32}-grabowski-operator-e7962c1e\Z")
 REQUIRED_MODULE = "lib/python3.12/site-packages/grabowski_mcp.py"
 MANIFEST_RELATIVE = "share/grabowski/nixos-integrity-manifest.json"
 CONTRACT_RELATIVE = "share/grabowski/config/runtime-entrypoint.json"
@@ -79,8 +79,8 @@ def _contract_entries(contract: dict[str, Any]) -> tuple[dict[str, str], dict[st
             contract.get("source") != "src/grabowski_runtime.py"):
         raise ValueError("unrecognized canonical entrypoint")
     tools = contract.get("expected_tools")
-    if not isinstance(tools, list) or len(tools) != 207 or len(set(tools)) != 207:
-        raise ValueError("207-tool contract absent")
+    if not isinstance(tools, list) or len(tools) != 208 or len(set(tools)) != 208:
+        raise ValueError("208-tool contract absent")
     supporting = contract.get("supporting_sources")
     if not isinstance(supporting, list) or len(supporting) != 134:
         raise ValueError("canonical source mapping incomplete")
@@ -234,7 +234,7 @@ def deployment_metadata(module_path: Path, *, expected_agent_sha256: str) -> dic
 def patch_pinned_module(path: Path) -> None:
     """Adapt only two exact, expected manifest-discovery sites in pinned source.
 
-    The 207-tool implementation, broker policy, tool signatures and signed
+    The 208-tool implementation, broker policy, tool signatures and signed
     connector transport are not altered. Unknown upstream revisions fail build.
     """
     text = path.read_text()
