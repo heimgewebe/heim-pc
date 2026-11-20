@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
-  expectedRevision = "e7962c1e25b123c5880bf7cb96d2fcd02f1ff0c0";
+  expectedReleaseId = "249c1a52-nixos-lock264e747ad05a-contract07fba47985cb";
+  expectedRevision = "249c1a5276346382765a63b5d4201aac8d20508a";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
@@ -99,6 +99,8 @@ in
       "d /home/alex/.local/state/chronik 0700 alex users -"
       "d /home/alex/.local/state/chronik/data 0755 alex users -"
       "d /home/alex/.local/state/grabowski 0700 alex users -"
+      # Retention treats a missing jobs root as an error, even on a fresh host.
+      "d /home/alex/.local/state/grabowski/jobs 0700 alex users -"
       "d /home/alex/.local/state/bureau 0700 alex users -"
       "d /home/alex/repos 0755 alex users -"
       "d /home/alex/grabowski-workspace 0700 alex users -"
@@ -366,9 +368,53 @@ in
         SystemCallArchitectures = "native";
       };
     };
-    # Run only the already-proven worktree-hygiene subroutine.  The combined
-    # job-retention scanner currently returns degraded on protected old jobs;
-    # that unrelated backlog must not disable ordinary Git worktree cleanup.
+    # Archive only completed ordinary jobs with the installed Grabowski
+    # retention contract. DecisionReview evidence stays in the live job root.
+    # The oneshot provisions the receipt leaf first; the packaged periodic
+    # entrypoint provisions the archive leaf before its pinned two-plan check.
+    # This must be activated together with the PR1794-capable operator package.
+    systemd.services."grabowski-runtime-retention" = lib.mkIf admit {
+      description = "Bounded Grabowski completed-job archive retention";
+      wants = [ "grabowski-operator.service" "user@1000.service" ];
+      after = [ "grabowski-operator.service" "user@1000.service" ];
+      path = [ cfg.operatorPackage pkgs.systemd pkgs.coreutils ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        ExecStartPre = "${cfg.operatorPackage}/bin/python3 -I -B ${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py --provision-receipt-root";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${cfg.operatorPackage}/share/grabowski/tools/maintain_runtime_state.py --periodic-apply --minimum-job-age-seconds 86400 --max-archive-jobs 128";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+          "PYTHONDONTWRITEBYTECODE=1"
+        ];
+        TimeoutStartSec = "12min";
+        MemoryMax = "1G";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ReadWritePaths = [ "-/home/alex/.local/state/grabowski" ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-runtime-retention" = lib.mkIf admit {
+      description = "Periodically archive completed Grabowski ordinary jobs";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "hourly";
+        RandomizedDelaySec = "5min";
+        Persistent = true;
+        Unit = "grabowski-runtime-retention.service";
+      };
+    };
+
+    # Keep worktree cleanup independent from job retention. A blocked job
+    # archive must not prevent already-proven safe worktree hygiene.
     systemd.services."grabowski-worktree-hygiene" = lib.mkIf admit {
       description = "Bounded Grabowski worktree archival and cleanup";
       wants = [ "grabowski-operator.service" "network-online.target" ];

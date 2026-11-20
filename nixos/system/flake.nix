@@ -449,7 +449,7 @@
                   packageOnly = true;
                 };
                 releaseId =
-                  "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
+                  "249c1a52-nixos-lock264e747ad05a-contract07fba47985cb";
               };
             })
           ];
@@ -555,8 +555,8 @@
               inherit pkgs;
               packageOnly = true;
             };
-            release = "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
-            revision = "e7962c1e25b123c5880bf7cb96d2fcd02f1ff0c0";
+            release = "249c1a52-nixos-lock264e747ad05a-contract07fba47985cb";
+            revision = "249c1a5276346382765a63b5d4201aac8d20508a";
             lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
           in
           assert operator.passthru.releaseId == release && broker.passthru.releaseId == release;
@@ -569,6 +569,13 @@
             test -x ${operator}/bin/grabowski-operator
             test -x ${broker}/bin/grabowski-privileged-broker
             test -x ${broker}/bin/grabowski-privileged-request
+            # Bind the new unit's actual packaged executable and CLI flags,
+            # not just the release label and immutable Python module list.
+            test -s ${operator}/share/grabowski/tools/maintain_runtime_state.py
+            ${operator}/bin/python3 -I -B ${operator}/share/grabowski/tools/maintain_runtime_state.py --help > "$TMPDIR/grabowski-retention-help"
+            for flag in --provision-receipt-root --periodic-apply --minimum-job-age-seconds --max-archive-jobs; do
+              grep -Fq -- "$flag" "$TMPDIR/grabowski-retention-help"
+            done
             ${broker}/bin/grabowski-privileged-request --help > "$TMPDIR/broker-request-help"
             grep -Fq 'reference_file' "$TMPDIR/broker-request-help"
             test -s ${broker}/libexec/grabowski-privileged-broker.py
@@ -1051,7 +1058,7 @@ PY
           assert cfg.heimPc.grabowskiProduction.operatorPackage.outPath == originalOperator.outPath;
           assert cfg.heimPc.grabowskiProduction.brokerPackage.outPath == originalBroker.outPath;
           assert cfg.heimPc.grabowskiProduction.releaseId ==
-            "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
+            "249c1a52-nixos-lock264e747ad05a-contract07fba47985cb";
           assert cfg.system.configurationRevision == sourceRevision;
           assert cfg.system.switch.enable;
           assert cfg.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";
@@ -1107,7 +1114,7 @@ PY
         # operator/broker artifacts fail before enabling either service.
         grabowski-production-unit-contract =
           let
-            release = "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
+            release = "249c1a52-nixos-lock264e747ad05a-contract07fba47985cb";
             inactive = self.nixosConfigurations.heim-pc-seagate-primary-candidate.config;
             candidatePkgs = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.pkgs;
             pinnedOperator = import ./modules/grabowski-operator-package.nix { pkgs = candidatePkgs; };
@@ -1139,6 +1146,9 @@ PY
             policy = policyUnit.serviceConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            retentionUnit = proof.systemd.services."grabowski-runtime-retention";
+            retention = retentionUnit.serviceConfig;
+            retentionTimer = proof.systemd.timers."grabowski-runtime-retention";
             rootResticCandidate = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             rootResticProof = rootResticCandidate.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
@@ -1146,13 +1156,32 @@ PY
           assert !inactive.heimPc.grabowskiProduction.enable;
           assert inactive.heimPc.grabowskiProduction.operatorPackage == null;
           assert inactive.heimPc.grabowskiProduction.brokerPackage.passthru.sourceRevision
-            == "e7962c1e25b123c5880bf7cb96d2fcd02f1ff0c0";
+            == "249c1a5276346382765a63b5d4201aac8d20508a";
           assert !(builtins.tryEval noPackages.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongOperator.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongBroker.system.build.toplevel.drvPath).success;
           assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;
           assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
+          assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.services);
+          assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.timers);
+          assert retention.User == "alex" && retention.Group == "users";
+          assert retention.Type == "oneshot" && retention.NoNewPrivileges;
+          assert retention.ProtectHome == "read-only" && retention.ProtectSystem == "strict";
+          assert retention.ReadWritePaths == [ "-/home/alex/.local/state/grabowski" ];
+          assert retention.ExecStartPre ==
+            "${pinnedOperator}/bin/python3 -I -B ${pinnedOperator}/share/grabowski/tools/maintain_runtime_state.py --provision-receipt-root";
+          assert retention.ExecStart ==
+            "${pinnedOperator}/bin/python3 -I -B ${pinnedOperator}/share/grabowski/tools/maintain_runtime_state.py --periodic-apply --minimum-job-age-seconds 86400 --max-archive-jobs 128";
+          assert builtins.elem "grabowski-operator.service" retentionUnit.after;
+          assert builtins.elem "user@1000.service" retentionUnit.after;
+          assert retentionTimer.wantedBy == [ "timers.target" ];
+          assert retentionTimer.timerConfig.OnCalendar == "hourly";
+          assert retentionTimer.timerConfig.Unit == "grabowski-runtime-retention.service";
+          assert builtins.elem "d /home/alex/.local/state/grabowski 0700 alex users -"
+            proof.systemd.tmpfiles.rules;
+          assert builtins.elem "d /home/alex/.local/state/grabowski/jobs 0700 alex users -"
+            proof.systemd.tmpfiles.rules;
           assert proof.heimPc.grabowskiProduction.releaseId == release;
           assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
