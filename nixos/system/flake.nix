@@ -1180,6 +1180,8 @@ PY
           assert retentionTimer.timerConfig.Unit == "grabowski-runtime-retention.service";
           assert builtins.elem "d /home/alex/.local/state/grabowski 0700 alex users -"
             proof.systemd.tmpfiles.rules;
+          assert builtins.elem "d /home/alex/.local/state/grabowski/jobs 0700 alex users -"
+            proof.systemd.tmpfiles.rules;
           assert proof.heimPc.grabowskiProduction.releaseId == release;
           assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";

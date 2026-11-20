@@ -99,6 +99,8 @@ in
       "d /home/alex/.local/state/chronik 0700 alex users -"
       "d /home/alex/.local/state/chronik/data 0755 alex users -"
       "d /home/alex/.local/state/grabowski 0700 alex users -"
+      # Retention treats a missing jobs root as an error, even on a fresh host.
+      "d /home/alex/.local/state/grabowski/jobs 0700 alex users -"
       "d /home/alex/.local/state/bureau 0700 alex users -"
       "d /home/alex/repos 0755 alex users -"
       "d /home/alex/grabowski-workspace 0700 alex users -"

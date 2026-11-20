@@ -388,6 +388,8 @@ pkgs.testers.runNixOSTest {
         # ProtectHome, not a bypass through the developer checkout.
         machine.succeed("systemctl is-active grabowski-runtime-retention.timer")
         machine.succeed("test -d /home/alex/.local/state/grabowski")
+        machine.succeed("test $(stat -c %a /home/alex/.local/state/grabowski/jobs) = 700")
+        machine.succeed("test $(stat -c %U /home/alex/.local/state/grabowski/jobs) = alex")
         machine.succeed("systemctl start grabowski-runtime-retention.service")
         machine.succeed("test $(systemctl show -P Result grabowski-runtime-retention.service) = success")
         machine.succeed("test $(systemctl show -P ExecMainStatus grabowski-runtime-retention.service) = 0")
