@@ -1,0 +1,14 @@
+[Unit]
+Description=Heimgewebe Music Assistant Sendspin output (MOTU M2 / PipeWire)
+Wants=pipewire-pulse.service heimgewebe-music-assistant.service
+After=pipewire-pulse.service heimgewebe-music-assistant.service
+ConditionPathExists=/dev/snd/by-id/usb-MOTU_M2_M20000062566-00
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/home/alex/.local/state/heim-pc/nabu-portaudio-gcroot/lib
+ExecStartPre=/run/current-system/sw/bin/bash -c "until /run/current-system/sw/bin/test -e /dev/snd/by-id/usb-MOTU_M2_M20000062566-00 && /home/alex/.nix-profile/bin/pactl list short sinks | /run/current-system/sw/bin/grep -Fq alsa_output.usb-MOTU_M2_M20000062566-00.HiFi__Line__sink; do /run/current-system/sw/bin/sleep 5; done"
+ExecStart=/home/alex/.local/share/heimgewebe/sendspin/bin/sendspin daemon --url ws://127.0.0.1:8927/sendspin --name Nabu-Musik-MOTU --audio-device pipewire --hardware-volume false --disable-mpris --settings-dir /home/alex/.local/share/heimgewebe/sendspin/state
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=90s
