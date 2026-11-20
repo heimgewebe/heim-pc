@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "ab3c6dd5f4836e3150ce559dc03203169e754862";
-  releaseId = "ab3c6dd5-nixos-lock264e747ad05a-contracte4854ca1a9f5";
+  sourceRevision = "e7962c1e25b123c5880bf7cb96d2fcd02f1ff0c0";
+  releaseId = "e7962c1e-nixos-lock264e747ad05a-contract07fba47985cb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-fa2W/aSaeSm6FFg9mbWK7CaNITTLP8D4MkjbRMu2Ky8=";
+    hash = "sha256-Xq2YhujjAqCAmAfzG4y/c+BeGiPMzhqLM3u/FA1CkNc=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -41,7 +41,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "ab3c6dd5";
+  version = "e7962c1e";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -78,7 +78,7 @@ pkgs.stdenvNoCC.mkDerivation {
     export GRABOWSKI_NIXOS_GIT_BIN="$out/bin/git"
     export GRABOWSKI_NIXOS_GH_BIN="$out/bin/gh"
 
-    # Reproduce the ORIGINAL canonical 207-tool deployment entrypoint.
+    # Reproduce the ORIGINAL canonical 208-tool deployment entrypoint.
     # The source file name differs from the Python module name: the public
     # runtime-entrypoint.json intentionally maps src/grabowski_runtime.py to
     # grabowski_operator and src/grabowski_operator.py to
@@ -105,7 +105,7 @@ if not (
 ):
     raise SystemExit("unexpected upstream canonical runtime entrypoint")
 expected = contract.get("expected_tools")
-if not (isinstance(expected, list) and len(expected) == 207
+if not (isinstance(expected, list) and len(expected) == 208
         and len(set(expected)) == len(expected)):
     raise SystemExit("canonical runtime tool contract changed")
 supporting = contract.get("supporting_sources")
@@ -144,7 +144,7 @@ for entry in entries:
         content = content.replace("/usr/bin/git", os.environ["GRABOWSKI_NIXOS_GIT_BIN"])
         content = content.replace("/usr/bin/gh", os.environ["GRABOWSKI_NIXOS_GH_BIN"])
         dst.write_text(content)
-    # The copied full upstream runtime is still the canonical 207-tool
+    # The copied full upstream runtime is still the canonical 208-tool
     # entrypoint. Repair only Nix-specific argv0 and catalog discovery.
     if original == "src/grabowski_runtime.py":
         content = dst.read_text()
