@@ -383,6 +383,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test $(stat -c %U /run/grabowski/privileged-broker.sock) = root")
         machine.succeed("test $(stat -c %G /run/grabowski/privileged-broker.sock) = grabowski")
         machine.fail("id -nG alex | grep -qw grabowski")
+    with subtest("packaged Grabowski job retention runs under real systemd sandbox"):
+        # Real VM: test the pinned executable and root provisioning under
+        # ProtectHome, not a bypass through the developer checkout.
+        machine.succeed("systemctl is-active grabowski-runtime-retention.timer")
+        machine.succeed("test -d /home/alex/.local/state/grabowski")
+        machine.succeed("systemctl start grabowski-runtime-retention.service")
+        machine.succeed("test $(systemctl show -P Result grabowski-runtime-retention.service) = success")
+        machine.succeed("test $(systemctl show -P ExecMainStatus grabowski-runtime-retention.service) = 0")
+        machine.succeed("test -d /home/alex/.local/state/grabowski/job-archive")
     with subtest("completed systemd unit has numeric unix invocation timestamps"):
         # Real guest-systemd contract for the recovery probe's --timestamp=unix
         # parser: a mocked systemctl show output alone would miss version drift.

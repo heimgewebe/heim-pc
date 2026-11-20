@@ -569,6 +569,13 @@
             test -x ${operator}/bin/grabowski-operator
             test -x ${broker}/bin/grabowski-privileged-broker
             test -x ${broker}/bin/grabowski-privileged-request
+            # Bind the new unit's actual packaged executable and CLI flags,
+            # not just the release label and immutable Python module list.
+            test -s ${operator}/share/grabowski/tools/maintain_runtime_state.py
+            ${operator}/bin/python3 -I -B ${operator}/share/grabowski/tools/maintain_runtime_state.py --help > "$TMPDIR/grabowski-retention-help"
+            for flag in --provision-receipt-root --periodic-apply --minimum-job-age-seconds --max-archive-jobs; do
+              grep -Fq -- "$flag" "$TMPDIR/grabowski-retention-help"
+            done
             ${broker}/bin/grabowski-privileged-request --help > "$TMPDIR/broker-request-help"
             grep -Fq 'reference_file' "$TMPDIR/broker-request-help"
             test -s ${broker}/libexec/grabowski-privileged-broker.py
@@ -1139,6 +1146,9 @@ PY
             policy = policyUnit.serviceConfig;
             broker = proof.systemd.services."grabowski-privileged-broker@".serviceConfig;
             operator = proof.systemd.services.grabowski-operator.serviceConfig;
+            retentionUnit = proof.systemd.services."grabowski-runtime-retention";
+            retention = retentionUnit.serviceConfig;
+            retentionTimer = proof.systemd.timers."grabowski-runtime-retention";
             rootResticCandidate = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             rootResticProof = rootResticCandidate.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
@@ -1153,6 +1163,23 @@ PY
           assert !(builtins.tryEval wrongRelease.system.build.toplevel.drvPath).success;
           assert !(builtins.hasAttr "grabowski-operator" inactive.systemd.services);
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
+          assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.services);
+          assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.timers);
+          assert retention.User == "alex" && retention.Group == "users";
+          assert retention.Type == "oneshot" && retention.NoNewPrivileges;
+          assert retention.ProtectHome == "read-only" && retention.ProtectSystem == "strict";
+          assert retention.ReadWritePaths == [ "-/home/alex/.local/state/grabowski" ];
+          assert retention.ExecStartPre ==
+            "${pinnedOperator}/bin/python3 -I -B ${pinnedOperator}/share/grabowski/tools/maintain_runtime_state.py --provision-receipt-root";
+          assert retention.ExecStart ==
+            "${pinnedOperator}/bin/python3 -I -B ${pinnedOperator}/share/grabowski/tools/maintain_runtime_state.py --periodic-apply --minimum-job-age-seconds 86400 --max-archive-jobs 128";
+          assert builtins.elem "grabowski-operator.service" retentionUnit.after;
+          assert builtins.elem "user@1000.service" retentionUnit.after;
+          assert retentionTimer.wantedBy == [ "timers.target" ];
+          assert retentionTimer.timerConfig.OnCalendar == "hourly";
+          assert retentionTimer.timerConfig.Unit == "grabowski-runtime-retention.service";
+          assert builtins.elem "d /home/alex/.local/state/grabowski 0700 alex users -"
+            proof.systemd.tmpfiles.rules;
           assert proof.heimPc.grabowskiProduction.releaseId == release;
           assert proof.heimPc.grabowskiProduction.operatorPackage.outPath == pinnedOperator.outPath;
           assert sock.ListenStream == "/run/grabowski/privileged-broker.sock";
