@@ -168,8 +168,13 @@ def _restore_digest(snapshot_id: str) -> str:
         return restored_sha
 
 
-def _journal_backup_run() -> tuple[str, int, int, int, int]:
-    """Recover trusted backup success after systemd garbage-collects oneshot state."""
+def _journal_backup_run(*, allow_pending: bool = False) -> tuple[str, int, int, int, int]:
+    """Recover the latest completed backup from trusted journal evidence.
+
+    Only the final recovery recheck may tolerate a later backup invocation
+    which has started but has not yet saved a new snapshot. Initial admission
+    still requires a completed systemd backup via _backup_timer_ready.
+    """
     service = "restic-backups-heim-pc.service"
 
     def journal_rows(selector: str) -> list[dict[str, object]]:
@@ -210,9 +215,37 @@ def _journal_backup_run() -> tuple[str, int, int, int, int]:
                 or not isinstance(mono, str) or not re.fullmatch(r"[0-9]{1,20}", mono)):
             raise RuntimeError("native Restic journal timestamp identity invalid")
         timeline.append((kind, boot, int(real), int(mono)))
+    pending = None
+    if allow_pending and timeline and timeline[-1][0] == "start":
+        pending = timeline.pop()
     if len(timeline) < 2 or [item[0] for item in timeline[-2:]] != ["start", "finish"]:
         raise RuntimeError("native Restic journal has no latest successful backup run")
     started, finished = timeline[-2:]
+    if pending is not None:
+        if (pending[2] <= finished[2]
+                or pending[1] == finished[1] and pending[3] <= finished[3]):
+            raise RuntimeError("native Restic pending backup interval is invalid")
+        fields = ("LoadState", "ActiveState", "Result", "ExecMainCode",
+                  "ExecMainStatus", "InvocationID", "ExecMainStartTimestamp")
+        output = _command([
+            "systemctl", "--timestamp=unix", "show",
+            *[part for key in fields for part in ("-p", key)], service,
+        ])
+        values: dict[str, str] = {}
+        for line in output.splitlines():
+            key, sep, value = line.partition("=")
+            if not sep or key not in fields or key in values:
+                raise RuntimeError("native Restic pending unit state is ambiguous")
+            values[key] = value
+        start = values.get("ExecMainStartTimestamp", "")
+        if (set(values) != set(fields) or values["LoadState"] != "loaded"
+                or values["ActiveState"] != "activating"
+                or values["Result"] != "success"
+                or values["ExecMainCode"] != "0" or values["ExecMainStatus"] != "0"
+                or re.fullmatch(r"[0-9a-f]{32}", values["InvocationID"]) is None
+                or re.fullmatch(r"@[0-9]+", start) is None
+                or abs(int(start[1:]) * 1_000_000 - pending[2]) > 3_000_000):
+            raise RuntimeError("native Restic pending backup has no trusted active invocation")
     if (started[1] != finished[1] or not started[2] < finished[2]
             or not started[3] < finished[3]
             or not 0 <= int(time.time()) - finished[2] // 1_000_000 <= MAX_AGE_SECONDS):
@@ -221,8 +254,15 @@ def _journal_backup_run() -> tuple[str, int, int, int, int]:
     for row in journal_rows("_SYSTEMD_UNIT=" + service):
         message = row.get("MESSAGE")
         if (not isinstance(message, str)
-                or re.fullmatch(r"snapshot [0-9a-f]{8,64} saved", message) is None
-                or row.get("_BOOT_ID") != started[1]):
+                or re.fullmatch(r"snapshot [0-9a-f]{8,64} saved", message) is None):
+            continue
+        if pending is not None and row.get("_BOOT_ID") == pending[1]:
+            stamp = row.get("__REALTIME_TIMESTAMP")
+            if not isinstance(stamp, str) or re.fullmatch(r"[0-9]{1,20}", stamp) is None:
+                raise RuntimeError("native Restic newer snapshot has invalid journal time")
+            if int(stamp) > finished[2]:
+                raise RuntimeError("native Restic newer snapshot saved during recovery")
+        if row.get("_BOOT_ID") != started[1]:
             continue
         real = row.get("__REALTIME_TIMESTAMP")
         mono = row.get("__MONOTONIC_TIMESTAMP")
@@ -356,7 +396,28 @@ def _snapshot_for_backup_run(
 
 
 def _require_backup_run_unchanged(backup_run: tuple[str, int, int, int, int]) -> None:
-    if _backup_timer_ready() != backup_run:
+    # Preserve the existing direct completed-unit check. Only when a newer
+    # scheduled backup is still activating may the trusted journal prove that
+    # the previously pinned successful snapshot remains the latest completed.
+    try:
+        current = _backup_timer_ready()
+    except RuntimeError as exc:
+        if str(exc) != "native Restic system backup service has not succeeded":
+            raise
+        manager = _journal_backup_run(allow_pending=True)
+        # A multi-ExecStart service reports ExecMain* for its final command;
+        # PID1's Starting/Finished markers bound the whole service. Their
+        # timestamps cannot be tuple-equal. Require the *same* trusted
+        # invocation and both main-process intervals inside PID1's interval.
+        # UTC seconds are rounded; monotonic microseconds have full precision.
+        if (manager[0] != backup_run[0]
+                or not manager[1] - 2 <= backup_run[1] <= backup_run[2] <= manager[2] + 2
+                or not manager[3] <= backup_run[3] <= backup_run[4] <= manager[4]):
+            raise RuntimeError(
+                "native Restic backup service invocation changed during recovery"
+            ) from exc
+        return
+    if current != backup_run:
         raise RuntimeError("native Restic backup service invocation changed during recovery")
 
 
