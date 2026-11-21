@@ -384,6 +384,11 @@ in
       path = [ cfg.operatorPackage pkgs.systemd pkgs.coreutils ];
       serviceConfig = {
         Type = "oneshot";
+        # The retention CLI uses exit 2 for audited partial completion when
+        # unsafe/active jobs remain untouched. Preserve exact blockers in its
+        # receipt without marking the whole host failed after safe archives.
+        # All other nonzero exit codes still fail this unit.
+        SuccessExitStatus = "2";
         User = "alex";
         Group = "users";
         WorkingDirectory = "/home/alex";

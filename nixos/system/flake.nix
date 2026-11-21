@@ -1167,6 +1167,7 @@ PY
           assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.timers);
           assert retention.User == "alex" && retention.Group == "users";
           assert retention.Type == "oneshot" && retention.NoNewPrivileges;
+          assert retention.SuccessExitStatus == "2";
           assert retention.ProtectHome == "read-only" && retention.ProtectSystem == "strict";
           assert retention.ReadWritePaths == [ "-/home/alex/.local/state/grabowski" ];
           assert retention.ExecStartPre ==
