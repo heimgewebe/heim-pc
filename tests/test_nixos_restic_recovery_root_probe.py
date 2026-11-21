@@ -340,12 +340,80 @@ class RootOwnedResticProbeTests(unittest.TestCase):
 
     def test_recovery_rejects_changed_systemd_invocation_before_publishing(self) -> None:
         expected = ("a" * 32, 100, 200, 100000, 300000)
-        with patch.object(probe, "_backup_timer_ready", return_value=expected):
+        with patch.object(probe, "_backup_timer_ready", return_value=expected), \
+                patch.object(probe, "_journal_backup_run") as journal:
             probe._require_backup_run_unchanged(expected)
+            journal.assert_not_called()  # unchanged completed service: normal path
         with patch.object(probe, "_backup_timer_ready",
                           return_value=("b" * 32, 100, 200, 100000, 300000)):
             with self.assertRaisesRegex(RuntimeError, "invocation changed"):
                 probe._require_backup_run_unchanged(expected)
+        with patch.object(probe, "_backup_timer_ready", side_effect=RuntimeError(
+                "native Restic system backup service has not succeeded")), \
+                patch.object(probe, "_journal_backup_run", return_value=expected) as journal:
+            probe._require_backup_run_unchanged(expected)
+            journal.assert_called_once_with(allow_pending=True)
+        with patch.object(probe, "_backup_timer_ready", side_effect=RuntimeError(
+                "backup timer is disabled")), \
+                patch.object(probe, "_journal_backup_run") as journal:
+            with self.assertRaisesRegex(RuntimeError, "timer is disabled"):
+                probe._require_backup_run_unchanged(expected)
+            journal.assert_not_called()
+
+    def test_pending_new_backup_does_not_invalidate_proven_last_completed(self) -> None:
+        # The scheduled backup starts *during* a 19 minute root Restic check.
+        # It waits for the old proof's exclusive Restic repository lock, so
+        # there is no newer completed snapshot at root publication.
+        now = int(probe.time.time())
+        unit = "restic-backups-heim-pc.service"
+        boot = "a" * 32
+        prior = "b" * 32
+        running = "c" * 32
+        start_us = (now - 1200) * 1_000_000
+        finish_us = (now - 900) * 1_000_000
+        pending_us = (now - 300) * 1_000_000
+        def manager(message: str, marker: str, when: int, mono: int) -> dict:
+            return {"_PID": "1", "_SYSTEMD_UNIT": "init.scope",
+                    "UNIT": unit, "MESSAGE": message, "MESSAGE_ID": marker,
+                    "_BOOT_ID": boot, "__REALTIME_TIMESTAMP": str(when),
+                    "__MONOTONIC_TIMESTAMP": str(mono)}
+        start_marker = "7d4958e842da4a758f6c1cdc7b36dcc5"
+        finish_marker = "39f53479d3a045ac8e11786248231fbf"
+        start = manager("Starting " + unit + "...", start_marker, start_us, 1000000)
+        finish = manager("Finished " + unit + ".", finish_marker, finish_us, 301000000)
+        pending = manager("Starting " + unit + "...", start_marker, pending_us, 901000000)
+        saved = {"_SYSTEMD_UNIT": unit, "_BOOT_ID": boot,
+                 "_SYSTEMD_INVOCATION_ID": prior, "MESSAGE": "snapshot 28e3840f saved",
+                 "__REALTIME_TIMESTAMP": str(start_us + 20_000_000),
+                 "__MONOTONIC_TIMESTAMP": str(21_000_000)}
+        new_saved = {**saved, "_SYSTEMD_INVOCATION_ID": running,
+                     "MESSAGE": "snapshot deacf00d saved",
+                     "__REALTIME_TIMESTAMP": str(pending_us + 10_000_000),
+                     "__MONOTONIC_TIMESTAMP": str(911000000)}
+        active = {"LoadState": "loaded", "ActiveState": "activating",
+                  "Result": "success", "ExecMainCode": "0",
+                  "ExecMainStatus": "0", "InvocationID": running,
+                  "ExecMainStartTimestamp": f"@{now - 300}"}
+        show = "\n".join(f"{key}={value}" for key, value in active.items()) + "\n"
+        expected = (prior, now - 1200, now - 900, 1000000, 301000000)
+        def journal(rows: list[dict]) -> str:
+            return "\n".join(json.dumps(row) for row in rows)
+        with patch.object(probe, "_command", side_effect=[
+                journal([start, finish, pending]), show, journal([saved])]):
+            self.assertEqual(probe._journal_backup_run(allow_pending=True), expected)
+        with patch.object(probe, "_command", side_effect=[
+                journal([start, finish, pending]), show, journal([saved, new_saved])]):
+            with self.assertRaisesRegex(RuntimeError, "newer snapshot"):
+                probe._journal_backup_run(allow_pending=True)
+        with patch.object(probe, "_command", side_effect=[
+                journal([start, finish, pending]),
+                show.replace("ActiveState=activating", "ActiveState=inactive"),
+                journal([saved])]):
+            with self.assertRaises(RuntimeError):
+                probe._journal_backup_run(allow_pending=True)
+        with patch.object(probe, "_command", return_value=journal([start, finish, pending])):
+            with self.assertRaisesRegex(RuntimeError, "latest successful"):
+                probe._journal_backup_run()
 
     def test_root_receipt_atomic_write_and_no_secret_content(self) -> None:
         record = {"schema_version":1,"kind":"heim_pc.nixos_restic_recovery_root_proof",
