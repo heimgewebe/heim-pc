@@ -358,6 +358,10 @@ class DeepAnswer(Tool):
         "zu einer Sachfrage sagt, auch in einem Anschlussdialog. Bei komplizierten "
         "mehrteiligen Vergleichen mit Gegenargumenten darfst du es selbstständig benutzen. "
         "Nicht für einfache Fakten, Musik, Lampen, reine Browseraktionen oder Websuche. "
+        "Falls die Bitte trotz 'gib dir Mühe' oder 'prüf das gründlich' eine direkte "
+        "Aktion (z.B. Musik abspielen, Webseite öffnen, Licht schalten) verlangt, "
+        "hat das normale Aktionswerkzeug Vorrang und dieses Deep-Tool darf NICHT "
+        "aufgerufen werden. "
         "Übergebe die vollständige zu prüfende Frage mit benötigtem Gesprächskontext. "
         "Die Antwort kann wegen des Modellwechsels deutlich länger dauern."
     )
@@ -373,6 +377,23 @@ class DeepAnswer(Tool):
             if not isinstance(question, str) or not question.strip():
                 raise ValueError("Eine konkrete Frage für die gründliche Prüfung fehlt")
             question = question.strip()[:2000]
+            action_question = re.sub(
+                r"^(?:bitte\s+)?"
+                r"(?:(?:prüf(?:e)?\s+das\s+(?:bitte\s+)?gründlich)|"
+                r"(?:gib\s+dir\s+(?:bitte\s+)?mühe))"
+                r"(?:\s*(?:und|:|,))?\s*",
+                "",
+                question.casefold(),
+            )
+            if re.match(
+                r"^(?:bitte\s+)?(?:spiel(?:e)?|starte|mach|öffne|oeffne|"
+                r"scrolle|schalte|dimme|suche|lies|lese|zeig)\b",
+                action_question,
+            ):
+                raise ValueError(
+                    "Direkte Aktion erkannt: das passende Musik-, Browser- oder "
+                    "Gerätewerkzeug ausführen, nicht Mistral befragen"
+                )
             payload = {
                 "model": "mistral-small3.2:24b",
                 "messages": [
@@ -432,6 +453,11 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
                 "Bei mehrteiligen sachlichen Vergleichen mit echten Gegenargumenten darfst du "
                 "das Werkzeug auch von dir aus aufrufen; für Alltagsfragen, Musik, Lampen, "
                 "Browser-Öffnen und einfache Fakten nicht. "
+                "WICHTIG: Eine konkrete Aktion hat immer Vorrang vor einer "
+                "Vertiefungsfloskel. Bei 'gib dir Mühe und spiele Bakerman' "
+                "benutze nabu_web__play_music und NICHT nabu_web__deep_answer. "
+                "Bei 'prüf das gründlich und öffne eine Webseite' nutze den Browser; "
+                "bei Lichtbefehlen die verfügbaren HA-Gerätewerkzeuge. "
                 "Nach einem erfolgreichen Mistral-Werkzeugresultat gib dessen Abwägung "
                 "verständlich wieder; wenn der Nutzer Gründlichkeit wünscht, sind bis zu sechs "
                 "gut sprechbare Sätze angemessen. Behaupte keine Recherche oder Ausführung, "
