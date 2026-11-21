@@ -52,6 +52,40 @@ setzen. Ein bloß zurückkopierter Symlink auf einen *fehlenden* Nix-Store-Pfad
 ist kein Recovery-Nachweis. Die vorliegende Unit benötigt eine existierende
 PortAudio-Library unter `nabu-portaudio-gcroot/lib`.
 
+
+## Browser: öffentliche Ziele ohne zusätzlichen Dienst
+
+`nabu-browser.service` verwendet den ebenfalls versionierten
+`nixos/system/nabu/browser_proxy.py` als **Launcher für den bisherigen Chrome**:
+Die Unit startet denselben Chrome-Prozess mit den bisherigen Flags, aber über
+`python3 .../browser_proxy.py -- .../google-chrome ...`.
+
+Der Launcher öffnet einen **temporären, nur an Loopback gebundenen SOCKS5-Port**
+im selben Prozess und konfiguriert Chrome für HTTP(S)-Requests mit
+`--proxy-server=socks5://127.0.0.1:<dynamischer-port>`,
+`--proxy-bypass-list=<-loopback>` und ohne direktes DNS, QUIC oder
+unproxied WebRTC-UDP. Der Proxy löst Ziele selbst auf und verbindet
+ausschließlich mit der **vorab geprüften, konkreten öffentlichen IP-Adresse**.
+Private IPv4/IPv6-Adressen, numerische Kurzformen, gemischte DNS-Antworten,
+LAN-Ziele sowie Redirects und Link-Klicks zu solchen Zielen werden verweigert.
+Bei einem Proxy-Ausfall gibt es keinen `DIRECT`-Fallback für Chrome-HTTP(S).
+
+**Wichtig:** Beim Wiederherstellen von `nabu-browser.service` den bestehenden
+`ExecStart`-Chrome-Aufruf unter Beibehaltung seiner privaten lokalen
+Startparameter in den Launcher einschließen. Der Launcher benötigt weder eine
+statische Proxy-Portnummer noch eine zweite User-Unit. Ein Start von Chrome
+**ohne Launcher** würde diese Browser-Netzgrenze umgehen. Die anlaufende
+Browser-Unit muss den aktiven Launcher verwenden; der Git-Quellcode allein
+ändert keinen laufenden Dienst.
+
+Tests: `python3 nixos/system/tests/test_nabu_browser_proxy.py` für
+private und gemischte DNS-Ziele, SOCKS5-Protokoll und öffentlichen Tunnel;
+anschließend einen echten Headless-Chrome-Request zu einer öffentlichen Seite,
+zu einer privaten Adresse und zu einem per Klick erreichbaren privaten Link
+über den Chrome-Debugkanal prüfen. Die Netzgrenze gilt für den
+Chrome-HTTP(S)-Browserweg, **nicht** als systemweite Firewall. Nabus
+`nabu_web__play_music` benötigt diesen Browser-Proxy nicht.
+
 ## Kontrollierte Wiederherstellung
 
 1. Bei fehlender Nabu-Integration Home Assistant stoppen, ausschließlich
