@@ -8,7 +8,8 @@ from html.parser import HTMLParser
 import ipaddress
 import json
 import re
-from urllib.parse import urlsplit, parse_qs
+import socket
+from urllib.parse import urlsplit, parse_qs, urljoin
 import xml.etree.ElementTree as ET
 
 import aiohttp
@@ -34,12 +35,39 @@ def public_url(value: str) -> str:
     if host == "localhost" or host.endswith((".local", ".home.arpa", ".internal")):
         raise ValueError("Lokale Adressen sind nicht über Nabu-Web zugänglich")
     try:
-        if not ipaddress.ip_address(host).is_global:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # getaddrinfo accepts e.g. 2130706433, 127.1 and hexadecimal IPv4.
+        # A non-canonical numeric host must never reach the network stack.
+        try:
+            socket.inet_aton(host)
+        except OSError:
+            if re.fullmatch(r"[0-9.]+", host) or host.startswith("0x"):
+                raise ValueError("Nicht-kanonische numerische Adresse ist nicht zulässig")
+        else:
+            raise ValueError("Nicht-kanonische numerische Adresse ist nicht zulässig")
+    else:
+        if not address.is_global:
             raise ValueError("Interne IP-Adresse ist nicht zulässig")
-    except ValueError as exc:
-        if "nicht zulässig" in str(exc):
-            raise
     return value.strip()
+
+
+class PublicResolver(aiohttp.abc.AbstractResolver):
+    """Reject non-public DNS answers before aiohttp opens a connection."""
+
+    def __init__(self):
+        self._delegate = aiohttp.resolver.ThreadedResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        addresses = await self._delegate.resolve(host, port, family)
+        if not addresses or any(
+            not ipaddress.ip_address(item["host"]).is_global for item in addresses
+        ):
+            raise ValueError("DNS-Ziel ist keine ausschließlich öffentliche Adresse")
+        return addresses
+
+    async def close(self):
+        await self._delegate.close()
 
 
 class TextExtractor(HTMLParser):
@@ -85,7 +113,7 @@ class WebSearch(Tool):
                 raise ValueError("Suchbegriff fehlt")
             headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
             async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver()),
+                connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers=headers,
             ) as session:
                 async with session.get("https://html.duckduckgo.com/html/", params={"q": query}) as response:
@@ -139,18 +167,30 @@ class WebRead(Tool):
         try:
             url = public_url(tool_input.tool_args["url"])
             async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver()),
+                connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
             ) as session:
-                async with session.get(url, max_redirects=5) as resp:
-                    resp.raise_for_status()
-                    public_url(str(resp.url))
-                    content_type = resp.headers.get("content-type", "").lower()
-                    if not ("text/" in content_type or "application/xhtml" in content_type):
-                        raise ValueError("Die Seite enthält keinen lesbaren Text")
-                    data = await resp.content.read(240000)
-                    actual = str(resp.url)
-                    document = data.decode(resp.charset or "utf-8", errors="replace")
+                # Every redirect is validated before its next network request.
+                redirects = 0
+                while True:
+                    async with session.get(url, allow_redirects=False) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            if redirects >= 5:
+                                raise ValueError("Zu viele Weiterleitungen")
+                            location = resp.headers.get("Location")
+                            if not location:
+                                raise ValueError("Weiterleitung ohne Zieladresse")
+                            url = public_url(urljoin(str(resp.url), location))
+                            redirects += 1
+                            continue
+                        resp.raise_for_status()
+                        content_type = resp.headers.get("content-type", "").lower()
+                        if not ("text/" in content_type or "application/xhtml" in content_type):
+                            raise ValueError("Die Seite enthält keinen lesbaren Text")
+                        data = await resp.content.read(240000)
+                        actual = str(resp.url)
+                        document = data.decode(resp.charset or "utf-8", errors="replace")
+                        break
             parser = TextExtractor()
             parser.feed(document)
             return ToolResult(data={"url": actual, "text": parser.get_text()})

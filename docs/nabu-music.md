@@ -31,6 +31,11 @@ Die Sendspin-User-Unit liegt unter
 `~/.config/systemd/user/heimgewebe-music-sendspin.service`, ihr optionaler
 MOTU-Hotplug-Starter unter `~/.config/systemd/user/heimgewebe-music-sendspin.path`.
 Dieses Verzeichnis enthält die entsprechenden wiederherstellbaren Vorlagen.
+Die öffentlichen Vorlagen erkennen das MOTU M2 mit einem **Modell-Glob**
+(`usb-MOTU_M2_*`) und einem Audio-Sink-Präfix; sie enthalten keine
+eindeutige Geräte-Seriennummer. Lokale Seriennummern gehören nur in
+private Hostdaten. `python3 nixos/system/nabu/test_public_web.py` prüft
+numerische Loopback-Adressen, private DNS-Antworten und Redirect-Sperren.
 
 Die Unit verwendet **keinen absoluten Nix-Store-Hash** mehr. Ihre PortAudio-Suche
 läuft über den stabilen user-eigenen GC-Root
