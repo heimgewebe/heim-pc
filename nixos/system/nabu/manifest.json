@@ -1,0 +1,11 @@
+{
+  "domain": "nabu_web",
+  "name": "Nabu Webwerkzeuge",
+  "version": "0.1.0",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/llm/",
+  "iot_class": "cloud_polling",
+  "integration_type": "helper",
+  "dependencies": [],
+  "requirements": []
+}
