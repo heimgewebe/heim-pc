@@ -318,8 +318,8 @@ class PlayMusic(Tool):
                 raise ValueError("Nabu-Musik-MOTU ist aktuell nicht verfügbar")
             if not hass.services.has_service("music_assistant", "play_media"):
                 raise ValueError("Music-Assistant-Wiedergabeaktion fehlt")
-            name = tool_input.tool_args.get("media_id", "").strip()[:200]
-            artist = tool_input.tool_args.get("artist", "").strip()[:100]
+            name = (tool_input.tool_args.get("media_id") or "").strip()[:200]
+            artist = (tool_input.tool_args.get("artist") or "").strip()[:100]
             media_type = tool_input.tool_args.get("media_type")
             generic = {"", "irgendeine musik", "musik deiner wahl", "irgendwelche musik", "irgendwas"}
             data = {"media_id": name, "enqueue": "replace"}
