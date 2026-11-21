@@ -13,6 +13,10 @@ let
   expectedReleaseId = "fa720e3b-nixos-lock264e747ad05a-contract07fba47985cb";
   expectedRevision = "fa720e3bc74a170c12f4427392de1a5a133d83d3";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
+  # systemd After=grabowski-operator.service waits for process start, not
+  # the MCP listener. A GET without MCP session legitimately returns HTTP 406
+  # once the handler is ready; do not use curl --fail here.
+  mcpListenerReady = "${pkgs.curl}/bin/curl --silent --show-error --output /dev/null --retry 25 --retry-delay 1 --retry-connrefused --retry-max-time 40 --connect-timeout 2 --max-time 4 http://127.0.0.1:18181/mcp";
   releaseBound = packagesPresent
     && cfg.releaseId == expectedReleaseId
     && cfg.operatorPackage.outPath == canonicalOperator.outPath
@@ -469,13 +473,14 @@ in
       serviceConfig = {
         Type = "oneshot";
         WorkingDirectory = "/home/alex";
+        ExecStartPre = mcpListenerReady;
         ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId}";
         Environment = [
           "HOME=/home/alex"
           "XDG_RUNTIME_DIR=/run/user/1000"
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
         ];
-        TimeoutStartSec = "45s";
+        TimeoutStartSec = "90s";
         UMask = "0077";
       };
     };
@@ -550,6 +555,7 @@ in
         User = "alex";
         Group = "users";
         WorkingDirectory = "/";
+        ExecStartPre = mcpListenerReady;
         ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-recovery-mcp-refresh.py}";
         Environment = [ "HOME=/home/alex" "PYTHONDONTWRITEBYTECODE=1" ];
         TimeoutStartSec = "100min";
