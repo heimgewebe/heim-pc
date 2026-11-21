@@ -12,7 +12,7 @@ import unittest
 from urllib.parse import urlsplit, urljoin
 
 
-SOURCE = Path(__file__).with_name("llm.py")
+SOURCE = Path(__file__).resolve().parents[1] / "nabu" / "llm.py"
 
 
 class Resolver:
