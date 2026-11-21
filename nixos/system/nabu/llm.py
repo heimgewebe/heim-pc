@@ -296,7 +296,7 @@ class PlayMusic(Tool):
         "statt eine nur verbale Empfehlung zu geben. "
         "media_id ist Titel, Album oder Künstler, bei 'Bakerman' z.B. Bakerman "
         "mit artist=Laid Back. media_type ist optional (track, album, artist, playlist, radio). "
-        "Für 'irgendeine Musik' media_id weglassen: ein Künstler-Radiomix wird gestartet. "
+        "Für 'irgendeine Musik' media_id weglassen: eine spielbare Qobuz-Playlist wird gestartet. "
         "Qobuz ist der Musikdienst, nicht ein Künstler oder Album; falsch transkribierte "
         "Bezeichnungen wie Kubuts/Kobuz oder Haibitzee meinen Qobuz bzw. Heim-PC."
     )
@@ -325,8 +325,7 @@ class PlayMusic(Tool):
             data = {"media_id": name, "enqueue": "replace"}
             if name.casefold() in generic:
                 data["media_id"] = "Nina Simone"
-                data["media_type"] = "artist"
-                data["radio_mode"] = True
+                data["media_type"] = "playlist"
             else:
                 if media_type:
                     data["media_type"] = media_type
