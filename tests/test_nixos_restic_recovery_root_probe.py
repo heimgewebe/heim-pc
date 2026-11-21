@@ -353,6 +353,27 @@ class RootOwnedResticProbeTests(unittest.TestCase):
                 patch.object(probe, "_journal_backup_run", return_value=expected) as journal:
             probe._require_backup_run_unchanged(expected)
             journal.assert_called_once_with(allow_pending=True)
+        # One multi-ExecStart systemd service has separate main-process and
+        # PID1 manager start/finish timestamps, but one trusted invocation ID.
+        manager_times = ("a" * 32, 90, 205, 80000, 310000)
+        with patch.object(probe, "_backup_timer_ready", side_effect=RuntimeError(
+                "native Restic system backup service has not succeeded")), \
+                patch.object(probe, "_journal_backup_run", return_value=manager_times) as journal:
+            probe._require_backup_run_unchanged(expected)
+            journal.assert_called_once_with(allow_pending=True)
+        for stale in (
+            ("a" * 32, 110, 205, 80000, 310000),  # PID1 start after ExecMain
+            ("a" * 32, 90, 190, 80000, 310000),   # PID1 finish before ExecMain
+            ("a" * 32, 90, 205, 110000, 310000),  # invalid monotonic start
+            ("a" * 32, 90, 205, 80000, 290000),   # invalid monotonic finish
+            ("b" * 32, 90, 205, 80000, 310000),   # newer completed invocation
+        ):
+            with self.subTest(journal_candidate=stale), \
+                    patch.object(probe, "_backup_timer_ready", side_effect=RuntimeError(
+                        "native Restic system backup service has not succeeded")), \
+                    patch.object(probe, "_journal_backup_run", return_value=stale):
+                with self.assertRaisesRegex(RuntimeError, "invocation changed"):
+                    probe._require_backup_run_unchanged(expected)
         with patch.object(probe, "_backup_timer_ready", side_effect=RuntimeError(
                 "backup timer is disabled")), \
                 patch.object(probe, "_journal_backup_run") as journal:

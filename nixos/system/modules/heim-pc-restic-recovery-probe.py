@@ -404,7 +404,19 @@ def _require_backup_run_unchanged(backup_run: tuple[str, int, int, int, int]) ->
     except RuntimeError as exc:
         if str(exc) != "native Restic system backup service has not succeeded":
             raise
-        current = _journal_backup_run(allow_pending=True)
+        manager = _journal_backup_run(allow_pending=True)
+        # A multi-ExecStart service reports ExecMain* for its final command;
+        # PID1's Starting/Finished markers bound the whole service. Their
+        # timestamps cannot be tuple-equal. Require the *same* trusted
+        # invocation and both main-process intervals inside PID1's interval.
+        # UTC seconds are rounded; monotonic microseconds have full precision.
+        if (manager[0] != backup_run[0]
+                or not manager[1] - 2 <= backup_run[1] <= backup_run[2] <= manager[2] + 2
+                or not manager[3] <= backup_run[3] <= backup_run[4] <= manager[4]):
+            raise RuntimeError(
+                "native Restic backup service invocation changed during recovery"
+            ) from exc
+        return
     if current != backup_run:
         raise RuntimeError("native Restic backup service invocation changed during recovery")
 
