@@ -98,6 +98,19 @@ def message(error: Exception) -> ToolResult:
     return ToolResult(data={"error": f"{type(error).__name__}: {str(error)[:260]}"}, error=True)
 
 
+async def read_bounded(reader, maximum: int) -> bytes:
+    """Accumulate incremental aiohttp chunks until EOF or the byte cap."""
+    chunks: list[bytes] = []
+    received = 0
+    while received < maximum:
+        chunk = await reader.read(min(65536, maximum - received))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        received += len(chunk)
+    return b"".join(chunks)
+
+
 class WebSearch(Tool):
     name = "nabu_web__search"
     title = "Im Internet recherchieren"
@@ -118,7 +131,7 @@ class WebSearch(Tool):
             ) as session:
                 async with session.get("https://html.duckduckgo.com/html/", params={"q": query}) as response:
                     response.raise_for_status()
-                    page = await response.content.read(250000)
+                    page = await read_bounded(response.content, 250000)
                 soup = BeautifulSoup(page, "html.parser")
                 hits = []
                 for item in soup.select(".result"):
@@ -142,7 +155,7 @@ class WebSearch(Tool):
                     return ToolResult(data={"query": query, "source": "DuckDuckGo", "results": hits})
                 async with session.get("https://www.bing.com/search", params={"q": query, "format": "rss"}) as response:
                     response.raise_for_status()
-                    body = await response.content.read(80000)
+                    body = await read_bounded(response.content, 80000)
                 for item in ET.fromstring(body).findall(".//item")[:6]:
                     url = (item.findtext("link") or "").strip()
                     if url.startswith(("https://", "http://")):
@@ -187,7 +200,7 @@ class WebRead(Tool):
                         content_type = resp.headers.get("content-type", "").lower()
                         if not ("text/" in content_type or "application/xhtml" in content_type):
                             raise ValueError("Die Seite enthält keinen lesbaren Text")
-                        data = await resp.content.read(240000)
+                        data = await read_bounded(resp.content, 240000)
                         actual = str(resp.url)
                         document = data.decode(resp.charset or "utf-8", errors="replace")
                         break

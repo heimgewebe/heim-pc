@@ -32,10 +32,15 @@ class FakeResponse:
         self.headers = headers or {"content-type": "text/html"}
         self.charset = "utf-8"
         self.content = SimpleNamespace(read=self._read)
-        self.body = content
+        self.chunks = list(content) if isinstance(content, (tuple, list)) else [content]
 
     async def _read(self, maximum):
-        return self.body[:maximum]
+        if not self.chunks:
+            return b""
+        chunk = self.chunks.pop(0)
+        if len(chunk) > maximum:
+            self.chunks.insert(0, chunk[maximum:])
+        return chunk[:maximum]
 
     async def __aenter__(self):
         return self
@@ -81,6 +86,8 @@ def source_functions():
     for node in root.body:
         if isinstance(node, ast.FunctionDef) and node.name == "public_url":
             chosen.append(node)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "read_bounded":
+            chosen.append(node)
         if isinstance(node, ast.ClassDef) and node.name == "PublicResolver":
             chosen.append(node)
         if isinstance(node, ast.ClassDef) and node.name == "WebRead":
@@ -90,7 +97,7 @@ def source_functions():
             for argument in method.args.args:
                 argument.annotation = None
             chosen.append(method)
-    assert len(chosen) == 3, "Expected production URL/resolver/WebRead source"
+    assert len(chosen) == 4, "Expected production URL/resolver/body-reader/WebRead source"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
@@ -171,6 +178,28 @@ class PublicWebTests(unittest.TestCase):
             self.assertFalse(result.error)
             self.assertEqual("https://example.org/next", result.data["url"])
             self.assertEqual(["https://example.org/", "https://example.org/next"], FakeSession.requests)
+        asyncio.run(scenario())
+
+
+    def test_incremental_document_chunks_are_combined(self):
+        async def scenario():
+            FakeSession.responses = [{
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "content": [b"<p>First ", b"and second ", b"chunk</p>"],
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={"url": "https://example.org/"}), None
+            )
+            self.assertFalse(result.error)
+            self.assertIn("First and second chunk", result.data["text"])
+            self.assertEqual(["https://example.org/"], FakeSession.requests)
+        asyncio.run(scenario())
+
+    def test_bounded_reader_never_exceeds_requested_byte_limit(self):
+        async def scenario():
+            response = FakeResponse("https://example.org/", content=[b"abc", b"def", b"ghi"])
+            self.assertEqual(b"abcde", await self.functions["read_bounded"](response.content, 5))
         asyncio.run(scenario())
 
 
