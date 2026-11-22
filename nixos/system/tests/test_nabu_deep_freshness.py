@@ -134,6 +134,10 @@ class DeepFreshnessTests(unittest.TestCase):
             "Wie hoch sind die heutigen Stromtarife?",
             "Welche neuen Nachrichten gibt es?",
             "Was hat sich 2026 geändert?",
+            "Wie ist das Wetter in Hamburg und brauche ich einen Regenschirm?",
+            "Wie hoch sind die Temperaturen in Hamburg?",
+            "Was kostet Strom pro kWh?",
+            "Vergleiche Stromtarife für meinen Haushalt.",
         ):
             with self.subTest(question=question):
                 self.assertTrue(actual(question))
@@ -141,6 +145,8 @@ class DeepFreshnessTests(unittest.TestCase):
             "Vergleiche die Vor- und Nachteile von Wärmepumpen.",
             "Was bedeutet Kausalität?",
             "Warum beeinflusst Angebot und Nachfrage den Preis?",
+            "Warum entsteht Wetter?",
+            "Erkläre das Konzept Stromtarife.",
         ):
             with self.subTest(question=question):
                 self.assertFalse(actual(question))
@@ -171,6 +177,13 @@ class DeepFreshnessTests(unittest.TestCase):
         self.assertIn("https://example.org/news", context)
         self.assertIn("22. November 2026", context)
         self.assertEqual("mistral-small3.2:24b", payload["model"])
+
+    def test_implicit_weather_question_retrieves_sources(self):
+        result = self.invoke("Wie ist das Wetter in Hamburg?")
+        self.assertFalse(result.error)
+        self.assertEqual(1, len(SearchFake.calls))
+        self.assertEqual(2, len(ReadFake.calls))
+        self.assertEqual(1, len(ChatSession.calls))
 
     def test_no_search_results_returns_error_without_offline_guess(self):
         SearchFake.result = tool_result({"results": []})

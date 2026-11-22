@@ -351,11 +351,29 @@ class PlayMusic(Tool):
 
 def requires_live_sources(question: str) -> bool:
     """Recognize requests whose truth depends on fresh external observations."""
-    return bool(re.search(
+    lower = question.casefold().strip()
+    if re.search(
         r"\b(?:heute|heutig\w*|gestern|morgen|aktuell\w*|derzeit|momentan|"
         r"zurzeit|neueste\w*|jüngste\w*|neuigkeiten|nachrichten|"
         r"diese\w*\s+(?:woche|monat)|20(?:2[6-9]|[3-9][0-9]))\b",
-        question.casefold(),
+        lower,
+    ):
+        return True
+    # Wetter, Temperaturen und Tarifpreise sind auch ohne "heute" live-abhaengig.
+    if re.search(
+        r"\b(?:was\s+kostet|wie\s+viel\s+kostet)\b.*"
+        r"\b(?:strom|gas|benzin|diesel|heizöl|tarif\w*|kwh)\b",
+        lower,
+    ):
+        return True
+    if re.match(r"(?:warum|wieso|weshalb|wie\s+(?:entsteht|funktioniert)|"
+                r"erkläre|was\s+(?:bedeutet|ist))\b", lower):
+        return False
+    return bool(re.search(
+        r"\b(?:wetter(?:vorhersage)?|temperatur(?:en)?|strompreis(?:e)?|"
+        r"stromtarif(?:e)?|gaspreis(?:e)?|benzinpreis(?:e)?|"
+        r"börse(?:nkurse?)?|wechselkurs(?:e)?)\b",
+        lower,
     ))
 
 
