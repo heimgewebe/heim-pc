@@ -155,17 +155,31 @@ def relevant_source_excerpt(text: str, question: str, maximum: int = 6000) -> st
     width, stride = 1100, 900
     last = max(0, len(text) - width)
     starts = sorted(set([*range(0, last + 1, stride), last]))
-    chosen = [0, last]
     def score(start):
         passage = text[start:start + width].casefold()
         return sum(1 for term in terms if term in passage)
+
+    def merge_spans(spans):
+        merged = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    spans = merge_spans([(0, width), (last, len(text))])
+    separator = "\n[…]\n"
     for start in sorted(starts, key=lambda pos: (-score(pos), pos)):
-        if len(chosen) == 5:
+        if score(start) == 0:
             break
-        if all(abs(start - existing) >= width for existing in chosen):
-            chosen.append(start)
-    return "\n[…]\n".join(text[pos:pos + width].strip()
-                         for pos in sorted(chosen))[:maximum]
+        candidate = merge_spans([*spans, (start, min(len(text), start + width))])
+        total = sum(end - begin for begin, end in candidate)
+        total += len(separator) * (len(candidate) - 1)
+        if total <= maximum:
+            spans = candidate
+    return separator.join(text[begin:end].strip()
+                          for begin, end in spans)[:maximum]
 
 def message(error: Exception) -> ToolResult:
     return ToolResult(data={"error": f"{type(error).__name__}: {str(error)[:260]}"}, error=True)

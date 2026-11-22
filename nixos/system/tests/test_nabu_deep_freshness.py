@@ -289,6 +289,19 @@ class DeepFreshnessTests(unittest.TestCase):
         self.assertIn("17 Prozent", excerpt)
         self.assertIn("Spätere Anmerkungen", excerpt)
 
+    def test_relevant_excerpt_merges_overlapping_intro_window(self):
+        """Codex P2: evidence near offset 1200 must survive the 0..1100 intro."""
+        select = self.real["relevant_source_excerpt"]
+        fact = "Arbeitnehmerbeitrag beträgt 17 Prozent"
+        prefix = "Amtlicher Bericht.\n"
+        article = (prefix + "x" * (1200 - len(prefix)) + fact
+                   + "x" * (10241 - 1200 - len(fact)))
+        excerpt = select(article, "Wie hoch ist der Arbeitnehmerbeitrag?")
+        self.assertLessEqual(len(excerpt), 6000)
+        self.assertTrue(excerpt.startswith(prefix))
+        self.assertIn(fact, excerpt)
+        self.assertTrue(excerpt.endswith("x" * 1100))
+
     def test_relevant_excerpt_bounded_for_no_shared_terms(self):
         select = self.real["relevant_source_excerpt"]
         article = "Einleitung " + "Langer Abschnitt. " * 3000 + "Abschlussbeleg Z."
