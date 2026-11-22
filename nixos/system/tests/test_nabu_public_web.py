@@ -217,15 +217,15 @@ class PublicWebTests(unittest.TestCase):
 
             def get(self, url, *, params):
                 requests.append(url)
-                if "duckduckgo.com" in url:
+                if urlsplit(url).hostname == "html.duckduckgo.com":
                     return FakeResponse(url, status=202, content=b"anti-bot page")
-                if "bing.com" in url:
+                if urlsplit(url).hostname == "www.bing.com":
                     return FakeResponse(url, content=(
                         b"<rss><channel><item><title>YouTube</title>"
                         b"<link>https://www.youtube.com/</link>"
                         b"<description>Videos about other topics</description>"
                         b"</item></channel></rss>"))
-                if "wikipedia.org" in url:
+                if urlsplit(url).hostname == "de.wikipedia.org":
                     return FakeResponse(url, content=json.dumps({
                         "pages": [
                             {"title": "Weltgesundheitsorganisation",
@@ -306,6 +306,38 @@ class PublicWebTests(unittest.TestCase):
         }], keep("Kindergeld Regeln 2026", [
             {"title": "Kindergeld Anspruch Regeln 2026",
              "url": "https://familienportal.de/leistungen/kindergeld"}]))
+
+    def test_short_subject_anchors_keep_eu_vw_oil_without_false_eu_matches(self):
+        keep = self.functions["relevant_search_hits"]
+        for short, title in (
+            ("EU", "EU Leitung"),
+            ("VW", "VW Preisentwicklung"),
+            ("Öl", "Ölpreis heute"),
+        ):
+            with self.subTest(subject=short):
+                matched = {"title": title, "url": "https://example.org/facts"}
+                unrelated = {"title": "Heute alles neu",
+                             "url": "https://example.org/blog"}
+                self.assertEqual([matched],
+                                 keep(f"{short} Preis 2026", [unrelated, matched]))
+
+    def test_specific_role_page_precedes_generic_organization_page(self):
+        keep = self.functions["relevant_search_hits"]
+        generic = {"title": "WHO", "url": "https://www.who.int/about"}
+        director = {"title": "WHO Director-General",
+                    "url": "https://www.who.int/director-general"}
+        self.assertEqual([director, generic],
+                         keep("WHO Leitung 2026 Direktor", [generic, director]))
+
+    def test_cookie_gdpr_topic_sections_are_not_discarded(self):
+        parser = self.functions["TextExtractor"]()
+        parser.feed(
+            "<html><body><section id='gdpr-information'>"
+            "<p>Rechtsgrundlage: Art. 6 DSGVO.</p></section>"
+            "<div class='cookie-consent'>Cookie notice</div></body></html>"
+        )
+        self.assertIn("Art. 6 DSGVO", parser.get_text())
+        self.assertNotIn("Cookie notice", parser.get_text())
 
     def test_long_public_csp_header_reader_limit(self):
         async def scenario():

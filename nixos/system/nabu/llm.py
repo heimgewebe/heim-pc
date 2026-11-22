@@ -96,8 +96,23 @@ class TextExtractor(HTMLParser):
         primary_parent = self._stack[-1][2] if self._stack else False
         marker = " ".join(str(attributes.get(key) or "") for key in
                           ("id", "class", "aria-label")).casefold()
-        consent_overlay = tag in ("div", "section", "dialog") and any(
-            key in marker for key in ("cookie", "consent", "gdpr")
+        # A privacy policy may itself discuss cookies or GDPR. Hide actual
+        # consent UI overlays, not entire substantive topic sections.
+        overlay_hint = re.search(
+            r"(?:^|[\s_-])(?:cookie|consent|gdpr)[_-]?"
+            r"(?:banner|consent|notice|overlay|modal|popup|dialog|wall|panel)"
+            r"(?:$|[\s_-])"
+            r"|(?:^|[\s_-])(?:onetrust|cookiebot)(?:$|[\s_-])",
+            marker,
+        )
+        dialog_hint = (tag == "dialog" or attributes.get("role") == "dialog"
+                       or attributes.get("aria-modal") == "true")
+        consent_overlay = (
+            tag in ("div", "section", "dialog")
+            and (not primary_parent or dialog_hint)
+            and bool(overlay_hint or (dialog_hint and any(
+                name in marker for name in ("cookie", "consent", "gdpr")
+            )))
         )
         hidden = (hidden_parent or tag in self._CHROME_TAGS
                   or (tag == "header" and not primary_parent) or consent_overlay)
@@ -209,29 +224,65 @@ def search_subject_terms(query: str) -> list[str]:
                "hat", "habe", "haben", "wird", "werden", "kann", "gibt",
                "viel", "viele", "hoch", "neueste", "gestern", "diese", "dieser",
                "über", "nach", "vor", "bei", "zum", "zur", "auf", "aus", "mit",
-               "leitet", "führt", "steht", "noch", "schon"}
+               "leitet", "führt", "steht", "noch", "schon",
+               "in", "im", "am", "an", "zu", "um", "ob", "es", "er", "du",
+               "ja", "da", "so", "ab", "wo", "je"}
     return list(dict.fromkeys(
         word for word in re.findall(r"\w+", query.casefold())
-        if len(word) >= 3 and not word.isdecimal() and word not in ignored
+        if len(word) >= 2 and not word.isdecimal() and word not in ignored
     ))
 
 
 def relevant_search_hits(query: str, hits: list[dict]) -> list[dict]:
-    """Discard provider results without topical overlap."""
-    terms = set(search_subject_terms(query))
-    if not terms:
+    """Retain subject-matching results and prefer the specifically asked topic.
+
+    Generic role words cannot make an unrelated result pass the subject gate.
+    German/English role synonyms only rank the already matching candidates.
+    """
+    anchors = search_subject_terms(query)
+    if not anchors:
         return []
-    return [
-        hit for hit in hits
-        if isinstance(hit, dict)
-        and any(
-            word in (
-                " ".join(str(hit.get(key) or "") for key in
-                         ("title", "excerpt", "url"))
-            ).casefold()
-            for word in terms
-        )
-    ]
+    role_hints = {
+        "leitung": ("leitung", "leadership", "director", "chief", "chair"),
+        "leitet": ("leitung", "leadership", "director", "chief", "chair"),
+        "direktor": ("direktor", "director", "director-general"),
+        "generaldirektor": ("generaldirektor", "director-general"),
+        "vorsitz": ("vorsitz", "chair", "president"),
+        "präsident": ("präsident", "president"),
+        "preis": ("preis", "price", "cost"),
+    }
+    query_words = set(re.findall(r"\w+", query.casefold()))
+    roles = {
+        candidate for word, alternatives in role_hints.items()
+        if any(word in query_word for query_word in query_words)
+        for candidate in alternatives
+    }
+
+    def has_anchor(value: str, anchor: str) -> bool:
+        if len(anchor) <= 3:
+            # "EU" is not contained in "heute", but "Ölpreis" starts with Öl.
+            return bool(re.search(r"(?<!\w)" + re.escape(anchor), value))
+        return anchor in value
+
+    def score(hit: dict) -> int:
+        title = str(hit.get("title") or "").casefold()
+        excerpt = str(hit.get("excerpt") or "").casefold()
+        url = str(hit.get("url") or "").casefold()
+        if not any(has_anchor(title + " " + excerpt + " " + url, item)
+                   for item in anchors):
+            return -1
+        specificity = sum(5 for item in anchors if has_anchor(title, item))
+        specificity += sum(2 for item in anchors if has_anchor(excerpt, item))
+        specificity += sum(1 for item in anchors if has_anchor(url, item))
+        specificity += sum(4 for role in roles
+                           if role in title or role in url)
+        return specificity
+
+    ranked = [(score(hit), index, hit) for index, hit in enumerate(hits)
+              if isinstance(hit, dict)]
+    return [hit for relevance, _, hit in
+            sorted((item for item in ranked if item[0] >= 0),
+                   key=lambda item: (-item[0], item[1]))]
 
 class WebSearch(Tool):
     name = "nabu_web__search"
