@@ -345,7 +345,7 @@ class WebSearch(Tool):
                         continue
                     read_sources.append({
                         "title": str(hit.get("title") or "")[:160],
-                        "url": str(read.data.get("url") or url)[:600],
+                        "url": str(read.data.get("url") or url),
                         "text": body.strip()[:2400],
                     })
                 # Search snippets alone are not verified live news evidence.

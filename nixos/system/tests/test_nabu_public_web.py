@@ -503,6 +503,14 @@ class NewsSearchBundlingTests(unittest.TestCase):
         self.assertEqual([], data["results"])
         self.assertEqual("unavailable", data["source_read_status"])
 
+    def test_long_signed_source_url_remains_exact_after_read(self):
+        long_url = "https://news.example/story/" + ("a" * 710) + "?sig=abc123"
+        data, calls = self.bundled([{"title": "News", "url": long_url}])
+        self.assertEqual([long_url], calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual(long_url, data["read_sources"][0]["url"])
+        self.assertEqual(long_url, data["results"][0]["url"])
+
     def test_generic_websearch_has_no_extra_reads(self):
         hits = [{"title": "WHO", "url": "https://who.int/about"}]
         data, calls = self.bundled(hits, news=False)
