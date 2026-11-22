@@ -89,7 +89,7 @@ GROUPS = {
         "Öffne die Seite https://www.home-assistant.io/ im Browser.",
         "Prüf das gründlich und öffne https://example.com.",
         "Bitte gib im Browser in das Suchfeld das Wort Wetter ein.",
-        "Scrolle auf der angezeigten Seite nach oben.",
+        "Scrolle auf der angezeigten Seite weiter nach unten.",
         "Öffne https://docs.python.org/3/ in Chrome.",
     ],
     "fresh": [

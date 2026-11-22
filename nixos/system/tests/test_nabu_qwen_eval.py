@@ -119,6 +119,12 @@ class NabuQwenEvalTest(unittest.TestCase):
             summary = next(Path(temp).glob("*.summary.json"))
             self.assertEqual(1, json.loads(summary.read_text())["critical_failures"])
 
+    def test_scroll_fixture_matches_real_browser_direction(self):
+        case = next(c for c in nabu.cases() if c["id"] == "browser-09")
+        # Browser.async_call implements scrollBy(0,650): downward only.
+        self.assertIn("nach unten", case["prompt"])
+        self.assertEqual("scroll", case["expected_arguments"]["operation"])
+
     def test_grabowski_operation_specific_id_contract(self):
         good = nabu.valid_arguments
         self.assertTrue(good("nabu_web__grabowski", {"operation": "status"}))
