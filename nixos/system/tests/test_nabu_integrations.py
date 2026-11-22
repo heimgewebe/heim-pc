@@ -60,6 +60,13 @@ class GrabowskiContractTests(TestCase):
                 '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"blocked"}}'
             )
 
+    def test_malformed_messages_are_rejected_not_crashing(self):
+        for raw in ("[1, 2]", '{"jsonrpc":"2.0","id":1,"error":"blocked"}',
+                    '{"jsonrpc":"2.0","id":1,"result":null}',
+                    'data: "text"\n\n'):
+            with self.subTest(raw=raw), self.assertRaises(grabowski.GrabowskiUnavailable):
+                grabowski.parse_mcp_response(raw)
+
     def test_summary_never_includes_secrets(self):
         result = {"healthy": True, "secret": "NEVER", "runtime": {"release_id": "r"},
                   "tool_contract": {"registered_tool_count": 208}}
@@ -395,12 +402,29 @@ class ChatGPTToolTests(IsolatedAsyncioTestCase):
                 "expires_in": 3600, "saved_at_unix": int(time.time()),
             })
             for events in (['{"type":"response.output_text.delta","delta":"Hallo"}'],
-                           ['{"type":"response.failed","response":{"error":{"code":"usage_limit"}}}']):
+                           ['{"type":"response.failed","response":{"error":{"code":"usage_limit"}}}'],
+                           ['{"type":"response.failed","response":null}']):
                 response = DummyResponse(
                     200, chunks=[("data: " + raw + "\n\n").encode() for raw in events],
                 )
                 with self.subTest(events=events), self.assertRaises(chatgpt.ChatGPTUnavailable):
                     await chatgpt.chatgpt_answer(DummySession([response]), "Hallo", path)
+
+    async def test_final_event_without_blank_line_terminator_completes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "auth.json"
+            login.save_private(path, {
+                "client_id": "oaiapp_test", "model_slug": "example-model",
+                "access_token": "private", "refresh_token": "refresh",
+                "scopes": ["chatgpt.tokens.use.direct"], "plan_usage_enabled": True,
+                "expires_in": 3600, "saved_at_unix": int(time.time()),
+            })
+            response = DummyResponse(200, chunks=[
+                b'data: {"type":"response.output_text.delta","delta":"Fertig"}\n\n',
+                b'data: {"type":"response.completed"}',
+            ])
+            result = await chatgpt.chatgpt_answer(DummySession([response]), "Hallo", path)
+            self.assertEqual(result["answer"], "Fertig")
 
     async def test_rotating_refresh_token_is_persisted(self):
         with tempfile.TemporaryDirectory() as d:

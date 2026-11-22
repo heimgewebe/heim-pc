@@ -5,6 +5,7 @@ The server remains the sole authority for admission, mutations and receipts.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -35,18 +36,21 @@ def parse_mcp_response(raw: str, request_id: int = 1) -> dict:
                 except json.JSONDecodeError:
                     continue
     for message in messages:
-        if message.get("id") != request_id:
+        if not isinstance(message, dict) or message.get("id") != request_id:
             continue
         if "error" in message:
             err = message["error"]
-            raise GrabowskiUnavailable(str(err.get("message", "MCP-Fehler"))[:250])
-        result = message.get("result", {})
+            text = err.get("message", "MCP-Fehler") if isinstance(err, dict) else err
+            raise GrabowskiUnavailable(str(text)[:250])
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise GrabowskiUnavailable("Ungültige MCP-Antwort von Grabowski")
         if result.get("isError"):
             raise GrabowskiUnavailable("Grabowski hat den Aufruf abgewiesen")
         if isinstance(result.get("structuredContent"), dict):
             return result["structuredContent"]
-        for item in result.get("content", []):
-            if item.get("type") == "text":
+        for item in result.get("content") or []:
+            if isinstance(item, dict) and item.get("type") == "text":
                 try:
                     parsed = json.loads(item["text"])
                     if isinstance(parsed, dict):
@@ -165,6 +169,7 @@ def compact_result(operation: str, result: dict) -> dict:
         }
     raise ValueError("Ungültiges Operationsergebnis")
 
+
 async def register_obligation(session: aiohttp.ClientSession,
                               objective: str, acceptance: str,
                               *, endpoint: str = MCP_ENDPOINT) -> dict:
@@ -173,8 +178,6 @@ async def register_obligation(session: aiohttp.ClientSession,
     Existing Grabowski transport-roundtrip binds the exact target to a
     single-use challenge. A lost execution result must never be retried.
     """
-    import hashlib
-
     if not isinstance(objective, str) or not 12 <= len(objective.strip()) <= 600:
         raise ValueError("Grabowski-Auftrag muss konkret und begrenzt sein")
     if not isinstance(acceptance, str) or not 12 <= len(acceptance.strip()) <= 500:
@@ -182,7 +185,7 @@ async def register_obligation(session: aiohttp.ClientSession,
     objective = objective.strip()
     acceptance = acceptance.strip()
     obligation_id = "goo-nabu-" + hashlib.sha256(
-        (objective + "\\n" + acceptance).encode("utf-8")
+        (objective + "\n" + acceptance).encode("utf-8")
     ).hexdigest()[:20]
     intent = "Nabu übergibt auf ausdrücklichen Benutzerauftrag Arbeit an Grabowski"
     target_args = {

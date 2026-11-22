@@ -72,7 +72,10 @@ async def authorized_session(session: aiohttp.ClientSession,
     async with _lock:
         record = read_credentials(credentials_path)
         now = int(time.time())
-        deadline = int(record.get("saved_at_unix", 0)) + int(record.get("expires_in", 0))
+        try:
+            deadline = int(record.get("saved_at_unix") or 0) + int(record.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            deadline = 0  # malformed expiry: force a refresh instead of crashing
         if now < deadline - 90:
             return record
         if not record.get("refresh_token"):
@@ -134,6 +137,24 @@ def extract_sse_data(event: str) -> dict | None:
         raise ChatGPTUnavailable("Ungültige ChatGPT-Stream-Antwort") from None
 
 
+def _apply_event(event: str, output: list[str]) -> bool:
+    """Apply one SSE event; True only for an explicit response.completed."""
+    value = extract_sse_data(event)
+    if not value:
+        return False
+    event_type = value.get("type")
+    if event_type == "response.output_text.delta":
+        output.append(str(value.get("delta", "")))
+    elif event_type == "response.completed":
+        return True
+    elif event_type in ("response.failed", "response.incomplete", "error"):
+        nested = value.get("response")
+        err = (nested.get("error") if isinstance(nested, dict) else None) or value.get("error") or {}
+        code = str(err.get("code") or event_type)[:100] if isinstance(err, dict) else event_type
+        raise ChatGPTUnavailable(f"ChatGPT-Antwort nicht abgeschlossen ({code})")
+    return False
+
+
 async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
                          credentials_path: Path = CREDENTIALS) -> dict:
     if not isinstance(question, str) or not question.strip():
@@ -167,18 +188,11 @@ async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
                     raise ChatGPTUnavailable("ChatGPT-Antwort über dem Größenlimit")
                 while "\n\n" in pending:
                     event, pending = pending.split("\n\n", 1)
-                    value = extract_sse_data(event)
-                    if not value:
-                        continue
-                    event_type = value.get("type")
-                    if event_type == "response.output_text.delta":
-                        output.append(str(value.get("delta", "")))
-                    elif event_type == "response.completed":
-                        completed = True
-                    elif event_type in ("response.failed", "response.incomplete", "error"):
-                        err = value.get("response", {}).get("error") or value.get("error") or {}
-                        code = str(err.get("code") or event_type)[:100] if isinstance(err, dict) else event_type
-                        raise ChatGPTUnavailable(f"ChatGPT-Antwort nicht abgeschlossen ({code})")
+                    completed = _apply_event(event, output) or completed
+            # A final event may end without the blank-line terminator.
+            pending = (pending + decoder.decode(b"", final=True)).replace("\r\n", "\n")
+            if pending.strip():
+                completed = _apply_event(pending, output) or completed
     except (aiohttp.ClientError, TimeoutError, UnicodeError) as exc:
         raise ChatGPTUnavailable("ChatGPT-Stream fehlerhaft oder unterbrochen; kein Ergebnis bestätigt") from exc
     answer = "".join(output).strip()
