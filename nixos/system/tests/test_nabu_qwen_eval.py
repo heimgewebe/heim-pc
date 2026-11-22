@@ -27,8 +27,8 @@ class NabuQwenEvalTest(unittest.TestCase):
 
     def test_actual_public_nabu_tool_prompt_is_included(self):
         prompt = nabu.registered_nabu_prompt()
-        self.assertIn("WICHTIG: Bei heute/aktuell/neueste", prompt)
-        self.assertIn("WICHTIG: Eine konkrete Aktion hat immer Vorrang", prompt)
+        self.assertIn("Für aktuelle Ereignisse, Wetter, Preise", prompt)
+        self.assertIn("Eine konkret gewünschte Aktion hat Vorrang", prompt)
         self.assertIn("nabu_web__play_music", prompt)
         self.assertIn("nabu_web__search", prompt)
 
@@ -37,7 +37,7 @@ class NabuQwenEvalTest(unittest.TestCase):
         b, other = nabu.validate_fixture()
         self.assertEqual(nabu.digest(a), nabu.digest(b))
         self.assertEqual(nabu.digest(tools), nabu.digest(other))
-        self.assertEqual(11, len(tools))
+        self.assertEqual(10, len(tools))
 
     def test_reject_null_music_parameters(self):
         self.assertFalse(nabu.valid_arguments("nabu_web__play_music", {"media_id": None}))
@@ -161,10 +161,16 @@ class NabuQwenEvalTest(unittest.TestCase):
         case = nabu.cases()[0]
         self.assertFalse(nabu.score(case, "answer", {}, ""))
 
-    def test_fresh_deep_alternative_only_in_one_explicit_case(self):
+    def test_one_model_analyses_directly_and_fetches_fresh_sources(self):
         cases = {x["id"]: x for x in nabu.cases()}
-        self.assertTrue(nabu.score(cases["fresh-10"], "nabu_web__deep_answer", {"question": "Energiepolitik?"}, ""))
-        self.assertFalse(nabu.score(cases["fresh-01"], "nabu_web__deep_answer", {"question": "Wetter?"}, ""))
+        self.assertTrue(nabu.score(cases["deep-01"], "answer", {},
+                                   "Bei Wärmepumpen sind diese Bedingungen wichtig."))
+        self.assertFalse(nabu.score(cases["deep-01"], "nabu_web__deep_answer",
+                                    {"question": "Wärmepumpen?"}, ""))
+        self.assertTrue(nabu.score(cases["fresh-10"], "nabu_web__search",
+                                   {"query": "Energiepolitik 2026"}, ""))
+        self.assertFalse(nabu.score(cases["fresh-10"], "answer", {},
+                                    "Aktuelle Beschlüsse ohne Quelle."))
 
     def test_check_never_touches_ollama(self):
         with patch.object(nabu, "http_json", side_effect=AssertionError("Network not allowed")):

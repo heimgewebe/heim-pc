@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-MODEL = "nabu-qwen3-14b-q6:20261121"
+MODEL = "hf.co/Xylolabs/Qwen3.8-27B-GGUF:Q3_K_M"
 API = "http://127.0.0.1:11434"
 SOURCE = Path(__file__).resolve().parents[1] / "nixos/system/nabu/llm.py"
 RESULT_DIR = Path.home() / ".local/state/nabu-model-eval"
@@ -167,7 +167,7 @@ GROUPS = {
 }
 
 TOOLS_EXPECTED = {
-    "answer": "answer", "deep": "nabu_web__deep_answer",
+    "answer": "answer", "deep": "answer",
     "music": "nabu_web__play_music", "browser": "nabu_web__browser",
     "fresh": "nabu_web__search", "read_page": "nabu_web__read_page",
     "operator_status": "nabu_web__grabowski",
@@ -187,9 +187,7 @@ OVERRIDE = {
     ("device", 8): "answer",
     ("device", 9): "clarify",
 }
-# Optional matched alternative: DeepAnswer itself retrieves sources when it
-# needs them. A fresh DeepAnswer selection is acceptable for that one case.
-ALTERNATES = {("fresh", 9): ["nabu_web__deep_answer"]}
+ALTERNATES = {}
 # These negative controls require absence of any tool call.
 CRITICAL = {("answer", 0), ("answer", 5), ("answer", 7), ("answer", 8),
             ("answer", 9), ("device", 8), ("device", 9)}
@@ -224,7 +222,6 @@ MODEL_TOOLS = {
                                        "url": {"type": "string"}, "target": {"type": "string"}, "value": {"type": "string"}}, ["operation"]),
     "PlayMusic": ("nabu_web__play_music", {"media_id": {"type": "string"}, "media_type": {"type": "string", "enum": ["track", "album", "artist", "playlist", "radio"]},
                                           "artist": {"type": "string"}}, []),
-    "DeepAnswer": ("nabu_web__deep_answer", {"question": {"type": "string"}}, ["question"]),
     "ChatGPTAnswer": ("nabu_web__chatgpt", {"question": {"type": "string"}}, ["question"]),
     "GrabowskiRequest": ("nabu_web__grabowski_request", {"objective": {"type": "string"}, "acceptance": {"type": "string"}}, ["objective", "acceptance"]),
     "GrabowskiStatus": ("nabu_web__grabowski", {"operation": {"type": "string", "enum": ["status", "tasks", "task", "obligation"]},
@@ -383,7 +380,7 @@ def valid_arguments(kind, args):
         return isinstance(args.get("url"), str) and args["url"].startswith(("http://", "https://"))
     if kind == "nabu_web__search":
         return isinstance(args.get("query"), str) and bool(args["query"].strip())
-    if kind in {"nabu_web__deep_answer", "nabu_web__chatgpt"}:
+    if kind == "nabu_web__chatgpt":
         return isinstance(args.get("question"), str) and bool(args["question"].strip())
     if kind == "nabu_web__grabowski_request":
         return all(isinstance(args.get(x), str) and bool(args[x].strip()) for x in ("objective", "acceptance"))
@@ -455,7 +452,7 @@ def run(mode, model, timeout, output_dir):
             print(json.dumps({"smoke": wanted, "got": got, "correct": correct,
                               "tool_call_count": len(raw_calls), "seconds": seconds}))
         return 0
-    stem = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + model.replace(":", "-")
+    stem = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + model.replace("/", "-").replace(":", "-")
     old_umask = os.umask(0o077)
     try:
         path, handle = private_jsonl(output_dir, stem)
