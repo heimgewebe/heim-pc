@@ -89,7 +89,18 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                 # Never retry the original request: only execute its exact
                 # already-issued challenge, with all target arguments unchanged.
                 allowed = {"grabowski_status", "grabowski_task_list", "grabowski_task_status"}
-                if name not in allowed or "fresh intent-bound transport verification required" not in raw_response:
+                fixed_obligation_read = (
+                    name == "grip_run"
+                    and args.get("name") == "operator-obligation-status"
+                    and args.get("allow_mutation") is False
+                    and isinstance(args.get("parameters"), dict)
+                    and set(args["parameters"]) == {"obligation_id"}
+                    and isinstance(args["parameters"]["obligation_id"], str)
+                    and re.fullmatch(r"goo-[a-z0-9][a-z0-9-]{7,79}",
+                                     args["parameters"]["obligation_id"]) is not None
+                )
+                if ((name not in allowed and not fixed_obligation_read)
+                        or "fresh intent-bound transport verification required" not in raw_response):
                     raise
                 match = re.search(r"challenge_receipt_sha256=([0-9a-f]{64})", raw_response)
                 if not match:
