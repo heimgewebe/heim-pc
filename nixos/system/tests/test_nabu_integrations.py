@@ -165,6 +165,20 @@ class DummySession:
         return next(self.responses)
 
 
+class GrabowskiStreamTests(IsolatedAsyncioTestCase):
+    async def test_split_sse_response_is_read_to_completion(self):
+        payload = {"jsonrpc": "2.0", "id": 1,
+                   "result": {"structuredContent": {"healthy": True}}}
+        raw = ("event: message\r\ndata: " + json.dumps(payload) +
+               "\r\n\r\n").encode("utf-8")
+        response = DummyResponse(200, chunks=[raw[:18], raw[18:42], raw[42:]])
+        result = await grabowski.mcp_call(
+            DummySession([response]), "grabowski_status",
+            {"view": "minimal", "reason": "read", "user_intent": "read"},
+        )
+        self.assertEqual(result, {"healthy": True})
+
+
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
     async def test_operator_obligation_uses_exact_single_use_target(self):
         from unittest.mock import AsyncMock

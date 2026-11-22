@@ -69,10 +69,14 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
             timeout=aiohttp.ClientTimeout(total=20, connect=4),
         ) as response:
             response.raise_for_status()
-            raw = await response.content.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) > MAX_RESPONSE_BYTES:
-                raise GrabowskiUnavailable("MCP-Antwort über dem Größenlimit")
-            return parse_mcp_response(raw.decode("utf-8", errors="replace"))
+            chunks = []
+            total = 0
+            async for part in response.content.iter_any():
+                total += len(part)
+                if total > MAX_RESPONSE_BYTES:
+                    raise GrabowskiUnavailable("MCP-Antwort über dem Größenlimit")
+                chunks.append(part)
+            return parse_mcp_response(b"".join(chunks).decode("utf-8", errors="replace"))
     except (aiohttp.ClientError, TimeoutError) as exc:
         raise GrabowskiUnavailable("Grabowski derzeit nicht erreichbar; Aktion nicht bestätigt") from exc
 
