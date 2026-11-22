@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime
 import html
 from html.parser import HTMLParser
 import ipaddress
@@ -11,6 +12,7 @@ import re
 import socket
 from urllib.parse import urlsplit, parse_qs, urljoin, quote
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -282,6 +284,24 @@ def relevant_search_hits(query: str, hits: list[dict]) -> list[dict]:
             sorted((item for item in ranked if item[0] >= 0),
                    key=lambda item: (-item[0], item[1]))]
 
+
+def normalize_today_news_query(query: str, now: datetime) -> str:
+    """Use the local calendar for 'heute', never a model-invented date."""
+    if not re.search(r"\bheute\b", query.casefold()):
+        return query
+    # Qwen3.8 has invented 15 February or 11 June for today's news.
+    # Strip only calendar expressions, not subject words or historical topics.
+    query = re.sub(
+        r"\b(?:\d{1,2}\.\s*)?(?:januar|februar|märz|maerz|april|mai|"
+        r"juni|juli|august|september|oktober|november|dezember)\s+20\d{2}\b"
+        r"|\b\d{1,2}\.\d{1,2}\.20\d{2}\b"
+        r"|\b20\d{2}-\d{1,2}-\d{1,2}\b",
+        " ", query, flags=re.IGNORECASE,
+    )
+    return (" ".join(query.split()) + f" {now:%d.%m.%Y}")[:200]
+
+
+
 class WebSearch(Tool):
     name = "nabu_web__search"
     title = "Im Internet recherchieren"
@@ -303,6 +323,10 @@ class WebSearch(Tool):
                 query.casefold(),
             ))
 
+            if is_news:
+                query = normalize_today_news_query(
+                    query, datetime.now(ZoneInfo("Europe/Berlin"))
+                )
             news_deadline = asyncio.get_running_loop().time() + 25
 
             async def search_result(provider: str, hits: list[dict]) -> ToolResult:

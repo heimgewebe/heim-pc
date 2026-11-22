@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime
 from html.parser import HTMLParser
 import ipaddress
 import json
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit, urljoin, quote, parse_qs
+from zoneinfo import ZoneInfo
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "nabu" / "llm.py"
@@ -92,7 +94,8 @@ def source_functions():
         if isinstance(node, ast.ClassDef) and node.name == "TextExtractor":
             chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name in (
-                "relevant_source_excerpt", "search_subject_terms", "relevant_search_hits"):
+                "relevant_source_excerpt", "search_subject_terms",
+                "relevant_search_hits", "normalize_today_news_query"):
             chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name == "public_url":
             chosen.append(node)
@@ -107,10 +110,10 @@ def source_functions():
             for argument in method.args.args:
                 argument.annotation = None
             chosen.append(method)
-    assert len(chosen) == 8, "Expected URL/resolver/body reader/WebRead and evidence helpers"
+    assert len(chosen) == 9, "Expected URL/resolver/body reader/WebRead and evidence helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
-        "HTMLParser": HTMLParser,
+        "HTMLParser": HTMLParser, "datetime": datetime,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
         "TIMEOUT": None,
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
@@ -593,6 +596,12 @@ class NewsSearchBundlingTests(unittest.TestCase):
                 })
 
         functions = source_functions()
+
+        class FakeDateTime:
+            @staticmethod
+            def now(_zone):
+                return datetime(2026, 11, 22)
+
         ns = {
             "aiohttp": SimpleNamespace(
                 ClientSession=Session,
@@ -605,6 +614,8 @@ class NewsSearchBundlingTests(unittest.TestCase):
             "read_bounded": functions["read_bounded"],
             "search_subject_terms": functions["search_subject_terms"],
             "relevant_search_hits": functions["relevant_search_hits"],
+            "normalize_today_news_query": functions["normalize_today_news_query"],
+            "datetime": FakeDateTime, "ZoneInfo": ZoneInfo,
             "ToolInput": lambda **kw: SimpleNamespace(**kw),
             "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
             "WebRead": Reader,
@@ -616,6 +627,36 @@ class NewsSearchBundlingTests(unittest.TestCase):
         result = asyncio.run(ns["call_search"](
             None, None, SimpleNamespace(tool_args={"query": query}), None))
         return result.data, provider_calls, read_calls
+
+    def test_todays_news_discards_model_invented_past_calendar(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "normalize_today_news_query")
+        ns = {"re": re}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(SOURCE), "exec"), ns)
+        normal = ns["normalize_today_news_query"]
+        today = datetime(2026, 11, 22)
+        for original in ("Nachrichten Schlagzeilen heute 15. Februar 2026",
+                         "Nachrichten heute 11. Juni 2026",
+                         "Nachrichten heute 2026-02-11"):
+            with self.subTest(query=original):
+                corrected = normal(original, today)
+                self.assertIn("22.11.2026", corrected)
+                self.assertNotIn("Februar", corrected)
+                self.assertNotIn("Juni", corrected)
+                self.assertNotIn("2026-02-11", corrected)
+        historical = "Nachrichten vom 15. Februar 2026"
+        self.assertEqual(historical, normal(historical, today))
+        self.assertIn("normalize_today_news_query(", SOURCE.read_text(encoding="utf-8"))
+
+    def test_news_websearch_rewrites_invented_model_calendar(self):
+        data, _, _ = self.search_with_provider_fallback(
+            "Nachrichten Schlagzeilen heute 15. Februar 2026")
+        self.assertIn("22.11.2026", data["query"])
+        self.assertNotIn("Februar", data["query"])
+        self.assertNotIn("15.", data["query"])
+        self.assertEqual("DuckDuckGo", data["source"])
+        self.assertEqual("read", data["source_read_status"])
 
     def test_today_without_news_intent_preserves_direct_search_results(self):
         for query in ("Ölpreis heute", "Öffnungszeiten heute"):
