@@ -253,6 +253,10 @@ def _bounded_operator_status_request(objective: str, acceptance: str) -> bool:
         and o & {"werkzeuge", "tools"}
         and a & {"healthy", "status"}
         and a & {"werkzeuganzahl", "toolanzahl", "werkzeuge", "tools"}
+        # A measured Healthy value may be false. Never auto-complete a
+        # predicate that requires the operator to BE healthy.
+        and ("healthy" not in a or ("wert" in a and "ist" not in a))
+        and ("belegt" in a or {"stehen", "fest"} <= a)
     )
 
 

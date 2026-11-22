@@ -420,6 +420,8 @@ class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
              "Fertig, wenn die Produktion umgestellt ist."),
             ("Prüfe den Heim-PC-Status morgen.", "Liefere einen aktuellen Statusreport."),
             ("Prüfe den Grabowski-Status und deploye", legitimate[1]),
+            ("Prüfe den Grabowski Status und die registrierten MCP Werkzeuge",
+             "Fertig wenn Status healthy ist und Werkzeuganzahl belegt ist"),
             ("Prüfe den Grabowski-Status; rm -rf /", legitimate[1]),
             (legitimate[0], "Sichere eine Datenbank und belege Status"),
         ):
@@ -445,7 +447,7 @@ class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
                 "status": "passed", "receipt_sha256": "b" * 64,
                 "output": {"obligation_id": obligation_id, "state": "open"},
             }}}
-        checked = {"healthy": True, "tool_contract": {"registered_tool_count": 208}}
+        checked = {"healthy": False, "tool_contract": {"registered_tool_count": 208}}
         close_begin = {"status": "passed", "receipt": {"status": "passed"},
                        "output": {"state": "challenge_pending",
                                   "challenge_receipt_sha256": "c" * 64}}
@@ -470,7 +472,7 @@ class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
         self.assertEqual(data["obligation_id"], obligation_id)
         self.assertEqual(data["receipt_sha256"], "d" * 64)
         self.assertEqual(data["completion_scope"], "process_only")
-        self.assertTrue(data["healthy"])
+        self.assertFalse(data["healthy"])
         self.assertEqual(data["registered_tools"], 208)
         calls = invoke.await_args_list
         self.assertEqual(calls[2].args[1], "grabowski_status")
