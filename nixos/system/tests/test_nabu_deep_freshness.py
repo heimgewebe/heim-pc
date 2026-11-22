@@ -137,6 +137,19 @@ class DeepFreshnessTests(unittest.TestCase):
             None,
         ))
 
+    def test_current_officeholder_selection_prompt_requires_websearch(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        registered = next(x for x in tree.body
+                          if isinstance(x, ast.FunctionDef) and x.name == "async_get_tools")
+        calls = [x for x in ast.walk(registered)
+                 if isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                 and x.func.id == "LLMTools"]
+        self.assertEqual(1, len(calls))
+        prompt = ast.literal_eval(next(k.value for k in calls[0].keywords
+                                       if k.arg == "prompt"))
+        self.assertIn("Bei Fragen nach aktuellen Amtsinhabern", prompt)
+        self.assertIn("nabu_web__search", prompt)
+
     def test_freshness_recognition_is_specific(self):
         actual = self.real["requires_live_sources"]
         for question in (
