@@ -75,6 +75,31 @@ class GrabowskiContractTests(TestCase):
         self.assertEqual(data["registered_tools"], 208)
 
 
+    def test_qwen_task_selection_with_goo_id_is_normalized_to_obligation(self):
+        obligation_id = "goo-nabu-chatgpt-grabowski-20261122"
+        operation, actual_id = grabowski.normalize_read_operation(
+            "task", obligation_id
+        )
+        self.assertEqual((operation, actual_id), ("obligation", obligation_id))
+        name, args = grabowski.read_request(operation, obligation_id=actual_id)
+        self.assertEqual(name, "grip_run")
+        self.assertEqual(args["name"], "operator-obligation-status")
+        self.assertFalse(args["allow_mutation"])
+        self.assertEqual(args["parameters"], {"obligation_id": obligation_id})
+        self.assertEqual(
+            grabowski.normalize_read_operation("task", "deadbeef1234567"),
+            ("task", ""),
+        )
+        self.assertEqual(
+            grabowski.normalize_read_operation("obligation", "",
+                                               obligation_id),
+            ("obligation", obligation_id),
+        )
+        with self.assertRaises(ValueError):
+            grabowski.read_request(
+                *grabowski.normalize_read_operation("task", "goo-/bad")
+            )
+
     def test_obligation_status_is_exact_read_only_and_bounded(self):
         obligation_id = "goo-nabu-1234567890abcdef1234"
         name, args = grabowski.read_request(

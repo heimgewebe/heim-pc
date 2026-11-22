@@ -126,6 +126,15 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
         raise GrabowskiUnavailable("Grabowski derzeit nicht erreichbar; Aktion nicht bestätigt") from exc
 
 
+def normalize_read_operation(
+    operation: str, task_id: str = "", obligation_id: str = "",
+) -> tuple[str, str]:
+    """Correct a Qwen task selection when the supplied ID is an obligation ID."""
+    if operation == "task" and isinstance(task_id, str) and task_id.startswith("goo-"):
+        return "obligation", task_id
+    return operation, obligation_id
+
+
 def read_request(operation: str, task_id: str = "", obligation_id: str = "") -> tuple[str, dict]:
     """Hard-coded read-only API exposed to Nabu, no arbitrary MCP passthrough."""
     intent = "Nabu fragt den bestehenden Grabowski-Operator nach dem Zustand"
