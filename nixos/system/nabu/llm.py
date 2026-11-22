@@ -10,7 +10,7 @@ import ipaddress
 import json
 import re
 import socket
-from urllib.parse import urlsplit, parse_qs, urljoin
+from urllib.parse import urlsplit, parse_qs, urljoin, quote
 from zoneinfo import ZoneInfo
 import xml.etree.ElementTree as ET
 
@@ -75,28 +75,128 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
 
 
 class TextExtractor(HTMLParser):
+    """Prefer meaningful article text to navigation and consent overlays."""
+
+    _CHROME_TAGS = frozenset({"script", "style", "noscript", "svg", "template",
+                             "nav", "footer", "aside"})
+    _BLOCK_TAGS = frozenset({"p", "br", "h1", "h2", "h3", "h4", "li",
+                             "section", "article", "main", "div", "tr"})
+    _VOID_TAGS = frozenset({"br", "img", "input", "meta", "link", "hr",
+                            "source", "wbr", "area", "embed"})
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
-        self.skip = 0
+        self.primary_parts: list[str] = []
+        self._stack: list[tuple[str, bool, bool]] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "noscript", "svg", "template"):
-            self.skip += 1
-        if tag in ("p", "br", "h1", "h2", "h3", "li", "section", "article"):
+        attributes = dict(attrs)
+        hidden_parent = self._stack[-1][1] if self._stack else False
+        primary_parent = self._stack[-1][2] if self._stack else False
+        marker = " ".join(str(attributes.get(key) or "") for key in
+                          ("id", "class", "aria-label")).casefold()
+        # A privacy policy may itself discuss cookies or GDPR. Hide actual
+        # consent UI overlays, not entire substantive topic sections.
+        overlay_hint = re.search(
+            r"(?:^|[\s_-])(?:cookie|consent|gdpr)[_-]?"
+            r"(?:banner|consent|notice|overlay|modal|popup|dialog|wall|panel)"
+            r"(?:$|[\s_-])"
+            r"|(?:^|[\s_-])(?:onetrust|cookiebot)(?:$|[\s_-])",
+            marker,
+        )
+        dialog_hint = (tag == "dialog" or attributes.get("role") == "dialog"
+                       or attributes.get("aria-modal") == "true")
+        consent_overlay = (
+            tag in ("div", "section", "dialog")
+            and (not primary_parent or dialog_hint)
+            and bool(overlay_hint or (dialog_hint and any(
+                name in marker for name in ("cookie", "consent", "gdpr")
+            )))
+        )
+        hidden = (hidden_parent or tag in self._CHROME_TAGS
+                  or (tag == "header" and not primary_parent) or consent_overlay)
+        primary = (primary_parent or tag in ("main", "article")
+                   or attributes.get("role") == "main")
+        if tag not in self._VOID_TAGS:
+            self._stack.append((tag, hidden, primary))
+        if tag in self._BLOCK_TAGS and not hidden:
             self.parts.append("\n")
+            if primary:
+                self.primary_parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID_TAGS:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript", "svg", "template") and self.skip:
-            self.skip -= 1
+        hidden = self._stack[-1][1] if self._stack else False
+        primary = self._stack[-1][2] if self._stack else False
+        if tag in self._BLOCK_TAGS and not hidden:
+            self.parts.append("\n")
+            if primary:
+                self.primary_parts.append("\n")
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                self._stack = self._stack[:index]
+                break
 
     def handle_data(self, data):
-        if not self.skip:
-            self.parts.append(data)
+        if self._stack and self._stack[-1][1]:
+            return
+        self.parts.append(data)
+        if self._stack and self._stack[-1][2]:
+            self.primary_parts.append(data)
 
-    def get_text(self, maximum=8000):
-        return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", "".join(self.parts))).strip()[:maximum]
+    def get_text(self, maximum=240000):
+        def clean(parts):
+            return re.sub(r"[ \t]+", " ",
+                          re.sub(r"\n\s*\n+", "\n", "".join(parts))).strip()
 
+        article = clean(self.primary_parts)
+        text = article if len(article) >= 80 else clean(self.parts)
+        return text[:maximum]
+
+
+def relevant_source_excerpt(text: str, question: str, maximum: int = 6000) -> str:
+    """Retain the introduction and query-matching passages, including late facts."""
+    if len(text) <= maximum:
+        return text
+    stop = {"welche", "welcher", "welches", "warum", "wieso", "bitte", "gründlich",
+            "heute", "jetzt", "aktuell", "einen", "einem", "einer", "eine",
+            "über", "oder", "sind", "wird", "wurde", "wurden", "habe",
+            "haben", "dass", "kann", "prüfe", "steht", "gibt"}
+    terms = {word for word in re.findall(r"\w+", question.casefold())
+             if len(word) >= 4 and word not in stop}
+    width, stride = 1100, 900
+    last = max(0, len(text) - width)
+    starts = sorted(set([*range(0, last + 1, stride), last]))
+    def score(start):
+        passage = text[start:start + width].casefold()
+        return sum(1 for term in terms if term in passage)
+
+    def merge_spans(spans):
+        merged = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    spans = merge_spans([(0, width), (last, len(text))])
+    separator = "\n[…]\n"
+    for start in sorted(starts, key=lambda pos: (-score(pos), pos)):
+        if score(start) == 0:
+            break
+        candidate = merge_spans([*spans, (start, min(len(text), start + width))])
+        total = sum(end - begin for begin, end in candidate)
+        total += len(separator) * (len(candidate) - 1)
+        if total <= maximum:
+            spans = candidate
+    return separator.join(text[begin:end].strip()
+                          for begin, end in spans)[:maximum]
 
 def message(error: Exception) -> ToolResult:
     return ToolResult(data={"error": f"{type(error).__name__}: {str(error)[:260]}"}, error=True)
@@ -114,6 +214,75 @@ async def read_bounded(reader, maximum: int) -> bytes:
         received += len(chunk)
     return b"".join(chunks)
 
+
+def search_subject_terms(query: str) -> list[str]:
+    """Subject anchors excluding short stopwords, generic roles and dates."""
+    ignored = {"wer", "was", "wie", "ist", "sind", "der", "die", "das", "und",
+               "oder", "von", "für", "des", "dem", "einer", "einem", "welche",
+               "welcher", "welches", "bitte", "heute", "morgen", "aktuell",
+               "direktor", "leitung", "preis", "regeln", "stand", "standort",
+               "hat", "habe", "haben", "wird", "werden", "kann", "gibt",
+               "viel", "viele", "hoch", "neueste", "gestern", "diese", "dieser",
+               "über", "nach", "vor", "bei", "zum", "zur", "auf", "aus", "mit",
+               "leitet", "führt", "steht", "noch", "schon",
+               "in", "im", "am", "an", "zu", "um", "ob", "es", "er", "du",
+               "ja", "da", "so", "ab", "wo", "je"}
+    return list(dict.fromkeys(
+        word for word in re.findall(r"\w+", query.casefold())
+        if len(word) >= 2 and not word.isdecimal() and word not in ignored
+    ))
+
+
+def relevant_search_hits(query: str, hits: list[dict]) -> list[dict]:
+    """Retain subject-matching results and prefer the specifically asked topic.
+
+    Generic role words cannot make an unrelated result pass the subject gate.
+    German/English role synonyms only rank the already matching candidates.
+    """
+    anchors = search_subject_terms(query)
+    if not anchors:
+        return []
+    role_hints = {
+        "leitung": ("leitung", "leadership", "director", "chief", "chair"),
+        "leitet": ("leitung", "leadership", "director", "chief", "chair"),
+        "direktor": ("direktor", "director", "director-general"),
+        "generaldirektor": ("generaldirektor", "director-general"),
+        "vorsitz": ("vorsitz", "chair", "president"),
+        "präsident": ("präsident", "president"),
+        "preis": ("preis", "price", "cost"),
+    }
+    query_words = set(re.findall(r"\w+", query.casefold()))
+    roles = {
+        candidate for word, alternatives in role_hints.items()
+        if any(word in query_word for query_word in query_words)
+        for candidate in alternatives
+    }
+
+    def has_anchor(value: str, anchor: str) -> bool:
+        if len(anchor) <= 3:
+            # "EU" is not contained in "heute", but "Ölpreis" starts with Öl.
+            return bool(re.search(r"(?<!\w)" + re.escape(anchor), value))
+        return anchor in value
+
+    def score(hit: dict) -> int:
+        title = str(hit.get("title") or "").casefold()
+        excerpt = str(hit.get("excerpt") or "").casefold()
+        url = str(hit.get("url") or "").casefold()
+        if not any(has_anchor(title + " " + excerpt + " " + url, item)
+                   for item in anchors):
+            return -1
+        specificity = sum(5 for item in anchors if has_anchor(title, item))
+        specificity += sum(2 for item in anchors if has_anchor(excerpt, item))
+        specificity += sum(1 for item in anchors if has_anchor(url, item))
+        specificity += sum(4 for role in roles
+                           if role in title or role in url)
+        return specificity
+
+    ranked = [(score(hit), index, hit) for index, hit in enumerate(hits)
+              if isinstance(hit, dict)]
+    return [hit for relevance, _, hit in
+            sorted((item for item in ranked if item[0] >= 0),
+                   key=lambda item: (-item[0], item[1]))]
 
 class WebSearch(Tool):
     name = "nabu_web__search"
@@ -133,50 +302,128 @@ class WebSearch(Tool):
                 connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers=headers,
             ) as session:
-                async with session.get("https://html.duckduckgo.com/html/", params={"q": query}) as response:
-                    response.raise_for_status()
-                    page = await read_bounded(response.content, 250000)
-                soup = BeautifulSoup(page, "html.parser")
-                hits = []
-                for item in soup.select(".result"):
-                    a = item.select_one("a.result__a")
-                    if not a:
-                        continue
-                    link = a.get("href", "")
-                    if link.startswith("//duckduckgo.com/l/"):
-                        link = parse_qs(urlsplit("https:" + link).query).get("uddg", [""])[0]
-                    if not link.startswith(("https://", "http://")):
-                        continue
-                    snippet = item.select_one(".result__snippet")
-                    hits.append({
-                        "title": a.get_text(" ", strip=True)[:160],
-                        "url": link,
-                        "excerpt": (snippet.get_text(" ", strip=True) if snippet else "")[:350],
-                    })
-                    if len(hits) == 6:
-                        break
-                if hits:
-                    return ToolResult(data={"query": query, "source": "DuckDuckGo", "results": hits})
-                async with session.get("https://www.bing.com/search", params={"q": query, "format": "rss"}) as response:
-                    response.raise_for_status()
-                    body = await read_bounded(response.content, 80000)
-                for item in ET.fromstring(body).findall(".//item")[:6]:
-                    url = (item.findtext("link") or "").strip()
-                    if url.startswith(("https://", "http://")):
+                # DuckDuckGo HTTP 202 is an anti-bot page, not search evidence.
+                try:
+                    async with session.get("https://html.duckduckgo.com/html/",
+                                           params={"q": query}) as response:
+                        page = (await read_bounded(response.content, 250000)
+                                if response.status == 200 else b"")
+                    soup = BeautifulSoup(page, "html.parser")
+                    hits = []
+                    for item in soup.select(".result"):
+                        a = item.select_one("a.result__a")
+                        if not a:
+                            continue
+                        link = a.get("href", "")
+                        if link.startswith("//duckduckgo.com/l/"):
+                            link = parse_qs(urlsplit("https:" + link).query).get("uddg", [""])[0]
+                        if not link.startswith(("https://", "http://")):
+                            continue
+                        snippet = item.select_one(".result__snippet")
                         hits.append({
-                            "title": (item.findtext("title") or "").strip()[:160],
-                            "url": url,
-                            "excerpt": (item.findtext("description") or "").strip()[:350],
+                            "title": a.get_text(" ", strip=True)[:160],
+                            "url": link,
+                            "excerpt": (snippet.get_text(" ", strip=True) if snippet else "")[:350],
                         })
-                return ToolResult(data={"query": query, "source": "Bing RSS (Fallback)", "results": hits})
-        except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        if len(hits) == 6:
+                            break
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "DuckDuckGo", "results": hits})
+                except (ValueError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+
+                # Bing RSS occasionally serves arbitrary cached pages for the
+                # requested query; only topic-matching titles are retained.
+                try:
+                    async with session.get("https://www.bing.com/search",
+                                           params={"q": query, "format": "rss"}) as response:
+                        response.raise_for_status()
+                        body = await read_bounded(response.content, 80000)
+                    hits = []
+                    for item in ET.fromstring(body).findall(".//item")[:6]:
+                        url = (item.findtext("link") or "").strip()
+                        if url.startswith(("https://", "http://")):
+                            hits.append({
+                                "title": (item.findtext("title") or "").strip()[:160],
+                                "url": url,
+                                "excerpt": (item.findtext("description") or "").strip()[:350],
+                            })
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "Bing RSS", "results": hits})
+                except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+
+                # Encyclopedic background can help locate the subject. It is
+                # not confirmation of a changing fact as of today's date.
+                subject = " ".join(search_subject_terms(query))[:140]
+                if subject:
+                    try:
+                        async with session.get(
+                            "https://de.wikipedia.org/w/rest.php/v1/search/page",
+                            params={"q": subject, "limit": "6"},
+                        ) as response:
+                            response.raise_for_status()
+                            document = json.loads((await read_bounded(
+                                response.content, 80000)).decode("utf-8", errors="replace"))
+                        hits = []
+                        for page in document.get("pages", [])[:6]:
+                            if not isinstance(page, dict):
+                                continue
+                            key, title = page.get("key"), page.get("title")
+                            if not isinstance(key, str) or not isinstance(title, str):
+                                continue
+                            url = "https://de.wikipedia.org/wiki/" + quote(
+                                key.replace(" ", "_")[:180], safe="_()")
+                            excerpt = BeautifulSoup(
+                                str(page.get("excerpt") or ""), "html.parser"
+                            ).get_text(" ", strip=True)[:350]
+                            hits.append({"title": title[:160], "url": url,
+                                         "excerpt": excerpt})
+                        hits = relevant_search_hits(query, hits)
+                        if hits:
+                            return ToolResult(data={
+                                "query": query,
+                                "source": "Wikipedia (Hintergrund, keine Live-Bestätigung)",
+                                "results": hits})
+                    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+                        pass
+
+                # Publisher headlines for recent events; validate subject
+                # before suggesting any link as a source.
+                try:
+                    async with session.get(
+                        "https://news.google.com/rss/search",
+                        params={"q": query, "hl": "de", "gl": "DE", "ceid": "DE:de"},
+                    ) as response:
+                        response.raise_for_status()
+                        body = await read_bounded(response.content, 80000)
+                    hits = []
+                    for item in ET.fromstring(body).findall(".//item")[:6]:
+                        url = (item.findtext("link") or "").strip()
+                        if url.startswith(("https://", "http://")):
+                            hits.append({
+                                "title": (item.findtext("title") or "").strip()[:160],
+                                "url": url,
+                                "excerpt": (item.findtext("description") or "").strip()[:350],
+                            })
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "Google News RSS",
+                                                "results": hits})
+                except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+                return ToolResult(data={"query": query, "source": "unavailable", "results": []})
+        except (ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
 class WebRead(Tool):
     name = "nabu_web__read_page"
     title = "Eine Webseite lesen"
-    description = "Eine öffentliche Webseite öffnen und ihren sichtbaren Text lesen. Für Quellenprüfung nach Websuche verwenden."
-    parameters = vol.Schema({vol.Required("url"): str})
+    description = ("Öffentliche Webseite lesen; bei langen Quellen die zu prüfende Frage "
+                   "als optionales question-Argument für relevante Textauszüge übergeben.")
+    parameters = vol.Schema({vol.Required("url"): str, vol.Optional("question"): str})
     annotations = ToolAnnotations(read_only=True, open_world=True)
     integration = DOMAIN
 
@@ -186,6 +433,7 @@ class WebRead(Tool):
             async with aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
+                max_field_size=32768,
             ) as session:
                 # Every redirect is validated before its next network request.
                 redirects = 0
@@ -210,7 +458,13 @@ class WebRead(Tool):
                         break
             parser = TextExtractor()
             parser.feed(document)
-            return ToolResult(data={"url": actual, "text": parser.get_text()})
+            body = parser.get_text()
+            question = tool_input.tool_args.get("question")
+            if question is not None and not isinstance(question, str):
+                raise ValueError("Die Quellenfrage muss Text sein")
+            text = (relevant_source_excerpt(body, question) if question
+                    else body[:8000])
+            return ToolResult(data={"url": actual, "text": text})
         except (ValueError, UnicodeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
@@ -379,6 +633,100 @@ def requires_live_sources(question: str) -> bool:
     ))
 
 
+async def question_needs_live_sources(question: str, hass: HomeAssistant) -> bool:
+    """Ask the already-running Nabu primary model about time dependence.
+
+    Clear temporal cues short-circuit. Ambiguous questions get one cheap local
+    classification before the deep model; uncertain results require sources.
+    """
+    if requires_live_sources(question):
+        return True
+    prompt = (
+        "Entscheide, ob eine sachlich zuverlässige Antwort AKTUELLE externe "
+        "Beobachtungen braucht. True bei wechselnden Amtsinhabern, Preisen, "
+        "Statistiken, politischen Beschlüssen, geltenden Regeln, lokalen "
+        "Zuständen, Verfügbarkeit oder neueren Forschungsergebnissen, auch "
+        "ohne das Wort aktuell. False bei Begriffsdefinitionen, Mathematik, "
+        "Naturgesetzen, grundlegenden Erklärungen und abgeschlossener Historie. "
+        "Unterscheide 'Was ist X?' von 'Wer ist X?'. Antworte ausschließlich "
+        "mit JSON {\"live\":true} oder {\"live\":false}."
+    )
+    try:
+        async with async_get_clientsession(hass).post(
+            "http://127.0.0.1:11434/api/chat",
+            json={
+                "model": "nabu-qwen3-14b-q6:20261121",
+                "messages": [{"role": "system", "content": prompt},
+                             {"role": "user", "content": question}],
+                "format": "json", "think": False, "stream": False,
+                "keep_alive": "10m",
+                "options": {"num_ctx": 2048, "num_predict": 45, "temperature": 0},
+            },
+            timeout=aiohttp.ClientTimeout(total=25, connect=5),
+        ) as response:
+            response.raise_for_status()
+            result = await response.json()
+        item = result.get("message") if isinstance(result, dict) else None
+        content = item.get("content") if isinstance(item, dict) else None
+        decision = json.loads(content) if isinstance(content, str) else None
+        if isinstance(decision, dict) and type(decision.get("live")) is bool:
+            return decision["live"]
+    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    # Missing classification must not silently turn potentially current
+    # facts into unsupported offline answers.
+    return True
+
+async def source_search_query(question: str, now: datetime, hass: HomeAssistant) -> str:
+    """Use the existing local primary model to name the fact being looked up.
+
+    The fallback preserves the original question; search text is never itself
+    accepted as evidence for an answer.
+    """
+    fallback = f"{question[:174]} {now:%Y}"
+    prompt = (
+        "Schreibe eine knappe Suchmaschinenanfrage mit drei bis neun präzisen "
+        "Schlüsselwörtern für verlässliche aktuelle Quellen. Ermittle die "
+        "gesuchte Funktion, Personengruppe oder Messgröße und schreibe sie "
+        "als Sachbegriff, statt die Fragewörter 'wer', 'wie' zu übernehmen. "
+        "Bei der Leitung einer Organisation verwende nach Möglichkeit den "
+        "üblichen konkreten Funktionstitel (Direktor, Vorsitzender, "
+        "Generaldirektor, CEO), nicht nur 'Amtsinhaber'. Verwende für "
+        f"wechselnde Sachverhalte das Jahr {now:%Y}, keinen exakten Tag. "
+        "Nenne KEINE erfundene Person, Zahl oder Antwort und keine URL. "
+        "Antworte ausschließlich mit JSON {\"query\":\"Suchbegriffe\"}."
+    )
+    try:
+        async with async_get_clientsession(hass).post(
+            "http://127.0.0.1:11434/api/chat",
+            json={
+                "model": "nabu-qwen3-14b-q6:20261121",
+                "messages": [{"role": "system", "content": prompt},
+                             {"role": "user", "content": question}],
+                "format": "json", "think": False, "stream": False,
+                "keep_alive": "10m",
+                "options": {"num_ctx": 2048, "num_predict": 90, "temperature": 0},
+            },
+            timeout=aiohttp.ClientTimeout(total=25, connect=5),
+        ) as response:
+            response.raise_for_status()
+            result = await response.json()
+        item = result.get("message") if isinstance(result, dict) else None
+        content = item.get("content") if isinstance(item, dict) else None
+        parsed = json.loads(content) if isinstance(content, str) else None
+        proposed = parsed.get("query") if isinstance(parsed, dict) else None
+        if isinstance(proposed, str):
+            query = " ".join(proposed.split())
+            original_terms = set(re.findall(r"\w{3,}", question.casefold()))
+            chosen_terms = set(re.findall(r"\w{3,}", query.casefold()))
+            if (5 <= len(query) <= 174
+                    and not re.search(r"https?://|[<>]", query, re.IGNORECASE)
+                    and (not original_terms or original_terms & chosen_terms)):
+                return query
+    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    return fallback
+
 class DeepAnswer(Tool):
     """Optional detailed reasoning with Qwen3.8 Q3_K_M, without a second voice service."""
 
@@ -440,8 +788,8 @@ class DeepAnswer(Tool):
                 )
             sources: list[dict[str, str]] = []
             now = datetime.now(ZoneInfo("Europe/Berlin"))
-            if requires_live_sources(question):
-                query = f"{question[:174]} {now:%d.%m.%Y}"
+            if await question_needs_live_sources(question, hass):
+                query = await source_search_query(question, now, hass)
                 search = await WebSearch().async_call(
                     hass,
                     ToolInput(tool_name="nabu_web__search", tool_args={"query": query}),
@@ -462,7 +810,8 @@ class DeepAnswer(Tool):
                         continue
                     read = await WebRead().async_call(
                         hass,
-                        ToolInput(tool_name="nabu_web__read_page", tool_args={"url": url}),
+                        ToolInput(tool_name="nabu_web__read_page",
+                                  tool_args={"url": url, "question": question}),
                         llm_context,
                     )
                     if read.error or not isinstance(read.data.get("text"), str):
@@ -472,10 +821,10 @@ class DeepAnswer(Tool):
                         continue
                     sources.append({
                         "title": str(hit.get("title") or "")[:160],
+                        "search_provider": str(search.data.get("source") or "")[:80],
                         "url": str(read.data.get("url") or url)[:500],
                         "excerpt": str(hit.get("excerpt") or "")[:350],
-                            # Some public pages prepend long cookie/navigation boilerplate.
-                        "text": body[:6000],
+                        "text": relevant_source_excerpt(body, question),
                     })
                 if not sources:
                     raise ValueError(
