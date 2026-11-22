@@ -24,6 +24,18 @@ except ImportError:
     )
 
 
+try:
+    import requests
+except ImportError:
+    # The real SIWC host CLI requires requests; CI tests substitute the
+    # HTTP methods and do not need this optional host runtime dependency.
+    sys.modules["requests"] = SimpleNamespace(
+        get=lambda *_args, **_kwargs: None,
+        post=lambda *_args, **_kwargs: None,
+        RequestException=type("RequestException", (Exception,), {}),
+    )
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(name, ROOT / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
