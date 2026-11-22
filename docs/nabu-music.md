@@ -86,10 +86,78 @@ zu einer privaten Adresse und zu einem per Klick erreichbaren privaten Link
 Chrome-HTTP(S)-Browserweg, **nicht** als systemweite Firewall. Nabus
 `nabu_web__play_music` benötigt diesen Browser-Proxy nicht.
 
+## ChatGPT Plus (optional) und Grabowski-Operator (Nabu Assist)
+
+Diese Integration ergänzt den vorhandenen lokalen Qwen-/Mistral-Assistenten;
+sie ersetzt ihn nicht. Sie verwendet die **offizielle OpenAI-SIWC-OAuth-Anmeldung**
+für lokal betriebenen Open-Source-Code und `/v1/responses` mit
+`store=false, stream=true`. **Kein** ChatGPT-Browser-Scraping, API-Key,
+Client-Secret, Zugriff auf ChatGPT-Verläufe oder offene Portfreigabe.
+
+**Einmalige persönliche Anmeldung am Heim-PC** (Browser muss auf demselben
+Rechner wie die Loopback-Rückrufadresse laufen):
+
+```sh
+python3 -B /home/alex/.local/share/heimgewebe/home-assistant/nabu-chatgpt-login.py
+```
+
+Der Befehl öffnet den OpenAI-Anmeldedialog im Browser. Dort muss die betroffene
+Person selbst den Account auswählen und die Berechtigung
+`chatgpt.tokens.use.direct` freigeben. Ein iPad-Browser auf einem anderen
+Gerät erreicht den `127.0.0.1`-Callback des Heim-PC **nicht**. Die
+Anmeldung darf nicht im Hintergrund fingiert werden. Falls der Browser nicht
+öffnet, zeigt das CLI die offizielle Autorisierungsadresse zum Öffnen **auf
+dem Heim-PC**. Der Login verwendet die Python-Standardbibliothek. Die
+RSA/JWKS-ID-Token-Signatur, Audience, Nonce, Issuer und Ablauf werden bei
+der Rückgabe kontrolliert.
+
+Das CLI speichert den stabilen Host-Identifier und OAuth-Tokens ausschließlich
+in Owner-privaten Dateien unter
+`~/.local/share/heimgewebe/home-assistant/`, insbesondere
+`.nabu-chatgpt.json` (0600). Das ist der persistente Host-Pfad von
+Home Assistants `/config`-Mount. Datei/Token niemals in Git, Terminalprotokolle
+oder externe Dienste kopieren. Der eingeschränkte `nabu_web__chatgpt`-Aufruf
+nutzt ein vom aktuellen Account gelistetes Modell, verlängert Tokens
+bei Bedarf und akzeptiert nur vollständig bestätigte Streaming-Antworten.
+Bei fehlender/abgelehnter Autorisierung, Limits oder API-Ausfall bleiben
+die lokalen Modelle nutzbar.
+
+**Grabowski** wird über den bestehenden lokalen Streamable-HTTP-MCP-Endpunkt
+`http://127.0.0.1:18181/mcp` angesprochen. Dieser muss **aus dem aktiven
+HA-Container-Netzkontext** erreichbar sein, nicht nur vom Host. Die
+Nabu-Werkzeuge sind:
+
+- `nabu_web__grabowski`: `status`, `tasks`, `task` mit exakter Task-ID;
+  enthält nur begrenzte Statusfelder und bestätigte Receipts.
+- `nabu_web__grabowski_request`: nur auf ausdrücklichen persönlichen Auftrag
+  legt der bestehende Grabowski-Operator eine dauerhafte `operator-obligation`
+  mit eindeutigem Ziel und überprüfbarem Erfolgskriterium an. Der bestehende
+  `transport-roundtrip`-Grip bindet den exakten MCP-Zielaufruf einmalig;
+  der Client prüft sowohl die Transport- als auch die Ziel-Receipt.
+  **Registrierung ist nicht Ausführung**, kein automatisch gestarteter
+  Agentenlauf und keine Bureau-Queue-Promotion. Dafür ist die spätere
+  normale Operator-Bearbeitung nötig.
+
+Ein neuer beliebiger Shell-/Git-/Root-Aufruf über Nabu ist absichtlich
+nicht verfügbar. Sprachbefehl z. B. »Nabu, wie geht es Grabowski?« oder
+»Nabu, beauftrage Grabowski mit einer Prüfung der nächsten offenen Nabu-Aufgabe;
+Erfolg ist ein belegter Status mit Task-Referenz«. Erfolgreiche
+Quell- und Unit-Tests allein ersetzen weder den frischen HA-Tool-Readback
+noch einen echten Assist- und Authentifizierungsdurchlauf.
+
+**Dateien für den bestehenden persistierten HA-`nabu_web`-Runtimepfad:**
+`__init__.py`, `manifest.json`, `llm.py`,
+`grabowski_client.py` und `chatgpt_client.py` werden als Package
+zusammen benötigt. `siwc_login.py` bleibt das Host-Loginprogramm und
+muss nicht in Home Assistant importiert werden. Ein Git-Merge allein
+installiert diese Quellen nicht; aktivieren/abnehmen erst über den
+bestehenden Nabu-HA-Runtime-Rollout und Neustart mit Tests.
+
 ## Kontrollierte Wiederherstellung
 
 1. Bei fehlender Nabu-Integration Home Assistant stoppen, ausschließlich
-   `__init__.py`, `llm.py` und `manifest.json` in
+   `__init__.py`, `llm.py`, `grabowski_client.py`,
+   `chatgpt_client.py` und `manifest.json` in
    `custom_components/nabu_web/` zurückkopieren und Home Assistant starten.
    Bestehende Runtime-Konfiguration nicht durch Quellkopien überschreiben.
 2. Falls Sendspin-Units fehlen: die beiden Versionen aus diesem Verzeichnis
