@@ -217,6 +217,136 @@ def compact_result(operation: str, result: dict) -> dict:
     raise ValueError("Ungültiges Operationsergebnis")
 
 
+
+_STATUS_OBJECTIVE_WORDS = frozenset("""
+pruefe ueberpruefe kontrolliere checke ermittle bitte jetzt einmal nur den des die der
+seinen seinem aktuellen lokalen status gesundheitsstatus zustand erreichbarkeit von
+grabowski operators operator und wie viele anzahl registrierten registriert
+mcp werkzeuge tools bereitstehen sind berichte ob er ohne systemaenderungen vorzunehmen
+""".split())
+_STATUS_ACCEPTANCE_WORDS = frozenset("""
+fertig wenn status und toolanzahl werkzeuganzahl healthy wert belegt sind
+stehen fest erfolg erfolgreich die der registrierten mcp werkzeuge
+tools anzahl ist belegbar beweise nachgewiesen berichtet
+""".split())
+
+
+def _status_words(value: str) -> set[str] | None:
+    if not isinstance(value, str) or not value or len(value) > 260:
+        return None
+    value = value.casefold().translate(str.maketrans({
+        "ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss",
+    }))
+    if re.fullmatch(r"[a-z0-9 ,.!?\-]+", value) is None:
+        return None
+    return set(re.findall(r"[a-z0-9]+", value))
+
+
+def _bounded_operator_status_request(objective: str, acceptance: str) -> bool:
+    """Never guess authority to run non-status work from spoken text."""
+    o, a = _status_words(objective), _status_words(acceptance)
+    return bool(
+        o and a and len(acceptance) <= 180
+        and o <= _STATUS_OBJECTIVE_WORDS and a <= _STATUS_ACCEPTANCE_WORDS
+        and o & {"pruefe", "ueberpruefe", "kontrolliere", "checke", "ermittle"}
+        and o & {"status", "gesundheitsstatus", "zustand", "erreichbarkeit"}
+        and o & {"werkzeuge", "tools"}
+        and a & {"healthy", "status"}
+        and a & {"werkzeuganzahl", "toolanzahl", "werkzeuge", "tools"}
+    )
+
+
+async def _close_status_only(session: aiohttp.ClientSession, params: dict,
+                             *, endpoint: str) -> dict:
+    """Exactly one authorized Grabowski close; no automatic mutation retry."""
+    target = {
+        "name": "operator-obligation-close", "parameters": params,
+        "allow_mutation": True,
+        "reason": "Nabu: ausgeführten Statusauftrag schließen",
+        "user_intent": "Nabu schließt einen erfolgreichen read-only Auftrag",
+    }
+    reason = "Nabu: nur die vorab gebundene Statusprüfung schließen"
+    begin = await mcp_call(session, "grip_run", {
+        "name": "transport-roundtrip",
+        "parameters": {
+            "action": "begin", "target_tool_name": "grip_run",
+            "target_arguments": target,
+        },
+        "allow_mutation": True, "reason": "Nabu: Abschlussbindung",
+        "user_intent": reason,
+    }, endpoint=endpoint)
+    payload = begin.get("output") or {}
+    challenge = payload.get("challenge_receipt_sha256")
+    if (begin.get("status") != "passed"
+            or (begin.get("receipt") or {}).get("status") != "passed"
+            or payload.get("state") != "challenge_pending"
+            or not isinstance(challenge, str)
+            or re.fullmatch(r"[0-9a-f]{64}", challenge) is None):
+        raise GrabowskiUnavailable("Statusabschluss ist nicht gebunden")
+    response = await mcp_call(session, "grip_run", {
+        "name": "transport-roundtrip",
+        "parameters": {
+            "action": "execute", "challenge_receipt_sha256": challenge,
+            "target_tool_name": "grip_run", "target_arguments": target,
+        },
+        "allow_mutation": True, "reason": "Nabu: gebundener Statusabschluss",
+        "user_intent": reason,
+    }, endpoint=endpoint)
+    output = response.get("output") or {}
+    work = output.get("target_result")
+    if (response.get("status") != "passed" or output.get("state") != "executed"
+            or not isinstance(work, dict) or work.get("status") != "passed"):
+        raise GrabowskiUnavailable("Grabowski hat den Statusabschluss nicht bestätigt")
+    return work
+
+
+async def _execute_status_only(session: aiohttp.ClientSession,
+                               obligation_id: str, *, endpoint: str) -> dict:
+    """Observe actual Grabowski status; verify a process-only close via readback."""
+    status = await mcp_call(session, "grabowski_status", {
+        "view": "minimal", "reason": "Nabu: aktuellen Operatorstatus prüfen",
+        "user_intent": "Grabowski-Gesundheit und Werkzeuge ermitteln",
+    }, endpoint=endpoint)
+    contract = status.get("tool_contract")
+    healthy = status.get("healthy")
+    count = contract.get("registered_tool_count") if isinstance(contract, dict) else None
+    if type(healthy) is not bool or type(count) is not int or not 0 <= count <= 100_000:
+        raise GrabowskiUnavailable("Grabowski-Status wurde nicht bestätigt")
+    evidence_hash = hashlib.sha256(json.dumps(
+        {"healthy": healthy, "registered_tools": count},
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    completed = await _close_status_only(session, {
+        "obligation_id": obligation_id, "outcome": "completed",
+        "evidence": [{
+            "acceptance_id": "result", "status": "passed", "source": "runtime",
+            "reference": "grabowski_status:minimal", "sha256": evidence_hash,
+        }],
+        "closure_classification": {
+            "convergence_required": False, "reason": "process_only",
+        },
+    }, endpoint=endpoint)
+    receipt = completed.get("receipt_sha256")
+    if not isinstance(receipt, str) or re.fullmatch(r"[0-9a-f]{64}", receipt) is None:
+        raise GrabowskiUnavailable("Grabowski-Abschlussreceipt fehlt")
+    name, args = read_request("obligation", obligation_id=obligation_id)
+    readback = compact_result(
+        "obligation", await mcp_call(session, name, args, endpoint=endpoint)
+    )
+    if (readback["obligation_id"] != obligation_id
+            or readback["state"] != "completed"
+            or readback["work_complete"] is not True
+            or readback["continuation_required"] is not False
+            or readback["missing_acceptance_ids"]):
+        raise GrabowskiUnavailable("Grabowski-Abschlussreadback stimmt nicht")
+    return {
+        "status": "completed_process_only", "obligation_id": obligation_id,
+        "receipt_sha256": receipt, "completion_scope": "process_only",
+        "healthy": healthy, "registered_tools": count,
+        "next": "Reine Grabowski-Statusprüfung abgeschlossen; keine Systemänderung",
+    }
+
+
 async def register_obligation(session: aiohttp.ClientSession,
                               objective: str, acceptance: str,
                               *, endpoint: str = MCP_ENDPOINT) -> dict:
@@ -288,6 +418,33 @@ async def register_obligation(session: aiohttp.ClientSession,
     work_receipt = work_result.get("receipt_sha256")
     if not isinstance(work_receipt, str) or len(work_receipt) != 64:
         raise GrabowskiUnavailable("Grabowski-Auftrag ohne gültigen Empfangsbeleg")
+    opened = work_result.get("output")
+    if (_bounded_operator_status_request(objective, acceptance)
+            and isinstance(opened, dict)
+            and opened.get("obligation_id") == obligation_id):
+        if (opened.get("state") == "completed"
+                and opened.get("work_complete") is True
+                and opened.get("completion_scope") == "process_only"):
+            return {
+                "status": "completed_process_only",
+                "obligation_id": obligation_id,
+                "receipt_sha256": work_receipt,
+                "completion_scope": "process_only",
+                "next": "Bereits bestätigter reiner Statusabschluss",
+            }
+        if opened.get("state") == "open":
+            try:
+                return await _execute_status_only(
+                    session, obligation_id, endpoint=endpoint
+                )
+            except GrabowskiUnavailable:
+                # A lost close response is NOT a retry authorization.
+                return {
+                    "status": "registered_execution_unconfirmed",
+                    "obligation_id": obligation_id,
+                    "receipt_sha256": work_receipt,
+                    "next": "Auftrag nur lesend auf Abschluss prüfen",
+                }
     return {
         "status": "registered_not_executed",
         "obligation_id": obligation_id,

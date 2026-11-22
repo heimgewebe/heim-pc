@@ -405,6 +405,169 @@ class GrabowskiReadChallengeTests(IsolatedAsyncioTestCase):
 
 
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
+    def test_only_bounded_self_status_is_executable(self):
+        legitimate = (
+            "Prüfe jetzt nur seinen Gesundheitsstatus und wie viele MCP-Werkzeuge registriert sind.",
+            "Fertig, wenn Healthy-Wert und Werkzeuganzahl belegt sind.",
+        )
+        self.assertTrue(grabowski._bounded_operator_status_request(*legitimate))
+        self.assertTrue(grabowski._bounded_operator_status_request(
+            "Kontrolliere seinen aktuellen Status und berichte Anzahl der registrierten Tools",
+            "Status und Toolanzahl stehen fest",
+        ))
+        for objective, acceptance in (
+            ("Starte einen Deploy und lösche alte Logs.",
+             "Fertig, wenn die Produktion umgestellt ist."),
+            ("Prüfe den Heim-PC-Status morgen.", "Liefere einen aktuellen Statusreport."),
+            ("Prüfe den Grabowski-Status und deploye", legitimate[1]),
+            ("Prüfe den Grabowski-Status; rm -rf /", legitimate[1]),
+            (legitimate[0], "Sichere eine Datenbank und belege Status"),
+        ):
+            with self.subTest(objective=objective):
+                self.assertFalse(grabowski._bounded_operator_status_request(
+                    objective, acceptance
+                ))
+
+    async def test_bounded_status_executes_once_and_reads_completed(self):
+        from unittest.mock import AsyncMock
+        import hashlib
+
+        objective = "Prüfe jetzt nur seinen Gesundheitsstatus und wie viele MCP-Werkzeuge registriert sind."
+        acceptance = "Fertig, wenn Healthy-Wert und Werkzeuganzahl belegt sind."
+        obligation_id = "goo-nabu-" + hashlib.sha256(
+            (objective + "\n" + acceptance).encode()
+        ).hexdigest()[:20]
+        begin = {"status": "passed", "receipt": {"status": "passed"},
+                 "output": {"state": "challenge_pending",
+                            "challenge_receipt_sha256": "a" * 64}}
+        opened = {"status": "passed", "output": {
+            "state": "executed", "target_result": {
+                "status": "passed", "receipt_sha256": "b" * 64,
+                "output": {"obligation_id": obligation_id, "state": "open"},
+            }}}
+        checked = {"healthy": True, "tool_contract": {"registered_tool_count": 208}}
+        close_begin = {"status": "passed", "receipt": {"status": "passed"},
+                       "output": {"state": "challenge_pending",
+                                  "challenge_receipt_sha256": "c" * 64}}
+        close_finish = {"status": "passed", "output": {
+            "state": "executed", "target_result": {
+                "status": "passed", "receipt_sha256": "d" * 64,
+            }}}
+        readback = {"status": "passed", "output": {
+            "obligation_id": obligation_id, "state": "completed",
+            "work_complete": True, "continuation_required": False,
+            "missing_acceptance_ids": [],
+        }}
+        replies = [begin, opened, checked, close_begin, close_finish, readback]
+        with mock.patch.object(
+            grabowski, "mcp_call", new=AsyncMock(side_effect=replies)
+        ) as invoke:
+            data = await grabowski.register_obligation(
+                object(), objective, acceptance
+            )
+        self.assertEqual(invoke.await_count, 6)
+        self.assertEqual(data["status"], "completed_process_only")
+        self.assertEqual(data["obligation_id"], obligation_id)
+        self.assertEqual(data["receipt_sha256"], "d" * 64)
+        self.assertEqual(data["completion_scope"], "process_only")
+        self.assertTrue(data["healthy"])
+        self.assertEqual(data["registered_tools"], 208)
+        calls = invoke.await_args_list
+        self.assertEqual(calls[2].args[1], "grabowski_status")
+        first_close = calls[3].args[2]["parameters"]["target_arguments"]
+        final_close = calls[4].args[2]["parameters"]["target_arguments"]
+        self.assertEqual(first_close, final_close)
+        self.assertEqual(first_close["name"], "operator-obligation-close")
+        self.assertEqual(first_close["parameters"]["outcome"], "completed")
+        self.assertFalse(
+            first_close["parameters"]["closure_classification"]["convergence_required"]
+        )
+        self.assertEqual(calls[5].args[2]["name"], "operator-obligation-status")
+
+    async def test_bounded_status_bad_read_never_closes(self):
+        from unittest.mock import AsyncMock
+        import hashlib
+
+        objective = "Prüfe jetzt nur seinen Gesundheitsstatus und wie viele MCP-Werkzeuge registriert sind."
+        acceptance = "Fertig, wenn Healthy-Wert und Werkzeuganzahl belegt sind."
+        obligation_id = "goo-nabu-" + hashlib.sha256(
+            (objective + "\n" + acceptance).encode()
+        ).hexdigest()[:20]
+        begin = {"status": "passed", "receipt": {"status": "passed"},
+                 "output": {"state": "challenge_pending",
+                            "challenge_receipt_sha256": "a" * 64}}
+        opened = {"status": "passed", "output": {
+            "state": "executed", "target_result": {
+                "status": "passed", "receipt_sha256": "b" * 64,
+                "output": {"obligation_id": obligation_id, "state": "open"},
+            }}}
+        with mock.patch.object(grabowski, "mcp_call", new=AsyncMock(
+            side_effect=[begin, opened, {"healthy": True, "tool_contract": {}}]
+        )) as invoke:
+            result = await grabowski.register_obligation(
+                object(), objective, acceptance
+            )
+        self.assertEqual(result["status"], "registered_execution_unconfirmed")
+        self.assertEqual(invoke.await_count, 3)
+
+    async def test_bounded_status_failed_close_not_retried(self):
+        from unittest.mock import AsyncMock
+        import hashlib
+
+        objective = "Prüfe jetzt nur seinen Gesundheitsstatus und wie viele MCP-Werkzeuge registriert sind."
+        acceptance = "Fertig, wenn Healthy-Wert und Werkzeuganzahl belegt sind."
+        obligation_id = "goo-nabu-" + hashlib.sha256(
+            (objective + "\n" + acceptance).encode()
+        ).hexdigest()[:20]
+        begin = {"status": "passed", "receipt": {"status": "passed"},
+                 "output": {"state": "challenge_pending",
+                            "challenge_receipt_sha256": "a" * 64}}
+        opened = {"status": "passed", "output": {
+            "state": "executed", "target_result": {
+                "status": "passed", "receipt_sha256": "b" * 64,
+                "output": {"obligation_id": obligation_id, "state": "open"},
+            }}}
+        checked = {"healthy": True, "tool_contract": {"registered_tool_count": 208}}
+        close_begin = {"status": "passed", "receipt": {"status": "passed"},
+                       "output": {"state": "challenge_pending",
+                                  "challenge_receipt_sha256": "c" * 64}}
+        with mock.patch.object(grabowski, "mcp_call", new=AsyncMock(
+            side_effect=[begin, opened, checked, close_begin,
+                         grabowski.GrabowskiUnavailable("unknown outcome")]
+        )) as invoke:
+            result = await grabowski.register_obligation(
+                object(), objective, acceptance
+            )
+        self.assertEqual(result["status"], "registered_execution_unconfirmed")
+        self.assertEqual(invoke.await_count, 5)
+
+    async def test_bounded_status_replayed_completion_does_not_rerun(self):
+        from unittest.mock import AsyncMock
+        import hashlib
+
+        objective = "Prüfe jetzt nur seinen Gesundheitsstatus und wie viele MCP-Werkzeuge registriert sind."
+        acceptance = "Fertig, wenn Healthy-Wert und Werkzeuganzahl belegt sind."
+        obligation_id = "goo-nabu-" + hashlib.sha256(
+            (objective + "\n" + acceptance).encode()
+        ).hexdigest()[:20]
+        begin = {"status": "passed", "receipt": {"status": "passed"},
+                 "output": {"state": "challenge_pending",
+                            "challenge_receipt_sha256": "a" * 64}}
+        replay = {"status": "passed", "output": {
+            "state": "executed", "target_result": {
+                "status": "passed", "receipt_sha256": "b" * 64,
+                "output": {"obligation_id": obligation_id, "state": "completed",
+                           "work_complete": True, "completion_scope": "process_only"},
+            }}}
+        with mock.patch.object(grabowski, "mcp_call", new=AsyncMock(
+            side_effect=[begin, replay]
+        )) as invoke:
+            result = await grabowski.register_obligation(
+                object(), objective, acceptance
+            )
+        self.assertEqual(result["status"], "completed_process_only")
+        self.assertEqual(invoke.await_count, 2)
+
     async def test_operator_obligation_uses_exact_single_use_target(self):
         from unittest.mock import AsyncMock
         accepted = {
