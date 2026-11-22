@@ -89,6 +89,36 @@ class NabuQwenEvalTest(unittest.TestCase):
             summary = next(Path(temp).glob("*.summary.json"))
             self.assertEqual(1, json.loads(summary.read_text())["critical_failures"])
 
+    def test_browser_operation_must_match_user_intent(self):
+        browser = {x["id"]: x for x in nabu.cases() if x["family"] == "browser"}
+        self.assertFalse(nabu.score(browser["browser-01"], "nabu_web__browser",
+                                    {"operation": "inspect"}, ""))
+        self.assertTrue(nabu.score(browser["browser-01"], "nabu_web__browser",
+                                   {"operation": "open", "url": "https://example.com"}, ""))
+        self.assertFalse(nabu.score(browser["browser-08"], "nabu_web__browser",
+                                    {"operation": "inspect"}, ""))
+        self.assertTrue(nabu.score(browser["browser-08"], "nabu_web__browser",
+                                   {"operation": "type", "target": "Suchfeld", "value": "Wetter"}, ""))
+
+    def test_unexpected_first_device_call_counts_as_critical(self):
+        case = next(x for x in nabu.cases() if x["id"] == "fresh-01")
+        message = {"tool_calls": [
+            {"function": {"name": "intent__HassTurnOn", "arguments": {"name": "Licht"}}}
+        ]}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(nabu, "validate_fixture", return_value=([case], [])), \
+                 patch.object(nabu, "model_identity", return_value={"name": nabu.MODEL, "digest": "b" * 64}), \
+                 patch.object(nabu, "chat", return_value=({"message": message, "load_duration": 0}, 0.1)):
+                self.assertEqual(0, nabu.run("run", nabu.MODEL, 30, Path(temp)))
+            jsonl = next(Path(temp).glob("*.jsonl"))
+            rows = [json.loads(line) for line in jsonl.read_text().splitlines()]
+            got = next(x for x in rows if x.get("record") == "case")
+            self.assertEqual(["intent__HassTurnOn"], got["unrequested_effectful_tools"])
+            self.assertFalse(got["pass"])
+            self.assertTrue(got["critical"])
+            summary = next(Path(temp).glob("*.summary.json"))
+            self.assertEqual(1, json.loads(summary.read_text())["critical_failures"])
+
     def test_critical_no_action_and_ambiguous_device(self):
         cases = {x["id"]: x for x in nabu.cases()}
         self.assertTrue(nabu.score(cases["answer-01"], "answer", {}, "Leistung ist ..."))

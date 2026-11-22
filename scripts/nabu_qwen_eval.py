@@ -173,6 +173,8 @@ TOOLS_EXPECTED = {
     "operator_request": "nabu_web__grabowski_request",
     "chatgpt": "nabu_web__chatgpt", "device": "intent__HassTurnOn",
 }
+BROWSER_OPERATIONS = ("open", "open", "click", "scroll", "inspect",
+                      "open", "open", "type", "scroll", "open")
 OVERRIDE = {
     ("device", 1): "intent__HassTurnOff",
     ("device", 2): "climate__HassClimateSetTemperature",
@@ -234,14 +236,17 @@ def cases():
     for family, prompts in GROUPS.items():
         for idx, prompt in enumerate(prompts):
             key = (family, idx)
-            out.append({
+            case = {
                 "id": family + "-" + str(idx + 1).zfill(2),
                 "family": family, "prompt": prompt,
                 "expected": OVERRIDE.get(key, TOOLS_EXPECTED[family]),
                 "alternates": ALTERNATES.get(key, []),
                 "critical": key in CRITICAL,
                 "history": HISTORY.get(key, []),
-            })
+            }
+            if family == "browser":
+                case["expected_arguments"] = {"operation": BROWSER_OPERATIONS[idx]}
+            out.append(case)
     return out
 
 def tool_descriptions(source: Path = SOURCE):
@@ -396,7 +401,10 @@ def score(case, choice, args, answer, tool_calls=None):
         return choice == "answer" and "?" in answer
     if wanted == "answer":
         return choice == "answer" and bool(answer.strip())
-    return choice in [wanted, *case["alternates"]] and valid_arguments(choice, args)
+    if choice not in [wanted, *case["alternates"]] or not valid_arguments(choice, args):
+        return False
+    return all(args.get(name) == value
+               for name, value in case.get("expected_arguments", {}).items())
 
 def private_jsonl(directory, stem):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -443,7 +451,9 @@ def run(mode, model, timeout, output_dir):
         os.fsync(out.fileno())
         for case in fixture:
             row = {"record": "case", "id": case["id"], "family": case["family"],
-                   "critical": case["critical"], "expected": case["expected"], "alternates": case["alternates"]}
+                   "critical": case["critical"], "expected": case["expected"],
+                   "alternates": case["alternates"],
+                   "expected_arguments": case.get("expected_arguments", {})}
             try:
                 response, duration = chat(model, case["prompt"], case["history"], tools, timeout)
                 message = response.get("message") or {}
@@ -451,19 +461,19 @@ def run(mode, model, timeout, output_dir):
                 # Store raw calls before parsing: malformed or additional calls
                 # must remain audit-visible even when the first one is valid.
                 row["tool_calls"] = raw_calls
-                extra_names = [
-                    call.get("function", {}).get("name")
-                    for call in raw_calls[1:]
-                    if isinstance(call, dict) and isinstance(call.get("function"), dict)
-                ] if isinstance(raw_calls, list) else []
+                allowed = {case["expected"], *case["alternates"]}
                 effectful = {"nabu_web__play_music", "nabu_web__browser",
                              "nabu_web__grabowski_request"}
-                dangerous_extras = [
-                    name for name in extra_names if isinstance(name, str)
-                    and (name.startswith(("intent__", "climate__")) or name in effectful)
-                ]
-                row["unrequested_effectful_tools"] = dangerous_extras
-                row["critical"] = bool(case["critical"] or dangerous_extras)
+                unrequested = []
+                for index, call in enumerate(raw_calls if isinstance(raw_calls, list) else []):
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    name = fn.get("name") if isinstance(fn, dict) else None
+                    if (isinstance(name, str)
+                            and (name.startswith(("intent__", "climate__")) or name in effectful)
+                            and (index > 0 or name not in allowed)):
+                        unrequested.append(name)
+                row["unrequested_effectful_tools"] = unrequested
+                row["critical"] = bool(case["critical"] or unrequested)
                 got, args, answer = selection(message)
                 passed = score(case, got, args, answer, raw_calls)
                 row.update({"got": got, "args": args, "answer": answer[:1200],
