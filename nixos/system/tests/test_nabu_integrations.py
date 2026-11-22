@@ -75,6 +75,66 @@ class GrabowskiContractTests(TestCase):
         self.assertEqual(data["registered_tools"], 208)
 
 
+    def test_qwen_task_selection_with_goo_id_is_normalized_to_obligation(self):
+        obligation_id = "goo-nabu-chatgpt-grabowski-20261122"
+        operation, actual_id = grabowski.normalize_read_operation(
+            "task", obligation_id
+        )
+        self.assertEqual((operation, actual_id), ("obligation", obligation_id))
+        name, args = grabowski.read_request(operation, obligation_id=actual_id)
+        self.assertEqual(name, "grip_run")
+        self.assertEqual(args["name"], "operator-obligation-status")
+        self.assertFalse(args["allow_mutation"])
+        self.assertEqual(args["parameters"], {"obligation_id": obligation_id})
+        self.assertEqual(
+            grabowski.normalize_read_operation("task", "deadbeef1234567"),
+            ("task", ""),
+        )
+        self.assertEqual(
+            grabowski.normalize_read_operation("obligation", "",
+                                               obligation_id),
+            ("obligation", obligation_id),
+        )
+        with self.assertRaises(ValueError):
+            grabowski.read_request(
+                *grabowski.normalize_read_operation("task", "goo-/bad")
+            )
+
+    def test_obligation_status_is_exact_read_only_and_bounded(self):
+        obligation_id = "goo-nabu-1234567890abcdef1234"
+        name, args = grabowski.read_request(
+            "obligation", obligation_id=obligation_id
+        )
+        self.assertEqual(name, "grip_run")
+        self.assertEqual(args["name"], "operator-obligation-status")
+        self.assertFalse(args["allow_mutation"])
+        self.assertEqual(args["parameters"], {"obligation_id": obligation_id})
+        answer = {"status": "passed", "output": {
+            "obligation_id": obligation_id, "state": "open",
+            "work_complete": False, "continuation_required": True,
+            "missing_acceptance_ids": ["dispatch"],
+            "recommended_next_action": "continue", "private": "NOT_FOR_NABU",
+        }}
+        summary = grabowski.compact_result("obligation", answer)
+        self.assertEqual(summary["obligation_id"], obligation_id)
+        self.assertEqual(summary["state"], "open")
+        self.assertEqual(summary["missing_acceptance_ids"], ["dispatch"])
+        self.assertFalse(summary["work_complete"])
+        self.assertNotIn("NOT_FOR_NABU", json.dumps(summary))
+
+    def test_obligation_status_rejects_invalid_ids_and_unconfirmed_results(self):
+        for obligation_id in ("", "goo-", "goo-/tmp/passwd", "task123", "goo-" + "x" * 200):
+            with self.subTest(obligation_id=obligation_id), self.assertRaises(ValueError):
+                grabowski.read_request("obligation", obligation_id=obligation_id)
+        for result in ({}, {"status": "passed"}, {"status": "blocked", "output": {
+            "obligation_id": "goo-nabu-1234567890abcdef1234", "work_complete": True,
+            "continuation_required": False}}, {"status": "passed", "output": {
+            "obligation_id": "goo-nabu-1234567890abcdef1234",
+            "work_complete": "yes", "continuation_required": False}}):
+            with self.subTest(result=result), self.assertRaises(grabowski.GrabowskiUnavailable):
+                grabowski.compact_result("obligation", result)
+
+
 class OAuthContractTests(TestCase):
     def test_private_storage_and_host_identity_are_stable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -277,6 +337,71 @@ class GrabowskiReadChallengeTests(IsolatedAsyncioTestCase):
         self.assertEqual(step2["arguments"]["parameters"]["target_arguments"], original_args)
         self.assertEqual(step2["arguments"]["parameters"]["challenge_receipt_sha256"], challenge)
         self.assertEqual(step2["arguments"]["allow_mutation"], False)
+
+
+    async def test_obligation_read_uses_exact_transport_challenge(self):
+        obligation_id = "goo-nabu-1234567890abcdef1234"
+        name, original_args = grabowski.read_request(
+            "obligation", obligation_id=obligation_id
+        )
+        challenge = "a" * 64
+        first = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": (
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge
+            )}],
+        }}
+        status = {
+            "status": "passed",
+            "output": {
+                "obligation_id": obligation_id, "state": "open",
+                "work_complete": False, "continuation_required": True,
+            },
+        }
+        second = {"jsonrpc": "2.0", "id": 1, "result": {
+            "structuredContent": {"status": "passed", "output": {
+                "state": "executed", "target_result": status,
+            }},
+        }}
+        encode = lambda obj: ("data: " + json.dumps(obj) + "\n\n").encode("utf-8")
+        session = DummySession([
+            DummyResponse(200, chunks=[encode(first)]),
+            DummyResponse(200, chunks=[encode(second)]),
+        ])
+        got = await grabowski.mcp_call(session, name, original_args)
+        self.assertEqual(grabowski.compact_result("obligation", got)["state"], "open")
+        self.assertEqual(len(session.calls), 2)
+        first_params = session.calls[0][1]["json"]["params"]
+        self.assertEqual(first_params["arguments"], original_args)
+        second_params = session.calls[1][1]["json"]["params"]
+        self.assertEqual(second_params["name"], "grip_run")
+        roundtrip = second_params["arguments"]
+        self.assertEqual(roundtrip["name"], "transport-roundtrip")
+        self.assertFalse(roundtrip["allow_mutation"])
+        self.assertEqual(roundtrip["parameters"]["action"], "execute")
+        self.assertEqual(roundtrip["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertEqual(roundtrip["parameters"]["target_tool_name"], name)
+        self.assertEqual(roundtrip["parameters"]["target_arguments"], original_args)
+
+    async def test_challenge_does_not_admit_other_grips(self):
+        challenge = "a" * 64
+        failure = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True,
+            "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        session = DummySession([DummyResponse(
+            200, chunks=[("data: " + json.dumps(failure) + "\n\n").encode()]
+        )])
+        with self.assertRaises(grabowski.GrabowskiUnavailable):
+            await grabowski.mcp_call(session, "grip_run", {
+                "name": "operator-obligation-close",
+                "parameters": {"obligation_id": "goo-nabu-1234567890abcdef1234"},
+                "allow_mutation": False,
+            })
+        self.assertEqual(len(session.calls), 1)
 
 
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):

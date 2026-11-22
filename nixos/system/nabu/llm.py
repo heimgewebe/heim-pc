@@ -18,7 +18,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import probatio as vol
 from homeassistant.components.llm import LLMTools
-from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, compact_result, register_obligation
+from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation
 from .chatgpt_client import ChatGPTUnavailable, chatgpt_answer
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -953,12 +953,15 @@ class GrabowskiStatus(Tool):
     title = "Grabowski-Operator abfragen"
     description = (
         "Status des Grabowski-Operators oder seine Aufgaben abfragen. "
-        "operation=status, tasks oder task. Für task eine exakte task_id angeben. "
+        "operation=status, tasks, task oder obligation. Für task eine exakte task_id, "
+        "für obligation die zuvor erhaltene obligation_id angeben. "
+        "IDs mit goo- sind Obligationen, keine Task-IDs. "
         "Dies ist ein lesendes Werkzeug: keine ausgeführten Änderungen behaupten."
     )
     parameters = vol.Schema({
-        vol.Required("operation"): vol.In(["status", "tasks", "task"]),
+        vol.Required("operation"): vol.In(["status", "tasks", "task", "obligation"]),
         vol.Optional("task_id"): str,
+        vol.Optional("obligation_id"): str,
     })
     annotations = ToolAnnotations(read_only=True, open_world=False)
     integration = DOMAIN
@@ -967,9 +970,16 @@ class GrabowskiStatus(Tool):
                          llm_context: LLMContext) -> ToolResult:
         op = tool_input.tool_args["operation"]
         try:
-            name, args = read_request(op, tool_input.tool_args.get("task_id", ""))
+            task_id = tool_input.tool_args.get("task_id", "")
+            op, obligation_id = normalize_read_operation(
+                op, task_id, tool_input.tool_args.get("obligation_id", ""),
+            )
+            name, args = read_request(op, task_id, obligation_id)
             result = await mcp_call(async_get_clientsession(hass), name, args)
-            return ToolResult(data={"operation": op, "grabowski": compact_result(op, result)})
+            data = compact_result(op, result)
+            if op == "obligation" and data["obligation_id"] != obligation_id:
+                raise GrabowskiUnavailable("Grabowski-Antwort gehört zu einer anderen Obligation")
+            return ToolResult(data={"operation": op, "grabowski": data})
         except (ValueError, GrabowskiUnavailable) as exc:
             return message(exc)
 
@@ -1019,6 +1029,11 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
                 "Lokales Qwen bleibt Standard, Mistral die normale Vertiefung. "
                 "Wenn nach Grabowski, seinen Aufgaben oder seiner Gesundheit gefragt wird, "
                 "verwende nabu_web__grabowski und bestätige nur das tatsächlich gelesene Ergebnis. "
+                "Für Fragen nach dem Fortschritt eines registrierten Grabowski-Auftrags "
+                "verwende nabu_web__grabowski mit operation=obligation und der "
+                "aus dem Auftragsreceipt erhaltenen obligation_id; IDs mit goo- "
+                "sind Obligationen, keine Task-IDs; bei offenem Auftrag "
+                "keine Ausführung oder Fertigstellung behaupten. "
                 "Für ausdrücklich formulierte Aufträge an Grabowski ist nabu_web__grabowski_request "
                 "mit konkretem Ziel und überprüfbarem Erfolgskriterium verfügbar; "
                 "dessen Receipt bestätigt ausschließlich die Registrierung, niemals die Ausführung. "
