@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from html.parser import HTMLParser
 import ipaddress
 from pathlib import Path
 import re
@@ -84,6 +85,10 @@ def source_functions():
     root = ast.parse(SOURCE.read_text(encoding="utf-8"))
     chosen = []
     for node in root.body:
+        if isinstance(node, ast.ClassDef) and node.name == "TextExtractor":
+            chosen.append(node)
+        if isinstance(node, ast.FunctionDef) and node.name == "relevant_source_excerpt":
+            chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name == "public_url":
             chosen.append(node)
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "read_bounded":
@@ -97,11 +102,12 @@ def source_functions():
             for argument in method.args.args:
                 argument.annotation = None
             chosen.append(method)
-    assert len(chosen) == 4, "Expected production URL/resolver/body-reader/WebRead source"
+    assert len(chosen) == 6, "Expected production URL/resolver/body-reader/WebRead and extraction helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
+        "HTMLParser": HTMLParser,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
-        "TIMEOUT": None, "TextExtractor": Extractor,
+        "TIMEOUT": None,
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
         "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
         "aiohttp": SimpleNamespace(
@@ -267,12 +273,18 @@ class PublicWebTests(unittest.TestCase):
                 payloads.append(json)
                 return Reply()
 
+        async def fake_freshness(question, hass):
+            return True
+
         ns = {
-            "re": re, "json": json, "datetime": datetime, "ZoneInfo": ZoneInfo,
+            "re": re, "json": json, "asyncio": asyncio,
+            "datetime": datetime, "ZoneInfo": ZoneInfo,
             "WebSearch": Search, "WebRead": Read,
             "ToolInput": lambda **kwargs: SimpleNamespace(**kwargs),
             "public_url": lambda url: url,
             "requires_live_sources": lambda question: True,
+            "question_needs_live_sources": fake_freshness,
+            "relevant_source_excerpt": self.functions["relevant_source_excerpt"],
             "async_get_clientsession": lambda hass: Session(),
             "aiohttp": SimpleNamespace(
                 ClientTimeout=lambda **kwargs: None,
@@ -291,6 +303,74 @@ class PublicWebTests(unittest.TestCase):
                       payloads[0]["messages"][1]["content"])
         self.assertEqual(["https://example.org/report"],
                          result.data["source_urls"])
+
+
+    def test_main_article_survives_long_navigation_and_consent_overlay(self):
+        async def scenario():
+            html = (
+                "<html><body><header>" + "Navigation Links " * 1400
+                + "</header><div class='cookie-consent'>"
+                + "Consent notice " * 1000
+                + "</div><main><article><header><h1>Offizieller Bericht</h1></header>"
+                + "<p>Ergebnis: die Leitung wurde neu besetzt.</p></article></main>"
+                + "<footer>Impressum Footer</footer></body></html>"
+            )
+            FakeSession.responses = [{
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "content": html.encode("utf-8"),
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://example.org/report"}), None)
+            self.assertFalse(result.error, result.data)
+            self.assertIn("Leitung wurde neu besetzt", result.data["text"])
+            self.assertIn("Offizieller Bericht", result.data["text"])
+            self.assertNotIn("Consent notice", result.data["text"])
+            self.assertNotIn("Navigation Links", result.data["text"])
+        asyncio.run(scenario())
+
+    def test_query_excerpts_recover_middle_fact_after_long_article(self):
+        async def scenario():
+            html = (
+                "<main><article><h1>Bericht zur Institutsleitung</h1><p>"
+                + ("Hintergrund ohne aktualisierte Details. " * 900)
+                + "</p><h2>Institutsleitung seit November</h2>"
+                + "<p>Die neue Institutsleitung ist Dr. Beispiel. "
+                + "Die Entscheidung wurde bestätigt.</p><p>"
+                + ("Weitere allgemeine Hintergrundinformationen. " * 750)
+                + "</p></article></main>"
+            )
+            FakeSession.responses = [{
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "content": html.encode("utf-8"),
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://example.org/report",
+                    "question": "Wer leitet die Institutsleitung?"}), None)
+            self.assertFalse(result.error, result.data)
+            excerpt = result.data["text"]
+            self.assertLessEqual(len(excerpt), 6000)
+            self.assertIn("Dr. Beispiel", excerpt)
+            self.assertIn("Bericht zur Institutsleitung", excerpt)
+        asyncio.run(scenario())
+
+    def test_direct_webread_remains_8k_bounded(self):
+        async def scenario():
+            html = "<main><article>" + ("Wissenschaftlicher Hintergrund. " * 2500) + "</article></main>"
+            FakeSession.responses = [{
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "content": html.encode(),
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://example.org/report"}), None)
+            self.assertFalse(result.error)
+            self.assertLessEqual(len(result.data["text"]), 8000)
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

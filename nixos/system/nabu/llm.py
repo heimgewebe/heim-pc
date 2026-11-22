@@ -73,28 +73,99 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
 
 
 class TextExtractor(HTMLParser):
+    """Prefer meaningful article text to navigation and consent overlays."""
+
+    _CHROME_TAGS = frozenset({"script", "style", "noscript", "svg", "template",
+                             "nav", "footer", "aside"})
+    _BLOCK_TAGS = frozenset({"p", "br", "h1", "h2", "h3", "h4", "li",
+                             "section", "article", "main", "div", "tr"})
+    _VOID_TAGS = frozenset({"br", "img", "input", "meta", "link", "hr",
+                            "source", "wbr", "area", "embed"})
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
-        self.skip = 0
+        self.primary_parts: list[str] = []
+        self._stack: list[tuple[str, bool, bool]] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "noscript", "svg", "template"):
-            self.skip += 1
-        if tag in ("p", "br", "h1", "h2", "h3", "li", "section", "article"):
+        attributes = dict(attrs)
+        hidden_parent = self._stack[-1][1] if self._stack else False
+        primary_parent = self._stack[-1][2] if self._stack else False
+        marker = " ".join(str(attributes.get(key) or "") for key in
+                          ("id", "class", "aria-label")).casefold()
+        consent_overlay = tag in ("div", "section", "dialog") and any(
+            key in marker for key in ("cookie", "consent", "gdpr")
+        )
+        hidden = (hidden_parent or tag in self._CHROME_TAGS
+                  or (tag == "header" and not primary_parent) or consent_overlay)
+        primary = (primary_parent or tag in ("main", "article")
+                   or attributes.get("role") == "main")
+        if tag not in self._VOID_TAGS:
+            self._stack.append((tag, hidden, primary))
+        if tag in self._BLOCK_TAGS and not hidden:
             self.parts.append("\n")
+            if primary:
+                self.primary_parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID_TAGS:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript", "svg", "template") and self.skip:
-            self.skip -= 1
+        hidden = self._stack[-1][1] if self._stack else False
+        primary = self._stack[-1][2] if self._stack else False
+        if tag in self._BLOCK_TAGS and not hidden:
+            self.parts.append("\n")
+            if primary:
+                self.primary_parts.append("\n")
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                self._stack = self._stack[:index]
+                break
 
     def handle_data(self, data):
-        if not self.skip:
-            self.parts.append(data)
+        if self._stack and self._stack[-1][1]:
+            return
+        self.parts.append(data)
+        if self._stack and self._stack[-1][2]:
+            self.primary_parts.append(data)
 
-    def get_text(self, maximum=8000):
-        return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", "".join(self.parts))).strip()[:maximum]
+    def get_text(self, maximum=240000):
+        def clean(parts):
+            return re.sub(r"[ \t]+", " ",
+                          re.sub(r"\n\s*\n+", "\n", "".join(parts))).strip()
 
+        article = clean(self.primary_parts)
+        text = article if len(article) >= 80 else clean(self.parts)
+        return text[:maximum]
+
+
+def relevant_source_excerpt(text: str, question: str, maximum: int = 6000) -> str:
+    """Retain the introduction and query-matching passages, including late facts."""
+    if len(text) <= maximum:
+        return text
+    stop = {"welche", "welcher", "welches", "warum", "wieso", "bitte", "gründlich",
+            "heute", "jetzt", "aktuell", "einen", "einem", "einer", "eine",
+            "über", "oder", "sind", "wird", "wurde", "wurden", "habe",
+            "haben", "dass", "kann", "prüfe", "steht", "gibt"}
+    terms = {word for word in re.findall(r"\w+", question.casefold())
+             if len(word) >= 4 and word not in stop}
+    width, stride = 1100, 900
+    last = max(0, len(text) - width)
+    starts = sorted(set([*range(0, last + 1, stride), last]))
+    chosen = [0, last]
+    def score(start):
+        passage = text[start:start + width].casefold()
+        return sum(1 for term in terms if term in passage)
+    for start in sorted(starts, key=lambda pos: (-score(pos), pos)):
+        if len(chosen) == 5:
+            break
+        if all(abs(start - existing) >= width for existing in chosen):
+            chosen.append(start)
+    return "\n[…]\n".join(text[pos:pos + width].strip()
+                         for pos in sorted(chosen))[:maximum]
 
 def message(error: Exception) -> ToolResult:
     return ToolResult(data={"error": f"{type(error).__name__}: {str(error)[:260]}"}, error=True)
@@ -173,8 +244,9 @@ class WebSearch(Tool):
 class WebRead(Tool):
     name = "nabu_web__read_page"
     title = "Eine Webseite lesen"
-    description = "Eine öffentliche Webseite öffnen und ihren sichtbaren Text lesen. Für Quellenprüfung nach Websuche verwenden."
-    parameters = vol.Schema({vol.Required("url"): str})
+    description = ("Öffentliche Webseite lesen; bei langen Quellen die zu prüfende Frage "
+                   "als optionales question-Argument für relevante Textauszüge übergeben.")
+    parameters = vol.Schema({vol.Required("url"): str, vol.Optional("question"): str})
     annotations = ToolAnnotations(read_only=True, open_world=True)
     integration = DOMAIN
 
@@ -208,7 +280,13 @@ class WebRead(Tool):
                         break
             parser = TextExtractor()
             parser.feed(document)
-            return ToolResult(data={"url": actual, "text": parser.get_text()})
+            body = parser.get_text()
+            question = tool_input.tool_args.get("question")
+            if question is not None and not isinstance(question, str):
+                raise ValueError("Die Quellenfrage muss Text sein")
+            text = (relevant_source_excerpt(body, question) if question
+                    else body[:8000])
+            return ToolResult(data={"url": actual, "text": text})
         except (ValueError, UnicodeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
@@ -377,6 +455,50 @@ def requires_live_sources(question: str) -> bool:
     ))
 
 
+async def question_needs_live_sources(question: str, hass: HomeAssistant) -> bool:
+    """Ask the already-running Nabu primary model about time dependence.
+
+    Clear temporal cues short-circuit. Ambiguous questions get one cheap local
+    classification before the deep model; uncertain results require sources.
+    """
+    if requires_live_sources(question):
+        return True
+    prompt = (
+        "Entscheide, ob eine sachlich zuverlässige Antwort AKTUELLE externe "
+        "Beobachtungen braucht. True bei wechselnden Amtsinhabern, Preisen, "
+        "Statistiken, politischen Beschlüssen, geltenden Regeln, lokalen "
+        "Zuständen, Verfügbarkeit oder neueren Forschungsergebnissen, auch "
+        "ohne das Wort aktuell. False bei Begriffsdefinitionen, Mathematik, "
+        "Naturgesetzen, grundlegenden Erklärungen und abgeschlossener Historie. "
+        "Unterscheide 'Was ist X?' von 'Wer ist X?'. Antworte ausschließlich "
+        "mit JSON {\"live\":true} oder {\"live\":false}."
+    )
+    try:
+        async with async_get_clientsession(hass).post(
+            "http://127.0.0.1:11434/api/chat",
+            json={
+                "model": "nabu-qwen3-14b-q6:20261121",
+                "messages": [{"role": "system", "content": prompt},
+                             {"role": "user", "content": question}],
+                "format": "json", "think": False, "stream": False,
+                "keep_alive": "10m",
+                "options": {"num_ctx": 2048, "num_predict": 45, "temperature": 0},
+            },
+            timeout=aiohttp.ClientTimeout(total=25, connect=5),
+        ) as response:
+            response.raise_for_status()
+            result = await response.json()
+        item = result.get("message") if isinstance(result, dict) else None
+        content = item.get("content") if isinstance(item, dict) else None
+        decision = json.loads(content) if isinstance(content, str) else None
+        if isinstance(decision, dict) and type(decision.get("live")) is bool:
+            return decision["live"]
+    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    # Missing classification must not silently turn potentially current
+    # facts into unsupported offline answers.
+    return True
+
 class DeepAnswer(Tool):
     """Optional detailed reasoning with Qwen3.8 Q3_K_M, without a second voice service."""
 
@@ -438,7 +560,7 @@ class DeepAnswer(Tool):
                 )
             sources: list[dict[str, str]] = []
             now = datetime.now(ZoneInfo("Europe/Berlin"))
-            if requires_live_sources(question):
+            if await question_needs_live_sources(question, hass):
                 query = f"{question[:174]} {now:%d.%m.%Y}"
                 search = await WebSearch().async_call(
                     hass,
@@ -460,7 +582,8 @@ class DeepAnswer(Tool):
                         continue
                     read = await WebRead().async_call(
                         hass,
-                        ToolInput(tool_name="nabu_web__read_page", tool_args={"url": url}),
+                        ToolInput(tool_name="nabu_web__read_page",
+                                  tool_args={"url": url, "question": question}),
                         llm_context,
                     )
                     if read.error or not isinstance(read.data.get("text"), str):
@@ -472,8 +595,7 @@ class DeepAnswer(Tool):
                         "title": str(hit.get("title") or "")[:160],
                         "url": str(read.data.get("url") or url)[:500],
                         "excerpt": str(hit.get("excerpt") or "")[:350],
-                            # Some public pages prepend long cookie/navigation boilerplate.
-                        "text": body[:6000],
+                        "text": relevant_source_excerpt(body, question),
                     })
                 if not sources:
                     raise ValueError(
