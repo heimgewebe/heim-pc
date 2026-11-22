@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -51,6 +53,41 @@ class NabuQwenEvalTest(unittest.TestCase):
         self.assertFalse(nabu.valid_arguments("nabu_web__browser", {"operation": "shell"}))
         self.assertFalse(nabu.valid_arguments("climate__HassClimateSetTemperature", {"temperature": 21}))
         self.assertTrue(nabu.valid_arguments("climate__HassClimateSetTemperature", {"area": "Flur", "temperature": 21}))
+
+    def test_browser_operation_specific_required_arguments(self):
+        good = nabu.valid_arguments
+        self.assertFalse(good("nabu_web__browser", {"operation": "open"}))
+        self.assertFalse(good("nabu_web__browser", {"operation": "open", "url": ""}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "open", "url": "https://example.com"}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "open", "url": "http://a"}))
+        self.assertFalse(good("nabu_web__browser", {"operation": "click"}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "click", "target": "More information"}))
+        self.assertFalse(good("nabu_web__browser", {"operation": "type", "target": "Suche"}))
+        self.assertFalse(good("nabu_web__browser", {"operation": "type", "value": "Wetter"}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "type", "target": "Suche", "value": "Wetter"}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "scroll"}))
+        self.assertTrue(good("nabu_web__browser", {"operation": "inspect"}))
+
+    def test_multiple_calls_are_recorded_and_unexpected_action_fails(self):
+        case = next(x for x in nabu.cases() if x["id"] == "music-01")
+        message = {"tool_calls": [
+            {"function": {"name": "nabu_web__play_music", "arguments": {"media_id": "Bakerman"}}},
+            {"function": {"name": "intent__HassTurnOn", "arguments": {"name": "Licht"}}},
+        ]}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(nabu, "validate_fixture", return_value=([case], [])), \
+                 patch.object(nabu, "model_identity", return_value={"name": nabu.MODEL, "digest": "a" * 64}), \
+                 patch.object(nabu, "chat", return_value=({"message": message, "load_duration": 0}, 0.1)):
+                self.assertEqual(0, nabu.run("run", nabu.MODEL, 30, Path(temp)))
+            results = list(Path(temp).glob("*.jsonl"))
+            self.assertEqual(1, len(results))
+            rows = [json.loads(line) for line in results[0].read_text().splitlines()]
+            case_result = next(x for x in rows if x.get("record") == "case")
+            self.assertEqual(2, len(case_result["tool_calls"]))
+            self.assertFalse(case_result["pass"])
+            self.assertTrue(case_result["critical"])
+            summary = next(Path(temp).glob("*.summary.json"))
+            self.assertEqual(1, json.loads(summary.read_text())["critical_failures"])
 
     def test_critical_no_action_and_ambiguous_device(self):
         cases = {x["id"]: x for x in nabu.cases()}

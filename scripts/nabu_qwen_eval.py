@@ -354,7 +354,21 @@ def valid_arguments(kind, args):
         return all(k not in args or isinstance(args[k], str) for k in ("media_id", "artist")) and (
             "media_type" not in args or args["media_type"] in ("track", "album", "artist", "playlist", "radio"))
     if kind == "nabu_web__browser":
-        return args.get("operation") in ("open", "inspect", "click", "type", "scroll")
+        op = args.get("operation")
+        if op == "open":
+            url = args.get("url")
+            return isinstance(url, str) and any(
+                url.startswith(scheme) and bool(url[len(scheme):].strip())
+                for scheme in ("https://", "http://")
+            )
+        if op == "click":
+            target = args.get("target")
+            return isinstance(target, str) and bool(target.strip())
+        if op == "type":
+            target, value = args.get("target"), args.get("value")
+            return (isinstance(target, str) and bool(target.strip())
+                    and isinstance(value, str) and bool(value.strip()))
+        return op in ("inspect", "scroll")
     if kind == "nabu_web__read_page":
         return isinstance(args.get("url"), str) and args["url"].startswith(("http://", "https://"))
     if kind == "nabu_web__search":
@@ -370,7 +384,13 @@ def valid_arguments(kind, args):
             kind != "climate__HassClimateSetTemperature" or isinstance(args.get("temperature"), (float, int)))
     return False
 
-def score(case, choice, args, answer):
+def score(case, choice, args, answer, tool_calls=None):
+    # Preserve the whole tool-call list in the result record: one correct first
+    # action never excuses a second unexpected (possibly destructive) action.
+    if tool_calls is not None and (
+        not isinstance(tool_calls, list) or len(tool_calls) > 1
+    ):
+        return False
     wanted = case["expected"]
     if wanted == "clarify":
         return choice == "answer" and "?" in answer
@@ -398,8 +418,13 @@ def run(mode, model, timeout, output_dir):
     if mode == "smoke":
         for text, wanted in DEVELOPMENT_SMOKE:
             response, seconds = chat(model, text, [], tools, timeout)
-            got, args, answer = selection(response.get("message") or {})
-            print(json.dumps({"smoke": wanted, "got": got, "correct": got == wanted and valid_arguments(got, args), "seconds": seconds}))
+            message = response.get("message") or {}
+            got, args, answer = selection(message)
+            raw_calls = message.get("tool_calls") or []
+            correct = (got == wanted and valid_arguments(got, args)
+                       and isinstance(raw_calls, list) and len(raw_calls) <= 1)
+            print(json.dumps({"smoke": wanted, "got": got, "correct": correct,
+                              "tool_call_count": len(raw_calls), "seconds": seconds}))
         return 0
     stem = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + model.replace(":", "-")
     old_umask = os.umask(0o077)
@@ -422,8 +447,25 @@ def run(mode, model, timeout, output_dir):
             try:
                 response, duration = chat(model, case["prompt"], case["history"], tools, timeout)
                 message = response.get("message") or {}
+                raw_calls = message.get("tool_calls") or []
+                # Store raw calls before parsing: malformed or additional calls
+                # must remain audit-visible even when the first one is valid.
+                row["tool_calls"] = raw_calls
+                extra_names = [
+                    call.get("function", {}).get("name")
+                    for call in raw_calls[1:]
+                    if isinstance(call, dict) and isinstance(call.get("function"), dict)
+                ] if isinstance(raw_calls, list) else []
+                effectful = {"nabu_web__play_music", "nabu_web__browser",
+                             "nabu_web__grabowski_request"}
+                dangerous_extras = [
+                    name for name in extra_names if isinstance(name, str)
+                    and (name.startswith(("intent__", "climate__")) or name in effectful)
+                ]
+                row["unrequested_effectful_tools"] = dangerous_extras
+                row["critical"] = bool(case["critical"] or dangerous_extras)
                 got, args, answer = selection(message)
-                passed = score(case, got, args, answer)
+                passed = score(case, got, args, answer, raw_calls)
                 row.update({"got": got, "args": args, "answer": answer[:1200],
                             "latency_s": duration, "load_s": round(response.get("load_duration", 0)/1e9, 3),
                             "pass": passed})
