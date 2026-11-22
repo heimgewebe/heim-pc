@@ -372,7 +372,7 @@ def requires_live_sources(question: str) -> bool:
     return bool(re.search(
         r"\b(?:wetter(?:vorhersage)?|temperatur(?:en)?|strompreis(?:e)?|"
         r"stromtarif(?:e)?|gaspreis(?:e)?|benzinpreis(?:e)?|"
-        r"börse(?:nkurse?)?|wechselkurs(?:e)?)\b",
+        r"börse(?:nkurse?)?|wechselkurs(?:e)?|dax)\b",
         lower,
     ))
 
@@ -472,7 +472,8 @@ class DeepAnswer(Tool):
                         "title": str(hit.get("title") or "")[:160],
                         "url": str(read.data.get("url") or url)[:500],
                         "excerpt": str(hit.get("excerpt") or "")[:350],
-                        "text": body[:2400],
+                            # Some public pages prepend long cookie/navigation boilerplate.
+                        "text": body[:6000],
                     })
                 if not sources:
                     raise ValueError(
