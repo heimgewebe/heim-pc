@@ -419,11 +419,19 @@ class DeepAnswer(Tool):
                 "",
                 question.casefold(),
             )
-            if re.match(
+            direct_action = re.match(
                 r"^(?:bitte\s+)?(?:spiel(?:e)?|starte|mach|öffne|oeffne|"
                 r"scrolle|schalte|dimme|suche|lies|lese|zeig)\b",
                 action_question,
-            ):
+            )
+            analytical_imperative = re.match(
+                r"^(?:bitte\s+)?(?:mach|zeig(?:e)?)(?:\s+mir)?"
+                r"\s+(?:(?:einen?|eine|die)\s+)?"
+                r"(?:vergleich\w*|analyse\w*|gegenüberstellung\w*|"
+                r"vor\s*[-]?\s*und\s+nachteile)\b",
+                action_question,
+            )
+            if direct_action and not analytical_imperative:
                 raise ValueError(
                     "Direkte Aktion erkannt: das passende Musik-, Browser- oder "
                     "Gerätewerkzeug ausführen, nicht Mistral befragen"

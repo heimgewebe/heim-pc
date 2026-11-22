@@ -199,6 +199,33 @@ class DeepFreshnessTests(unittest.TestCase):
         self.assertEqual(1, len(SearchFake.calls))
         self.assertEqual([], ChatSession.calls)
 
+    def test_analytical_imperatives_are_not_device_commands(self):
+        for question in (
+            "Prüf das gründlich: Zeig mir die Vor- und Nachteile von Wärmepumpe und Gas.",
+            "Mach einen Vergleich von Wärmepumpe und Gas mit Gegenargumenten.",
+            "Gib dir Mühe und mach eine Analyse der Folgen von Inflation.",
+        ):
+            with self.subTest(question=question):
+                SearchFake.calls.clear()
+                ChatSession.calls.clear()
+                result = self.invoke(question)
+                self.assertFalse(result.error, result.data)
+                self.assertEqual([], SearchFake.calls)
+                self.assertEqual(1, len(ChatSession.calls))
+
+    def test_device_imperatives_are_still_rejected(self):
+        for question in (
+            "Prüf das gründlich und mach Musik an.",
+            "Gib dir Mühe und zeig mir die geöffnete Webseite.",
+            "Prüf das gründlich und schalte die Lampe ein.",
+        ):
+            with self.subTest(question=question):
+                ChatSession.calls.clear()
+                result = self.invoke(question)
+                self.assertTrue(result.error)
+                self.assertIn("Direkte Aktion", result.data["error"])
+                self.assertEqual([], ChatSession.calls)
+
     def test_direct_actions_still_short_circuit_all_llms(self):
         result = self.invoke("Prüf das gründlich und spiel irgendeine Musik ab.")
         self.assertTrue(result.error)
