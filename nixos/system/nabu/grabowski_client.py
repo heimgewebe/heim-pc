@@ -6,6 +6,7 @@ The server remains the sole authority for admission, mutations and receipts.
 from __future__ import annotations
 
 import json
+import re
 
 import aiohttp
 
@@ -76,7 +77,36 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                 if total > MAX_RESPONSE_BYTES:
                     raise GrabowskiUnavailable("MCP-Antwort über dem Größenlimit")
                 chunks.append(part)
-            return parse_mcp_response(b"".join(chunks).decode("utf-8", errors="replace"))
+            raw_response = b"".join(chunks).decode("utf-8", errors="replace")
+            try:
+                return parse_mcp_response(raw_response)
+            except GrabowskiUnavailable:
+                # Grabowski's native transport challenges some read-only tools.
+                # Never retry the original request: only execute its exact
+                # already-issued challenge, with all target arguments unchanged.
+                allowed = {"grabowski_status", "grabowski_task_list", "grabowski_task_status"}
+                if name not in allowed or "fresh intent-bound transport verification required" not in raw_response:
+                    raise
+                match = re.search(r"challenge_receipt_sha256=([0-9a-f]{64})", raw_response)
+                if not match:
+                    raise
+                verified = await mcp_call(session, "grip_run", {
+                    "name": "transport-roundtrip",
+                    "parameters": {
+                        "action": "execute",
+                        "challenge_receipt_sha256": match.group(1),
+                        "target_tool_name": name,
+                        "target_arguments": args,
+                    },
+                    "allow_mutation": False,
+                    "reason": "Nabu: bereits gebundene read-only-Verifikationsanfrage ausführen",
+                    "user_intent": "Nabu liest vom Benutzer verlangte Grabowski-Daten",
+                }, endpoint=endpoint)
+                output = verified.get("output") or {}
+                if (verified.get("status") != "passed" or output.get("state") != "executed"
+                        or not isinstance(output.get("target_result"), dict)):
+                    raise GrabowskiUnavailable("Grabowski hat die Read-only-Verifikation nicht bestätigt")
+                return output["target_result"]
     except (aiohttp.ClientError, TimeoutError) as exc:
         raise GrabowskiUnavailable("Grabowski derzeit nicht erreichbar; Aktion nicht bestätigt") from exc
 

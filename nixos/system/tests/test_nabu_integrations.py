@@ -191,6 +191,48 @@ class GrabowskiStreamTests(IsolatedAsyncioTestCase):
         self.assertEqual(result, {"healthy": True})
 
 
+class GrabowskiReadChallengeTests(IsolatedAsyncioTestCase):
+    async def test_read_only_tool_completes_grabowski_challenge_without_retry(self):
+        original_args = {
+            "view": "minimal", "limit": 5,
+            "reason": "Nabu-Assist: aktuelle Grabowski-Aufgaben",
+            "user_intent": "Nabu fragt den bestehenden Grabowski-Operator nach dem Zustand",
+        }
+        challenge = "a" * 64
+        first = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": (
+                "fresh intent-bound transport verification required; "
+                "call grip_run for transport-roundtrip with action=execute, "
+                "challenge_receipt_sha256=" + challenge
+            )}],
+        }}
+        second = {"jsonrpc": "2.0", "id": 1, "result": {
+            "structuredContent": {
+                "status": "passed", "output": {
+                    "state": "executed",
+                    "target_result": {"tasks": [{"task_id": "example", "state": "completed"}]},
+                },
+            },
+        }}
+        sse = lambda obj: (
+            "event: message\r\ndata: " + json.dumps(obj) + "\r\n\r\n"
+        ).encode("utf-8")
+        session = DummySession([
+            DummyResponse(200, chunks=[sse(first)]),
+            DummyResponse(200, chunks=[sse(second)]),
+        ])
+        got = await grabowski.mcp_call(session, "grabowski_task_list", original_args)
+        self.assertEqual(got["tasks"][0]["task_id"], "example")
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[0][1]["json"]["params"]["name"], "grabowski_task_list")
+        step2 = session.calls[1][1]["json"]["params"]
+        self.assertEqual(step2["name"], "grip_run")
+        self.assertEqual(step2["arguments"]["parameters"]["target_arguments"], original_args)
+        self.assertEqual(step2["arguments"]["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertEqual(step2["arguments"]["allow_mutation"], False)
+
+
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
     async def test_operator_obligation_uses_exact_single_use_target(self):
         from unittest.mock import AsyncMock
