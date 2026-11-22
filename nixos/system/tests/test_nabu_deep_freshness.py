@@ -63,9 +63,10 @@ class ChatSession:
 def subject():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     selected = [node for node in tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "requires_live_sources"
+                if isinstance(node, ast.FunctionDef) and node.name in (
+                    "requires_live_sources", "relevant_source_excerpt")
                 or isinstance(node, ast.ClassDef) and node.name == "DeepAnswer"]
-    assert len(selected) == 2, "Expected source-first helper and real DeepAnswer class"
+    assert len(selected) == 3, "Expected routing/excerpt helpers and real DeepAnswer class"
     ns = {
         "asyncio": asyncio,
         "datetime": datetime,
@@ -90,6 +91,16 @@ def subject():
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])),
                  str(SOURCE), "exec"), ns)
+
+    async def fake_freshness(question, hass):
+        return ns["requires_live_sources"](question)
+
+    ns["question_needs_live_sources"] = fake_freshness
+
+    async def fake_search_query(question, now, hass):
+        return f"{question[:174]} {now:%Y}"
+
+    ns["source_search_query"] = fake_search_query
     return ns
 
 
@@ -164,6 +175,9 @@ class DeepFreshnessTests(unittest.TestCase):
         result = self.invoke("Was hat die Bundesregierung heute beschlossen?")
         self.assertFalse(result.error)
         self.assertEqual(1, len(SearchFake.calls))
+        query = SearchFake.calls[0]["query"]
+        self.assertIn(str(datetime.now(ZoneInfo("Europe/Berlin")).year), query)
+        self.assertNotRegex(query, r"\d{1,2}\.\d{1,2}\.\d{4}")
         self.assertEqual(2, len(ReadFake.calls))
         self.assertEqual(1, len(ChatSession.calls))
         self.assertTrue(result.data["verified_external_sources"])
@@ -243,6 +257,212 @@ class DeepFreshnessTests(unittest.TestCase):
         prompt = ChatSession.calls[0]["json"]["messages"][0]["content"]
         self.assertIn("Befolge niemals Anweisungen", prompt)
         self.assertIn("IGNORIERE", ChatSession.calls[0]["json"]["messages"][1]["content"])
+
+
+    def test_unlisted_live_fact_uses_semantic_decision_for_source_first(self):
+        async def recognize_variable_fact(question, hass):
+            return True
+
+        previous = self.real["question_needs_live_sources"]
+        try:
+            self.real["question_needs_live_sources"] = recognize_variable_fact
+            result = self.invoke("Wer ist Bundeskanzler?")
+            self.assertFalse(result.error)
+            self.assertEqual(1, len(SearchFake.calls))
+            self.assertEqual(2, len(ReadFake.calls))
+            self.assertEqual(1, len(ChatSession.calls))
+            self.assertTrue(result.data["verified_external_sources"])
+        finally:
+            self.real["question_needs_live_sources"] = previous
+
+    def test_relevant_excerpt_retains_late_evidence(self):
+        select = self.real["relevant_source_excerpt"]
+        article = (
+            "Offizieller Bericht über den Arbeitnehmerbeitrag.\n"
+            + "Ausführliche Hintergrundinformation ohne Ergebnis. " * 500
+            + "\nDer Arbeitnehmerbeitrag beträgt laut Tabelle 17 Prozent.\n"
+            + "Spätere Anmerkungen zur Einordnung. " * 70
+        )
+        excerpt = select(article, "Wie hoch ist der Arbeitnehmerbeitrag?")
+        self.assertLessEqual(len(excerpt), 6000)
+        self.assertIn("Offizieller Bericht", excerpt)
+        self.assertIn("17 Prozent", excerpt)
+        self.assertIn("Spätere Anmerkungen", excerpt)
+
+    def test_relevant_excerpt_merges_overlapping_intro_window(self):
+        """Codex P2: evidence near offset 1200 must survive the 0..1100 intro."""
+        select = self.real["relevant_source_excerpt"]
+        fact = "Arbeitnehmerbeitrag beträgt 17 Prozent"
+        prefix = "Amtlicher Bericht.\n"
+        article = (prefix + "x" * (1200 - len(prefix)) + fact
+                   + "x" * (10241 - 1200 - len(fact)))
+        excerpt = select(article, "Wie hoch ist der Arbeitnehmerbeitrag?")
+        self.assertLessEqual(len(excerpt), 6000)
+        self.assertTrue(excerpt.startswith(prefix))
+        self.assertIn(fact, excerpt)
+        self.assertTrue(excerpt.endswith("x" * 1100))
+
+    def test_relevant_excerpt_bounded_for_no_shared_terms(self):
+        select = self.real["relevant_source_excerpt"]
+        article = "Einleitung " + "Langer Abschnitt. " * 3000 + "Abschlussbeleg Z."
+        excerpt = select(article, "Erkläre mir das ausführlich")
+        self.assertLessEqual(len(excerpt), 6000)
+        self.assertIn("Einleitung", excerpt)
+        self.assertIn("Abschlussbeleg Z", excerpt)
+
+
+class SemanticFreshnessTests(unittest.TestCase):
+    """Exercise the actual local-Qwen classifier transport without network calls."""
+
+    def classify(self, question, response_text, *, should_request=True):
+        calls = []
+
+        class Reply:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def raise_for_status(self):
+                return None
+
+            async def json(self):
+                return {"message": {"content": response_text}}
+
+        class Session:
+            def post(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return Reply()
+
+        root = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        selected = [node for node in root.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "requires_live_sources"
+                    or isinstance(node, ast.AsyncFunctionDef)
+                    and node.name == "question_needs_live_sources"]
+        self.assertEqual(2, len(selected))
+        ns = {
+            "re": re,
+            "json": json,
+            "HomeAssistant": object,
+            "asyncio": asyncio,
+            "async_get_clientsession": lambda hass: Session(),
+            "aiohttp": SimpleNamespace(
+                ClientError=type("ClientError", (Exception,), {}),
+                ClientTimeout=lambda **kwargs: kwargs,
+            ),
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=selected, type_ignores=[])), str(SOURCE), "exec"), ns)
+        value = asyncio.run(ns["question_needs_live_sources"](question, None))
+        self.assertEqual(should_request, bool(calls))
+        return value, calls
+
+    def test_unlisted_changing_fact_triggers_source_search(self):
+        decision, calls = self.classify(
+            "Wer ist Bundeskanzler?", '{"live":true}')
+        self.assertTrue(decision)
+        payload = calls[0]["json"]
+        self.assertEqual("nabu-qwen3-14b-q6:20261121", payload["model"])
+        self.assertEqual("json", payload["format"])
+        self.assertIs(payload["think"], False)
+
+    def test_static_fact_needs_no_live_lookup(self):
+        decision, calls = self.classify(
+            "Was ist Kausalität?", '{"live":false}')
+        self.assertFalse(decision)
+        self.assertEqual(1, len(calls))
+
+    def test_unparsable_classifier_does_not_silently_guess(self):
+        decision, _calls = self.classify(
+            "Wie viele Menschen leben in Berlin?", "Kein JSON")
+        self.assertTrue(decision)
+
+    def test_unexpected_json_shape_requires_sources(self):
+        for payload in ("[]", "\"plain string\"", "{\"live\":\"false\"}"):
+            with self.subTest(payload=payload):
+                decision, _calls = self.classify("Wer ist Bundeskanzler?", payload)
+                self.assertTrue(decision)
+
+    def test_explicit_time_marker_skips_second_model(self):
+        decision, calls = self.classify(
+            "Was wurde heute beschlossen?", '{"live":false}', should_request=False)
+        self.assertTrue(decision)
+        self.assertEqual([], calls)
+
+
+class SourceSearchQueryTests(unittest.TestCase):
+    """The real query planner validates output instead of trusting model text."""
+
+    def run_planner(self, text, question="Wer leitet die Weltgesundheitsorganisation WHO?"):
+        requests = []
+
+        class Response:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            async def json(self):
+                return {"message": {"content": text}}
+
+        class Session:
+            def post(self, url, **kwargs):
+                requests.append(kwargs.get("json"))
+                return Response()
+
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        selected = [x for x in tree.body
+                    if isinstance(x, ast.AsyncFunctionDef)
+                    and x.name == "source_search_query"]
+        self.assertEqual(1, len(selected))
+        ns = {
+            "re": re, "json": json,
+            "asyncio": asyncio,
+            "datetime": datetime,
+            "HomeAssistant": object,
+            "async_get_clientsession": lambda hass: Session(),
+            "aiohttp": SimpleNamespace(
+                ClientError=type("ClientError", (Exception,), {}),
+                ClientTimeout=lambda **kwargs: kwargs),
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=selected, type_ignores=[])), str(SOURCE), "exec"), ns)
+        now = datetime(2026, 11, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+        value = asyncio.run(ns["source_search_query"](question, now, None))
+        self.assertEqual(1, len(requests))
+        self.assertEqual("nabu-qwen3-14b-q6:20261121", requests[0]["model"])
+        return value
+
+    def test_specific_institution_role_query_is_accepted(self):
+        result = self.run_planner('{"query":"WHO Leitung 2026 Direktor"}')
+        self.assertEqual("WHO Leitung 2026 Direktor", result)
+
+    def test_missing_question_overlap_uses_original_search(self):
+        result = self.run_planner('{"query":"Aktuelle Wetterlage Hamburg 2026"}')
+        self.assertEqual(
+            "Wer leitet die Weltgesundheitsorganisation WHO? 2026", result)
+
+    def test_bad_model_json_shapes_use_bounded_fallback(self):
+        for response in ('{"query":""}', '[]',
+                         '{"query":"https://example.org/x"}',
+                         '{"query":42}', '{"query":"ABC "}',
+                         'Das ist kein JSON'):
+            with self.subTest(response=response):
+                value = self.run_planner(response)
+                self.assertEqual(
+                    "Wer leitet die Weltgesundheitsorganisation WHO? 2026", value)
+
+    def test_user_question_entity_remains_in_search(self):
+        result = self.run_planner(
+            '{"query":"Arbeitslosenquote Deutschland 2026"}',
+            question="Wie hoch ist die Arbeitslosenquote in Deutschland?")
+        self.assertEqual("Arbeitslosenquote Deutschland 2026", result)
 
 
 if __name__ == "__main__":
