@@ -48,6 +48,10 @@
       # A private exclude file may contain negations, so this hard rule
       # must follow it. The plaintext-dump rule must remain LAST.
       "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-xrdp-excludes" "/home/alex/thinclient_drives\n"}"
+      # Restic must not scan Ollama's disposable, disappearing download parts.
+      # Preserve completed model blobs and every other home file; do not ignore errors.
+      # Hard exclusion follows private negations; plaintext exclusion stays LAST.
+      "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-ollama-partials" "/home/alex/.local/share/heimgewebe/assist/ollama/models/blobs/*-partial-*\n"}"
       # Even a dump created after backupPrepareCommand must never enter Restic.
       # The owner-private exclude file can contain negations; this immutable
       # rule therefore comes LAST and protects the snapshot itself.
