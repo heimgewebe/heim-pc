@@ -475,7 +475,11 @@ class NewsSearchBundlingTests(unittest.TestCase):
         }
         exec(compile(ast.fix_missing_locations(ast.Module(
             body=[helper], type_ignores=[])), str(SOURCE), "exec"), ns)
-        result = asyncio.run(ns["search_result"]("DuckDuckGo", hits))
+        async def execute():
+            ns["news_deadline"] = asyncio.get_running_loop().time() + 25
+            return await ns["search_result"]("DuckDuckGo", hits)
+
+        result = asyncio.run(execute())
         return result.data, calls
 
     def test_news_reads_three_distinct_sources_and_skips_failed_read(self):
@@ -505,6 +509,139 @@ class NewsSearchBundlingTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual(hits, data["results"])
         self.assertNotIn("read_sources", data)
+
+
+    def search_with_provider_fallback(self, query, failed_urls=()):
+        """Execute production WebSearch with fake providers and real relevance filter."""
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                     and n.name == "WebSearch")
+        method = next(n for n in klass.body if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == "async_call")
+        method.name = "call_search"
+        method.returns = None
+        for arg in method.args.args:
+            arg.annotation = None
+        provider_calls, read_calls = [], []
+
+        class Anchor:
+            def get(self, key, default=""):
+                return "https://ddg.example/news" if key == "href" else default
+
+            def get_text(self, *args, **kwargs):
+                return query
+
+        class Item:
+            def select_one(self, selector):
+                return Anchor() if selector == "a.result__a" else None
+
+        class Soup:
+            def __init__(self, body, *_args):
+                self.body = body
+
+            def select(self, selector):
+                return [Item()] if selector == ".result" and self.body == b"ddg" else []
+
+            def get_text(self, *_args, **_kwargs):
+                return ""
+
+        class Session:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                pass
+
+            def get(self, url, *, params):
+                provider_calls.append(url)
+                host = urlsplit(url).hostname
+                if host == "html.duckduckgo.com":
+                    return FakeResponse(url, content=b"ddg")
+                if host == "www.bing.com":
+                    return FakeResponse(url, content=(
+                        "<rss><channel><item><title>Nachrichten heute</title>"
+                        "<link>https://bing.example/report</link>"
+                        "<description>Nachrichten der Welt heute</description>"
+                        "</item></channel></rss>"
+                    ).encode())
+                if host == "news.google.com":
+                    return FakeResponse(url, content=(
+                        "<rss><channel><item><title>Nachrichten heute</title>"
+                        "<link>https://news.example/report</link>"
+                        "<description>Nachrichten der Welt heute</description>"
+                        "</item></channel></rss>"
+                    ).encode())
+                self.fail("Unexpected provider: " + str(host))
+
+        class Reader:
+            async def async_call(self, hass, tool, context):
+                url = tool.tool_args["url"]
+                read_calls.append(url)
+                return SimpleNamespace(error=url in failed_urls, data={
+                    "url": url, "text": "Dated article content. " * 45,
+                })
+
+        functions = source_functions()
+        ns = {
+            "aiohttp": SimpleNamespace(
+                ClientSession=Session,
+                TCPConnector=lambda **kwargs: None,
+                ClientError=type("ClientError", (Exception,), {})),
+            "PublicResolver": lambda: None, "TIMEOUT": None,
+            "BeautifulSoup": Soup, "re": re, "json": json, "quote": quote,
+            "urlsplit": urlsplit, "parse_qs": parse_qs,
+            "ET": ET, "asyncio": asyncio,
+            "read_bounded": functions["read_bounded"],
+            "search_subject_terms": functions["search_subject_terms"],
+            "relevant_search_hits": functions["relevant_search_hits"],
+            "ToolInput": lambda **kw: SimpleNamespace(**kw),
+            "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
+            "WebRead": Reader,
+            "message": lambda error: SimpleNamespace(
+                error=True, data={"error": str(error)}),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[method], type_ignores=[])), str(SOURCE), "exec"), ns)
+        result = asyncio.run(ns["call_search"](
+            None, None, SimpleNamespace(tool_args={"query": query}), None))
+        return result.data, provider_calls, read_calls
+
+    def test_today_without_news_intent_preserves_direct_search_results(self):
+        for query in ("Ölpreis heute", "Öffnungszeiten heute"):
+            with self.subTest(query=query):
+                data, providers, reads = self.search_with_provider_fallback(query)
+                self.assertEqual("DuckDuckGo", data["source"])
+                self.assertEqual([], reads)
+                self.assertNotIn("read_sources", data)
+                self.assertEqual(1, len(data["results"]))
+                self.assertEqual(1, len(providers))
+
+    def test_failed_news_first_provider_continues_to_bing(self):
+        data, providers, reads = self.search_with_provider_fallback(
+            "Nachrichten heute",
+            failed_urls=("https://ddg.example/news",))
+        self.assertEqual("Bing RSS", data["source"])
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual(["https://ddg.example/news",
+                          "https://bing.example/report"], reads)
+        self.assertEqual(2, len(providers))
+        self.assertEqual(["https://bing.example/report"],
+                         [x["url"] for x in data["read_sources"]])
+
+    def test_all_news_providers_unreadable_yields_no_sourced_claim(self):
+        urls = ("https://ddg.example/news", "https://bing.example/report",
+                "https://news.example/report")
+        data, providers, reads = self.search_with_provider_fallback(
+            "Schlagzeilen Nachrichten heute", failed_urls=urls)
+        self.assertEqual("unavailable", data["source"])
+        self.assertEqual("unavailable", data["source_read_status"])
+        self.assertEqual([], data["results"])
+        self.assertEqual([], data["read_sources"])
+        self.assertEqual(list(urls), reads)
+        self.assertEqual(3, len(providers))
 
 
 if __name__ == "__main__":

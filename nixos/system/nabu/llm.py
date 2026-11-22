@@ -299,9 +299,11 @@ class WebSearch(Tool):
             # of long URLs that the Qwen/Ollama tool parser must echo back.
             is_news = bool(re.search(
                 r"\b(?:nachrichten|news|schlagzeilen|meldungen|"
-                r"tagesgeschehen|weltgeschehen|ereignisse|heute)\b",
+                r"tagesnachrichten|tagesgeschehen|weltgeschehen|weltereignisse)\b",
                 query.casefold(),
             ))
+
+            news_deadline = asyncio.get_running_loop().time() + 25
 
             async def search_result(provider: str, hits: list[dict]) -> ToolResult:
                 data = {"query": query, "source": provider, "results": hits}
@@ -309,7 +311,7 @@ class WebSearch(Tool):
                     return ToolResult(data=data)
                 read_sources: list[dict[str, str]] = []
                 attempted: set[str] = set()
-                deadline = asyncio.get_running_loop().time() + 25
+                deadline = news_deadline
                 for hit in hits[:6]:
                     if len(read_sources) >= 3:
                         break
@@ -389,7 +391,9 @@ class WebSearch(Tool):
                             break
                     hits = relevant_search_hits(query, hits)
                     if hits:
-                        return await search_result("DuckDuckGo", hits)
+                        result = await search_result("DuckDuckGo", hits)
+                        if not is_news or result.data["read_sources"]:
+                            return result
                 except (ValueError, aiohttp.ClientError, asyncio.TimeoutError):
                     pass
 
@@ -411,7 +415,9 @@ class WebSearch(Tool):
                             })
                     hits = relevant_search_hits(query, hits)
                     if hits:
-                        return await search_result("Bing RSS", hits)
+                        result = await search_result("Bing RSS", hits)
+                        if not is_news or result.data["read_sources"]:
+                            return result
                 except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
                     pass
 
@@ -470,10 +476,15 @@ class WebSearch(Tool):
                             })
                     hits = relevant_search_hits(query, hits)
                     if hits:
-                        return await search_result("Google News RSS", hits)
+                        result = await search_result("Google News RSS", hits)
+                        if not is_news or result.data["read_sources"]:
+                            return result
                 except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
                     pass
-                return ToolResult(data={"query": query, "source": "unavailable", "results": []})
+                data = {"query": query, "source": "unavailable", "results": []}
+                if is_news:
+                    data.update(read_sources=[], source_read_status="unavailable")
+                return ToolResult(data=data)
         except (ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
