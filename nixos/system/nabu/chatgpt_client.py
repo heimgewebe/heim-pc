@@ -144,7 +144,6 @@ async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
         "input": [{"role": "user", "content": question.strip()[:MAX_QUESTION]}],
         "store": False,
         "stream": True,
-        "max_output_tokens": 700,
     }
     headers = {"Authorization": "Bearer " + record["access_token"]}
     output = []

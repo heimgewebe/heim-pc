@@ -237,8 +237,6 @@ def sign_in(credentials: Path, requested_model: str = "") -> None:
         }
         if client_id == "dynamic_agent_client":
             params["agent_name_hint"] = "Nabu"
-        elif old.get("id_token"):
-            params["id_token_hint"] = old["id_token"]
         url = AUTH_URL + "?" + urlencode(params)
         print("Nabu: Browseranmeldung ueber OpenAI starten (kein Passwort im Terminal).")
         if not webbrowser.open(url):

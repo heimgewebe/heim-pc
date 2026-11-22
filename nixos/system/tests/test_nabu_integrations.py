@@ -114,6 +114,28 @@ class OAuthContractTests(TestCase):
             status, body = login.http_json(login.TOKEN_URL, data={"code": "secret"})
             self.assertEqual((status, body), (429, {}))
 
+    def test_reauth_fallback_never_includes_id_token(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "auth.json"
+            login.save_private(path, {
+                "client_id": "oaiapp_test",
+                "id_token": "THIS_MUST_NOT_BE_EXPOSED",
+                "subject": "account123",
+            })
+            opened = []
+            with mock.patch.object(login.webbrowser, "open",
+                                   side_effect=lambda url: opened.append(url) or False):
+                with mock.patch.object(login.HTTPServer, "handle_request", return_value=None):
+                    with mock.patch("builtins.print"):
+                        with self.assertRaises(RuntimeError):
+                            login.sign_in(path)
+            self.assertEqual(len(opened), 1)
+            self.assertNotIn("THIS_MUST_NOT_BE_EXPOSED", opened[0])
+            self.assertNotIn("id_token_hint", parse_qs(urlsplit(opened[0]).query))
+            self.assertEqual(parse_qs(urlsplit(opened[0]).query)["client_id"], ["oaiapp_test"])
+
     def test_id_token_nonce_issuer_and_audience_are_checked(self):
         import base64
         import hashlib
@@ -339,6 +361,7 @@ class ChatGPTToolTests(IsolatedAsyncioTestCase):
             self.assertEqual(result["answer"], "Test bestanden.")
             self.assertEqual(session.calls[0][1]["json"]["store"], False)
             self.assertEqual(session.calls[0][1]["json"]["stream"], True)
+            self.assertNotIn("max_output_tokens", session.calls[0][1]["json"])
             self.assertNotIn("private", json.dumps(result))
 
     async def test_stream_preserves_unicode_across_network_chunks(self):

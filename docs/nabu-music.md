@@ -98,7 +98,7 @@ Client-Secret, Zugriff auf ChatGPT-Verläufe oder offene Portfreigabe.
 Rechner wie die Loopback-Rückrufadresse laufen):
 
 ```sh
-python3 -B nixos/system/nabu/siwc_login.py
+python3 -B /home/alex/.local/share/heimgewebe/home-assistant/nabu-chatgpt-login.py
 ```
 
 Der Befehl öffnet den OpenAI-Anmeldedialog im Browser. Dort muss die betroffene
@@ -107,7 +107,7 @@ Person selbst den Account auswählen und die Berechtigung
 Gerät erreicht den `127.0.0.1`-Callback des Heim-PC **nicht**. Die
 Anmeldung darf nicht im Hintergrund fingiert werden. Falls der Browser nicht
 öffnet, zeigt das CLI die offizielle Autorisierungsadresse zum Öffnen **auf
-dem Heim-PC**. `requests` muss im Host-Python verfügbar sein. Die
+dem Heim-PC**. Der Login verwendet die Python-Standardbibliothek. Die
 RSA/JWKS-ID-Token-Signatur, Audience, Nonce, Issuer und Ablauf werden bei
 der Rückgabe kontrolliert.
 
