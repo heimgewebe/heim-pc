@@ -151,7 +151,7 @@ class DeepFreshnessTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertFalse(actual(question))
 
-    def test_timeless_question_uses_only_mistral(self):
+    def test_timeless_question_uses_only_deep_model(self):
         result = self.invoke("Vergleiche Wärmepumpe und Gasheizung nach Umweltwirkung.")
         self.assertFalse(result.error)
         self.assertEqual([], SearchFake.calls)
@@ -160,7 +160,7 @@ class DeepFreshnessTests(unittest.TestCase):
         self.assertFalse(result.data["verified_external_sources"])
         self.assertEqual([], result.data["source_urls"])
 
-    def test_current_question_searches_and_reads_before_mistral(self):
+    def test_current_question_searches_and_reads_before_deep_model(self):
         result = self.invoke("Was hat die Bundesregierung heute beschlossen?")
         self.assertFalse(result.error)
         self.assertEqual(1, len(SearchFake.calls))
@@ -176,7 +176,7 @@ class DeepFreshnessTests(unittest.TestCase):
         self.assertIn("ungeprüfte Fremdtexte", context)
         self.assertIn("https://example.org/news", context)
         self.assertIn("22. November 2026", context)
-        self.assertEqual("mistral-small3.2:24b", payload["model"])
+        self.assertEqual("hf.co/Xylolabs/Qwen3.8-27B-GGUF:Q3_K_M", payload["model"])
 
     def test_implicit_weather_question_retrieves_sources(self):
         result = self.invoke("Wie ist das Wetter in Hamburg?")
