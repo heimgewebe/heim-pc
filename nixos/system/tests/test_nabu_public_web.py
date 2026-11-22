@@ -449,7 +449,8 @@ class PublicWebTests(unittest.TestCase):
 class NewsSearchBundlingTests(unittest.TestCase):
     """Current-news search itself reads sources, preventing model tool fanout."""
 
-    def bundled(self, hits, news=True, unreadable=()):
+    def bundled(self, hits, news=True, unreadable=(), destinations=None,
+                contents=None):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         klass = next(n for n in tree.body if isinstance(n, ast.ClassDef)
                      and n.name == "WebSearch")
@@ -464,7 +465,9 @@ class NewsSearchBundlingTests(unittest.TestCase):
                 url = tool.tool_args["url"]
                 calls.append(url)
                 return SimpleNamespace(error=url in unreadable, data={
-                    "url": url, "text": "A dated, readable article. " * 40,
+                    "url": (destinations or {}).get(url, url),
+                    "text": (contents or {}).get(url,
+                                               "A dated, readable article. " * 40),
                 })
 
         ns = {
@@ -475,6 +478,7 @@ class NewsSearchBundlingTests(unittest.TestCase):
             "ToolInput": lambda **kw: SimpleNamespace(**kw),
             "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
             "WebRead": Reader,
+            "relevant_source_excerpt": source_functions()["relevant_source_excerpt"],
         }
         exec(compile(ast.fix_missing_locations(ast.Module(
             body=[helper], type_ignores=[])), str(SOURCE), "exec"), ns)
@@ -505,6 +509,38 @@ class NewsSearchBundlingTests(unittest.TestCase):
         self.assertEqual([], data["read_sources"])
         self.assertEqual([], data["results"])
         self.assertEqual("unavailable", data["source_read_status"])
+
+    def test_aggregator_links_resolve_distinct_publishers_even_after_failure(self):
+        urls = [
+            "https://news.google.com/rss/articles/opaque-a",
+            "https://news.google.com/rss/articles/opaque-b",
+            "https://news.google.com/rss/articles/opaque-c",
+            "https://news.google.com/rss/articles/opaque-d",
+        ]
+        destinations = {
+            urls[1]: "https://publisher-one.example/story",
+            urls[2]: "https://publisher-two.example/story",
+            urls[3]: "https://publisher-one.example/duplicate",
+        }
+        hits = [{"title": "Current News", "url": url} for url in urls]
+        data, calls = self.bundled(hits, unreadable=(urls[0],),
+                                   destinations=destinations)
+        self.assertEqual(urls, calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual([destinations[urls[1]], destinations[urls[2]]],
+                         [x["url"] for x in data["read_sources"]])
+
+    def test_news_preserves_relevant_late_passage_after_2400_characters(self):
+        url = "https://news.example/article"
+        article = ("Navigation, cookie notice, unrelated material. " * 105
+                   + " Nachrichten Schlagzeilen confirmed late fact dated today. "
+                   + "Additional article evidence about the late fact. " * 30)
+        data, _ = self.bundled([{"title": "News", "url": url}],
+                               contents={url: article})
+        text = data["read_sources"][0]["text"]
+        self.assertIn("confirmed late fact", text)
+        self.assertLessEqual(len(text), 4500)
+        self.assertTrue(len(article) > 5000)
 
     def test_long_signed_source_url_remains_exact_after_read(self):
         long_url = "https://news.example/story/" + ("a" * 710) + "?sig=abc123"
@@ -615,6 +651,7 @@ class NewsSearchBundlingTests(unittest.TestCase):
             "search_subject_terms": functions["search_subject_terms"],
             "relevant_search_hits": functions["relevant_search_hits"],
             "normalize_today_news_query": functions["normalize_today_news_query"],
+            "relevant_source_excerpt": functions["relevant_source_excerpt"],
             "datetime": FakeDateTime, "ZoneInfo": ZoneInfo,
             "ToolInput": lambda **kw: SimpleNamespace(**kw),
             "ToolResult": lambda data: SimpleNamespace(data=data, error=False),

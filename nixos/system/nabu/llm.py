@@ -334,7 +334,8 @@ class WebSearch(Tool):
                 if not is_news:
                     return ToolResult(data=data)
                 read_sources: list[dict[str, str]] = []
-                attempted: set[str] = set()
+                attempted_urls: set[str] = set()
+                seen_publishers: set[str] = set()
                 deadline = news_deadline
                 for hit in hits[:6]:
                     if len(read_sources) >= 3:
@@ -344,9 +345,9 @@ class WebSearch(Tool):
                         host = (urlsplit(url).hostname or "").casefold()
                     except ValueError:
                         continue
-                    if not host or host in attempted:
+                    if not host or url in attempted_urls or host in seen_publishers:
                         continue
-                    attempted.add(host)
+                    attempted_urls.add(url)
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         break
@@ -367,10 +368,18 @@ class WebSearch(Tool):
                     body = read.data.get("text")
                     if not isinstance(body, str) or len(body.strip()) < 350:
                         continue
+                    resolved_url = str(read.data.get("url") or url)
+                    try:
+                        publisher = (urlsplit(resolved_url).hostname or "").casefold()
+                    except ValueError:
+                        continue
+                    if not publisher or publisher in seen_publishers:
+                        continue
+                    seen_publishers.add(publisher)
                     read_sources.append({
                         "title": str(hit.get("title") or "")[:160],
-                        "url": str(read.data.get("url") or url),
-                        "text": body.strip()[:2400],
+                        "url": resolved_url,
+                        "text": relevant_source_excerpt(body.strip(), query, 4500),
                     })
                 # Search snippets alone are not verified live news evidence.
                 # For time-sensitive news, do not expose unread snippets as facts
