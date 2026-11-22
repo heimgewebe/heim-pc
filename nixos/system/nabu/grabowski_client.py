@@ -115,7 +115,7 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
         raise GrabowskiUnavailable("Grabowski derzeit nicht erreichbar; Aktion nicht bestätigt") from exc
 
 
-def read_request(operation: str, task_id: str = "") -> tuple[str, dict]:
+def read_request(operation: str, task_id: str = "", obligation_id: str = "") -> tuple[str, dict]:
     """Hard-coded read-only API exposed to Nabu, no arbitrary MCP passthrough."""
     intent = "Nabu fragt den bestehenden Grabowski-Operator nach dem Zustand"
     if operation == "status":
@@ -139,6 +139,18 @@ def read_request(operation: str, task_id: str = "") -> tuple[str, dict]:
             "task_id": task_id,
             "reason": "Nabu-Assist: exakte Grabowski-Task prüfen",
             "user_intent": intent,
+        }
+    if operation == "obligation":
+        if not isinstance(obligation_id, str) or not re.fullmatch(
+            r"goo-[a-z0-9][a-z0-9-]{7,79}", obligation_id
+        ):
+            raise ValueError("Ungültige Grabowski-Obligation-ID")
+        return "grip_run", {
+            "name": "operator-obligation-status",
+            "parameters": {"obligation_id": obligation_id},
+            "allow_mutation": False,
+            "reason": "Nabu-Assist: exakten Grabowski-Auftragsfortschritt lesen",
+            "user_intent": "Nabu fragt den Status eines zuvor registrierten Auftrags ab",
         }
     raise ValueError("Unbekannter Grabowski-Leseauftrag")
 
@@ -166,6 +178,21 @@ def compact_result(operation: str, result: dict) -> dict:
             k: result.get(k) for k in
             ("task_id", "host", "state", "attempt", "recommended_next_action",
              "lifecycle_receipt_sha256")
+        }
+    if operation == "obligation":
+        output = result.get("output")
+        if (result.get("status") != "passed" or not isinstance(output, dict)
+                or not isinstance(output.get("obligation_id"), str)
+                or not isinstance(output.get("work_complete"), bool)
+                or not isinstance(output.get("continuation_required"), bool)):
+            raise GrabowskiUnavailable("Grabowski hat den Auftragsstatus nicht bestätigt")
+        return {
+            "obligation_id": output["obligation_id"],
+            "state": output.get("state"),
+            "work_complete": output["work_complete"],
+            "continuation_required": output["continuation_required"],
+            "missing_acceptance_ids": output.get("missing_acceptance_ids", [])[:8],
+            "recommended_next_action": str(output.get("recommended_next_action") or "")[:160],
         }
     raise ValueError("Ungültiges Operationsergebnis")
 

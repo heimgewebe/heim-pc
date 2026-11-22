@@ -75,6 +75,41 @@ class GrabowskiContractTests(TestCase):
         self.assertEqual(data["registered_tools"], 208)
 
 
+    def test_obligation_status_is_exact_read_only_and_bounded(self):
+        obligation_id = "goo-nabu-1234567890abcdef1234"
+        name, args = grabowski.read_request(
+            "obligation", obligation_id=obligation_id
+        )
+        self.assertEqual(name, "grip_run")
+        self.assertEqual(args["name"], "operator-obligation-status")
+        self.assertFalse(args["allow_mutation"])
+        self.assertEqual(args["parameters"], {"obligation_id": obligation_id})
+        answer = {"status": "passed", "output": {
+            "obligation_id": obligation_id, "state": "open",
+            "work_complete": False, "continuation_required": True,
+            "missing_acceptance_ids": ["dispatch"],
+            "recommended_next_action": "continue", "private": "NOT_FOR_NABU",
+        }}
+        summary = grabowski.compact_result("obligation", answer)
+        self.assertEqual(summary["obligation_id"], obligation_id)
+        self.assertEqual(summary["state"], "open")
+        self.assertEqual(summary["missing_acceptance_ids"], ["dispatch"])
+        self.assertFalse(summary["work_complete"])
+        self.assertNotIn("NOT_FOR_NABU", json.dumps(summary))
+
+    def test_obligation_status_rejects_invalid_ids_and_unconfirmed_results(self):
+        for obligation_id in ("", "goo-", "goo-/tmp/passwd", "task123", "goo-" + "x" * 200):
+            with self.subTest(obligation_id=obligation_id), self.assertRaises(ValueError):
+                grabowski.read_request("obligation", obligation_id=obligation_id)
+        for result in ({}, {"status": "passed"}, {"status": "blocked", "output": {
+            "obligation_id": "goo-nabu-1234567890abcdef1234", "work_complete": True,
+            "continuation_required": False}}, {"status": "passed", "output": {
+            "obligation_id": "goo-nabu-1234567890abcdef1234",
+            "work_complete": "yes", "continuation_required": False}}):
+            with self.subTest(result=result), self.assertRaises(grabowski.GrabowskiUnavailable):
+                grabowski.compact_result("obligation", result)
+
+
 class OAuthContractTests(TestCase):
     def test_private_storage_and_host_identity_are_stable(self):
         with tempfile.TemporaryDirectory() as d:
