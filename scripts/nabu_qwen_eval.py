@@ -15,6 +15,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import statistics
 import sys
@@ -175,6 +176,8 @@ TOOLS_EXPECTED = {
 }
 BROWSER_OPERATIONS = ("open", "open", "click", "scroll", "inspect",
                       "open", "open", "type", "scroll", "open")
+GRABOWSKI_READ_OPERATIONS = ("status", "status", "tasks", "tasks", "status",
+                            "tasks", "status", "tasks", "status", "tasks")
 OVERRIDE = {
     ("device", 1): "intent__HassTurnOff",
     ("device", 2): "climate__HassClimateSetTemperature",
@@ -246,6 +249,8 @@ def cases():
             }
             if family == "browser":
                 case["expected_arguments"] = {"operation": BROWSER_OPERATIONS[idx]}
+            elif family == "operator_status":
+                case["expected_arguments"] = {"operation": GRABOWSKI_READ_OPERATIONS[idx]}
             out.append(case)
     return out
 
@@ -383,7 +388,23 @@ def valid_arguments(kind, args):
     if kind == "nabu_web__grabowski_request":
         return all(isinstance(args.get(x), str) and bool(args[x].strip()) for x in ("objective", "acceptance"))
     if kind == "nabu_web__grabowski":
-        return args.get("operation") in ("status", "tasks", "task", "obligation")
+        op = args.get("operation")
+        if op in ("status", "tasks"):
+            return True
+        if op == "task":
+            task_id = args.get("task_id")
+            if not isinstance(task_id, str):
+                return False
+            # Nabu normalizes old task+goo IDs to obligation before read_request.
+            if task_id.startswith("goo-"):
+                return re.fullmatch(r"goo-[a-z0-9][a-z0-9-]{7,79}", task_id) is not None
+            return (8 <= len(task_id) <= 64 and task_id.isascii()
+                    and all(ch.isalnum() or ch == "-" for ch in task_id))
+        if op == "obligation":
+            obligation_id = args.get("obligation_id")
+            return (isinstance(obligation_id, str)
+                    and re.fullmatch(r"goo-[a-z0-9][a-z0-9-]{7,79}", obligation_id) is not None)
+        return False
     if kind.startswith("intent__") or kind.startswith("climate__"):
         return isinstance(args.get("name") or args.get("area"), str) and (
             kind != "climate__HassClimateSetTemperature" or isinstance(args.get("temperature"), (float, int)))

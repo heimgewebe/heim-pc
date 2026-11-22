@@ -119,6 +119,30 @@ class NabuQwenEvalTest(unittest.TestCase):
             summary = next(Path(temp).glob("*.summary.json"))
             self.assertEqual(1, json.loads(summary.read_text())["critical_failures"])
 
+    def test_grabowski_operation_specific_id_contract(self):
+        good = nabu.valid_arguments
+        self.assertTrue(good("nabu_web__grabowski", {"operation": "status"}))
+        self.assertTrue(good("nabu_web__grabowski", {"operation": "tasks"}))
+        self.assertFalse(good("nabu_web__grabowski", {"operation": "task"}))
+        self.assertFalse(good("nabu_web__grabowski", {"operation": "obligation"}))
+        self.assertFalse(good("nabu_web__grabowski", {"operation": "task", "task_id": "short"}))
+        self.assertTrue(good("nabu_web__grabowski", {"operation": "task", "task_id": "1234567890abcdef"}))
+        self.assertTrue(good("nabu_web__grabowski", {"operation": "task", "task_id": "goo-12345678"}))
+        self.assertFalse(good("nabu_web__grabowski", {"operation": "task", "task_id": "goo-short"}))
+        self.assertTrue(good("nabu_web__grabowski", {"operation": "obligation", "obligation_id": "goo-12345678"}))
+        self.assertFalse(good("nabu_web__grabowski", {"operation": "obligation", "obligation_id": "wrong"}))
+
+    def test_grabowski_operation_matches_question(self):
+        status = {c["id"]: c for c in nabu.cases() if c["family"] == "operator_status"}
+        self.assertFalse(nabu.score(status["operator_status-01"],
+                                    "nabu_web__grabowski", {"operation": "tasks"}, ""))
+        self.assertTrue(nabu.score(status["operator_status-01"],
+                                   "nabu_web__grabowski", {"operation": "status"}, ""))
+        self.assertFalse(nabu.score(status["operator_status-03"],
+                                    "nabu_web__grabowski", {"operation": "status"}, ""))
+        self.assertTrue(nabu.score(status["operator_status-03"],
+                                   "nabu_web__grabowski", {"operation": "tasks"}, ""))
+
     def test_critical_no_action_and_ambiguous_device(self):
         cases = {x["id"]: x for x in nabu.cases()}
         self.assertTrue(nabu.score(cases["answer-01"], "answer", {}, "Leistung ist ..."))
