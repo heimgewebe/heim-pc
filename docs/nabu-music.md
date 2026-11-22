@@ -156,7 +156,8 @@ bestehenden Nabu-HA-Runtime-Rollout und Neustart mit Tests.
 ## Kontrollierte Wiederherstellung
 
 1. Bei fehlender Nabu-Integration Home Assistant stoppen, ausschließlich
-   `__init__.py`, `llm.py` und `manifest.json` in
+   `__init__.py`, `llm.py`, `grabowski_client.py`,
+   `chatgpt_client.py` und `manifest.json` in
    `custom_components/nabu_web/` zurückkopieren und Home Assistant starten.
    Bestehende Runtime-Konfiguration nicht durch Quellkopien überschreiben.
 2. Falls Sendspin-Units fehlen: die beiden Versionen aus diesem Verzeichnis

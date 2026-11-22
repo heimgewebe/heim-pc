@@ -7,6 +7,7 @@ No ChatGPT browser sessions, API keys or arbitrary tool calls are involved.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import os
 from pathlib import Path
@@ -149,6 +150,7 @@ async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
     output = []
     completed = False
     pending = ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     try:
         async with session.post(
             API_ROOT + "/responses", json=payload, headers=headers,
@@ -160,7 +162,7 @@ async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
                     "Nabu bleibt lokal nutzbar"
                 )
             async for chunk in response.content.iter_any():
-                pending += chunk.decode("utf-8", errors="replace")
+                pending += decoder.decode(chunk)
                 pending = pending.replace("\r\n", "\n")
                 if len(pending) > 150_000:
                     raise ChatGPTUnavailable("ChatGPT-Antwort über dem Größenlimit")
@@ -178,8 +180,8 @@ async def chatgpt_answer(session: aiohttp.ClientSession, question: str,
                         err = value.get("response", {}).get("error") or value.get("error") or {}
                         code = str(err.get("code") or event_type)[:100] if isinstance(err, dict) else event_type
                         raise ChatGPTUnavailable(f"ChatGPT-Antwort nicht abgeschlossen ({code})")
-    except (aiohttp.ClientError, TimeoutError) as exc:
-        raise ChatGPTUnavailable("ChatGPT-Verbindung unterbrochen; kein Ergebnis bestätigt") from exc
+    except (aiohttp.ClientError, TimeoutError, UnicodeError) as exc:
+        raise ChatGPTUnavailable("ChatGPT-Stream fehlerhaft oder unterbrochen; kein Ergebnis bestätigt") from exc
     answer = "".join(output).strip()
     if not completed or not answer:
         raise ChatGPTUnavailable("ChatGPT lieferte keine vollständig bestätigte Antwort")

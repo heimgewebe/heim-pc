@@ -282,6 +282,27 @@ class ChatGPTToolTests(IsolatedAsyncioTestCase):
             self.assertEqual(session.calls[0][1]["json"]["stream"], True)
             self.assertNotIn("private", json.dumps(result))
 
+    async def test_stream_preserves_unicode_across_network_chunks(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "auth.json"
+            login.save_private(path, {
+                "client_id": "oaiapp_test", "model_slug": "example-model",
+                "access_token": "private", "refresh_token": "refresh",
+                "scopes": ["chatgpt.tokens.use.direct"], "plan_usage_enabled": True,
+                "expires_in": 3600, "saved_at_unix": int(time.time()),
+            })
+            event = lambda data: (
+                "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+            ).encode("utf-8")
+            answer = event({"type": "response.output_text.delta", "delta": "Grüße"})
+            cut = answer.index("ü".encode("utf-8")) + 1
+            chunks = [answer[:cut], answer[cut:], event({"type": "response.completed"})]
+            result = await chatgpt.chatgpt_answer(
+                DummySession([DummyResponse(200, chunks=chunks)]), "Hallo", path
+            )
+            self.assertEqual(result["answer"], "Grüße")
+            self.assertNotIn("\ufffd", result["answer"])
+
     async def test_incomplete_and_failed_are_not_success(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "auth.json"
