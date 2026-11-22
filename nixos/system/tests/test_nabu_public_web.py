@@ -443,5 +443,69 @@ class PublicWebTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+class NewsSearchBundlingTests(unittest.TestCase):
+    """Current-news search itself reads sources, preventing model tool fanout."""
+
+    def bundled(self, hits, news=True, unreadable=()):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                     and n.name == "WebSearch")
+        call = next(n for n in klass.body if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "async_call")
+        helper = next(n for n in ast.walk(call) if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == "search_result")
+        calls = []
+
+        class Reader:
+            async def async_call(self, _hass, tool, _context):
+                url = tool.tool_args["url"]
+                calls.append(url)
+                return SimpleNamespace(error=url in unreadable, data={
+                    "url": url, "text": "A dated, readable article. " * 40,
+                })
+
+        ns = {
+            "query": "Nachrichten heute", "is_news": news,
+            "hass": None, "llm_context": None, "asyncio": asyncio,
+            "urlsplit": urlsplit, "re": re,
+            "aiohttp": SimpleNamespace(ClientError=type("ClientError", (Exception,), {})),
+            "ToolInput": lambda **kw: SimpleNamespace(**kw),
+            "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
+            "WebRead": Reader,
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[helper], type_ignores=[])), str(SOURCE), "exec"), ns)
+        result = asyncio.run(ns["search_result"]("DuckDuckGo", hits))
+        return result.data, calls
+
+    def test_news_reads_three_distinct_sources_and_skips_failed_read(self):
+        hits = [{"title": name, "url": "https://" + host + ".example/article"}
+                for name, host in (("A", "a"), ("A duplicate", "a"),
+                                   ("B", "b"), ("C", "c"), ("D", "d"))]
+        failed = hits[2]["url"]
+        data, calls = self.bundled(hits, unreadable=(failed,))
+        self.assertEqual(["A", "C", "D"],
+                         [s["title"] for s in data["read_sources"]])
+        self.assertEqual([hits[i]["url"] for i in (0, 2, 3, 4)], calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual([x["url"] for x in data["read_sources"]],
+                         [x["url"] for x in data["results"]])
+        self.assertTrue(all(len(s["text"]) > 350 for s in data["read_sources"]))
+
+    def test_unreadable_news_is_not_labeled_read(self):
+        hits = [{"title": "Paywall", "url": "https://a.example/article"}]
+        data, _ = self.bundled(hits, unreadable=(hits[0]["url"],))
+        self.assertEqual([], data["read_sources"])
+        self.assertEqual([], data["results"])
+        self.assertEqual("unavailable", data["source_read_status"])
+
+    def test_generic_websearch_has_no_extra_reads(self):
+        hits = [{"title": "WHO", "url": "https://who.int/about"}]
+        data, calls = self.bundled(hits, news=False)
+        self.assertEqual([], calls)
+        self.assertEqual(hits, data["results"])
+        self.assertNotIn("read_sources", data)
+
+
 if __name__ == "__main__":
     unittest.main()
