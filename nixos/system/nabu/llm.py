@@ -561,7 +561,7 @@ class DeepAnswer(Tool):
             sources: list[dict[str, str]] = []
             now = datetime.now(ZoneInfo("Europe/Berlin"))
             if await question_needs_live_sources(question, hass):
-                query = f"{question[:174]} {now:%d.%m.%Y}"
+                query = f"{question[:174]} {now:%Y}"
                 search = await WebSearch().async_call(
                     hass,
                     ToolInput(tool_name="nabu_web__search", tool_args={"query": query}),

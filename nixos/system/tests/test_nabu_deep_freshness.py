@@ -170,6 +170,9 @@ class DeepFreshnessTests(unittest.TestCase):
         result = self.invoke("Was hat die Bundesregierung heute beschlossen?")
         self.assertFalse(result.error)
         self.assertEqual(1, len(SearchFake.calls))
+        query = SearchFake.calls[0]["query"]
+        self.assertIn(str(datetime.now(ZoneInfo("Europe/Berlin")).year), query)
+        self.assertNotRegex(query, r"\d{1,2}\.\d{1,2}\.\d{4}")
         self.assertEqual(2, len(ReadFake.calls))
         self.assertEqual(1, len(ChatSession.calls))
         self.assertTrue(result.data["verified_external_sources"])
