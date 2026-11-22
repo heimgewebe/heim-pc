@@ -10,7 +10,7 @@ import ipaddress
 import json
 import re
 import socket
-from urllib.parse import urlsplit, parse_qs, urljoin
+from urllib.parse import urlsplit, parse_qs, urljoin, quote
 from zoneinfo import ZoneInfo
 import xml.etree.ElementTree as ET
 
@@ -184,6 +184,39 @@ async def read_bounded(reader, maximum: int) -> bytes:
     return b"".join(chunks)
 
 
+def search_subject_terms(query: str) -> list[str]:
+    """Subject anchors excluding short stopwords, generic roles and dates."""
+    ignored = {"wer", "was", "wie", "ist", "sind", "der", "die", "das", "und",
+               "oder", "von", "für", "des", "dem", "einer", "einem", "welche",
+               "welcher", "welches", "bitte", "heute", "morgen", "aktuell",
+               "direktor", "leitung", "preis", "regeln", "stand", "standort",
+               "hat", "habe", "haben", "wird", "werden", "kann", "gibt",
+               "viel", "viele", "hoch", "neueste", "gestern", "diese", "dieser",
+               "über", "nach", "vor", "bei", "zum", "zur", "auf", "aus", "mit",
+               "leitet", "führt", "steht", "noch", "schon"}
+    return list(dict.fromkeys(
+        word for word in re.findall(r"\w+", query.casefold())
+        if len(word) >= 3 and not word.isdecimal() and word not in ignored
+    ))
+
+
+def relevant_search_hits(query: str, hits: list[dict]) -> list[dict]:
+    """Discard provider results without topical overlap."""
+    terms = set(search_subject_terms(query))
+    if not terms:
+        return []
+    return [
+        hit for hit in hits
+        if isinstance(hit, dict)
+        and any(
+            word in (
+                " ".join(str(hit.get(key) or "") for key in
+                         ("title", "excerpt", "url"))
+            ).casefold()
+            for word in terms
+        )
+    ]
+
 class WebSearch(Tool):
     name = "nabu_web__search"
     title = "Im Internet recherchieren"
@@ -202,43 +235,120 @@ class WebSearch(Tool):
                 connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers=headers,
             ) as session:
-                async with session.get("https://html.duckduckgo.com/html/", params={"q": query}) as response:
-                    response.raise_for_status()
-                    page = await read_bounded(response.content, 250000)
-                soup = BeautifulSoup(page, "html.parser")
-                hits = []
-                for item in soup.select(".result"):
-                    a = item.select_one("a.result__a")
-                    if not a:
-                        continue
-                    link = a.get("href", "")
-                    if link.startswith("//duckduckgo.com/l/"):
-                        link = parse_qs(urlsplit("https:" + link).query).get("uddg", [""])[0]
-                    if not link.startswith(("https://", "http://")):
-                        continue
-                    snippet = item.select_one(".result__snippet")
-                    hits.append({
-                        "title": a.get_text(" ", strip=True)[:160],
-                        "url": link,
-                        "excerpt": (snippet.get_text(" ", strip=True) if snippet else "")[:350],
-                    })
-                    if len(hits) == 6:
-                        break
-                if hits:
-                    return ToolResult(data={"query": query, "source": "DuckDuckGo", "results": hits})
-                async with session.get("https://www.bing.com/search", params={"q": query, "format": "rss"}) as response:
-                    response.raise_for_status()
-                    body = await read_bounded(response.content, 80000)
-                for item in ET.fromstring(body).findall(".//item")[:6]:
-                    url = (item.findtext("link") or "").strip()
-                    if url.startswith(("https://", "http://")):
+                # DuckDuckGo HTTP 202 is an anti-bot page, not search evidence.
+                try:
+                    async with session.get("https://html.duckduckgo.com/html/",
+                                           params={"q": query}) as response:
+                        page = (await read_bounded(response.content, 250000)
+                                if response.status == 200 else b"")
+                    soup = BeautifulSoup(page, "html.parser")
+                    hits = []
+                    for item in soup.select(".result"):
+                        a = item.select_one("a.result__a")
+                        if not a:
+                            continue
+                        link = a.get("href", "")
+                        if link.startswith("//duckduckgo.com/l/"):
+                            link = parse_qs(urlsplit("https:" + link).query).get("uddg", [""])[0]
+                        if not link.startswith(("https://", "http://")):
+                            continue
+                        snippet = item.select_one(".result__snippet")
                         hits.append({
-                            "title": (item.findtext("title") or "").strip()[:160],
-                            "url": url,
-                            "excerpt": (item.findtext("description") or "").strip()[:350],
+                            "title": a.get_text(" ", strip=True)[:160],
+                            "url": link,
+                            "excerpt": (snippet.get_text(" ", strip=True) if snippet else "")[:350],
                         })
-                return ToolResult(data={"query": query, "source": "Bing RSS (Fallback)", "results": hits})
-        except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        if len(hits) == 6:
+                            break
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "DuckDuckGo", "results": hits})
+                except (ValueError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+
+                # Bing RSS occasionally serves arbitrary cached pages for the
+                # requested query; only topic-matching titles are retained.
+                try:
+                    async with session.get("https://www.bing.com/search",
+                                           params={"q": query, "format": "rss"}) as response:
+                        response.raise_for_status()
+                        body = await read_bounded(response.content, 80000)
+                    hits = []
+                    for item in ET.fromstring(body).findall(".//item")[:6]:
+                        url = (item.findtext("link") or "").strip()
+                        if url.startswith(("https://", "http://")):
+                            hits.append({
+                                "title": (item.findtext("title") or "").strip()[:160],
+                                "url": url,
+                                "excerpt": (item.findtext("description") or "").strip()[:350],
+                            })
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "Bing RSS", "results": hits})
+                except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+
+                # Encyclopedic background can help locate the subject. It is
+                # not confirmation of a changing fact as of today's date.
+                subject = " ".join(search_subject_terms(query))[:140]
+                if subject:
+                    try:
+                        async with session.get(
+                            "https://de.wikipedia.org/w/rest.php/v1/search/page",
+                            params={"q": subject, "limit": "6"},
+                        ) as response:
+                            response.raise_for_status()
+                            document = json.loads((await read_bounded(
+                                response.content, 80000)).decode("utf-8", errors="replace"))
+                        hits = []
+                        for page in document.get("pages", [])[:6]:
+                            if not isinstance(page, dict):
+                                continue
+                            key, title = page.get("key"), page.get("title")
+                            if not isinstance(key, str) or not isinstance(title, str):
+                                continue
+                            url = "https://de.wikipedia.org/wiki/" + quote(
+                                key.replace(" ", "_")[:180], safe="_()")
+                            excerpt = BeautifulSoup(
+                                str(page.get("excerpt") or ""), "html.parser"
+                            ).get_text(" ", strip=True)[:350]
+                            hits.append({"title": title[:160], "url": url,
+                                         "excerpt": excerpt})
+                        hits = relevant_search_hits(query, hits)
+                        if hits:
+                            return ToolResult(data={
+                                "query": query,
+                                "source": "Wikipedia (Hintergrund, keine Live-Bestätigung)",
+                                "results": hits})
+                    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+                        pass
+
+                # Publisher headlines for recent events; validate subject
+                # before suggesting any link as a source.
+                try:
+                    async with session.get(
+                        "https://news.google.com/rss/search",
+                        params={"q": query, "hl": "de", "gl": "DE", "ceid": "DE:de"},
+                    ) as response:
+                        response.raise_for_status()
+                        body = await read_bounded(response.content, 80000)
+                    hits = []
+                    for item in ET.fromstring(body).findall(".//item")[:6]:
+                        url = (item.findtext("link") or "").strip()
+                        if url.startswith(("https://", "http://")):
+                            hits.append({
+                                "title": (item.findtext("title") or "").strip()[:160],
+                                "url": url,
+                                "excerpt": (item.findtext("description") or "").strip()[:350],
+                            })
+                    hits = relevant_search_hits(query, hits)
+                    if hits:
+                        return ToolResult(data={"query": query, "source": "Google News RSS",
+                                                "results": hits})
+                except (ValueError, ET.ParseError, aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+                return ToolResult(data={"query": query, "source": "unavailable", "results": []})
+        except (ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
 class WebRead(Tool):
@@ -256,6 +366,7 @@ class WebRead(Tool):
             async with aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
+                max_field_size=32768,
             ) as session:
                 # Every redirect is validated before its next network request.
                 redirects = 0
@@ -499,6 +610,56 @@ async def question_needs_live_sources(question: str, hass: HomeAssistant) -> boo
     # facts into unsupported offline answers.
     return True
 
+async def source_search_query(question: str, now: datetime, hass: HomeAssistant) -> str:
+    """Use the existing local primary model to name the fact being looked up.
+
+    The fallback preserves the original question; search text is never itself
+    accepted as evidence for an answer.
+    """
+    fallback = f"{question[:174]} {now:%Y}"
+    prompt = (
+        "Schreibe eine knappe Suchmaschinenanfrage mit drei bis neun präzisen "
+        "Schlüsselwörtern für verlässliche aktuelle Quellen. Ermittle die "
+        "gesuchte Funktion, Personengruppe oder Messgröße und schreibe sie "
+        "als Sachbegriff, statt die Fragewörter 'wer', 'wie' zu übernehmen. "
+        "Bei der Leitung einer Organisation verwende nach Möglichkeit den "
+        "üblichen konkreten Funktionstitel (Direktor, Vorsitzender, "
+        "Generaldirektor, CEO), nicht nur 'Amtsinhaber'. Verwende für "
+        f"wechselnde Sachverhalte das Jahr {now:%Y}, keinen exakten Tag. "
+        "Nenne KEINE erfundene Person, Zahl oder Antwort und keine URL. "
+        "Antworte ausschließlich mit JSON {\"query\":\"Suchbegriffe\"}."
+    )
+    try:
+        async with async_get_clientsession(hass).post(
+            "http://127.0.0.1:11434/api/chat",
+            json={
+                "model": "nabu-qwen3-14b-q6:20261121",
+                "messages": [{"role": "system", "content": prompt},
+                             {"role": "user", "content": question}],
+                "format": "json", "think": False, "stream": False,
+                "keep_alive": "10m",
+                "options": {"num_ctx": 2048, "num_predict": 90, "temperature": 0},
+            },
+            timeout=aiohttp.ClientTimeout(total=25, connect=5),
+        ) as response:
+            response.raise_for_status()
+            result = await response.json()
+        item = result.get("message") if isinstance(result, dict) else None
+        content = item.get("content") if isinstance(item, dict) else None
+        parsed = json.loads(content) if isinstance(content, str) else None
+        proposed = parsed.get("query") if isinstance(parsed, dict) else None
+        if isinstance(proposed, str):
+            query = " ".join(proposed.split())
+            original_terms = set(re.findall(r"\w{3,}", question.casefold()))
+            chosen_terms = set(re.findall(r"\w{3,}", query.casefold()))
+            if (5 <= len(query) <= 174
+                    and not re.search(r"https?://|[<>]", query, re.IGNORECASE)
+                    and (not original_terms or original_terms & chosen_terms)):
+                return query
+    except (ValueError, KeyError, aiohttp.ClientError, asyncio.TimeoutError):
+        pass
+    return fallback
+
 class DeepAnswer(Tool):
     """Optional detailed reasoning with Qwen3.8 Q3_K_M, without a second voice service."""
 
@@ -561,7 +722,7 @@ class DeepAnswer(Tool):
             sources: list[dict[str, str]] = []
             now = datetime.now(ZoneInfo("Europe/Berlin"))
             if await question_needs_live_sources(question, hass):
-                query = f"{question[:174]} {now:%Y}"
+                query = await source_search_query(question, now, hass)
                 search = await WebSearch().async_call(
                     hass,
                     ToolInput(tool_name="nabu_web__search", tool_args={"query": query}),
@@ -593,6 +754,7 @@ class DeepAnswer(Tool):
                         continue
                     sources.append({
                         "title": str(hit.get("title") or "")[:160],
+                        "search_provider": str(search.data.get("source") or "")[:80],
                         "url": str(read.data.get("url") or url)[:500],
                         "excerpt": str(hit.get("excerpt") or "")[:350],
                         "text": relevant_source_excerpt(body, question),

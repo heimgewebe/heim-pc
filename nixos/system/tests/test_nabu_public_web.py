@@ -5,12 +5,14 @@ import ast
 import asyncio
 from html.parser import HTMLParser
 import ipaddress
+import json
 from pathlib import Path
 import re
 import socket
 from types import SimpleNamespace
 import unittest
-from urllib.parse import urlsplit, urljoin
+import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit, urljoin, quote, parse_qs
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "nabu" / "llm.py"
@@ -60,6 +62,8 @@ class FakeSession:
 
     def __init__(self, **kwargs):
         self.connector = kwargs["connector"]
+        self.max_field_size = kwargs.get("max_field_size")
+        self.__class__.last_field_limit = self.max_field_size
 
     async def __aenter__(self):
         return self
@@ -87,7 +91,8 @@ def source_functions():
     for node in root.body:
         if isinstance(node, ast.ClassDef) and node.name == "TextExtractor":
             chosen.append(node)
-        if isinstance(node, ast.FunctionDef) and node.name == "relevant_source_excerpt":
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "relevant_source_excerpt", "search_subject_terms", "relevant_search_hits"):
             chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name == "public_url":
             chosen.append(node)
@@ -102,7 +107,7 @@ def source_functions():
             for argument in method.args.args:
                 argument.annotation = None
             chosen.append(method)
-    assert len(chosen) == 6, "Expected production URL/resolver/body-reader/WebRead and extraction helpers"
+    assert len(chosen) == 8, "Expected URL/resolver/body reader/WebRead and evidence helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
         "HTMLParser": HTMLParser,
@@ -186,6 +191,135 @@ class PublicWebTests(unittest.TestCase):
             self.assertEqual(["https://example.org/", "https://example.org/next"], FakeSession.requests)
         asyncio.run(scenario())
 
+
+    def test_websearch_fallback_rejects_poisoned_rss(self):
+        """Source order is subject-validated, not whatever Bing RSS returned."""
+        root = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        klass = next(x for x in root.body
+                     if isinstance(x, ast.ClassDef) and x.name == "WebSearch")
+        method = next(x for x in klass.body
+                      if isinstance(x, ast.AsyncFunctionDef) and x.name == "async_call")
+        method.name = "call_web_search"
+        method.returns = None
+        for argument in method.args.args:
+            argument.annotation = None
+        requests = []
+
+        class SearchSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def get(self, url, *, params):
+                requests.append(url)
+                if "duckduckgo.com" in url:
+                    return FakeResponse(url, status=202, content=b"anti-bot page")
+                if "bing.com" in url:
+                    return FakeResponse(url, content=(
+                        b"<rss><channel><item><title>YouTube</title>"
+                        b"<link>https://www.youtube.com/</link>"
+                        b"<description>Videos about other topics</description>"
+                        b"</item></channel></rss>"))
+                if "wikipedia.org" in url:
+                    return FakeResponse(url, content=json.dumps({
+                        "pages": [
+                            {"title": "Weltgesundheitsorganisation",
+                             "key": "Weltgesundheitsorganisation",
+                             "excerpt": "WHO and its Director-General"},
+                            {"title": "Ebay Kleinanzeigen", "key": "Ebay_Kleinanzeigen",
+                             "excerpt": "Unrelated offers"},
+                        ]}).encode("utf-8"))
+                self.fail("No unrelated provider should be requested")
+
+        class Soup:
+            def __init__(self, value, *_args):
+                self.value = (value.decode("utf-8", errors="replace")
+                              if isinstance(value, bytes) else value)
+
+            def select(self, _selector):
+                return []
+
+            def get_text(self, *_args, **_kwargs):
+                return self.value
+
+        ns = {
+            "aiohttp": SimpleNamespace(
+                ClientSession=SearchSession,
+                TCPConnector=lambda **kwargs: None,
+                ClientError=type("ClientError", (Exception,), {})),
+            "PublicResolver": lambda: None,
+            "TIMEOUT": None, "BeautifulSoup": Soup,
+            "re": re, "json": json, "quote": quote,
+            "urlsplit": urlsplit, "parse_qs": parse_qs, "ET": ET,
+            "asyncio": asyncio,
+            "read_bounded": self.functions["read_bounded"],
+            "search_subject_terms": self.functions["search_subject_terms"],
+            "relevant_search_hits": self.functions["relevant_search_hits"],
+            "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
+            "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=[method], type_ignores=[])), str(SOURCE), "exec"), ns)
+        result = asyncio.run(ns["call_web_search"](
+            None, None, SimpleNamespace(tool_args={
+                "query": "Direktor der Weltgesundheitsorganisation WHO 2026"}), None))
+        self.assertFalse(result.error, result.data)
+        self.assertIn("Wikipedia", result.data["source"])
+        self.assertEqual(
+            ["https://de.wikipedia.org/wiki/Weltgesundheitsorganisation"],
+            [x["url"] for x in result.data["results"]])
+        self.assertEqual(3, len(requests))
+
+    def test_unrelated_search_provider_results_are_not_evidence(self):
+        keep = self.functions["relevant_search_hits"]
+        noisy = [
+            {"title": "YouTube", "url": "https://www.youtube.com/"},
+            {"title": "Wer – Rechtschreibung", "url": "https://www.duden.de/rechtschreibung/wer"},
+            {"title": "Nagelpilz behandeln", "excerpt": "Hilfreiche Behandlung",
+             "url": "https://example.com/nagelpilz"},
+            {"title": "Ebay Kleinanzeigen", "url": "https://example.com/ebay"},
+        ]
+        self.assertEqual([], keep(
+            "Direktor der Weltgesundheitsorganisation WHO 2026", noisy))
+        self.assertEqual([], keep(
+            "Wer hat die Bundesregierung heute geleitet?", noisy))
+
+    def test_relevant_search_provider_hits_keep_real_topic(self):
+        keep = self.functions["relevant_search_hits"]
+        official = {
+            "title": "WHO Director-General",
+            "excerpt": "Leadership and role at the World Health Organization",
+            "url": "https://www.who.int/director-general/",
+        }
+        other = {"title": "Unrelated PowerPoint assistance",
+                 "url": "https://example.org/ppt"}
+        self.assertEqual([official], keep(
+            "WHO Leitung 2026 Direktor", [other, official]))
+        self.assertEqual([{
+            "title": "Kindergeld Anspruch Regeln 2026",
+            "url": "https://familienportal.de/leistungen/kindergeld"
+        }], keep("Kindergeld Regeln 2026", [
+            {"title": "Kindergeld Anspruch Regeln 2026",
+             "url": "https://familienportal.de/leistungen/kindergeld"}]))
+
+    def test_long_public_csp_header_reader_limit(self):
+        async def scenario():
+            FakeSession.responses = [{
+                "status": 200,
+                "headers": {"content-type": "text/html",
+                            "content-security-policy": "default-src 'self'; " * 500},
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://example.org/"}), None)
+            self.assertFalse(result.error, result.data)
+            self.assertEqual(32768, FakeSession.last_field_limit)
+        asyncio.run(scenario())
 
     def test_incremental_document_chunks_are_combined(self):
         async def scenario():
@@ -276,6 +410,9 @@ class PublicWebTests(unittest.TestCase):
         async def fake_freshness(question, hass):
             return True
 
+        async def fake_search_query(question, now, hass):
+            return f"{question[:174]} {now:%Y}"
+
         ns = {
             "re": re, "json": json, "asyncio": asyncio,
             "datetime": datetime, "ZoneInfo": ZoneInfo,
@@ -284,6 +421,7 @@ class PublicWebTests(unittest.TestCase):
             "public_url": lambda url: url,
             "requires_live_sources": lambda question: True,
             "question_needs_live_sources": fake_freshness,
+            "source_search_query": fake_search_query,
             "relevant_source_excerpt": self.functions["relevant_source_excerpt"],
             "async_get_clientsession": lambda hass: Session(),
             "aiohttp": SimpleNamespace(

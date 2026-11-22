@@ -96,6 +96,11 @@ def subject():
         return ns["requires_live_sources"](question)
 
     ns["question_needs_live_sources"] = fake_freshness
+
+    async def fake_search_query(question, now, hass):
+        return f"{question[:174]} {now:%Y}"
+
+    ns["source_search_query"] = fake_search_query
     return ns
 
 
@@ -372,6 +377,79 @@ class SemanticFreshnessTests(unittest.TestCase):
             "Was wurde heute beschlossen?", '{"live":false}', should_request=False)
         self.assertTrue(decision)
         self.assertEqual([], calls)
+
+
+class SourceSearchQueryTests(unittest.TestCase):
+    """The real query planner validates output instead of trusting model text."""
+
+    def run_planner(self, text, question="Wer leitet die Weltgesundheitsorganisation WHO?"):
+        requests = []
+
+        class Response:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            async def json(self):
+                return {"message": {"content": text}}
+
+        class Session:
+            def post(self, url, **kwargs):
+                requests.append(kwargs.get("json"))
+                return Response()
+
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        selected = [x for x in tree.body
+                    if isinstance(x, ast.AsyncFunctionDef)
+                    and x.name == "source_search_query"]
+        self.assertEqual(1, len(selected))
+        ns = {
+            "re": re, "json": json,
+            "asyncio": asyncio,
+            "datetime": datetime,
+            "HomeAssistant": object,
+            "async_get_clientsession": lambda hass: Session(),
+            "aiohttp": SimpleNamespace(
+                ClientError=type("ClientError", (Exception,), {}),
+                ClientTimeout=lambda **kwargs: kwargs),
+        }
+        exec(compile(ast.fix_missing_locations(
+            ast.Module(body=selected, type_ignores=[])), str(SOURCE), "exec"), ns)
+        now = datetime(2026, 11, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+        value = asyncio.run(ns["source_search_query"](question, now, None))
+        self.assertEqual(1, len(requests))
+        self.assertEqual("nabu-qwen3-14b-q6:20261121", requests[0]["model"])
+        return value
+
+    def test_specific_institution_role_query_is_accepted(self):
+        result = self.run_planner('{"query":"WHO Leitung 2026 Direktor"}')
+        self.assertEqual("WHO Leitung 2026 Direktor", result)
+
+    def test_missing_question_overlap_uses_original_search(self):
+        result = self.run_planner('{"query":"Aktuelle Wetterlage Hamburg 2026"}')
+        self.assertEqual(
+            "Wer leitet die Weltgesundheitsorganisation WHO? 2026", result)
+
+    def test_bad_model_json_shapes_use_bounded_fallback(self):
+        for response in ('{"query":""}', '[]',
+                         '{"query":"https://example.org/x"}',
+                         '{"query":42}', '{"query":"ABC "}',
+                         'Das ist kein JSON'):
+            with self.subTest(response=response):
+                value = self.run_planner(response)
+                self.assertEqual(
+                    "Wer leitet die Weltgesundheitsorganisation WHO? 2026", value)
+
+    def test_user_question_entity_remains_in_search(self):
+        result = self.run_planner(
+            '{"query":"Arbeitslosenquote Deutschland 2026"}',
+            question="Wie hoch ist die Arbeitslosenquote in Deutschland?")
+        self.assertEqual("Arbeitslosenquote Deutschland 2026", result)
 
 
 if __name__ == "__main__":
