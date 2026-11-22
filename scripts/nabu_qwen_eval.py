@@ -4,6 +4,8 @@
 All requests go exclusively to the local Ollama API. Ollama tool calls are
 recorded but NEVER executed. Fixtures are synthetic, public and frozen v1.
 This is not an authenticated Home Assistant or microphone E2E test.
+The visible cases are an inspected development set, not a blinded final
+training holdout; reserve separate unseen cases before adapter training.
 """
 from __future__ import annotations
 
@@ -296,9 +298,9 @@ def registered_nabu_prompt(source: Path = SOURCE):
 def validate_fixture():
     data = cases()
     if len(data) != 100 or len(set(x["prompt"].casefold() for x in data)) != 100:
-        raise ValueError("Holdout must have 100 distinct prompts")
+        raise ValueError("Development set must have 100 distinct prompts")
     if len(GROUPS) != 10 or any(len(v) != 10 for v in GROUPS.values()):
-        raise ValueError("Holdout must have ten families of ten prompts")
+        raise ValueError("Development set must have ten families of ten prompts")
     tools = tool_descriptions()
     available = {x["function"]["name"] for x in tools}
     if any(x["expected"] not in available | {"answer", "clarify"} for x in data):
