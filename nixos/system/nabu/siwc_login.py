@@ -22,7 +22,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 import webbrowser
 
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 ISSUER = "https://auth.openai.com"
 RESOURCE = "https://api.openai.com/v1"
@@ -33,6 +34,32 @@ SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.
 DEFAULT_CREDENTIALS = (
     Path.home() / ".local/share/heimgewebe/home-assistant/.nabu-chatgpt.json"
 )
+
+
+def http_json(url: str, *, data: dict | None = None,
+              headers: dict | None = None, timeout: int = 20) -> tuple[int, dict]:
+    """Send an OAuth JSON request with the standard library, no extra packages."""
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    encoded = None
+    if data is not None:
+        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        encoded = urlencode(data).encode("utf-8")
+    request = Request(url, data=encoded, headers=request_headers)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            status = response.status
+            body = response.read(1024 * 1024 + 1)
+    except HTTPError as exc:
+        # Status is enough to report a refusal; never echo token/error bodies.
+        return exc.code, {}
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError("OpenAI-Anmeldung: Netzwerkverbindung nicht erreichbar") from exc
+    if len(body) > 1024 * 1024:
+        raise ValueError("OpenAI-Antwort überschreitet das Größenlimit")
+    decoded = json.loads(body)
+    if not isinstance(decoded, dict):
+        raise ValueError("Ungültige JSON-Antwort von OpenAI")
+    return int(status), decoded
 
 
 def save_private(path: Path, content: dict) -> None:
@@ -119,17 +146,18 @@ def validate_id_token(id_token: str, client_id: str, nonce: str) -> dict:
         raise ValueError("Nur RS256-signierte ID-Tokens sind zulässig")
     if not isinstance(claims, dict) or not isinstance(header.get("kid"), str):
         raise ValueError("ID-Token-Schlüssel oder Claims fehlen")
-    response = requests.get(DISCOVERY, timeout=12)
-    response.raise_for_status()
-    metadata = response.json()
+    discovery_status, metadata = http_json(DISCOVERY, timeout=12)
+    if discovery_status != 200:
+        raise RuntimeError(f"OpenAI-OIDC-Konfiguration nicht verfügbar (HTTP {discovery_status})")
     if metadata.get("issuer", "").rstrip("/") != ISSUER:
         raise ValueError("OAuth-Aussteller stimmt nicht mit OpenAI überein")
     jwks_uri = metadata.get("jwks_uri", "")
     if not isinstance(jwks_uri, str) or not jwks_uri.startswith(ISSUER + "/"):
         raise ValueError("OAuth-Schlüsselquelle ist nicht die erwartete OpenAI-Domain")
-    keys_response = requests.get(jwks_uri, timeout=12)
-    keys_response.raise_for_status()
-    keys = [key for key in keys_response.json().get("keys", [])
+    keys_status, keys_doc = http_json(jwks_uri, timeout=12)
+    if keys_status != 200:
+        raise RuntimeError(f"OpenAI-Signaturschlüssel nicht verfügbar (HTTP {keys_status})")
+    keys = [key for key in keys_doc.get("keys", [])
             if isinstance(key, dict) and key.get("kid") == header["kid"]]
     if len(keys) != 1:
         raise ValueError("OpenAI-Signaturschlüssel nicht eindeutig gefunden")
@@ -225,7 +253,7 @@ def sign_in(credentials: Path, requested_model: str = "") -> None:
     issued = received.get("client_id") or (client_id if client_id != "dynamic_agent_client" else "")
     if not issued or (client_id != "dynamic_agent_client" and issued != client_id):
         raise ValueError("OAuth-Client-ID fehlt oder weicht ab")
-    token_response = requests.post(TOKEN_URL, data={
+    token_status, tokens = http_json(TOKEN_URL, data={
         "grant_type": "authorization_code",
         "client_id": issued,
         "code": received["code"],
@@ -233,9 +261,8 @@ def sign_in(credentials: Path, requested_model: str = "") -> None:
         "redirect_uri": redirect_uri,
         "resource": RESOURCE,
     }, timeout=20)
-    if token_response.status_code != 200:
-        raise RuntimeError(f"OAuth-Tokenaustausch nicht erfolgreich ({token_response.status_code})")
-    tokens = token_response.json()
+    if token_status != 200:
+        raise RuntimeError(f"OAuth-Tokenaustausch nicht erfolgreich (HTTP {token_status})")
     scopes = str(tokens.get("scope") or "").split()
     claims = validate_id_token(tokens.get("id_token", ""), issued, nonce)
     if old.get("subject") and old["subject"] != claims["sub"]:
@@ -245,16 +272,16 @@ def sign_in(credentials: Path, requested_model: str = "") -> None:
     allowed = "chatgpt.tokens.use.direct" in scopes
     selected_model = ""
     if allowed:
-        models_response = requests.get(
+        models_status, models_doc = http_json(
             RESOURCE + "/models",
             headers={"Authorization": "Bearer " + tokens["access_token"]},
             timeout=20,
         )
-        if models_response.status_code != 200:
+        if models_status != 200:
             raise RuntimeError(
-                f"Modellkatalog für diesen ChatGPT-Account nicht verfügbar ({models_response.status_code})"
+                f"Modellkatalog für diesen ChatGPT-Account nicht verfügbar (HTTP {models_status})"
             )
-        entries = models_response.json().get("models") or []
+        entries = models_doc.get("models") or []
         choices = [str(m["slug"]) for m in entries
                    if isinstance(m, dict) and m.get("slug") and m.get("visibility") == "list"]
         if requested_model and requested_model not in choices:
@@ -294,6 +321,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     try:
         sign_in(args.credentials, args.model)
-    except (ValueError, RuntimeError, requests.RequestException) as err:
+    except (ValueError, RuntimeError) as err:
         print(f"Nabu-Anmeldung nicht abgeschlossen: {err}", file=sys.stderr)
         raise SystemExit(1) from None

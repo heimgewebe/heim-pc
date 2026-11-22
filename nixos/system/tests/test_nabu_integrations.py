@@ -24,18 +24,6 @@ except ImportError:
     )
 
 
-try:
-    import requests
-except ImportError:
-    # The real SIWC host CLI requires requests; CI tests substitute the
-    # HTTP methods and do not need this optional host runtime dependency.
-    sys.modules["requests"] = SimpleNamespace(
-        get=lambda *_args, **_kwargs: None,
-        post=lambda *_args, **_kwargs: None,
-        RequestException=type("RequestException", (Exception,), {}),
-    )
-
-
 def load(name):
     spec = importlib.util.spec_from_file_location(name, ROOT / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -92,6 +80,40 @@ class OAuthContractTests(TestCase):
             self.assertEqual(a, b)
             self.assertTrue(a.startswith("urn:uuid:"))
 
+    def test_http_json_uses_stdlib_post_and_rejects_errors(self):
+        from urllib.error import HTTPError
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b'{"ok":true}'
+
+        with mock.patch.object(login, "urlopen", return_value=Response()) as opener:
+            status, data = login.http_json(
+                login.TOKEN_URL, data={"grant_type": "authorization_code", "code": "test"},
+                timeout=10,
+            )
+            request = opener.call_args.args[0]
+            self.assertEqual(status, 200)
+            self.assertEqual(data, {"ok": True})
+            self.assertEqual(request.get_method(), "POST")
+            self.assertIn(b"code=test", request.data)
+            self.assertEqual(
+                request.get_header("Content-type"), "application/x-www-form-urlencoded"
+            )
+        with mock.patch.object(login, "urlopen", side_effect=HTTPError(
+            login.TOKEN_URL, 429, "Too many requests", {}, None,
+        )):
+            status, body = login.http_json(login.TOKEN_URL, data={"code": "secret"})
+            self.assertEqual((status, body), (429, {}))
+
     def test_id_token_nonce_issuer_and_audience_are_checked(self):
         import base64
         import hashlib
@@ -115,17 +137,12 @@ class OAuthContractTests(TestCase):
         em = b"\x00\x01" + b"\xff" * (key_bytes - len(digest) - 3) + b"\x00" + digest
         sig = pow(int.from_bytes(em, "big"), d, n).to_bytes(key_bytes, "big")
         issued = head + "." + payload + "." + b64(sig)
-        metadata = SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"issuer": login.ISSUER,
-                          "jwks_uri": login.ISSUER + "/.well-known/jwks.json"},
-        )
-        keys = SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"keys": [{"kid": "test", "kty": "RSA",
-                                    "alg": "RS256", "n": n_b64, "e": "AQAB"}]},
-        )
-        with mock.patch.object(login.requests, "get", side_effect=[metadata, keys] * 5):
+        metadata = {"issuer": login.ISSUER,
+                    "jwks_uri": login.ISSUER + "/.well-known/jwks.json"}
+        keys = {"keys": [{"kid": "test", "kty": "RSA",
+                          "alg": "RS256", "n": n_b64, "e": "AQAB"}]}
+        with mock.patch.object(login, "http_json",
+                               side_effect=[(200, metadata), (200, keys)] * 5):
             self.assertEqual(login.validate_id_token(issued, "oaiapp_test", "N123")["sub"], "account-123")
             with self.assertRaises(ValueError):
                 login.validate_id_token(issued, "oaiapp_test", "WRONG")
