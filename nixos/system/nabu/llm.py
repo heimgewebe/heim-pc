@@ -374,18 +374,18 @@ def requires_live_sources(question: str) -> bool:
     return bool(re.search(
         r"\b(?:wetter(?:vorhersage)?|temperatur(?:en)?|strompreis(?:e)?|"
         r"stromtarif(?:e)?|gaspreis(?:e)?|benzinpreis(?:e)?|"
-        r"börse(?:nkurse?)?|wechselkurs(?:e)?)\b",
+        r"börse(?:nkurse?)?|wechselkurs(?:e)?|dax)\b",
         lower,
     ))
 
 
 class DeepAnswer(Tool):
-    """Optional detailed reasoning with Mistral, without a second voice service."""
+    """Optional detailed reasoning with Qwen3.8 Q3_K_M, without a second voice service."""
 
     name = "nabu_web__deep_answer"
-    title = "Eine Frage mit Mistral Small 3.2 gründlich prüfen"
+    title = "Eine Frage mit Qwen3.8 27B Q3_K_M gründlich prüfen"
     description = (
-        "Prüfe eine Wissens-, Analyse- oder Bewertungsfrage gründlich mit Mistral Small 3.2. "
+        "Prüfe eine Wissens-, Analyse- oder Bewertungsfrage gründlich mit Qwen3.8 27B Q3_K_M. "
         "Benutze dieses Werkzeug, wenn der Nutzer 'prüf das gründlich' oder 'gib dir Mühe' "
         "zu einer Sachfrage sagt, auch in einem Anschlussdialog. Bei komplizierten "
         "mehrteiligen Vergleichen mit Gegenargumenten darfst du es selbstständig benutzen. "
@@ -396,7 +396,7 @@ class DeepAnswer(Tool):
         "aufgerufen werden. "
         "Übergebe die vollständige zu prüfende Frage mit benötigtem Gesprächskontext. "
         "Bei tagesaktuellen Aussagen (heute, aktuelle Nachrichten, Wetter, Preise) "
-        "werden vor Mistral echte öffentliche Webquellen gesucht und gelesen; ohne "
+        "werden vor dem Zweitmodell echte öffentliche Webquellen gesucht und gelesen; ohne "
         "lesbare Quelle wird keine vermeintlich aktuelle Antwort erfunden. "
         "Für einfache Aktualitätsfragen ist die direkte Websuche vorzuziehen. "
         "Die Antwort kann wegen des Modellwechsels deutlich länger dauern."
@@ -436,7 +436,7 @@ class DeepAnswer(Tool):
             if direct_action and not analytical_imperative:
                 raise ValueError(
                     "Direkte Aktion erkannt: das passende Musik-, Browser- oder "
-                    "Gerätewerkzeug ausführen, nicht Mistral befragen"
+                    "Gerätewerkzeug ausführen, nicht das Gründlich-Modell befragen"
                 )
             sources: list[dict[str, str]] = []
             now = datetime.now(ZoneInfo("Europe/Berlin"))
@@ -474,7 +474,8 @@ class DeepAnswer(Tool):
                         "title": str(hit.get("title") or "")[:160],
                         "url": str(read.data.get("url") or url)[:500],
                         "excerpt": str(hit.get("excerpt") or "")[:350],
-                        "text": body[:2400],
+                            # Some public pages prepend long cookie/navigation boilerplate.
+                        "text": body[:6000],
                     })
                 if not sources:
                     raise ValueError(
@@ -490,7 +491,7 @@ class DeepAnswer(Tool):
                 if sources else ""
             )
             payload = {
-                "model": "mistral-small3.2:24b",
+                "model": "hf.co/Xylolabs/Qwen3.8-27B-GGUF:Q3_K_M",
                 "messages": [
                     {"role": "system", "content": (
                         "Du bist die sorgfältige zweite Prüfinstanz von Nabu. Antworte auf Deutsch. "
@@ -506,7 +507,9 @@ class DeepAnswer(Tool):
                         "Quellenevidenz; ein Suchtreffer allein belegt kein heutiges Ereignis. "
                         "Nenne nur tatsächlich bereitgestellte URLs. "
                         "Ohne Beleg benenne die Unsicherheit klar. "
-                        "Erfinde keine Recherche, Quellen oder ausgeführten Aktionen."
+                        "Erfinde keine Recherche, Quellen oder ausgeführten Aktionen. "
+                        "Behaupte konkrete Geldgeber, institutionelle Beziehungen oder "
+                        "unabhängige Bestätigungen nur bei expliziter Quellenevidenz."
                     )},
                     {"role": "user", "content": question + context},
                 ],
@@ -524,10 +527,10 @@ class DeepAnswer(Tool):
                 result = await response.json()
             answer = (result.get("message") or {}).get("content") or ""
             if not isinstance(answer, str) or not answer.strip():
-                raise ValueError("Mistral hat keine nutzbare Antwort geliefert")
+                raise ValueError("Qwen3.8 hat keine nutzbare Antwort geliefert")
             return ToolResult(data={
                 "status": "answered",
-                "model": "mistral-small3.2:24b",
+                "model": "hf.co/Xylolabs/Qwen3.8-27B-GGUF:Q3_K_M",
                 "answer": answer.strip()[:3200],
                 "verified_external_sources": bool(sources),
                 "source_urls": [item["url"] for item in sources],
@@ -647,7 +650,7 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
                 "nutze für einfache aktuelle Auskünfte nabu_web__search und prüfe "
                 "Quellen über nabu_web__read_page. Wenn du bei einer gründlichen "
                 "aktuellen Analyse nabu_web__deep_answer wählst, führt das Werkzeug "
-                "die Websuche selbst vor Mistral aus. Ohne lesbare Quellen keine "
+                "die Websuche selbst vor dem Zweitmodell aus. Ohne lesbare Quellen keine "
                 "Tatsachen über das heutige Geschehen behaupten. "
                 "Gib beim Antworten zu aktuellen Fragen tatsächlich abgerufene "
                 "Quell-URLs an und unterscheide aktuelle Belege von Annahmen. "
@@ -656,10 +659,10 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
                 "benutze nabu_web__play_music und NICHT nabu_web__deep_answer. "
                 "Bei 'prüf das gründlich und öffne eine Webseite' nutze den Browser; "
                 "bei Lichtbefehlen die verfügbaren HA-Gerätewerkzeuge. "
-                "Nach einem erfolgreichen Mistral-Werkzeugresultat gib dessen Abwägung "
+                "Nach einem erfolgreichen Gründlich-Werkzeugresultat gib dessen Abwägung "
                 "verständlich wieder; wenn der Nutzer Gründlichkeit wünscht, sind bis zu sechs "
                 "gut sprechbare Sätze angemessen. Behaupte keine Recherche oder Ausführung, "
-                "die nicht stattgefunden hat. Falls Mistral scheitert, erkläre das kurz und "
+                "die nicht stattgefunden hat. Falls das Zweitmodell scheitert, erkläre das kurz und "
                 "antworte mit deinem eigenen Wissen, ohne einen weiteren Modellwechsel. "
                 "Nur wenn ausdrücklich ChatGPT oder GPT gefragt wird, nabu_web__chatgpt mit "
                 "der eigentlichen Frage aufrufen und dessen bestätigte Antwort wiedergeben; "
