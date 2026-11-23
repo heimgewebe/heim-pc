@@ -1,11 +1,13 @@
 "use strict";
 
 // Generated locally with a private per-installation key. Never commit a filled copy.
-// The web page cannot read this isolated content script or its signing key.
+// Capture the signed URL at document_start, before the application's router may
+// remove or change its query string. Never export the prompt or account data.
 (async function nabuSignedChatGPTSend() {
   if (location.origin !== "https://chatgpt.com") return;
   const params = new URLSearchParams(location.search);
-  if (Array.from(params.keys()).join(",") !== "prompt,nabu_ts,nabu_nonce,nabu_sig") return;
+  const names = Array.from(params.keys()).sort().join(",");
+  if (names !== "nabu_nonce,nabu_sig,nabu_ts,prompt") return;
 
   const prompt = params.get("prompt") || "";
   const tsText = params.get("nabu_ts") || "";
@@ -13,8 +15,9 @@
   const signature = params.get("nabu_sig") || "";
   const ts = Number(tsText);
   const now = Math.floor(Date.now() / 1000);
-  // Match chatgpt_text_url(): at most 4800 URL-encoded ASCII bytes.
-  if (!prompt || encodeURIComponent(prompt).length > 4800 ||
+  // Match Python quote(..., safe=""), including the five extra escaped chars.
+  const encodedLength = encodeURIComponent(prompt).replace(/[!'()*]/g, "%00").length;
+  if (!prompt || encodedLength > 4800 ||
       !/^[0-9]{10}$/.test(tsText) || !Number.isSafeInteger(ts) ||
       ts > now + 15 || now - ts > 180 ||
       !/^[a-f0-9]{24}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) return;
@@ -30,53 +33,96 @@
   );
   if (!await crypto.subtle.verify("HMAC", key, bytes(signature), payload)) return;
 
-  let claimPending = false;
+  let lastStage;
+  async function report(stage) {
+    if (lastStage === stage) return;
+    lastStage = stage;
+    try {
+      await chrome.runtime.sendMessage({type: "nabu-send-status-v1", nonce, stage});
+    } catch {
+      // A lost diagnostic must not cause an unconfirmed submission to be retried.
+    }
+  }
 
-  const findComposer = () => Array.from(
-    document.querySelectorAll('textarea,[contenteditable="true"],[role="textbox"]')
-  ).find(el => el.getClientRects().length > 0 &&
-       (("value" in el ? el.value : el.innerText) || "").trim() === prompt);
-
-  const findSendButton = () => Array.from(document.querySelectorAll("button")).find(el => {
+  const visible = el => el && el.getClientRects().length > 0;
+  const findVisible = selector => Array.from(document.querySelectorAll(selector)).find(visible);
+  const normalize = value => (value || "").replace(/\r\n/g, "\n").trim();
+  const composer = () => findVisible('#prompt-textarea,textarea,[contenteditable="true"][role="textbox"],[role="textbox"][contenteditable]');
+  const composerMatches = () => {
+    const el = composer();
+    return el && normalize("value" in el ? el.value : el.innerText) === prompt;
+  };
+  const accountVisible = () => !!findVisible(
+    '[data-testid="profile-button"],[data-testid="account-menu-button"],[data-testid="profile-menu-button"],' +
+    'button[aria-label="Open profile menu"],button[aria-label="Profilmenü öffnen"],button[aria-label="Kontomenü öffnen"]'
+  );
+  const signInVisible = () => !!findVisible(
+    '[data-testid="login-button"],[data-testid="signup-button"],' +
+    'button[aria-label="Log in"],button[aria-label="Anmelden"]'
+  );
+  const findSend = () => Array.from(document.querySelectorAll("button")).find(el => {
     const label = el.getAttribute("aria-label") || "";
     return (label === "Nachricht senden" || label === "Send message" ||
             el.getAttribute("data-testid") === "send-button") &&
-           !el.disabled && el.getAttribute("aria-disabled") !== "true" &&
-           el.getClientRects().length > 0;
+           !el.disabled && el.getAttribute("aria-disabled") !== "true" && visible(el);
   });
+  // Compare only the locally authorized outgoing prompt, never read model output.
+  const ownMessageVisible = () => Array.from(
+    document.querySelectorAll('[data-message-author-role="user"]')
+  ).some(el => visible(el) && normalize(el.innerText) === prompt);
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  const started = Date.now();
-  let observer;
-  const trySend = async () => {
-    if (Date.now() - started > 30000) { observer?.disconnect(); return; }
-    if (claimPending || !findComposer() || !findSendButton()) return;
-    claimPending = true;
-    let grant;
-    try {
-      // The background worker serializes and persists claims across ALL tabs.
-      grant = await chrome.runtime.sendMessage({type: "nabu-signed-send-claim-v1", nonce});
-    } catch {
-      observer?.disconnect();
-      return; // Fail closed; never send when the claim is uncertain.
+  await report("validated");
+  let waiting = "account_unconfirmed";
+  // Poll as well as allowing DOM changes: setting a textarea's value does not
+  // necessarily trigger a MutationObserver. All waits are bounded.
+  for (let i = 0; i < 150; i++) {
+    if (location.origin !== "https://chatgpt.com" ||
+        Math.floor(Date.now() / 1000) - ts > 180) {
+      await report("expired"); return;
     }
-    observer?.disconnect();
-    if (grant?.granted !== true || !findComposer()) return;
-    const button = findSendButton();
-    if (!button) return; // The page may have changed while claiming.
+    if (signInVisible()) {
+      waiting = "login_required";
+    } else if (!accountVisible()) {
+      waiting = "account_unconfirmed";
+    } else if (!composer()) {
+      waiting = "composer_missing";
+    } else if (!composerMatches()) {
+      waiting = "composer_mismatch";
+    } else if (!findSend()) {
+      waiting = "send_button_missing";
+    } else {
+      if (ownMessageVisible()) { await report("already_present"); return; }
+      let grant;
+      try {
+        // The worker serializes and persists claims across all tabs.
+        grant = await chrome.runtime.sendMessage({type: "nabu-signed-send-claim-v1", nonce});
+      } catch {
+        await report("claim_unconfirmed"); return;
+      }
+      if (grant?.granted !== true) { await report("claim_denied"); return; }
+      // Re-check every UI prerequisite after the asynchronous claim.
+      const button = findSend();
+      if (location.origin !== "https://chatgpt.com" || signInVisible() ||
+          !accountVisible() || !composerMatches() || !button || ownMessageVisible() ||
+          Math.floor(Date.now() / 1000) - ts > 180) {
+        await report("composer_changed"); return;
+      }
 
-    // The durable claim predates the click, including reloads and SPA changes.
-    const clean = new URL(location.href);
-    for (const field of ["prompt", "nabu_ts", "nabu_nonce", "nabu_sig"]) {
-      clean.searchParams.delete(field);
+      // Do not manipulate the application's router before clicking the button.
+      // The durable claim already prevents repeating a possibly sent message.
+      button.click();
+      await report("click_attempted");
+      for (let j = 0; j < 75; j++) {
+        if (location.origin !== "https://chatgpt.com") break;
+        if (ownMessageVisible()) { await report("message_sent"); return; }
+        await wait(200);
+      }
+      await report("send_unconfirmed");
+      return;
     }
-    history.replaceState(history.state, "", clean.pathname + clean.search + clean.hash);
-    button.click();
-  };
-
-  observer = new MutationObserver(trySend);
-  observer.observe(document.documentElement, {
-    childList: true, subtree: true, attributes: true, characterData: true
-  });
-  trySend();
-  setTimeout(() => observer?.disconnect(), 30000);
+    await report(waiting);
+    await wait(200);
+  }
+  await report("timeout_" + waiting);
 })();

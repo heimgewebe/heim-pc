@@ -65,9 +65,13 @@ def install() -> dict:
         raise RuntimeError("invalid extension template")
     content = template.replace(MARKER, key)
     background = (SOURCE / "chatgpt_sender.background.js").read_text(encoding="utf-8")
-    _private_atomic_write(EXTENSION_DIR / "manifest.json", manifest)
     _private_atomic_write(EXTENSION_DIR / "background.js", background)
     _private_atomic_write(EXTENSION_DIR / "content.js", content)
+    for name in ("maintenance.html", "maintenance.js"):
+        _private_atomic_write(EXTENSION_DIR / name,
+                              (SOURCE / ("chatgpt_sender." + name)).read_text(encoding="utf-8"))
+    # Publish the manifest last, after all referenced resources exist.
+    _private_atomic_write(EXTENSION_DIR / "manifest.json", manifest)
     return {
         "installed": True,
         "extension_directory": str(EXTENSION_DIR),

@@ -1,4 +1,7 @@
-"""Exercise the real Chrome content script with a fake composer, without ChatGPT access."""
+"""Exercise the real extension scripts with a changing, simulated composer.
+
+The fixture never accesses ChatGPT, a browser profile, credentials or model output.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -22,8 +25,13 @@ const data = JSON.parse(fs.readFileSync(0, "utf8"));
 const url = new URL(data.url);
 const stored = {};
 let backgroundListener;
+let installListener;
 const backgroundChrome = {
-  runtime: { onMessage: { addListener(fn) { backgroundListener = fn; } } },
+  runtime: {
+    onMessage: { addListener(fn) { backgroundListener = fn; } },
+    onInstalled: { addListener(fn) { installListener = fn; } },
+    getManifest() { return {version: "1.1.0"}; }
+  },
   storage: { local: {
     async get(key) { return {[key]: stored[key]}; },
     async set(values) {
@@ -34,60 +42,73 @@ const backgroundChrome = {
 };
 vm.runInNewContext(data.background, {chrome: backgroundChrome, Date, URL});
 function openTab() {
-  const draft = {
-    value: data.composer,
-    getClientRects() { return [{}]; }
-  };
+  const loc = {origin: url.origin, search: url.search, href: url.href};
+  let hydrated = !data.delayedHydration;
   let clicks = 0;
-  let cleaned = "";
+  const visible = {getClientRects() {return hydrated ? [{}] : [];}};
+  const draft = {
+    ...visible,
+    value: data.composer
+  };
   const send = {
+    ...visible,
     disabled: false,
     getAttribute(name) { return name === "aria-label" ? "Nachricht senden" : null; },
-    getClientRects() { return [{}]; },
     click() { clicks++; }
   };
   const context = {
-    location: {origin: "https://chatgpt.com", search: url.search, href: url.href},
-    URL, URLSearchParams, TextEncoder, crypto: webcrypto, Date,
+    location: loc, URL, URLSearchParams, TextEncoder, crypto: webcrypto, Date,
     chrome: { runtime: {
       sendMessage(message) {
         return new Promise(resolve => {
-          if (!backgroundListener(message, {url: url.href}, resolve)) {
-            resolve({granted: false});
+          if (!backgroundListener(message, {url: loc.href, frameId: 0}, resolve)) {
+            resolve({granted: false, recorded: false});
           }
         });
       }
     } },
     document: {
-      documentElement: {},
       querySelectorAll(selector) {
-        return selector === "button" ? [send] : [draft];
+        if (selector === "button") return data.missingSend ? [] : [send];
+        if (selector.includes('data-message-author-role="user"')) {
+          return clicks && data.confirm !== false ? [{...visible, innerText: data.composer}] : [];
+        }
+        if (selector.includes('data-testid="login-button"')) return data.login ? [visible] : [];
+        if (selector.includes('data-testid="profile-button"')) return data.account === false ? [] : [visible];
+        if (selector.includes("#prompt-textarea")) return data.missingComposer ? [] : [draft];
+        return [];
       }
     },
-    history: {state: null, replaceState(_state, _title, path) { cleaned = path; }},
-    MutationObserver: class { observe() {} disconnect() {} },
-    setTimeout(_fn, _ms) {}
+    // Compress bounded polling for the synthetic fixture, not production.
+    setTimeout(fn, _ms) {return setTimeout(fn, 1);}
   };
-  vm.runInNewContext(data.script, context);
-  return {get clicks() {return clicks;}, get cleaned() {return cleaned;}};
+  const finished = vm.runInNewContext(data.script, context);
+  if (data.delayedHydration) {
+    // The site may remove the query before the composer becomes available.
+    loc.search = "";
+    loc.href = "https://chatgpt.com/";
+    setTimeout(() => {hydrated = true;}, 5);
+  }
+  return {finished, get clicks() {return clicks;}};
 }
-// Distinct JS contexts, with no shared tab memory, claim the same signed URL.
 const tabs = Array.from({length: data.tabs || 1}, () => openTab());
-setTimeout(() => {
+Promise.all(tabs.map(tab => tab.finished)).then(() => {
+  const receipts = Object.values(stored.nabu_send_receipts_v1 || {});
   console.log(JSON.stringify({
     clicks: tabs.reduce((n, tab) => n + tab.clicks, 0),
     perTabClicks: tabs.map(tab => tab.clicks),
     marked: Object.keys(stored.nabu_consumed_nonces_v1 || {}).length,
-    cleaned: tabs.map(tab => tab.cleaned)
+    stage: receipts[0]?.stage || null,
+    noPromptInReceipts: !JSON.stringify(receipts).includes(data.composer)
   }));
-}, 250);
+}).catch(error => { console.error(error); process.exitCode = 1; });
 """
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for Chrome-script simulation")
 class NabuChromeSendContentTests(unittest.TestCase):
     def send_once(self, *, tamper=False, age=0, signed=True, tabs=1, storage_failure=False,
-                  prompt="Nabu-Sendetest ohne Werkzeuge"):
+                  prompt="Nabu-Sendetest ohne Werkzeuge", **fixture):
         key = bytes.fromhex("ab" * 32)
         ts = int(time.time()) - age
         nonce = "cd" * 12
@@ -99,28 +120,61 @@ class NabuChromeSendContentTests(unittest.TestCase):
         if signed:
             url += f"&nabu_ts={ts}&nabu_nonce={nonce}&nabu_sig={signature}"
         script = SOURCE.read_text().replace("__NABU_SEND_SECRET_HEX__", key.hex())
+        data = {"url": url, "composer": prompt if not tamper else "Nabu-anderer-Test",
+                "script": script, "background": BACKGROUND.read_text(),
+                "tabs": tabs, "storageFailure": storage_failure}
+        data.update(fixture)
         proc = subprocess.run(
-            ["node", "-e", NODE],
-            input=json.dumps({"url": url, "composer": prompt if not tamper else "Nabu-anderer-Test",
-                              "script": script, "background": BACKGROUND.read_text(),
-                              "tabs": tabs, "storageFailure": storage_failure}),
+            ["node", "-e", NODE], input=json.dumps(data),
             capture_output=True, text=True, timeout=10, check=True,
         )
         return json.loads(proc.stdout)
 
-    def test_signed_fresh_text_gets_one_click(self):
+    def test_signed_fresh_text_gets_one_click_and_own_message_receipt(self):
         result = self.send_once()
         self.assertEqual(result["clicks"], 1)
         self.assertEqual(result["marked"], 1)
-        self.assertEqual(result["cleaned"], ["/"])
+        self.assertEqual(result["stage"], "message_sent")
+        self.assertTrue(result["noPromptInReceipts"])
+
+    def test_capture_survives_query_removal_before_composer_hydration(self):
+        result = self.send_once(delayedHydration=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "message_sent")
+
+    def test_no_guest_send_or_unconfirmed_account(self):
+        for fixture, expected in (
+            ({"login": True}, "timeout_login_required"),
+            ({"account": False}, "timeout_account_unconfirmed"),
+        ):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(**fixture)
+                self.assertEqual(result["clicks"], 0)
+                self.assertEqual(result["marked"], 0)
+                self.assertEqual(result["stage"], expected)
+
+    def test_click_without_own_message_is_not_reported_as_sent(self):
+        result = self.send_once(confirm=False)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "send_unconfirmed")
+
+    def test_missing_or_different_composer_and_button_are_diagnosed(self):
+        for fixture, expected in (
+            ({"missingComposer": True}, "timeout_composer_missing"),
+            ({"composer": "Another user's draft"}, "timeout_composer_mismatch"),
+            ({"missingSend": True}, "timeout_send_button_missing"),
+        ):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(**fixture)
+                self.assertEqual(result["clicks"], 0)
+                self.assertEqual(result["marked"], 0)
+                self.assertEqual(result["stage"], expected)
 
     def test_signed_prompt_length_matches_url_constructor(self):
-        # Accepted 4500- and 4800-byte ASCII drafts must be sent.
         for size in (4500, 4800):
             with self.subTest(size=size):
                 self.assertEqual(self.send_once(prompt="a" * size)["clicks"], 1)
-        # The URL constructor rejects both an extra byte and excess UTF-8 escaping.
-        for prompt in ("a" * 4801, "ä" * 1601):
+        for prompt in ("a" * 4801, "ä" * 1601, "!" * 1601):
             with self.subTest(encoded_length=len(quote(prompt, safe=""))):
                 self.assertEqual(self.send_once(prompt=prompt)["clicks"], 0)
 
@@ -129,6 +183,7 @@ class NabuChromeSendContentTests(unittest.TestCase):
         self.assertEqual(result["clicks"], 1)
         self.assertEqual(result["marked"], 1)
         self.assertEqual(sorted(result["perTabClicks"]), [0, 1])
+        self.assertEqual(result["stage"], "message_sent")
 
     def test_storage_failure_fails_closed(self):
         result = self.send_once(storage_failure=True)

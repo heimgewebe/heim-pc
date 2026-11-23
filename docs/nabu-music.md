@@ -147,10 +147,9 @@ anschalten, »Entpackte Erweiterung laden« und das bereits vorbereitete
 Verzeichnis `/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`
 wählen. Anschließend ChatGPT neu laden und einen harmlosen Textauftrag
 durch Nabu testweise übergeben. Der Nachweis umfasst richtige Kontoanzeige,
-Einfügung und **einmaliges Absenden**. Die Änderungen dürfen erst danach
-auf den laufenden Home-Assistant-Client übernommen werden. Bis dahin bleibt
-die zuletzt funktionierende Browserzuordnung aktiv; der PR alleine ändert
-den laufenden Nabu nicht.
+Einfügung und **einmaliges Absenden**. Die feste Profilbindung kann unabhängig davon aktiv sein; erst der
+beobachtete Versand bestätigt die automatische Übergabe. Der PR alleine
+ändert weder den laufenden Nabu noch eine geladene Chrome-Erweiterung.
 
 Bei einem ausdrücklich an ChatGPT gerichteten Auftrag nutzt Nabu standardmäßig
 `nabu_web__chatgpt` mit `mode=browser_chat` und dem gesprochenen Auftrag
@@ -179,8 +178,17 @@ nach Installation des lokalen Sendehelfers mit einer kurzlebigen HMAC-Signatur.
 Die eigens für `https://chatgpt.com/*` gebaute Manifest-V3-Erweiterung
 reagiert ausschließlich auf exakt signierte Nabu-Links, kontrolliert den
 vorausgefüllten Text und die sichtbare Senden-Schaltfläche und klickt
-höchstens einmal. Externe Links mit nur `?prompt=` können dadurch keinen
-automatischen ChatGPT-Auftrag auslösen. Kein Browser-Scraping von Antworten,
+höchstens einmal. Die signierten Parameter werden beim Dokumentstart erfasst,
+damit eine spätere URL-Bereinigung des Web-Clients sie nicht verliert. Der
+Sendehelfer wartet begrenzt auf sichtbare Konto-, Composer- und Sende-Elemente.
+Ohne bestätigten Kontohinweis oder bei abweichendem Entwurf sendet er nicht.
+Er speichert höchstens 64 kurzlebige, inhaltsfreie Statusbelege in seinem
+Chrome-Speicher. `message_sent` bedeutet: Nach dem einmaligen Klick ist die
+genau übergebene eigene Nachricht im Chat sichtbar. `click_attempted` oder
+`send_unconfirmed` sind ausdrücklich kein Versandnachweis. Das ist weder eine
+Bestätigung der Kontoidentität noch eine Bestätigung einer ChatGPT-Antwort
+oder eines ausgeführten Plugins. Externe Links mit nur `?prompt=` können
+keinen automatischen ChatGPT-Auftrag auslösen. Keine Auslese von Modellantworten,
 keine Chrome-Cookies in Nabu und keine fremde Erweiterung.
 
 Die lokale Installation erfolgt über
@@ -194,7 +202,10 @@ und erstellt die entpackte Chrome-Erweiterung unter
 **Entpackte Erweiterung laden** und genau diesen Verzeichnispfad wählen.
 Danach die ChatGPT-Seite einmal neu laden. Dafür muss kein Browserprofil
 kopiert, kein zusätzlicher Dienst geöffnet und kein Chrome-Prozess beendet
-werden.
+werden. Bei späteren Updates den Installer erneut ausführen und die bereits
+installierte Erweiterung in `chrome://extensions` neu laden. Alternativ bietet
+ihre eigene Erweiterungsseite `maintenance.html` einen Reload-Knopf und den
+letzten Versandstatus. Diese Seite ist nicht für Webseiten freigegeben.
 
 Bis die Erweiterung in Chrome aktiviert und ihr Sendeklick an einem echten
 ChatGPT-Auftrag beobachtet wurde, ist **nur die Vorbereitung des Sendeversuchs**
