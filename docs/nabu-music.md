@@ -88,10 +88,11 @@ Chrome-HTTP(S)-Browserweg, **nicht** als systemweite Firewall. Nabus
 
 ## ChatGPT Plus (optional) und Grabowski-Operator (Nabu Assist)
 
-Diese Integration ergänzt den vorhandenen lokalen Qwen-/Mistral-Assistenten;
-sie ersetzt ihn nicht. Sie verwendet die **offizielle OpenAI-SIWC-OAuth-Anmeldung**
-für lokal betriebenen Open-Source-Code und `/v1/responses` mit
-`store=false, stream=true`. **Kein** ChatGPT-Browser-Scraping, API-Key,
+Diese Integration ergänzt den vorhandenen lokalen Assistenten und
+ersetzt ihn nicht. Der optionale Modus `answer` verwendet die **offizielle
+OpenAI-SIWC-OAuth-Anmeldung** und `/v1/responses` mit `store=false,
+stream=true`. Die Browsermodi verwenden hingegen die bereits bestehende
+ChatGPT-Websitzung. **Kein** ChatGPT-Browser-Scraping, API-Key,
 Client-Secret, Zugriff auf ChatGPT-Verläufe oder offene Portfreigabe.
 
 **Einmalige persönliche Anmeldung am Heim-PC** (Browser muss auf demselben
@@ -121,6 +122,33 @@ nutzt ein vom aktuellen Account gelistetes Modell, verlängert Tokens
 bei Bedarf und akzeptiert nur vollständig bestätigte Streaming-Antworten.
 Bei fehlender/abgelehnter Autorisierung, Limits oder API-Ausfall bleiben
 die lokalen Modelle nutzbar.
+
+### Textchat statt Sprachchat als Standard
+
+Bei einem ausdrücklich an ChatGPT gerichteten Auftrag nutzt Nabu standardmäßig
+`nabu_web__chatgpt` mit `mode=browser_chat` und dem gesprochenen Auftrag
+als `question`. Dadurch öffnet Grabowski die **normale Desktop-Chrome-Sitzung**
+mit `https://chatgpt.com/?prompt=<urlkodierter Auftrag>`. Dies ist ein
+vorbereiteter Eingabeentwurf, **kein Beweis, dass ChatGPT die Nachricht
+abgesendet, beantwortet oder mit einem Plugin bearbeitet hat**. Der Nutzer
+prüft das Eingabefeld und betätigt gegebenenfalls **Senden**. Der Link
+eröffnet üblicherweise einen neuen Chat; er ist keine dauerhafte
+Bidirektionalschnittstelle für eine bestimmte Chat-Unterhaltung.
+
+Nur bei ausdrücklichem `ChatGPT Live`, `Voice` oder `Sprachmodus` verwendet
+Nabu `mode=browser_voice`. Eine unmittelbar an Nabu gerichtete Antwort aus
+dem verknüpften ChatGPT-Konto bleibt separat als `mode=answer` verfügbar.
+Die vorhandenen Home-Assistant-Gerätewerkzeuge bleiben unverändert bei Nabu;
+nach dem Absenden kann ChatGPT seine tatsächlich verbundenen Plugins selbst
+aufrufen. Nabu liest keine ChatGPT-Webantworten oder Browserkonto-Daten aus.
+
+**Vertraulichkeit:** Der vorbefüllte Auftrag erscheint als URL-Parameter und
+kann in Chrome-Verlauf sowie lokalen Grabowski-Taskprotokollen auftauchen.
+Keine Passwörter, Zugriffstokens oder andere Geheimnisse über diesen
+Textlink übergeben. Die URL-Länge ist absichtlich begrenzt. Die
+Automatisierung des eigentlichen Klicks auf **Senden** ist nicht Teil dieses
+Handoffs; für eine robuste Absendungsbestätigung wäre eine gesondert
+abzunehmende Bedienoberfläche nötig.
 
 **Grabowski** wird über den bestehenden lokalen Streamable-HTTP-MCP-Endpunkt
 `http://127.0.0.1:18181/mcp` angesprochen. Dieser muss **aus dem aktiven

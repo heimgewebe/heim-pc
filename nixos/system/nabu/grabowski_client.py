@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from urllib.parse import quote, unquote
 
 import aiohttp
 
@@ -23,11 +24,65 @@ class GrabowskiUnavailable(RuntimeError):
     """A request was not confirmed by Grabowski; do not claim success."""
 
 
-# Only this fixed public URL may be opened by Nabu's voice handoff.
-# The user's ordinary desktop Chrome profile (not Nabu's anonymous CDP profile)
-# owns the browser authentication and microphone permissions.
-CHATGPT_VOICE_URL = "https://chatgpt.com/?mode=voice"
-CHATGPT_BROWSER_ARGV = ("/run/current-system/sw/bin/xdg-open", CHATGPT_VOICE_URL)
+# A normal browser session owns ChatGPT authentication and plugin permissions.
+# Nabu's anonymous CDP browser and OAuth answer tool remain separate.
+CHATGPT_HOME_URL = "https://chatgpt.com/"
+CHATGPT_TEXT_PREFIX = CHATGPT_HOME_URL + "?prompt="
+CHATGPT_VOICE_URL = CHATGPT_HOME_URL + "?mode=voice"
+CHATGPT_BROWSER_BIN = "/run/current-system/sw/bin/xdg-open"
+CHATGPT_BROWSER_ARGV = (CHATGPT_BROWSER_BIN, CHATGPT_VOICE_URL)
+MAX_CHATGPT_PROMPT_URL_BYTES = 4800
+
+
+def chatgpt_text_url(question: str | None) -> str:
+    """Build one bounded ChatGPT composer deep link without arbitrary URLs."""
+    if question is None:
+        return CHATGPT_HOME_URL
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Für einen ChatGPT-Textauftrag ist Text erforderlich")
+    question = question.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in question):
+        raise ValueError("ChatGPT-Textauftrag enthält Steuerzeichen")
+    encoded = quote(question, safe="")
+    if len(encoded.encode("ascii")) > MAX_CHATGPT_PROMPT_URL_BYTES:
+        raise ValueError("ChatGPT-Textauftrag ist für einen Browserlink zu lang")
+    return CHATGPT_TEXT_PREFIX + encoded
+
+
+def chatgpt_text_launch_args(question: str | None = None) -> dict:
+    """Open regular desktop ChatGPT with an optional prefilled text draft."""
+    return {
+        "host": "heim-pc",
+        "argv": [CHATGPT_BROWSER_BIN, chatgpt_text_url(question)],
+        "runtime_seconds": 60,
+        "resume_policy": "never",
+        "resource_keys": [],
+        "reason": "Nabu: ChatGPT-Textchat im Desktopbrowser oeffnen",
+        "user_intent": "Nutzer uebergibt ChatGPT einen Textauftrag ueber Nabu",
+    }
+
+
+def is_fixed_chatgpt_text_launch(args: dict) -> bool:
+    """Admit only canonical, bounded, exact ChatGPT composer URLs."""
+    if not isinstance(args, dict):
+        return False
+    argv = args.get("argv")
+    if not isinstance(argv, list) or len(argv) != 2 or argv[0] != CHATGPT_BROWSER_BIN:
+        return False
+    url = argv[1]
+    if url == CHATGPT_HOME_URL:
+        question = None
+    elif isinstance(url, str) and url.startswith(CHATGPT_TEXT_PREFIX):
+        try:
+            question = unquote(url[len(CHATGPT_TEXT_PREFIX):], errors="strict")
+        except UnicodeDecodeError:
+            return False
+    else:
+        return False
+    try:
+        return args == chatgpt_text_launch_args(question)
+    except (TypeError, ValueError):
+        return False
 
 
 def chatgpt_voice_launch_args() -> dict:
@@ -43,9 +98,9 @@ def chatgpt_voice_launch_args() -> dict:
     }
 
 
-async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
-    """Ask Grabowski to open ChatGPT Voice, never handle browser cookies or output."""
-    result = await mcp_call(session, "grabowski_task_start", chatgpt_voice_launch_args())
+async def _start_chatgpt_desktop(session: aiohttp.ClientSession, launch_args: dict) -> tuple[str, str | None]:
+    """Verify one browser-start task without reading ChatGPT content or cookies."""
+    result = await mcp_call(session, "grabowski_task_start", launch_args)
     task = result.get("task") if isinstance(result, dict) else None
     launcher = task.get("launcher") if isinstance(task, dict) else None
     if (not isinstance(task, dict)
@@ -68,6 +123,12 @@ async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
     state = observed.get("state")
     if state in ("failed", "timed_out", "cancelled", "interrupted", "outcome_unknown"):
         raise GrabowskiUnavailable("Der ChatGPT-Browserstart wurde nicht erfolgreich abgeschlossen")
+    return task_id, state
+
+
+async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
+    """Open Voice only on explicit request; browser activation is not proven."""
+    task_id, state = await _start_chatgpt_desktop(session, chatgpt_voice_launch_args())
     return {
         "status": "start_completed" if state == "completed" else "start_requested",
         "task_id": task_id,
@@ -77,6 +138,31 @@ async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
         "chatgpt_voice_active_verified": False,
         "message": ("ChatGPT Live wurde im normalen Desktopbrowser angefordert. "
                     "Anmeldung und Sprachmodus gegebenenfalls im Browser bestaetigen."),
+    }
+
+
+async def start_chatgpt_browser_text(
+    session: aiohttp.ClientSession, question: str | None = None,
+) -> dict:
+    """Open the text composer with Nabu's user-authored message; no output extraction."""
+    launch = chatgpt_text_launch_args(question)
+    task_id, state = await _start_chatgpt_desktop(session, launch)
+    return {
+        "status": "browser_opened" if state == "completed" else "browser_open_requested",
+        "task_id": task_id,
+        "mode": "browser_chat",
+        "text_prefill_requested": question is not None,
+        "composer_prefill_verified": False,
+        "message_sent_verified": False,
+        "chatgpt_login_verified": False,
+        "chatgpt_response_verified": False,
+        "message": (
+            "ChatGPT-Textchat im normalen Desktopbrowser angefordert. "
+            + ("Pruefe den vorausgefuellten Auftrag und klicke auf Senden. "
+               if question is not None else
+               "Gib den Auftrag im ChatGPT-Eingabefeld ein. ")
+            + "Es wurde weder eine Absendung noch eine Antwort bestaetigt."
+        ),
     }
 
 
@@ -156,15 +242,15 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                     and re.fullmatch(r"goo-[a-z0-9][a-z0-9-]{7,79}",
                                      args["parameters"]["obligation_id"]) is not None
                 )
-                # Browser Voice is the only write-capable exception. It must
-                # match every byte of the predeclared launch intent; arbitrary
-                # Nabu work requests never inherit this permission.
-                fixed_voice_launch = (
+                # The sole browser write capability is an exact, bounded ChatGPT
+                # desktop launch. Never generalize it to arbitrary commands.
+                fixed_browser_launch = (
                     name == "grabowski_task_start"
-                    and args == chatgpt_voice_launch_args()
+                    and (args == chatgpt_voice_launch_args()
+                         or is_fixed_chatgpt_text_launch(args))
                 )
                 if ((name not in allowed and not fixed_obligation_read
-                     and not fixed_voice_launch)
+                     and not fixed_browser_launch)
                         or "fresh intent-bound transport verification required" not in raw_response):
                     raise
                 match = re.search(r"challenge_receipt_sha256=([0-9a-f]{64})", raw_response)
@@ -178,12 +264,12 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                         "target_tool_name": name,
                         "target_arguments": args,
                     },
-                    "allow_mutation": fixed_voice_launch,
+                    "allow_mutation": fixed_browser_launch,
                     "reason": ("Nabu: fest gebundenen ChatGPT-Browserstart verifizieren"
-                               if fixed_voice_launch else
+                               if fixed_browser_launch else
                                "Nabu: bereits gebundene read-only-Verifikationsanfrage ausführen"),
-                    "user_intent": ("Nabu öffnet auf ausdrücklichen Wunsch ChatGPT Voice"
-                                    if fixed_voice_launch else
+                    "user_intent": ("Nabu öffnet auf ausdrücklichen Wunsch ChatGPT im Browser"
+                                    if fixed_browser_launch else
                                     "Nabu liest vom Benutzer verlangte Grabowski-Daten"),
                 }, endpoint=endpoint)
                 output = verified.get("output") or {}
