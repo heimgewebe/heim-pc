@@ -226,10 +226,11 @@ class NabuChromeSendContentTests(unittest.TestCase):
     def test_read_only_recovery_requires_prior_attempt_and_never_clicks(self):
         for fixture, expected in (
             ({"verify": True, "wrapped": True}, "message_verified"),
-            ({"verify": True, "messageText": "different text"}, "verification_not_found"),
+            ({"verify": True, "messageText": "different text"}, "verification_text_mismatch"),
             ({"verify": True, "priorAttempt": False}, None),
             ({"verify": True, "signed": False}, "send_unconfirmed"),
-            ({"verify": True, "account": False}, "verification_not_found"),
+            ({"verify": True, "account": False}, "message_verified"),
+            ({"verify": True, "login": True}, "verification_login_required"),
         ):
             with self.subTest(fixture=fixture):
                 result = self.send_once(**fixture)

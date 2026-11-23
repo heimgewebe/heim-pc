@@ -8,7 +8,8 @@ const STAGES = new Set([
   "validated", "login_required", "account_unconfirmed", "composer_missing",
   "composer_mismatch", "send_button_missing", "send_button_unavailable", "already_present",
   "claim_unconfirmed", "claim_denied", "composer_changed", "click_attempted",
-  "message_sent", "message_verified", "verification_not_found", "send_unconfirmed", "expired", "timeout_login_required",
+  "message_sent", "message_verified", "verification_not_found", "verification_login_required",
+  "verification_text_mismatch", "verification_no_user_messages", "send_unconfirmed", "expired", "timeout_login_required",
   "timeout_account_unconfirmed", "timeout_composer_missing",
   "timeout_composer_mismatch", "timeout_send_button_missing", "timeout_send_button_unavailable"
 ]);
@@ -44,8 +45,10 @@ async function record(nonce, stage) {
   const before = records[nonce]?.stage;
   // A duplicate tab must not overwrite a completed or attempted send.
   const confirmed = ["message_sent", "message_verified"];
-  const attempted = ["click_attempted", "send_unconfirmed", "verification_not_found"];
-  if (["message_verified", "verification_not_found"].includes(stage) &&
+  const verification = ["verification_not_found", "verification_login_required",
+    "verification_text_mismatch", "verification_no_user_messages"];
+  const attempted = ["click_attempted", "send_unconfirmed", ...verification];
+  if (["message_verified", ...verification].includes(stage) &&
       !attempted.includes(before) && !confirmed.includes(before)) return {recorded: false};
   if (confirmed.includes(before) ||
       (attempted.includes(before) &&

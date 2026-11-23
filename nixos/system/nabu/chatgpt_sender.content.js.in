@@ -131,7 +131,9 @@
     for (let i = 0; i < 150; i++) {
       if (location.origin !== "https://chatgpt.com" || location.pathname !== initialPath ||
           Math.floor(Date.now() / 1000) - ts > 180) return;
-      if (!signInVisible() && accountVisible()) {
+      // Reading back an already sent, exactly bound user message needs no
+      // visible profile-menu button. The send path still requires it.
+      if (!signInVisible()) {
         for (const value of ownMessageTexts()) {
           const digest = Array.from(new Uint8Array(await crypto.subtle.digest(
             "SHA-256", new TextEncoder().encode(value)
@@ -144,7 +146,9 @@
       }
       await wait(200);
     }
-    await report("verification_not_found");
+    await report(signInVisible() ? "verification_login_required" :
+      ownMessageTexts().length ? "verification_text_mismatch" :
+      "verification_no_user_messages");
     return;
   }
 
