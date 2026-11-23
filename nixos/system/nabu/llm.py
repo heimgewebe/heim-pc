@@ -18,6 +18,7 @@ import probatio as vol
 from homeassistant.components.llm import LLMTools
 from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation
 from .chatgpt_client import ChatGPTUnavailable, chatgpt_answer
+from .radio import resolve_radio
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.llm import (
@@ -554,9 +555,14 @@ class PlayMusic(Tool):
         "mit artist=Laid Back. media_type ist optional (track, album, artist, playlist, radio). "
         "Für 'irgendeine Musik' media_id weglassen: eine spielbare Qobuz-Playlist wird gestartet. "
         "Qobuz ist der Musikdienst, nicht ein Künstler oder Album; falsch transkribierte "
-        "Bezeichnungen wie Kubuts/Kobuz oder Haibitzee meinen Qobuz bzw. Heim-PC."
+        "Bezeichnungen wie Kubuts/Kobuz oder Haibitzee meinen Qobuz bzw. Heim-PC. "
+        "Für Live-Radio media_type=radio und als media_id den Sender oder das Genre "
+        "setzen, z.B. Deutschlandfunk, NDR Info, Jazz, Klassik, Rock, Pop, Techno; "
+        "bei bloß 'Radio' media_id weglassen. Ein neuer Sender ersetzt den laufenden. "
+        "Zum Stoppen von Radio oder Musik action=stop setzen."
     )
     parameters = vol.Schema({
+        vol.Optional("action"): vol.In(["play", "stop"]),
         vol.Optional("media_id"): str,
         vol.Optional("media_type"): vol.In(["track", "album", "artist", "playlist", "radio"]),
         vol.Optional("artist"): str,
@@ -572,6 +578,17 @@ class PlayMusic(Tool):
             state = hass.states.get(player)
             if state is None or state.state == "unavailable":
                 raise ValueError("Nabu-Musik-MOTU ist aktuell nicht verfügbar")
+            if tool_input.tool_args.get("action") == "stop":
+                await hass.services.async_call(
+                    "media_player", "media_stop", {},
+                    target={"entity_id": player}, blocking=True, context=llm_context.context,
+                )
+                after = hass.states.get(player)
+                return ToolResult(data={
+                    "status": "stop_accepted",
+                    "player": player,
+                    "player_state": after.state if after else "unknown",
+                })
             if not hass.services.has_service("music_assistant", "play_media"):
                 raise ValueError("Music-Assistant-Wiedergabeaktion fehlt")
             name = (tool_input.tool_args.get("media_id") or "").strip()[:200]
@@ -579,7 +596,11 @@ class PlayMusic(Tool):
             media_type = tool_input.tool_args.get("media_type")
             generic = {"", "irgendeine musik", "musik deiner wahl", "irgendwelche musik", "irgendwas"}
             data = {"media_id": name, "enqueue": "replace"}
-            if name.casefold() in generic:
+            station = resolve_radio(name, media_type, artist)
+            if station:
+                data["media_id"] = station.uri
+                data["media_type"] = "radio"
+            elif media_type != "radio" and name.casefold() in generic:
                 data["media_id"] = "Nina Simone"
                 data["media_type"] = "playlist"
             else:
@@ -594,7 +615,7 @@ class PlayMusic(Tool):
             after = hass.states.get(player)
             return ToolResult(data={
                 "status": "service_accepted",
-                "media": data["media_id"],
+                "media": station.title if station else data["media_id"],
                 "player": player,
                 "player_state": after.state if after else "unknown",
                 "audible_output_verified": False,
@@ -719,6 +740,8 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
             "Für Musik nutze nabu_web__play_music am Heim-PC; bei vagen Musikwünschen "
             "ohne konkreten Titel das Werkzeug ohne media_id aufrufen. Qobuz ist der "
             "Musikdienst, nicht der Titel. "
+            "Bei Radio, Sendernamen oder Wünschen wie Jazzradio dasselbe Werkzeug mit "
+            "media_type=radio nutzen, zum Stoppen mit action=stop. "
             "Für Licht, Klima und andere Geräte nutze die vorhandenen "
             "Home-Assistant-Gerätewerkzeuge. Bei mehrdeutigem Gerätenamen frage kurz nach. "
             "Bei Browserbefehlen nabu_web__browser benutzen. Für aktuelle Ereignisse, "

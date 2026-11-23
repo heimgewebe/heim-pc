@@ -146,17 +146,33 @@ Quell- und Unit-Tests allein ersetzen weder den frischen HA-Tool-Readback
 noch einen echten Assist- und Authentifizierungsdurchlauf.
 
 **Dateien für den bestehenden persistierten HA-`nabu_web`-Runtimepfad:**
-`__init__.py`, `manifest.json`, `llm.py`,
+`__init__.py`, `manifest.json`, `llm.py`, `radio.py`,
 `grabowski_client.py` und `chatgpt_client.py` werden als Package
 zusammen benötigt. `siwc_login.py` bleibt das Host-Loginprogramm und
 muss nicht in Home Assistant importiert werden. Ein Git-Merge allein
 installiert diese Quellen nicht; aktivieren/abnehmen erst über den
 bestehenden Nabu-HA-Runtime-Rollout und Neustart mit Tests.
 
+## Internetradio
+
+Live-Radio läuft über den nativen **RadioBrowser-Provider** von Music Assistant
+auf demselben Player `media_player.nabu_musik_motu`; es gibt keinen zweiten
+Audiostack, kein Abo und kein Login. `nixos/system/nabu/radio.py` ordnet
+gesprochene Sender und Genres 30 kuratierten RadioBrowser-IDs zu, nicht
+festen Stream-URLs. Andere Sender gehen mit `media_type=radio` als Namenssuche
+an das RadioBrowser-Verzeichnis. Songs, Alben und Künstler bleiben bei Qobuz,
+etwa „Radio Ga Ga“ oder Radiohead. `action=stop` stoppt die Wiedergabe.
+
+Der Provider löst seinen API-Host per **SRV-DNS** auf. Die FritzBox beantwortet
+`_api._tcp.radio-browser.info` nicht, deshalb steht im privaten Quadlet
+`heimgewebe-music-assistant.container` nach `DNS=192.168.178.1` zusätzlich
+`DNS=9.9.9.9`. Fehlt dieser Eintrag, lädt RadioBrowser mit einem DNS-Timeout nicht.
+Provider-Eintrag und Quadlet sind Host-Runtime und werden nicht durch Git installiert.
+
 ## Kontrollierte Wiederherstellung
 
 1. Bei fehlender Nabu-Integration Home Assistant stoppen, ausschließlich
-   `__init__.py`, `llm.py`, `grabowski_client.py`,
+   `__init__.py`, `llm.py`, `radio.py`, `grabowski_client.py`,
    `chatgpt_client.py` und `manifest.json` in
    `custom_components/nabu_web/` zurückkopieren und Home Assistant starten.
    Bestehende Runtime-Konfiguration nicht durch Quellkopien überschreiben.
