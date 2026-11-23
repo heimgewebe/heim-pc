@@ -86,9 +86,9 @@ setTimeout(() => {
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for Chrome-script simulation")
 class NabuChromeSendContentTests(unittest.TestCase):
-    def send_once(self, *, tamper=False, age=0, signed=True, tabs=1, storage_failure=False):
+    def send_once(self, *, tamper=False, age=0, signed=True, tabs=1, storage_failure=False,
+                  prompt="Nabu-Sendetest ohne Werkzeuge"):
         key = bytes.fromhex("ab" * 32)
-        prompt = "Nabu-Sendetest ohne Werkzeuge"
         ts = int(time.time()) - age
         nonce = "cd" * 12
         message = f"nabu-send-v1\n{ts}\n{nonce}\n{prompt}".encode()
@@ -113,6 +113,16 @@ class NabuChromeSendContentTests(unittest.TestCase):
         self.assertEqual(result["clicks"], 1)
         self.assertEqual(result["marked"], 1)
         self.assertEqual(result["cleaned"], ["/"])
+
+    def test_signed_prompt_length_matches_url_constructor(self):
+        # Accepted 4500- and 4800-byte ASCII drafts must be sent.
+        for size in (4500, 4800):
+            with self.subTest(size=size):
+                self.assertEqual(self.send_once(prompt="a" * size)["clicks"], 1)
+        # The URL constructor rejects both an extra byte and excess UTF-8 escaping.
+        for prompt in ("a" * 4801, "ä" * 1601):
+            with self.subTest(encoded_length=len(quote(prompt, safe=""))):
+                self.assertEqual(self.send_once(prompt=prompt)["clicks"], 0)
 
     def test_same_signed_request_in_two_tabs_claims_at_most_once(self):
         result = self.send_once(tabs=2)

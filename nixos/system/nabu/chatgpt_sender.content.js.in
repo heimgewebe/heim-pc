@@ -13,7 +13,8 @@
   const signature = params.get("nabu_sig") || "";
   const ts = Number(tsText);
   const now = Math.floor(Date.now() / 1000);
-  if (!prompt || prompt.length > 4000 ||
+  // Match chatgpt_text_url(): at most 4800 URL-encoded ASCII bytes.
+  if (!prompt || encodeURIComponent(prompt).length > 4800 ||
       !/^[0-9]{10}$/.test(tsText) || !Number.isSafeInteger(ts) ||
       ts > now + 15 || now - ts > 180 ||
       !/^[a-f0-9]{24}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) return;
