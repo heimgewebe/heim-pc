@@ -29,8 +29,7 @@
   );
   if (!await crypto.subtle.verify("HMAC", key, bytes(signature), payload)) return;
 
-  const once = "nabu-send-v1:" + nonce;
-  if (sessionStorage.getItem(once)) return;
+  let claimPending = false;
 
   const findComposer = () => Array.from(
     document.querySelectorAll('textarea,[contenteditable="true"],[role="textbox"]')
@@ -47,19 +46,24 @@
 
   const started = Date.now();
   let observer;
-  const trySend = () => {
+  const trySend = async () => {
     if (Date.now() - started > 30000) { observer?.disconnect(); return; }
-    if (sessionStorage.getItem(once)) { observer?.disconnect(); return; }
-    if (!findComposer()) return;
-    const button = findSendButton();
-    if (!button) return;
-
-    // Consume BEFORE click: page reloads, SPA transitions or failed clicks
-    // must never silently repeat a possibly executed user command.
-    sessionStorage.setItem(once, "attempted");
+    if (claimPending || !findComposer() || !findSendButton()) return;
+    claimPending = true;
+    let grant;
+    try {
+      // The background worker serializes and persists claims across ALL tabs.
+      grant = await chrome.runtime.sendMessage({type: "nabu-signed-send-claim-v1", nonce});
+    } catch {
+      observer?.disconnect();
+      return; // Fail closed; never send when the claim is uncertain.
+    }
     observer?.disconnect();
+    if (grant?.granted !== true || !findComposer()) return;
+    const button = findSendButton();
+    if (!button) return; // The page may have changed while claiming.
 
-    // Remove the signed command from the visible URL/history entry.
+    // The durable claim predates the click, including reloads and SPA changes.
     const clean = new URL(location.href);
     for (const field of ["prompt", "nabu_ts", "nabu_nonce", "nabu_sig"]) {
       clean.searchParams.delete(field);

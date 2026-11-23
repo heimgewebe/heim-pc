@@ -64,7 +64,9 @@ def install() -> dict:
     if template.count(MARKER) != 1:
         raise RuntimeError("invalid extension template")
     content = template.replace(MARKER, key)
+    background = (SOURCE / "chatgpt_sender.background.js").read_text(encoding="utf-8")
     _private_atomic_write(EXTENSION_DIR / "manifest.json", manifest)
+    _private_atomic_write(EXTENSION_DIR / "background.js", background)
     _private_atomic_write(EXTENSION_DIR / "content.js", content)
     return {
         "installed": True,

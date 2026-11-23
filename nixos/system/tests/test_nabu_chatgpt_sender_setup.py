@@ -27,6 +27,11 @@ class NabuChatGPTSenderSetupTests(unittest.TestCase):
                 self.assertFalse(key.stat().st_mode & 0o077)
                 content = (directory / "content.js").read_text()
                 self.assertIn(private, content)
+                background = (directory / "background.js").read_text()
+                self.assertIn("nabu-signed-send-claim-v1", background)
+                self.assertNotIn(private, background)
+                self.assertIn('"service_worker": "background.js"',
+                              (directory / "manifest.json").read_text())
                 self.assertNotIn(setup.MARKER, content)
                 self.assertNotIn(private, str(result))
                 self.assertTrue(result["chrome_activation_required"])
