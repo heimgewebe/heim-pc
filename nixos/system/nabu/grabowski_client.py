@@ -23,6 +23,63 @@ class GrabowskiUnavailable(RuntimeError):
     """A request was not confirmed by Grabowski; do not claim success."""
 
 
+# Only this fixed public URL may be opened by Nabu's voice handoff.
+# The user's ordinary desktop Chrome profile (not Nabu's anonymous CDP profile)
+# owns the browser authentication and microphone permissions.
+CHATGPT_VOICE_URL = "https://chatgpt.com/?mode=voice"
+CHATGPT_BROWSER_ARGV = ("/run/current-system/sw/bin/xdg-open", CHATGPT_VOICE_URL)
+
+
+def chatgpt_voice_launch_args() -> dict:
+    """Immutable allowlisted effect: start only the ChatGPT Voice desktop URL."""
+    return {
+        "host": "heim-pc",
+        "argv": list(CHATGPT_BROWSER_ARGV),
+        "runtime_seconds": 60,
+        "resume_policy": "never",
+        "resource_keys": [],
+        "reason": "Nabu: ChatGPT Live im normalen Desktopbrowser oeffnen",
+        "user_intent": "Nutzer fordert ChatGPT Voice mit bestehenden ChatGPT-Plugins",
+    }
+
+
+async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
+    """Ask Grabowski to open ChatGPT Voice, never handle browser cookies or output."""
+    result = await mcp_call(session, "grabowski_task_start", chatgpt_voice_launch_args())
+    task = result.get("task") if isinstance(result, dict) else None
+    launcher = task.get("launcher") if isinstance(task, dict) else None
+    if (not isinstance(task, dict)
+            or not isinstance(task.get("task_id"), str)
+            or re.fullmatch(r"[0-9a-f]{24}", task["task_id"]) is None
+            or not isinstance(launcher, dict) or launcher.get("returncode") != 0):
+        raise GrabowskiUnavailable("Grabowski hat keinen gueltigen Browser-Startbeleg geliefert")
+    task_id = task["task_id"]
+    # The start receipt alone does not prove a visible, authenticated Voice session.
+    try:
+        observed = await mcp_call(session, "grabowski_task_status", {
+            "task_id": task_id,
+            "reason": "Nabu: exakten Browser-Startstatus pruefen",
+            "user_intent": "Nutzer moechte ChatGPT Live im Browser nutzen",
+        })
+    except GrabowskiUnavailable:
+        observed = {}
+    if observed and observed.get("task_id") != task_id:
+        raise GrabowskiUnavailable("Browser-Startstatus gehoert zu einer anderen Aufgabe")
+    state = observed.get("state")
+    if state in ("failed", "timed_out", "cancelled", "interrupted", "outcome_unknown"):
+        raise GrabowskiUnavailable("Der ChatGPT-Browserstart wurde nicht erfolgreich abgeschlossen")
+    return {
+        "status": "start_completed" if state == "completed" else "start_requested",
+        "task_id": task_id,
+        "voice_url": CHATGPT_VOICE_URL,
+        "browser_login_verified": False,
+        "microphone_verified": False,
+        "chatgpt_voice_active_verified": False,
+        "message": ("ChatGPT Live wurde im normalen Desktopbrowser angefordert. "
+                    "Anmeldung und Sprachmodus gegebenenfalls im Browser bestaetigen."),
+    }
+
+
 def parse_mcp_response(raw: str, request_id: int = 1) -> dict:
     """Extract the exact matching JSON-RPC result from JSON or MCP SSE."""
     messages = []
@@ -99,7 +156,15 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                     and re.fullmatch(r"goo-[a-z0-9][a-z0-9-]{7,79}",
                                      args["parameters"]["obligation_id"]) is not None
                 )
-                if ((name not in allowed and not fixed_obligation_read)
+                # Browser Voice is the only write-capable exception. It must
+                # match every byte of the predeclared launch intent; arbitrary
+                # Nabu work requests never inherit this permission.
+                fixed_voice_launch = (
+                    name == "grabowski_task_start"
+                    and args == chatgpt_voice_launch_args()
+                )
+                if ((name not in allowed and not fixed_obligation_read
+                     and not fixed_voice_launch)
                         or "fresh intent-bound transport verification required" not in raw_response):
                     raise
                 match = re.search(r"challenge_receipt_sha256=([0-9a-f]{64})", raw_response)
@@ -113,9 +178,13 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                         "target_tool_name": name,
                         "target_arguments": args,
                     },
-                    "allow_mutation": False,
-                    "reason": "Nabu: bereits gebundene read-only-Verifikationsanfrage ausführen",
-                    "user_intent": "Nabu liest vom Benutzer verlangte Grabowski-Daten",
+                    "allow_mutation": fixed_voice_launch,
+                    "reason": ("Nabu: fest gebundenen ChatGPT-Browserstart verifizieren"
+                               if fixed_voice_launch else
+                               "Nabu: bereits gebundene read-only-Verifikationsanfrage ausführen"),
+                    "user_intent": ("Nabu öffnet auf ausdrücklichen Wunsch ChatGPT Voice"
+                                    if fixed_voice_launch else
+                                    "Nabu liest vom Benutzer verlangte Grabowski-Daten"),
                 }, endpoint=endpoint)
                 output = verified.get("output") or {}
                 if (verified.get("status") != "passed" or output.get("state") != "executed"

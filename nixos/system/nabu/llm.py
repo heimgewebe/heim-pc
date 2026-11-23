@@ -16,7 +16,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import probatio as vol
 from homeassistant.components.llm import LLMTools
-from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation
+from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation, start_chatgpt_browser_voice
 from .chatgpt_client import ChatGPTUnavailable, chatgpt_answer
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -606,27 +606,43 @@ class PlayMusic(Tool):
 
 
 class ChatGPTAnswer(Tool):
-    """Optional ChatGPT plan tool; local Nabu remains the main Assist agent."""
+    """Use official ChatGPT login: answers via OAuth, Voice via desktop browser."""
 
     name = "nabu_web__chatgpt"
-    title = "ChatGPT über offiziell verbundenes Konto befragen"
+    title = "ChatGPT befragen oder ChatGPT Live im Browser starten"
     description = (
-        "Nur auf ausdrücklichen Wunsch 'Frag ChatGPT' oder 'Nutze GPT' aufrufen. "
-        "question enthält die vollständige Sachfrage, ohne Geräteaktionen. "
-        "Weder Browserkonto noch unberechtigte API-Credits verwenden."
+        "Nur auf ausdrücklichen Wunsch nach ChatGPT aufrufen. "
+        "Bei 'öffne/starte ChatGPT im Browser' oder 'ChatGPT Live/Voice': "
+        "mode=browser_voice setzen (question entfällt); damit die angemeldete "
+        "ChatGPT-Web-App für ein eigenes Sprachgespräch geöffnet wird. "
+        "Bei 'Frag ChatGPT' ohne Browserwunsch: mode=answer und question als "
+        "vollständige Sachfrage, ohne Geräteaktionen. "
+        "Browser-Anmeldung, Mikrofon und Plugins bleiben Eigentum von ChatGPT; "
+        "niemals aus dem Startbeleg auf aktive Voice oder erledigte Aufgaben schließen."
     )
-    parameters = vol.Schema({vol.Required("question"): str})
-    annotations = ToolAnnotations(read_only=True, open_world=True)
+    parameters = vol.Schema({
+        vol.Optional("mode", default="answer"): vol.In(["answer", "browser_voice"]),
+        vol.Optional("question"): str,
+    })
+    annotations = ToolAnnotations(read_only=False, destructive=False, open_world=False)
     integration = DOMAIN
 
     async def async_call(self, hass: HomeAssistant, tool_input: ToolInput,
                          llm_context: LLMContext) -> ToolResult:
         try:
-            result = await chatgpt_answer(
-                async_get_clientsession(hass), tool_input.tool_args["question"]
-            )
+            mode = tool_input.tool_args.get("mode", "answer")
+            session = async_get_clientsession(hass)
+            if mode == "browser_voice":
+                result = await start_chatgpt_browser_voice(session)
+            elif mode == "answer":
+                question = tool_input.tool_args.get("question", "")
+                if not isinstance(question, str) or not question.strip():
+                    raise ValueError("Für ChatGPT-Antworten ist eine Frage erforderlich")
+                result = await chatgpt_answer(session, question)
+            else:
+                raise ValueError("Unbekannter ChatGPT-Modus")
             return ToolResult(data=result)
-        except (ValueError, ChatGPTUnavailable) as exc:
+        except (ValueError, ChatGPTUnavailable, GrabowskiUnavailable) as exc:
             return message(exc)
 
 
@@ -734,7 +750,13 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
             "dass ein Licht geändert oder Musik hörbar ist; bei nicht bestätigter "
             "Wirkung sage ausdrücklich, was belegt ist. Bei Werkzeugfehlern nie Erfolg "
             "melden. Antworte nicht grundsätzlich, dass du keine Gerätewerkzeuge hast. "
-            "Auf ausdrücklichen Wunsch nach ChatGPT nabu_web__chatgpt benutzen, "
+            "Auf ausdrücklichen Wunsch nach ChatGPT nabu_web__chatgpt benutzen: "
+            "Bei 'öffne ChatGPT im Browser', 'starte ChatGPT Live' oder "
+            "'sprich mit ChatGPT' mode=browser_voice ohne question wählen. "
+            "Dann übernimmt die ChatGPT-Web-App das Gespräch über ihre eigenen "
+            "Plugins; Nabu führt weder Browserkonten noch ChatGPT-Werkzeuge selbst. "
+            "Ein Browser-Startbeleg ist kein Nachweis einer aktiven Sprachsitzung. "
+            "Bei 'frag ChatGPT' ohne Browserwunsch mode=answer mit question nutzen, "
             "sonst ausschließlich mit dem lokalen Modell antworten. "
             "Bei Fragen nach Grabowski, Status oder seinen Aufgaben nabu_web__grabowski "
             "verwenden; bei ausdrücklich beauftragten Aufgaben nabu_web__grabowski_request "

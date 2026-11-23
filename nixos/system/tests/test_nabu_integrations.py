@@ -135,6 +135,82 @@ class GrabowskiContractTests(TestCase):
                 grabowski.compact_result("obligation", result)
 
 
+
+class ChatGPTBrowserVoiceTests(TestCase):
+    """Browser handoff must remain fixed and never impersonate a Voice E2E."""
+
+    def test_success_uses_only_fixed_chatgpt_url_and_grabowski_task(self):
+        self.assertEqual(
+            grabowski.CHATGPT_BROWSER_ARGV,
+            ("/run/current-system/sw/bin/xdg-open", "https://chatgpt.com/?mode=voice"),
+        )
+        task_id = "d" * 24
+        replies = [
+            {"task": {"task_id": task_id, "launcher": {"returncode": 0}}},
+            {"task_id": task_id, "state": "completed"},
+        ]
+        with mock.patch.object(grabowski, "mcp_call",
+                               new=mock.AsyncMock(side_effect=replies)) as call:
+            result = asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+        self.assertEqual(result["status"], "start_completed")
+        self.assertEqual(result["task_id"], task_id)
+        for key in ("browser_login_verified", "microphone_verified",
+                    "chatgpt_voice_active_verified"):
+            self.assertIs(result[key], False)
+        first = call.call_args_list[0]
+        self.assertEqual(first.args[1], "grabowski_task_start")
+        start = first.args[2]
+        self.assertEqual(start["host"], "heim-pc")
+        self.assertEqual(start["argv"], list(grabowski.CHATGPT_BROWSER_ARGV))
+        self.assertEqual(start["resume_policy"], "never")
+        self.assertEqual(call.call_args_list[1].args[1], "grabowski_task_status")
+        self.assertEqual(call.call_args_list[1].args[2]["task_id"], task_id)
+
+    def test_no_valid_launch_receipt_means_no_success(self):
+        for reply in ({}, {"task": {"task_id": "not-a-task", "launcher": {"returncode": 0}}},
+                      {"task": {"task_id": "f" * 24, "launcher": {"returncode": 1}}}):
+            with self.subTest(reply=reply), mock.patch.object(
+                grabowski, "mcp_call", new=mock.AsyncMock(return_value=reply),
+            ) as call:
+                with self.assertRaises(grabowski.GrabowskiUnavailable):
+                    asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+                self.assertEqual(call.call_count, 1)
+
+    def test_failed_or_unknown_execution_does_not_claim_browser_open(self):
+        for state in ("failed", "timed_out", "outcome_unknown"):
+            replies = [
+                {"task": {"task_id": "f" * 24, "launcher": {"returncode": 0}}},
+                {"task_id": "f" * 24, "state": state},
+            ]
+            with self.subTest(state=state), mock.patch.object(
+                grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+            ):
+                with self.assertRaises(grabowski.GrabowskiUnavailable):
+                    asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+
+    def test_other_task_status_cannot_confirm_voice_launch(self):
+        replies = [
+            {"task": {"task_id": "f" * 24, "launcher": {"returncode": 0}}},
+            {"task_id": "e" * 24, "state": "completed"},
+        ]
+        with mock.patch.object(
+            grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+        ):
+            with self.assertRaises(grabowski.GrabowskiUnavailable):
+                asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+
+    def test_launching_is_not_confused_with_complete_or_authenticated_voice(self):
+        replies = [
+            {"task": {"task_id": "e" * 24, "launcher": {"returncode": 0}}},
+            {"task_id": "e" * 24, "state": "running"},
+        ]
+        with mock.patch.object(
+            grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+        ):
+            result = asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+        self.assertEqual(result["status"], "start_requested")
+        self.assertFalse(result["chatgpt_voice_active_verified"])
+
 class OAuthContractTests(TestCase):
     def test_private_storage_and_host_identity_are_stable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -402,6 +478,57 @@ class GrabowskiReadChallengeTests(IsolatedAsyncioTestCase):
                 "allow_mutation": False,
             })
         self.assertEqual(len(session.calls), 1)
+
+
+class BrowserVoiceTransportChallengeTests(IsolatedAsyncioTestCase):
+    async def test_exact_voice_browser_start_completes_challenge_once(self):
+        challenge = "b" * 64
+        first = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        target = {"task": {"task_id": "d" * 24, "launcher": {"returncode": 0}}}
+        second = {"jsonrpc": "2.0", "id": 1, "result": {
+            "structuredContent": {"status": "passed", "output": {
+                "state": "executed", "target_result": target,
+            }},
+        }}
+        encode = lambda obj: ("data: " + json.dumps(obj) + "\n\n").encode()
+        session = DummySession([
+            DummyResponse(200, chunks=[encode(first)]),
+            DummyResponse(200, chunks=[encode(second)]),
+        ])
+        args = grabowski.chatgpt_voice_launch_args()
+        result = await grabowski.mcp_call(session, "grabowski_task_start", args)
+        self.assertEqual(result, target)
+        self.assertEqual(len(session.calls), 2)
+        roundtrip = session.calls[1][1]["json"]["params"]
+        self.assertEqual(roundtrip["name"], "grip_run")
+        self.assertEqual(roundtrip["arguments"]["parameters"]["target_arguments"], args)
+        self.assertEqual(roundtrip["arguments"]["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertTrue(roundtrip["arguments"]["allow_mutation"])
+
+    async def test_no_generic_mutation_via_transport_challenge(self):
+        challenge = "c" * 64
+        denied = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        response = lambda: DummyResponse(
+            200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]
+        )
+        illegal = grabowski.chatgpt_voice_launch_args()
+        illegal["argv"] = ["/run/current-system/sw/bin/xdg-open", "https://example.org"]
+        for name, args in (
+            ("grabowski_task_start", illegal),
+            ("grabowski_terminal_run", {"argv": ["echo", "hello"]}),
+        ):
+            with self.subTest(name=name), self.assertRaises(grabowski.GrabowskiUnavailable):
+                session = DummySession([response()])
+                await grabowski.mcp_call(session, name, args)
+            self.assertEqual(len(session.calls), 1)
 
 
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):
