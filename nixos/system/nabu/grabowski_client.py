@@ -106,9 +106,15 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
         valid_url = True
     elif isinstance(url, str) and url.startswith(CHATGPT_TEXT_PREFIX):
         try:
+            if len(url.encode("ascii")) > MAX_CHATGPT_PROMPT_URL_BYTES + len(CHATGPT_TEXT_PREFIX):
+                return False
             parsed = urlsplit(url)
             entries = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
             names = [key for key, _ in entries]
+            # The verifier must enforce the constructor's restrictions too.
+            prompt_text = entries[0][1] if names and names[0] == "prompt" else ""
+            if not prompt_text or any(ord(char) < 32 or ord(char) == 127 for char in prompt_text):
+                return False
             valid_url = False
             if (parsed.scheme == "https" and parsed.netloc == "chatgpt.com"
                     and parsed.path == "/" and not parsed.fragment):

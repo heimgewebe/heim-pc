@@ -247,6 +247,13 @@ class ChatGPTBrowserTextTests(TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 grabowski.chatgpt_text_url(text)
 
+    def test_verifier_rejects_invalid_drafts_that_generator_refuses(self):
+        for encoded in ("", "%00", "%0A", "x" * 5000):
+            with self.subTest(payload=encoded[:16]):
+                launch = grabowski.chatgpt_text_launch_args(None)
+                launch["argv"][1] = grabowski.CHATGPT_TEXT_PREFIX + encoded
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+
     def test_text_start_receipt_does_not_claim_chat_submission(self):
         task_id = "a" * 24
         reply = [
