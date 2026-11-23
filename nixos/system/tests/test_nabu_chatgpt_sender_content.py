@@ -23,7 +23,9 @@ const vm = require("node:vm");
 const {webcrypto} = require("node:crypto");
 const data = JSON.parse(fs.readFileSync(0, "utf8"));
 const url = new URL(data.url);
-const stored = {};
+const stored = data.verify && data.priorAttempt !== false ? {
+  nabu_send_receipts_v1: {["cd".repeat(12)]: {stage: "send_unconfirmed", at: Math.floor(Date.now()/1000)}}
+} : {};
 let backgroundListener;
 let installListener;
 const backgroundChrome = {
@@ -42,7 +44,7 @@ const backgroundChrome = {
 };
 vm.runInNewContext(data.background, {chrome: backgroundChrome, Date, URL});
 function openTab() {
-  const loc = {origin: url.origin, search: url.search, href: url.href};
+  const loc = {origin: url.origin, pathname: url.pathname, search: url.search, href: url.href};
   let hydrated = !data.delayedHydration;
   let clicks = 0;
   const visible = {getClientRects() {return hydrated ? [{}] : [];}};
@@ -81,7 +83,11 @@ function openTab() {
       querySelectorAll(selector) {
         if (selector === "button") return data.missingSend ? [] : [send];
         if (selector.includes('data-message-author-role="user"')) {
-          return clicks && data.confirm !== false ? [{...visible, innerText: data.composer}] : [];
+          if (!(data.verify || clicks && data.confirm !== false)) return [];
+          const value = data.messageText ?? data.composer;
+          return [{...visible, innerText: data.wrapped ? "You said:\n" + value : value,
+            querySelectorAll() {return data.wrapped ? [{...visible, innerText: value}] : [];}
+          }];
         }
         if (selector.includes('data-testid="login-button"')) return data.login ? [visible] : [];
         if (selector.includes('data-testid="profile-button"')) return data.account === false ? [] : [visible];
@@ -129,6 +135,13 @@ class NabuChromeSendContentTests(unittest.TestCase):
         )
         if signed:
             url += f"&nabu_ts={ts}&nabu_nonce={nonce}&nabu_sig={signature}"
+        if fixture.get("verify"):
+            path = "/c/00000000-test"
+            digest = hashlib.sha256(prompt.encode()).hexdigest()
+            verification = f"nabu-verify-v1\n{ts}\n{nonce}\n{path}\n{digest}".encode()
+            signature = hmac.new(key, verification, hashlib.sha256).hexdigest()
+            url = (f"https://chatgpt.com{path}?nabu_verify={digest}&nabu_ts={ts}"
+                   f"&nabu_nonce={nonce}&nabu_sig={signature if signed else '0'*64}")
         script = SOURCE.read_text().replace("__NABU_SEND_SECRET_HEX__", key.hex())
         data = {"url": url, "composer": prompt if not tamper else "Nabu-anderer-Test",
                 "script": script, "background": BACKGROUND.read_text(),
@@ -198,6 +211,25 @@ class NabuChromeSendContentTests(unittest.TestCase):
             ({"sendLabel": "Voice", "formSubmit": True}, "timeout_send_button_missing"),
             ({"sendLabel": "Stop generating", "formSubmit": True}, "timeout_send_button_missing"),
             ({"sendLabel": "Unrelated control"}, "timeout_send_button_missing"),
+        ):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(**fixture)
+                self.assertEqual(result["clicks"], 0)
+                self.assertEqual(result["marked"], 0)
+                self.assertEqual(result["stage"], expected)
+
+    def test_wrapped_own_message_confirms_exact_outgoing_text(self):
+        result = self.send_once(wrapped=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "message_sent")
+
+    def test_read_only_recovery_requires_prior_attempt_and_never_clicks(self):
+        for fixture, expected in (
+            ({"verify": True, "wrapped": True}, "message_verified"),
+            ({"verify": True, "messageText": "different text"}, "verification_not_found"),
+            ({"verify": True, "priorAttempt": False}, None),
+            ({"verify": True, "signed": False}, "send_unconfirmed"),
+            ({"verify": True, "account": False}, "verification_not_found"),
         ):
             with self.subTest(fixture=fixture):
                 result = self.send_once(**fixture)

@@ -5,11 +5,18 @@
 // remove or change its query string. Never export the prompt or account data.
 (async function nabuSignedChatGPTSend() {
   if (location.origin !== "https://chatgpt.com") return;
+  const initialPath = location.pathname;
   const params = new URLSearchParams(location.search);
   const names = Array.from(params.keys()).sort().join(",");
-  if (names !== "nabu_nonce,nabu_sig,nabu_ts,prompt") return;
+  const verifyOnly = names === "nabu_nonce,nabu_sig,nabu_ts,nabu_verify";
+  if (!verifyOnly && names !== "nabu_nonce,nabu_sig,nabu_ts,prompt") return;
+  // Sending is deliberately restricted to a new chat. A signed verification
+  // link for an existing conversation can never execute a send.
+  if (verifyOnly ? !/^\/c\/[a-zA-Z0-9-]{8,100}\/?$/.test(location.pathname) :
+      location.pathname !== "/") return;
 
   const prompt = params.get("prompt") || "";
+  const expectedDigest = params.get("nabu_verify") || "";
   const tsText = params.get("nabu_ts") || "";
   const nonce = params.get("nabu_nonce") || "";
   const signature = params.get("nabu_sig") || "";
@@ -17,7 +24,8 @@
   const now = Math.floor(Date.now() / 1000);
   // Match Python quote(..., safe=""), including the five extra escaped chars.
   const encodedLength = encodeURIComponent(prompt).replace(/[!'()*]/g, "%00").length;
-  if (!prompt || encodedLength > 4800 ||
+  if ((verifyOnly ? !/^[a-f0-9]{64}$/.test(expectedDigest) :
+      !prompt || encodedLength > 4800) ||
       !/^[0-9]{10}$/.test(tsText) || !Number.isSafeInteger(ts) ||
       ts > now + 15 || now - ts > 180 ||
       !/^[a-f0-9]{24}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) return;
@@ -25,8 +33,9 @@
   const secret = "__NABU_SEND_SECRET_HEX__";
   if (!/^[a-f0-9]{64}$/.test(secret)) return;
   const bytes = hex => new Uint8Array(hex.match(/../g).map(x => parseInt(x, 16)));
-  const payload = new TextEncoder().encode(
-    "nabu-send-v1\n" + tsText + "\n" + nonce + "\n" + prompt
+  const payload = new TextEncoder().encode(verifyOnly
+    ? "nabu-verify-v1\n" + tsText + "\n" + nonce + "\n" + initialPath + "\n" + expectedDigest
+    : "nabu-send-v1\n" + tsText + "\n" + nonce + "\n" + prompt
   );
   const key = await crypto.subtle.importKey(
     "raw", bytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
@@ -92,18 +101,59 @@
     const candidates = sendCandidates().filter(available);
     return candidates.length === 1 ? candidates[0] : undefined;
   };
-  // Compare only the locally authorized outgoing prompt, never read model output.
-  const ownMessageVisible = () => Array.from(
-    document.querySelectorAll('[data-message-author-role="user"]')
-  ).some(el => visible(el) && normalize(el.innerText) === prompt);
+  // Only user-message containers are examined, never assistant output.
+  // Account or action labels on an outer wrapper must not invalidate the
+  // exact outgoing text in a visible child.
+  const ownMessageTexts = () => {
+    const result = [];
+    const roots = Array.from(document.querySelectorAll(
+      '[data-message-author-role="user"],[data-turn="user"]'
+    )).slice(-12);
+    for (const el of roots) {
+      if (!visible(el)) continue;
+      const nodes = [el, ...Array.from(el.querySelectorAll?.(
+        'div,p,span,[data-testid="user-message"]'
+      ) || []).slice(0, 120)];
+      for (const node of nodes) {
+        if (!visible(node)) continue;
+        const value = normalize(node.innerText);
+        if (value && value.length <= 4800) result.push(value);
+      }
+    }
+    return result;
+  };
+  const ownMessageVisible = () => ownMessageTexts().includes(prompt);
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  if (verifyOnly) {
+    // Recover an ambiguous send receipt without another click. The signed
+    // digest and exact conversation path bind this read-only operation.
+    for (let i = 0; i < 150; i++) {
+      if (location.origin !== "https://chatgpt.com" || location.pathname !== initialPath ||
+          Math.floor(Date.now() / 1000) - ts > 180) return;
+      if (!signInVisible() && accountVisible()) {
+        for (const value of ownMessageTexts()) {
+          const digest = Array.from(new Uint8Array(await crypto.subtle.digest(
+            "SHA-256", new TextEncoder().encode(value)
+          )), x => x.toString(16).padStart(2, "0")).join("");
+          if (digest === expectedDigest) {
+            await report("message_verified");
+            return;
+          }
+        }
+      }
+      await wait(200);
+    }
+    await report("verification_not_found");
+    return;
+  }
 
   await report("validated");
   let waiting = "account_unconfirmed";
   // Poll as well as allowing DOM changes: setting a textarea's value does not
   // necessarily trigger a MutationObserver. All waits are bounded.
   for (let i = 0; i < 150; i++) {
-    if (location.origin !== "https://chatgpt.com" ||
+    if (location.origin !== "https://chatgpt.com" || location.pathname !== initialPath ||
         Math.floor(Date.now() / 1000) - ts > 180) {
       await report("expired"); return;
     }
@@ -130,7 +180,7 @@
       if (grant?.granted !== true) { await report("claim_denied"); return; }
       // Re-check every UI prerequisite after the asynchronous claim.
       const button = findSend();
-      if (location.origin !== "https://chatgpt.com" || signInVisible() ||
+      if (location.origin !== "https://chatgpt.com" || location.pathname !== initialPath || signInVisible() ||
           !accountVisible() || !composerMatches() || !button || ownMessageVisible() ||
           Math.floor(Date.now() / 1000) - ts > 180) {
         await report("composer_changed"); return;

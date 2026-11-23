@@ -8,7 +8,7 @@ const STAGES = new Set([
   "validated", "login_required", "account_unconfirmed", "composer_missing",
   "composer_mismatch", "send_button_missing", "send_button_unavailable", "already_present",
   "claim_unconfirmed", "claim_denied", "composer_changed", "click_attempted",
-  "message_sent", "send_unconfirmed", "expired", "timeout_login_required",
+  "message_sent", "message_verified", "verification_not_found", "send_unconfirmed", "expired", "timeout_login_required",
   "timeout_account_unconfirmed", "timeout_composer_missing",
   "timeout_composer_mismatch", "timeout_send_button_missing", "timeout_send_button_unavailable"
 ]);
@@ -43,9 +43,13 @@ async function record(nonce, stage) {
     .sort((a, b) => b[1].at - a[1].at).slice(0, 63));
   const before = records[nonce]?.stage;
   // A duplicate tab must not overwrite a completed or attempted send.
-  const final = ["message_sent", "send_unconfirmed", "click_attempted"];
-  if (before === "message_sent" ||
-      (final.includes(before) && !final.includes(stage))) return {recorded: true};
+  const confirmed = ["message_sent", "message_verified"];
+  const attempted = ["click_attempted", "send_unconfirmed", "verification_not_found"];
+  if (["message_verified", "verification_not_found"].includes(stage) &&
+      !attempted.includes(before) && !confirmed.includes(before)) return {recorded: false};
+  if (confirmed.includes(before) ||
+      (attempted.includes(before) &&
+       ![...confirmed, ...attempted].includes(stage))) return {recorded: true};
   records[nonce] = {stage, at: now};
   await chrome.storage.local.set({[RECEIPTS]: records});
   return {recorded: true};
