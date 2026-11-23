@@ -33,8 +33,13 @@ class GrabowskiUnavailable(RuntimeError):
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 CHATGPT_TEXT_PREFIX = CHATGPT_HOME_URL + "?prompt="
 CHATGPT_VOICE_URL = CHATGPT_HOME_URL + "?mode=voice"
-CHATGPT_BROWSER_BIN = "/run/current-system/sw/bin/xdg-open"
-CHATGPT_BROWSER_ARGV = (CHATGPT_BROWSER_BIN, CHATGPT_VOICE_URL)
+# The new Nabu profile is intentionally distinct from the user's Default.
+# Chrome forwards this invocation to the already-running browser process,
+# selecting only this internal profile. Never fall back to xdg-open.
+CHATGPT_BROWSER_BIN = "/home/alex/.nix-profile/bin/google-chrome"
+CHATGPT_BROWSER_PROFILE = "Profile 1"
+CHATGPT_BROWSER_PROFILE_ARG = "--profile-directory=" + CHATGPT_BROWSER_PROFILE
+CHATGPT_BROWSER_ARGV = (CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, CHATGPT_VOICE_URL)
 MAX_CHATGPT_PROMPT_URL_BYTES = 4800
 CHATGPT_SENDER_KEY_PATH = Path("/config/.nabu-chatgpt-autosend.key")
 
@@ -82,10 +87,10 @@ def chatgpt_text_url(question: str | None) -> str:
 
 
 def chatgpt_text_launch_args(question: str | None = None) -> dict:
-    """Open regular desktop ChatGPT with an optional prefilled text draft."""
+    """Open ChatGPT only in the dedicated persistent Nabu Chrome profile."""
     return {
         "host": "heim-pc",
-        "argv": [CHATGPT_BROWSER_BIN, chatgpt_text_url(question)],
+        "argv": [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, chatgpt_text_url(question)],
         "runtime_seconds": 60,
         "resume_policy": "never",
         "resource_keys": [],
@@ -99,9 +104,10 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
     if not isinstance(args, dict):
         return False
     argv = args.get("argv")
-    if not isinstance(argv, list) or len(argv) != 2 or argv[0] != CHATGPT_BROWSER_BIN:
+    if (not isinstance(argv, list) or len(argv) != 3
+            or argv[:2] != [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG]):
         return False
-    url = argv[1]
+    url = argv[2]
     if url == CHATGPT_HOME_URL:
         valid_url = True
     elif isinstance(url, str) and url.startswith(CHATGPT_TEXT_PREFIX):
@@ -144,7 +150,7 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
         return False
     expected = {
         "host": "heim-pc",
-        "argv": [CHATGPT_BROWSER_BIN, url],
+        "argv": [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, url],
         "runtime_seconds": 60,
         "resume_policy": "never",
         "resource_keys": [],
@@ -220,7 +226,7 @@ async def start_chatgpt_browser_text(
         "task_id": task_id,
         "mode": "browser_chat",
         "text_prefill_requested": question is not None,
-        "auto_send_requested": "&nabu_sig=" in launch["argv"][1],
+        "auto_send_requested": "&nabu_sig=" in launch["argv"][-1],
         "composer_prefill_verified": False,
         "message_sent_verified": False,
         "chatgpt_login_verified": False,
@@ -228,7 +234,7 @@ async def start_chatgpt_browser_text(
         "message": (
             "ChatGPT-Textchat im normalen Desktopbrowser angefordert. "
             + ("Automatischer Sendeklick ist angefordert; pruefe die Nachricht im Browser. "
-               if "&nabu_sig=" in launch["argv"][1] else
+               if "&nabu_sig=" in launch["argv"][-1] else
                "Pruefe den Entwurf und klicke auf Senden. "
                if question is not None else
                "Gib den Auftrag im ChatGPT-Eingabefeld ein. ")

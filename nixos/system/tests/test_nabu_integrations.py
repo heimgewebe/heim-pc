@@ -142,7 +142,8 @@ class ChatGPTBrowserVoiceTests(TestCase):
     def test_success_uses_only_fixed_chatgpt_url_and_grabowski_task(self):
         self.assertEqual(
             grabowski.CHATGPT_BROWSER_ARGV,
-            ("/run/current-system/sw/bin/xdg-open", "https://chatgpt.com/?mode=voice"),
+            ("/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Profile 1",
+             "https://chatgpt.com/?mode=voice"),
         )
         task_id = "d" * 24
         replies = [
@@ -165,6 +166,19 @@ class ChatGPTBrowserVoiceTests(TestCase):
         self.assertEqual(start["resume_policy"], "never")
         self.assertEqual(call.call_args_list[1].args[1], "grabowski_task_status")
         self.assertEqual(call.call_args_list[1].args[2]["task_id"], task_id)
+
+    def test_voice_and_text_share_only_dedicated_chrome_profile(self):
+        voice = grabowski.chatgpt_voice_launch_args()["argv"]
+        text = grabowski.chatgpt_text_launch_args("Status")["argv"]
+        self.assertEqual(voice[:2], text[:2])
+        self.assertEqual(voice[:2], [
+            "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Profile 1",
+        ])
+        self.assertNotIn("xdg-open", " ".join(voice + text))
+        self.assertNotIn("--guest", voice + text)
+        self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(
+            grabowski.chatgpt_text_launch_args("Status")
+        ))
 
     def test_no_valid_launch_receipt_means_no_success(self):
         for reply in ({}, {"task": {"task_id": "not-a-task", "launcher": {"returncode": 0}}},
@@ -233,11 +247,14 @@ class ChatGPTBrowserTextTests(TestCase):
     def test_no_arbitrary_url_or_command_is_permitted(self):
         valid = grabowski.chatgpt_text_launch_args("Test")
         failures = [
-            dict(valid, argv=["/bin/sh", "https://chatgpt.com/?prompt=Test"]),
-            dict(valid, argv=[valid["argv"][0], "https://evil.example/?prompt=Test"]),
-            dict(valid, argv=[valid["argv"][0], "https://chatgpt.com/?mode=voice"]),
-            dict(valid, argv=[valid["argv"][0], "https://chatgpt.com/?prompt=Test&x=1"]),
-            dict(valid, argv=[valid["argv"][0], "https://chatgpt.com/?prompt=%4eabu"]),
+            dict(valid, argv=["/bin/sh", valid["argv"][1], valid["argv"][2]]),
+            dict(valid, argv=[valid["argv"][0], "--profile-directory=Default", valid["argv"][2]]),
+            dict(valid, argv=[valid["argv"][0], "--profile-directory=Profile 2", valid["argv"][2]]),
+            dict(valid, argv=["/run/current-system/sw/bin/xdg-open", valid["argv"][2]]),
+            dict(valid, argv=[valid["argv"][0], valid["argv"][1], "https://evil.example/?prompt=Test"]),
+            dict(valid, argv=[valid["argv"][0], valid["argv"][1], "https://chatgpt.com/?mode=voice"]),
+            dict(valid, argv=[valid["argv"][0], valid["argv"][1], "https://chatgpt.com/?prompt=Test&x=1"]),
+            dict(valid, argv=[valid["argv"][0], valid["argv"][1], "https://chatgpt.com/?prompt=%4eabu"]),
             dict(valid, resource_keys=["repo.heim-pc"]),
         ]
         for args in failures:
@@ -251,7 +268,7 @@ class ChatGPTBrowserTextTests(TestCase):
         for encoded in ("", "%00", "%0A", "x" * 5000):
             with self.subTest(payload=encoded[:16]):
                 launch = grabowski.chatgpt_text_launch_args(None)
-                launch["argv"][1] = grabowski.CHATGPT_TEXT_PREFIX + encoded
+                launch["argv"][2] = grabowski.CHATGPT_TEXT_PREFIX + encoded
                 self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
 
     def test_text_start_receipt_does_not_claim_chat_submission(self):
@@ -304,14 +321,14 @@ class ChatGPTSignedSenderTests(TestCase):
                  mock.patch.object(grabowski.secrets, "token_hex", return_value="cd" * 12):
                 question = "Prüfe Grabowski, aber ändere nichts."
                 launch = grabowski.chatgpt_text_launch_args(question)
-                fields = parse_qs(urlsplit(launch["argv"][1]).query)
+                fields = parse_qs(urlsplit(launch["argv"][2]).query)
                 self.assertEqual(fields["prompt"], [question])
                 self.assertEqual(fields["nabu_ts"], ["1795425000"])
                 self.assertEqual(fields["nabu_nonce"], ["cd" * 12])
                 self.assertEqual(len(fields["nabu_sig"][0]), 64)
                 self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(launch))
 
-                original = launch["argv"][1]
+                original = launch["argv"][2]
                 for bogus in (
                     original.replace("Pr%C3%BCfe", "L%C3%B6sche"),
                     original.replace("nabu_nonce=" + "cd" * 12, "nabu_nonce=" + "ce" * 12),
@@ -319,7 +336,7 @@ class ChatGPTSignedSenderTests(TestCase):
                     original + "&nabu_send=1",
                 ):
                     with self.subTest(bogus=bogus[-30:]):
-                        invalid = dict(launch, argv=[launch["argv"][0], bogus])
+                        invalid = dict(launch, argv=[*launch["argv"][:2], bogus])
                         self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(invalid))
 
     def test_expired_and_wrong_key_rejected_without_retry(self):
@@ -342,7 +359,7 @@ class ChatGPTSignedSenderTests(TestCase):
         with tempfile.TemporaryDirectory() as root:
             with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", Path(root) / "missing"):
                 link = grabowski.chatgpt_text_launch_args("Schreib ChatGPT")
-                self.assertNotIn("nabu_sig", link["argv"][1])
+                self.assertNotIn("nabu_sig", link["argv"][2])
                 self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(link))
 
 
@@ -655,7 +672,7 @@ class BrowserVoiceTransportChallengeTests(IsolatedAsyncioTestCase):
             200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]
         )
         illegal = grabowski.chatgpt_voice_launch_args()
-        illegal["argv"] = ["/run/current-system/sw/bin/xdg-open", "https://example.org"]
+        illegal["argv"] = [grabowski.CHATGPT_BROWSER_BIN, "--profile-directory=Default", "https://chatgpt.com/?mode=voice"]
         for name, args in (
             ("grabowski_task_start", illegal),
             ("grabowski_terminal_run", {"argv": ["echo", "hello"]}),
@@ -694,7 +711,7 @@ class ChatGPTTextTransportChallengeTests(IsolatedAsyncioTestCase):
         self.assertTrue(roundtrip["allow_mutation"])
         self.assertEqual(roundtrip["parameters"]["target_arguments"], bound)
         self.assertEqual(roundtrip["parameters"]["challenge_receipt_sha256"], challenge)
-        invalid = dict(bound, argv=[bound["argv"][0], "https://chatgpt.com/c/fake"])
+        invalid = dict(bound, argv=[*bound["argv"][:2], "https://chatgpt.com/c/fake"])
         denied = DummySession([DummyResponse(200, chunks=[encode(err)])])
         with self.assertRaises(grabowski.GrabowskiUnavailable):
             await grabowski.mcp_call(denied, "grabowski_task_start", invalid)

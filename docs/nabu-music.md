@@ -125,6 +125,33 @@ die lokalen Modelle nutzbar.
 
 ### Textchat statt Sprachchat als Standard
 
+**Festes Nabu-Chrome-Profil:** Nabus Textchat und ausdrücklich angeforderter
+Voice-Modus verwenden ausschließlich Google Chrome mit
+`--profile-directory="Profile 1"`. Das ist ein eigenständiges, persistentes
+Profil unter `~/.config/google-chrome/Profile 1`, getrennt vom normalen
+Chrome-Profil `Default`. Ein weiterer Browserdienst ist nicht notwendig.
+Nabu benutzt weder `xdg-open` noch das Standardprofil als Rückfallweg.
+Der lokale Nabu-Headless-Browser für öffentliche Webrecherchen bleibt davon
+separat; der OAuth-Antwortmodus bleibt ebenfalls unverändert.
+
+Einmalig im neuen Profil persönlich bei **dem gewünschten ChatGPT-Konto**
+anmelden. Über den KDE-Starter **Nabu – ChatGPT** lässt sich genau dieses
+Profil öffnen. Vor der Anmeldung ist die Kontoidentität nicht nachgewiesen;
+ein Browserstart allein beweist weder Anmeldung noch richtige Kontoauswahl.
+Das Profil kann auch einen ChatGPT-Kontowechsel enthalten, weshalb die
+Kontozugehörigkeit im Browser geprüft werden muss.
+
+Die lokale Erweiterung für signierte Nabu-Textaufträge wird **pro Chrome-Profil**
+aktiviert. In **Profile 1** `chrome://extensions` öffnen, Entwicklermodus
+anschalten, »Entpackte Erweiterung laden« und das bereits vorbereitete
+Verzeichnis `/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`
+wählen. Anschließend ChatGPT neu laden und einen harmlosen Textauftrag
+durch Nabu testweise übergeben. Der Nachweis umfasst richtige Kontoanzeige,
+Einfügung und **einmaliges Absenden**. Die Änderungen dürfen erst danach
+auf den laufenden Home-Assistant-Client übernommen werden. Bis dahin bleibt
+die zuletzt funktionierende Browserzuordnung aktiv; der PR alleine ändert
+den laufenden Nabu nicht.
+
 Bei einem ausdrücklich an ChatGPT gerichteten Auftrag nutzt Nabu standardmäßig
 `nabu_web__chatgpt` mit `mode=browser_chat` und dem gesprochenen Auftrag
 als `question`. Dadurch öffnet Grabowski die **normale Desktop-Chrome-Sitzung**
@@ -147,7 +174,7 @@ kann in Chrome-Verlauf sowie lokalen Grabowski-Taskprotokollen auftauchen.
 Keine Passwörter, Zugriffstokens oder andere Geheimnisse über diesen
 Textlink übergeben. Die URL-Länge ist absichtlich begrenzt.
 
-**Automatisches Senden im normalen Chrome:** Nabu signiert Textaufträge
+**Automatisches Senden im Nabu-Chrome-Profil:** Nabu signiert Textaufträge
 nach Installation des lokalen Sendehelfers mit einer kurzlebigen HMAC-Signatur.
 Die eigens für `https://chatgpt.com/*` gebaute Manifest-V3-Erweiterung
 reagiert ausschließlich auf exakt signierte Nabu-Links, kontrolliert den
@@ -162,7 +189,7 @@ Sie bewahrt einen privaten Schlüssel in
 `~/.local/share/heimgewebe/home-assistant/.nabu-chatgpt-autosend.key`
 und erstellt die entpackte Chrome-Erweiterung unter
 `/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`.
-**Einmalig in der bereits angemeldeten normalen Chrome-Sitzung:**
+**Einmalig in der mit ChatGPT angemeldeten Chrome-Sitzung `Profile 1`:**
 `chrome://extensions` öffnen, Entwicklermodus einschalten,
 **Entpackte Erweiterung laden** und genau diesen Verzeichnispfad wählen.
 Danach die ChatGPT-Seite einmal neu laden. Dafür muss kein Browserprofil
