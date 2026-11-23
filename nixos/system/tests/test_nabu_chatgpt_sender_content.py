@@ -46,15 +46,25 @@ function openTab() {
   let hydrated = !data.delayedHydration;
   let clicks = 0;
   const visible = {getClientRects() {return hydrated ? [{}] : [];}};
-  const draft = {
-    ...visible,
-    value: data.composer
-  };
   const send = {
     ...visible,
-    disabled: false,
-    getAttribute(name) { return name === "aria-label" ? "Nachricht senden" : null; },
+    disabled: !!data.sendDisabled,
+    getAttribute(name) {
+      if (name === "aria-label") return data.sendLabel ?? "Nachricht senden";
+      if (name === "data-testid") return data.sendTestId || null;
+      if (name === "type") return data.formSubmit ? "submit" : "button";
+      return null;
+    },
     click() { clicks++; }
+  };
+  const form = {querySelectorAll(selector) {
+    if (selector === 'button[type="submit"]') return data.formSubmit ? [send] : [];
+    return data.missingSend ? [] : [send];
+  }};
+  const draft = {
+    ...visible,
+    value: data.composer,
+    closest(selector) {return data.formSubmit && selector === "form" ? form : null;}
   };
   const context = {
     location: loc, URL, URLSearchParams, TextEncoder, crypto: webcrypto, Date,
@@ -163,6 +173,31 @@ class NabuChromeSendContentTests(unittest.TestCase):
             ({"missingComposer": True}, "timeout_composer_missing"),
             ({"composer": "Another user's draft"}, "timeout_composer_mismatch"),
             ({"missingSend": True}, "timeout_send_button_missing"),
+        ):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(**fixture)
+                self.assertEqual(result["clicks"], 0)
+                self.assertEqual(result["marked"], 0)
+                self.assertEqual(result["stage"], expected)
+
+    def test_localized_send_prompt_labels_and_unique_form_submit(self):
+        for fixture in (
+            {"sendLabel": "Send prompt"},
+            {"sendLabel": "Prompt senden"},
+            {"sendLabel": "Senden"},
+            {"sendLabel": "Unlabeled", "formSubmit": True},
+        ):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(**fixture)
+                self.assertEqual(result["clicks"], 1)
+                self.assertEqual(result["stage"], "message_sent")
+
+    def test_never_click_disabled_or_voice_or_stop_control(self):
+        for fixture, expected in (
+            ({"sendDisabled": True}, "timeout_send_button_unavailable"),
+            ({"sendLabel": "Voice", "formSubmit": True}, "timeout_send_button_missing"),
+            ({"sendLabel": "Stop generating", "formSubmit": True}, "timeout_send_button_missing"),
+            ({"sendLabel": "Unrelated control"}, "timeout_send_button_missing"),
         ):
             with self.subTest(fixture=fixture):
                 result = self.send_once(**fixture)

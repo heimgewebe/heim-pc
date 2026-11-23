@@ -60,12 +60,38 @@
     '[data-testid="login-button"],[data-testid="signup-button"],' +
     'button[aria-label="Log in"],button[aria-label="Anmelden"]'
   );
-  const findSend = () => Array.from(document.querySelectorAll("button")).find(el => {
-    const label = el.getAttribute("aria-label") || "";
-    return (label === "Nachricht senden" || label === "Send message" ||
-            el.getAttribute("data-testid") === "send-button") &&
-           !el.disabled && el.getAttribute("aria-disabled") !== "true" && visible(el);
-  });
+  // ChatGPT uses localized accessible names and may change the test ID.
+  // Prefer explicit Send semantics; only fall back to a unique submit button
+  // in the form that actually contains the exact authorized composer.
+  const sendLabels = new Set([
+    "send", "send message", "send prompt", "submit prompt",
+    "senden", "absenden", "abschicken", "nachricht senden",
+    "nachricht absenden", "nachricht abschicken",
+    "prompt senden", "prompt absenden", "prompt abschicken"
+  ]);
+  const labelOf = el => normalize(el.getAttribute("aria-label") ||
+    el.getAttribute("title")).toLowerCase();
+  const otherAction = el => /voice|dictat|microphone|stop|cancel|speech|sprach|diktier|mikrofon|stopp|abbrechen/i
+    .test(labelOf(el) + " " + (el.getAttribute("data-testid") || ""));
+  const available = el => visible(el) && !el.disabled &&
+    el.getAttribute("aria-disabled") !== "true" && !otherAction(el);
+  const explicitlySend = el => sendLabels.has(labelOf(el)) ||
+    el.getAttribute("data-testid") === "send-button";
+  const sendCandidates = () => {
+    const el = composer();
+    const form = el?.closest?.("form");
+    const explicit = Array.from((form || document).querySelectorAll("button"))
+      .filter(explicitlySend);
+    if (explicit.length) return explicit;
+    // Never click an unknown standalone button or the shared voice/stop control.
+    if (!form) return [];
+    return Array.from(form.querySelectorAll('button[type="submit"]'))
+      .filter(button => !otherAction(button));
+  };
+  const findSend = () => {
+    const candidates = sendCandidates().filter(available);
+    return candidates.length === 1 ? candidates[0] : undefined;
+  };
   // Compare only the locally authorized outgoing prompt, never read model output.
   const ownMessageVisible = () => Array.from(
     document.querySelectorAll('[data-message-author-role="user"]')
@@ -90,7 +116,8 @@
     } else if (!composerMatches()) {
       waiting = "composer_mismatch";
     } else if (!findSend()) {
-      waiting = "send_button_missing";
+      const candidates = sendCandidates();
+      waiting = candidates.length ? "send_button_unavailable" : "send_button_missing";
     } else {
       if (ownMessageVisible()) { await report("already_present"); return; }
       let grant;

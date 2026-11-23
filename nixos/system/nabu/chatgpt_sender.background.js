@@ -6,11 +6,11 @@ const CLAIMS = "nabu_consumed_nonces_v1";
 const RECEIPTS = "nabu_send_receipts_v1";
 const STAGES = new Set([
   "validated", "login_required", "account_unconfirmed", "composer_missing",
-  "composer_mismatch", "send_button_missing", "already_present",
+  "composer_mismatch", "send_button_missing", "send_button_unavailable", "already_present",
   "claim_unconfirmed", "claim_denied", "composer_changed", "click_attempted",
   "message_sent", "send_unconfirmed", "expired", "timeout_login_required",
   "timeout_account_unconfirmed", "timeout_composer_missing",
-  "timeout_composer_mismatch", "timeout_send_button_missing"
+  "timeout_composer_mismatch", "timeout_send_button_missing", "timeout_send_button_unavailable"
 ]);
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const validNonce = value => typeof value === "string" && /^[a-f0-9]{24}$/.test(value);
