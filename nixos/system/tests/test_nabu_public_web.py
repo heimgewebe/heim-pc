@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime
 from html.parser import HTMLParser
 import ipaddress
 import json
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit, urljoin, quote, parse_qs
+from zoneinfo import ZoneInfo
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "nabu" / "llm.py"
@@ -92,7 +94,8 @@ def source_functions():
         if isinstance(node, ast.ClassDef) and node.name == "TextExtractor":
             chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name in (
-                "relevant_source_excerpt", "search_subject_terms", "relevant_search_hits"):
+                "relevant_source_excerpt", "search_subject_terms",
+                "relevant_search_hits", "normalize_today_news_query"):
             chosen.append(node)
         if isinstance(node, ast.FunctionDef) and node.name == "public_url":
             chosen.append(node)
@@ -107,10 +110,10 @@ def source_functions():
             for argument in method.args.args:
                 argument.annotation = None
             chosen.append(method)
-    assert len(chosen) == 8, "Expected URL/resolver/body reader/WebRead and evidence helpers"
+    assert len(chosen) == 9, "Expected URL/resolver/body reader/WebRead and evidence helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
-        "HTMLParser": HTMLParser,
+        "HTMLParser": HTMLParser, "datetime": datetime,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
         "TIMEOUT": None,
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
@@ -441,6 +444,290 @@ class PublicWebTests(unittest.TestCase):
             self.assertFalse(result.error)
             self.assertLessEqual(len(result.data["text"]), 8000)
         asyncio.run(scenario())
+
+
+class NewsSearchBundlingTests(unittest.TestCase):
+    """Current-news search itself reads sources, preventing model tool fanout."""
+
+    def bundled(self, hits, news=True, unreadable=(), destinations=None,
+                contents=None):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                     and n.name == "WebSearch")
+        call = next(n for n in klass.body if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "async_call")
+        helper = next(n for n in ast.walk(call) if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == "search_result")
+        calls = []
+
+        class Reader:
+            async def async_call(self, _hass, tool, _context):
+                url = tool.tool_args["url"]
+                calls.append(url)
+                return SimpleNamespace(error=url in unreadable, data={
+                    "url": (destinations or {}).get(url, url),
+                    "text": (contents or {}).get(url,
+                                               "A dated, readable article. " * 40),
+                })
+
+        ns = {
+            "query": "Nachrichten heute", "is_news": news,
+            "hass": None, "llm_context": None, "asyncio": asyncio,
+            "urlsplit": urlsplit, "re": re,
+            "aiohttp": SimpleNamespace(ClientError=type("ClientError", (Exception,), {})),
+            "ToolInput": lambda **kw: SimpleNamespace(**kw),
+            "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
+            "WebRead": Reader,
+            "relevant_source_excerpt": source_functions()["relevant_source_excerpt"],
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[helper], type_ignores=[])), str(SOURCE), "exec"), ns)
+        async def execute():
+            ns["news_deadline"] = asyncio.get_running_loop().time() + 25
+            return await ns["search_result"]("DuckDuckGo", hits)
+
+        result = asyncio.run(execute())
+        return result.data, calls
+
+    def test_news_reads_three_distinct_sources_and_skips_failed_read(self):
+        hits = [{"title": name, "url": "https://" + host + ".example/article"}
+                for name, host in (("A", "a"), ("A duplicate", "a"),
+                                   ("B", "b"), ("C", "c"), ("D", "d"))]
+        failed = hits[2]["url"]
+        data, calls = self.bundled(hits, unreadable=(failed,))
+        self.assertEqual(["A", "C", "D"],
+                         [s["title"] for s in data["read_sources"]])
+        self.assertEqual([hits[i]["url"] for i in (0, 2, 3, 4)], calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual([x["url"] for x in data["read_sources"]],
+                         [x["url"] for x in data["results"]])
+        self.assertTrue(all(len(s["text"]) > 350 for s in data["read_sources"]))
+
+    def test_unreadable_news_is_not_labeled_read(self):
+        hits = [{"title": "Paywall", "url": "https://a.example/article"}]
+        data, _ = self.bundled(hits, unreadable=(hits[0]["url"],))
+        self.assertEqual([], data["read_sources"])
+        self.assertEqual([], data["results"])
+        self.assertEqual("unavailable", data["source_read_status"])
+
+    def test_aggregator_links_resolve_distinct_publishers_even_after_failure(self):
+        urls = [
+            "https://news.google.com/rss/articles/opaque-a",
+            "https://news.google.com/rss/articles/opaque-b",
+            "https://news.google.com/rss/articles/opaque-c",
+            "https://news.google.com/rss/articles/opaque-d",
+        ]
+        destinations = {
+            urls[1]: "https://publisher-one.example/story",
+            urls[2]: "https://publisher-two.example/story",
+            urls[3]: "https://publisher-one.example/duplicate",
+        }
+        hits = [{"title": "Current News", "url": url} for url in urls]
+        data, calls = self.bundled(hits, unreadable=(urls[0],),
+                                   destinations=destinations)
+        self.assertEqual(urls, calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual([destinations[urls[1]], destinations[urls[2]]],
+                         [x["url"] for x in data["read_sources"]])
+
+    def test_news_preserves_relevant_late_passage_after_2400_characters(self):
+        url = "https://news.example/article"
+        article = ("Navigation, cookie notice, unrelated material. " * 105
+                   + " Nachrichten Schlagzeilen confirmed late fact dated today. "
+                   + "Additional article evidence about the late fact. " * 30)
+        data, _ = self.bundled([{"title": "News", "url": url}],
+                               contents={url: article})
+        text = data["read_sources"][0]["text"]
+        self.assertIn("confirmed late fact", text)
+        self.assertLessEqual(len(text), 4500)
+        self.assertTrue(len(article) > 5000)
+
+    def test_long_signed_source_url_remains_exact_after_read(self):
+        long_url = "https://news.example/story/" + ("a" * 710) + "?sig=abc123"
+        data, calls = self.bundled([{"title": "News", "url": long_url}])
+        self.assertEqual([long_url], calls)
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual(long_url, data["read_sources"][0]["url"])
+        self.assertEqual(long_url, data["results"][0]["url"])
+
+    def test_generic_websearch_has_no_extra_reads(self):
+        hits = [{"title": "WHO", "url": "https://who.int/about"}]
+        data, calls = self.bundled(hits, news=False)
+        self.assertEqual([], calls)
+        self.assertEqual(hits, data["results"])
+        self.assertNotIn("read_sources", data)
+
+
+    def search_with_provider_fallback(self, query, failed_urls=()):
+        """Execute production WebSearch with fake providers and real relevance filter."""
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                     and n.name == "WebSearch")
+        method = next(n for n in klass.body if isinstance(n, ast.AsyncFunctionDef)
+                      and n.name == "async_call")
+        method.name = "call_search"
+        method.returns = None
+        for arg in method.args.args:
+            arg.annotation = None
+        provider_calls, read_calls = [], []
+
+        class Anchor:
+            def get(self, key, default=""):
+                return "https://ddg.example/news" if key == "href" else default
+
+            def get_text(self, *args, **kwargs):
+                return query
+
+        class Item:
+            def select_one(self, selector):
+                return Anchor() if selector == "a.result__a" else None
+
+        class Soup:
+            def __init__(self, body, *_args):
+                self.body = body
+
+            def select(self, selector):
+                return [Item()] if selector == ".result" and self.body == b"ddg" else []
+
+            def get_text(self, *_args, **_kwargs):
+                return ""
+
+        class Session:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                pass
+
+            def get(self, url, *, params):
+                provider_calls.append(url)
+                host = urlsplit(url).hostname
+                if host == "html.duckduckgo.com":
+                    return FakeResponse(url, content=b"ddg")
+                if host == "www.bing.com":
+                    return FakeResponse(url, content=(
+                        "<rss><channel><item><title>Nachrichten heute</title>"
+                        "<link>https://bing.example/report</link>"
+                        "<description>Nachrichten der Welt heute</description>"
+                        "</item></channel></rss>"
+                    ).encode())
+                if host == "news.google.com":
+                    return FakeResponse(url, content=(
+                        "<rss><channel><item><title>Nachrichten heute</title>"
+                        "<link>https://news.example/report</link>"
+                        "<description>Nachrichten der Welt heute</description>"
+                        "</item></channel></rss>"
+                    ).encode())
+                self.fail("Unexpected provider: " + str(host))
+
+        class Reader:
+            async def async_call(self, hass, tool, context):
+                url = tool.tool_args["url"]
+                read_calls.append(url)
+                return SimpleNamespace(error=url in failed_urls, data={
+                    "url": url, "text": "Dated article content. " * 45,
+                })
+
+        functions = source_functions()
+
+        class FakeDateTime:
+            @staticmethod
+            def now(_zone):
+                return datetime(2026, 11, 22)
+
+        ns = {
+            "aiohttp": SimpleNamespace(
+                ClientSession=Session,
+                TCPConnector=lambda **kwargs: None,
+                ClientError=type("ClientError", (Exception,), {})),
+            "PublicResolver": lambda: None, "TIMEOUT": None,
+            "BeautifulSoup": Soup, "re": re, "json": json, "quote": quote,
+            "urlsplit": urlsplit, "parse_qs": parse_qs,
+            "ET": ET, "asyncio": asyncio,
+            "read_bounded": functions["read_bounded"],
+            "search_subject_terms": functions["search_subject_terms"],
+            "relevant_search_hits": functions["relevant_search_hits"],
+            "normalize_today_news_query": functions["normalize_today_news_query"],
+            "relevant_source_excerpt": functions["relevant_source_excerpt"],
+            "datetime": FakeDateTime, "ZoneInfo": ZoneInfo,
+            "ToolInput": lambda **kw: SimpleNamespace(**kw),
+            "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
+            "WebRead": Reader,
+            "message": lambda error: SimpleNamespace(
+                error=True, data={"error": str(error)}),
+        }
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[method], type_ignores=[])), str(SOURCE), "exec"), ns)
+        result = asyncio.run(ns["call_search"](
+            None, None, SimpleNamespace(tool_args={"query": query}), None))
+        return result.data, provider_calls, read_calls
+
+    def test_todays_news_discards_model_invented_past_calendar(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "normalize_today_news_query")
+        ns = {"re": re}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(SOURCE), "exec"), ns)
+        normal = ns["normalize_today_news_query"]
+        today = datetime(2026, 11, 22)
+        for original in ("Nachrichten Schlagzeilen heute 15. Februar 2026",
+                         "Nachrichten heute 11. Juni 2026",
+                         "Nachrichten heute 2026-02-11"):
+            with self.subTest(query=original):
+                corrected = normal(original, today)
+                self.assertIn("22.11.2026", corrected)
+                self.assertNotIn("Februar", corrected)
+                self.assertNotIn("Juni", corrected)
+                self.assertNotIn("2026-02-11", corrected)
+        historical = "Nachrichten vom 15. Februar 2026"
+        self.assertEqual(historical, normal(historical, today))
+        self.assertIn("normalize_today_news_query(", SOURCE.read_text(encoding="utf-8"))
+
+    def test_news_websearch_rewrites_invented_model_calendar(self):
+        data, _, _ = self.search_with_provider_fallback(
+            "Nachrichten Schlagzeilen heute 15. Februar 2026")
+        self.assertIn("22.11.2026", data["query"])
+        self.assertNotIn("Februar", data["query"])
+        self.assertNotIn("15.", data["query"])
+        self.assertEqual("DuckDuckGo", data["source"])
+        self.assertEqual("read", data["source_read_status"])
+
+    def test_today_without_news_intent_preserves_direct_search_results(self):
+        for query in ("Ölpreis heute", "Öffnungszeiten heute"):
+            with self.subTest(query=query):
+                data, providers, reads = self.search_with_provider_fallback(query)
+                self.assertEqual("DuckDuckGo", data["source"])
+                self.assertEqual([], reads)
+                self.assertNotIn("read_sources", data)
+                self.assertEqual(1, len(data["results"]))
+                self.assertEqual(1, len(providers))
+
+    def test_failed_news_first_provider_continues_to_bing(self):
+        data, providers, reads = self.search_with_provider_fallback(
+            "Nachrichten heute",
+            failed_urls=("https://ddg.example/news",))
+        self.assertEqual("Bing RSS", data["source"])
+        self.assertEqual("read", data["source_read_status"])
+        self.assertEqual(["https://ddg.example/news",
+                          "https://bing.example/report"], reads)
+        self.assertEqual(2, len(providers))
+        self.assertEqual(["https://bing.example/report"],
+                         [x["url"] for x in data["read_sources"]])
+
+    def test_all_news_providers_unreadable_yields_no_sourced_claim(self):
+        urls = ("https://ddg.example/news", "https://bing.example/report",
+                "https://news.example/report")
+        data, providers, reads = self.search_with_provider_fallback(
+            "Schlagzeilen Nachrichten heute", failed_urls=urls)
+        self.assertEqual("unavailable", data["source"])
+        self.assertEqual("unavailable", data["source_read_status"])
+        self.assertEqual([], data["results"])
+        self.assertEqual([], data["read_sources"])
+        self.assertEqual(list(urls), reads)
+        self.assertEqual(3, len(providers))
 
 
 if __name__ == "__main__":
