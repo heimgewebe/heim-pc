@@ -6,9 +6,13 @@ The server remains the sole authority for admission, mutations and receipts.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+from pathlib import Path
 import re
-from urllib.parse import quote, unquote
+import secrets
+import time
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 import aiohttp
 
@@ -32,6 +36,25 @@ CHATGPT_VOICE_URL = CHATGPT_HOME_URL + "?mode=voice"
 CHATGPT_BROWSER_BIN = "/run/current-system/sw/bin/xdg-open"
 CHATGPT_BROWSER_ARGV = (CHATGPT_BROWSER_BIN, CHATGPT_VOICE_URL)
 MAX_CHATGPT_PROMPT_URL_BYTES = 4800
+CHATGPT_SENDER_KEY_PATH = Path("/config/.nabu-chatgpt-autosend.key")
+
+
+def _sender_key() -> bytes | None:
+    """Private per-installation sender key; missing extension keeps manual mode."""
+    try:
+        raw = CHATGPT_SENDER_KEY_PATH.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise GrabowskiUnavailable("Nabu-Sendesignatur nicht lesbar") from exc
+    if re.fullmatch(r"[0-9a-f]{64}", raw) is None:
+        raise GrabowskiUnavailable("Nabu-Sendesignatur ist ungueltig")
+    return bytes.fromhex(raw)
+
+
+def _autosend_signature(key: bytes, ts: int, nonce: str, prompt: str) -> str:
+    value = "nabu-send-v1\n" + str(ts) + "\n" + nonce + "\n" + prompt
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def chatgpt_text_url(question: str | None) -> str:
@@ -46,7 +69,16 @@ def chatgpt_text_url(question: str | None) -> str:
     encoded = quote(question, safe="")
     if len(encoded.encode("ascii")) > MAX_CHATGPT_PROMPT_URL_BYTES:
         raise ValueError("ChatGPT-Textauftrag ist für einen Browserlink zu lang")
-    return CHATGPT_TEXT_PREFIX + encoded
+    url = CHATGPT_TEXT_PREFIX + encoded
+    key = _sender_key()
+    if key is not None:
+        ts = int(time.time())
+        nonce = secrets.token_hex(12)
+        sig = _autosend_signature(key, ts, nonce, question)
+        url += f"&nabu_ts={ts}&nabu_nonce={nonce}&nabu_sig={sig}"
+        if len(url.encode("ascii")) > MAX_CHATGPT_PROMPT_URL_BYTES + len(CHATGPT_TEXT_PREFIX):
+            raise ValueError("Signierter ChatGPT-Browserlink ist zu lang")
+    return url
 
 
 def chatgpt_text_launch_args(question: str | None = None) -> dict:
@@ -63,7 +95,7 @@ def chatgpt_text_launch_args(question: str | None = None) -> dict:
 
 
 def is_fixed_chatgpt_text_launch(args: dict) -> bool:
-    """Admit only canonical, bounded, exact ChatGPT composer URLs."""
+    """Admit only exact canonical Nabu drafts and signed short-lived sends."""
     if not isinstance(args, dict):
         return False
     argv = args.get("argv")
@@ -71,19 +103,49 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
         return False
     url = argv[1]
     if url == CHATGPT_HOME_URL:
-        question = None
+        valid_url = True
     elif isinstance(url, str) and url.startswith(CHATGPT_TEXT_PREFIX):
         try:
-            question = unquote(url[len(CHATGPT_TEXT_PREFIX):], errors="strict")
-        except UnicodeDecodeError:
+            parsed = urlsplit(url)
+            entries = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            names = [key for key, _ in entries]
+            valid_url = False
+            if (parsed.scheme == "https" and parsed.netloc == "chatgpt.com"
+                    and parsed.path == "/" and not parsed.fragment):
+                if names == ["prompt"]:
+                    prompt = entries[0][1]
+                    valid_url = url == CHATGPT_TEXT_PREFIX + quote(prompt.strip(), safe="")
+                elif names == ["prompt", "nabu_ts", "nabu_nonce", "nabu_sig"]:
+                    prompt, ts_text, nonce, signature = (item[1] for item in entries)
+                    key = _sender_key()
+                    if (key is not None and prompt == prompt.strip() and prompt
+                            and re.fullmatch(r"[0-9]{10}", ts_text)
+                            and re.fullmatch(r"[a-f0-9]{24}", nonce)
+                            and re.fullmatch(r"[a-f0-9]{64}", signature)):
+                        ts = int(ts_text)
+                        if -15 <= int(time.time()) - ts <= 180:
+                            digest = _autosend_signature(key, ts, nonce, prompt)
+                            canonical = (CHATGPT_TEXT_PREFIX + quote(prompt, safe="")
+                                         + f"&nabu_ts={ts_text}&nabu_nonce={nonce}"
+                                         + f"&nabu_sig={signature}")
+                            valid_url = (hmac.compare_digest(digest, signature)
+                                         and url == canonical)
+        except (TypeError, ValueError, GrabowskiUnavailable):
             return False
     else:
         return False
-    try:
-        return args == chatgpt_text_launch_args(question)
-    except (TypeError, ValueError):
+    if not valid_url:
         return False
-
+    expected = {
+        "host": "heim-pc",
+        "argv": [CHATGPT_BROWSER_BIN, url],
+        "runtime_seconds": 60,
+        "resume_policy": "never",
+        "resource_keys": [],
+        "reason": "Nabu: ChatGPT-Textchat im Desktopbrowser oeffnen",
+        "user_intent": "Nutzer uebergibt ChatGPT einen Textauftrag ueber Nabu",
+    }
+    return args == expected
 
 def chatgpt_voice_launch_args() -> dict:
     """Immutable allowlisted effect: start only the ChatGPT Voice desktop URL."""
@@ -152,16 +214,19 @@ async def start_chatgpt_browser_text(
         "task_id": task_id,
         "mode": "browser_chat",
         "text_prefill_requested": question is not None,
+        "auto_send_requested": "&nabu_sig=" in launch["argv"][1],
         "composer_prefill_verified": False,
         "message_sent_verified": False,
         "chatgpt_login_verified": False,
         "chatgpt_response_verified": False,
         "message": (
             "ChatGPT-Textchat im normalen Desktopbrowser angefordert. "
-            + ("Pruefe den vorausgefuellten Auftrag und klicke auf Senden. "
+            + ("Automatischer Sendeklick ist angefordert; pruefe die Nachricht im Browser. "
+               if "&nabu_sig=" in launch["argv"][1] else
+               "Pruefe den Entwurf und klicke auf Senden. "
                if question is not None else
                "Gib den Auftrag im ChatGPT-Eingabefeld ein. ")
-            + "Es wurde weder eine Absendung noch eine Antwort bestaetigt."
+            + "Ein abgeschickter ChatGPT-Auftrag ist noch nicht bestaetigt."
         ),
     }
 

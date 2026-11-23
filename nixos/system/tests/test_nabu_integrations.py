@@ -284,6 +284,61 @@ class ChatGPTBrowserTextTests(TestCase):
         self.assertFalse(result["message_sent_verified"])
 
 
+class ChatGPTSignedSenderTests(TestCase):
+    """Only an installation-local fresh signed Nabu link may auto-submit."""
+
+    def test_signed_url_is_canonical_and_exactly_bound_to_request(self):
+        from urllib.parse import parse_qs, urlsplit
+        with tempfile.TemporaryDirectory() as root:
+            key = Path(root) / "sender.key"
+            key.write_text("ab" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value="cd" * 12):
+                question = "Prüfe Grabowski, aber ändere nichts."
+                launch = grabowski.chatgpt_text_launch_args(question)
+                fields = parse_qs(urlsplit(launch["argv"][1]).query)
+                self.assertEqual(fields["prompt"], [question])
+                self.assertEqual(fields["nabu_ts"], ["1795425000"])
+                self.assertEqual(fields["nabu_nonce"], ["cd" * 12])
+                self.assertEqual(len(fields["nabu_sig"][0]), 64)
+                self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(launch))
+
+                original = launch["argv"][1]
+                for bogus in (
+                    original.replace("Pr%C3%BCfe", "L%C3%B6sche"),
+                    original.replace("nabu_nonce=" + "cd" * 12, "nabu_nonce=" + "ce" * 12),
+                    original.replace(fields["nabu_sig"][0], "f" * 64),
+                    original + "&nabu_send=1",
+                ):
+                    with self.subTest(bogus=bogus[-30:]):
+                        invalid = dict(launch, argv=[launch["argv"][0], bogus])
+                        self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(invalid))
+
+    def test_expired_and_wrong_key_rejected_without_retry(self):
+        with tempfile.TemporaryDirectory() as root:
+            key = Path(root) / "sender.key"
+            key.write_text("12" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value="56" * 12):
+                launch = grabowski.chatgpt_text_launch_args("Frag ChatGPT nach Projektstatus")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425300):
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+            key.write_text("13" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000):
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+
+    def test_absent_sender_key_retains_manual_handoff(self):
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", Path(root) / "missing"):
+                link = grabowski.chatgpt_text_launch_args("Schreib ChatGPT")
+                self.assertNotIn("nabu_sig", link["argv"][1])
+                self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(link))
+
+
 class OAuthContractTests(TestCase):
     def test_private_storage_and_host_identity_are_stable(self):
         with tempfile.TemporaryDirectory() as d:

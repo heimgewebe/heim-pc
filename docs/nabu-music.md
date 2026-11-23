@@ -130,9 +130,9 @@ Bei einem ausdrücklich an ChatGPT gerichteten Auftrag nutzt Nabu standardmäßi
 als `question`. Dadurch öffnet Grabowski die **normale Desktop-Chrome-Sitzung**
 mit `https://chatgpt.com/?prompt=<urlkodierter Auftrag>`. Dies ist ein
 vorbereiteter Eingabeentwurf, **kein Beweis, dass ChatGPT die Nachricht
-abgesendet, beantwortet oder mit einem Plugin bearbeitet hat**. Der Nutzer
-prüft das Eingabefeld und betätigt gegebenenfalls **Senden**. Der Link
-eröffnet üblicherweise einen neuen Chat; er ist keine dauerhafte
+abgesendet, beantwortet oder mit einem Plugin bearbeitet hat**. Ohne den lokal aktivierten Chrome-Sendehelfer prüft der Nutzer
+das Eingabefeld und betätigt **Senden** selbst. Der Link eröffnet
+üblicherweise einen neuen Chat; er ist keine dauerhafte
 Bidirektionalschnittstelle für eine bestimmte Chat-Unterhaltung.
 
 Nur bei ausdrücklichem `ChatGPT Live`, `Voice` oder `Sprachmodus` verwendet
@@ -145,10 +145,35 @@ aufrufen. Nabu liest keine ChatGPT-Webantworten oder Browserkonto-Daten aus.
 **Vertraulichkeit:** Der vorbefüllte Auftrag erscheint als URL-Parameter und
 kann in Chrome-Verlauf sowie lokalen Grabowski-Taskprotokollen auftauchen.
 Keine Passwörter, Zugriffstokens oder andere Geheimnisse über diesen
-Textlink übergeben. Die URL-Länge ist absichtlich begrenzt. Die
-Automatisierung des eigentlichen Klicks auf **Senden** ist nicht Teil dieses
-Handoffs; für eine robuste Absendungsbestätigung wäre eine gesondert
-abzunehmende Bedienoberfläche nötig.
+Textlink übergeben. Die URL-Länge ist absichtlich begrenzt.
+
+**Automatisches Senden im normalen Chrome:** Nabu signiert Textaufträge
+nach Installation des lokalen Sendehelfers mit einer kurzlebigen HMAC-Signatur.
+Die eigens für `https://chatgpt.com/*` gebaute Manifest-V3-Erweiterung
+reagiert ausschließlich auf exakt signierte Nabu-Links, kontrolliert den
+vorausgefüllten Text und die sichtbare Senden-Schaltfläche und klickt
+höchstens einmal. Externe Links mit nur `?prompt=` können dadurch keinen
+automatischen ChatGPT-Auftrag auslösen. Kein Browser-Scraping von Antworten,
+keine Chrome-Cookies in Nabu und keine fremde Erweiterung.
+
+Die lokale Installation erfolgt über
+`python3 nixos/system/nabu/setup_chatgpt_sender.py` im Heim-PC-Repo.
+Sie bewahrt einen privaten Schlüssel in
+`~/.local/share/heimgewebe/home-assistant/.nabu-chatgpt-autosend.key`
+und erstellt die entpackte Chrome-Erweiterung unter
+`/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`.
+**Einmalig in der bereits angemeldeten normalen Chrome-Sitzung:**
+`chrome://extensions` öffnen, Entwicklermodus einschalten,
+**Entpackte Erweiterung laden** und genau diesen Verzeichnispfad wählen.
+Danach die ChatGPT-Seite einmal neu laden. Dafür muss kein Browserprofil
+kopiert, kein zusätzlicher Dienst geöffnet und kein Chrome-Prozess beendet
+werden.
+
+Bis die Erweiterung in Chrome aktiviert und ihr Sendeklick an einem echten
+ChatGPT-Auftrag beobachtet wurde, ist **nur die Vorbereitung des Sendeversuchs**
+nachgewiesen. Nabu behauptet keine tatsächlich gesendete Nachricht und
+keine erfolgte Pluginaktion ohne entsprechenden Nachweis; der Nutzer kann
+weiterhin manuell auf **Senden** klicken.
 
 **Grabowski** wird über den bestehenden lokalen Streamable-HTTP-MCP-Endpunkt
 `http://127.0.0.1:18181/mcp` angesprochen. Dieser muss **aus dem aktiven

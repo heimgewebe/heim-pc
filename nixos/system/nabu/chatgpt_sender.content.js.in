@@ -1,0 +1,77 @@
+"use strict";
+
+// Generated locally with a private per-installation key. Never commit a filled copy.
+// The web page cannot read this isolated content script or its signing key.
+(async function nabuSignedChatGPTSend() {
+  if (location.origin !== "https://chatgpt.com") return;
+  const params = new URLSearchParams(location.search);
+  if (Array.from(params.keys()).join(",") !== "prompt,nabu_ts,nabu_nonce,nabu_sig") return;
+
+  const prompt = params.get("prompt") || "";
+  const tsText = params.get("nabu_ts") || "";
+  const nonce = params.get("nabu_nonce") || "";
+  const signature = params.get("nabu_sig") || "";
+  const ts = Number(tsText);
+  const now = Math.floor(Date.now() / 1000);
+  if (!prompt || prompt.length > 4000 ||
+      !/^[0-9]{10}$/.test(tsText) || !Number.isSafeInteger(ts) ||
+      ts > now + 15 || now - ts > 180 ||
+      !/^[a-f0-9]{24}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) return;
+
+  const secret = "__NABU_SEND_SECRET_HEX__";
+  if (!/^[a-f0-9]{64}$/.test(secret)) return;
+  const bytes = hex => new Uint8Array(hex.match(/../g).map(x => parseInt(x, 16)));
+  const payload = new TextEncoder().encode(
+    "nabu-send-v1\n" + tsText + "\n" + nonce + "\n" + prompt
+  );
+  const key = await crypto.subtle.importKey(
+    "raw", bytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
+  );
+  if (!await crypto.subtle.verify("HMAC", key, bytes(signature), payload)) return;
+
+  const once = "nabu-send-v1:" + nonce;
+  if (sessionStorage.getItem(once)) return;
+
+  const findComposer = () => Array.from(
+    document.querySelectorAll('textarea,[contenteditable="true"],[role="textbox"]')
+  ).find(el => el.getClientRects().length > 0 &&
+       (("value" in el ? el.value : el.innerText) || "").trim() === prompt);
+
+  const findSendButton = () => Array.from(document.querySelectorAll("button")).find(el => {
+    const label = el.getAttribute("aria-label") || "";
+    return (label === "Nachricht senden" || label === "Send message" ||
+            el.getAttribute("data-testid") === "send-button") &&
+           !el.disabled && el.getAttribute("aria-disabled") !== "true" &&
+           el.getClientRects().length > 0;
+  });
+
+  const started = Date.now();
+  let observer;
+  const trySend = () => {
+    if (Date.now() - started > 30000) { observer?.disconnect(); return; }
+    if (sessionStorage.getItem(once)) { observer?.disconnect(); return; }
+    if (!findComposer()) return;
+    const button = findSendButton();
+    if (!button) return;
+
+    // Consume BEFORE click: page reloads, SPA transitions or failed clicks
+    // must never silently repeat a possibly executed user command.
+    sessionStorage.setItem(once, "attempted");
+    observer?.disconnect();
+
+    // Remove the signed command from the visible URL/history entry.
+    const clean = new URL(location.href);
+    for (const field of ["prompt", "nabu_ts", "nabu_nonce", "nabu_sig"]) {
+      clean.searchParams.delete(field);
+    }
+    history.replaceState(history.state, "", clean.pathname + clean.search + clean.hash);
+    button.click();
+  };
+
+  observer = new MutationObserver(trySend);
+  observer.observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true, characterData: true
+  });
+  trySend();
+  setTimeout(() => observer?.disconnect(), 30000);
+})();
