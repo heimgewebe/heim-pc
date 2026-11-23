@@ -41,6 +41,16 @@ class SingleModelContract(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.prompt)
 
+    def test_ambiguous_light_requires_a_room_before_action(self):
+        for phrase in ("Schalte das Licht an", "Licht aus",
+                       "In welchem Raum?", "intent__HassTurnOn",
+                       "intent__HassTurnOff", "ohne area",
+                       "Zustand erst nach positivem Werkzeugergebnis",
+                       "ohne Toolaufruf", "Wir sind im Wohnzimmer",
+                       "area=Wohnzimmer"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.prompt)
+
     def test_source_first_without_model_switch(self):
         for phrase in ("nabu_web__search", "nabu_web__read_page",
                        "Wetter", "Amtsinhaber", "tatsächlich gelesene URLs"):
