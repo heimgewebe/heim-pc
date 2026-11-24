@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "e53e95800481bc0a399433cd2f19aefe75ed207c";
-  releaseId = "e53e9580-nixos-lock264e747ad05a-contract07fba47985cb";
+  sourceRevision = "bf96dc3d158c46e324106e480ddc56ac424809e3";
+  releaseId = "bf96dc3d-nixos-lock264e747ad05a-contract07fba47985cb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-SmNuCNDCdWqewiUsMadZ4ibTNyP+a8qzBT5HVfSLHj8=";
+    hash = "sha256-qJnr6AKnKiF3Dqws339BczxhaasgrYfgxMtkPv04xoM=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -41,7 +41,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "e53e9580";
+  version = "bf96dc3d";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
@@ -267,6 +267,15 @@ PY
     install -m 0444 extracted/tools/grabowski_transport_ingress.py \
       "$out/lib/python3.12/site-packages/grabowski_transport_ingress.py"
 
+    # Reuse the pinned PR review CLI with the installed immutable validator.
+    # Its parser imports the three sibling helpers even for local-only reviews.
+    for helper in pr_review_gate.py review_evidence_schemas.py plain_llm_review_contract.py external_review_plain.py; do
+      install -m 0444 "extracted/tools/$helper" "$out/lib/python3.12/site-packages/$helper"
+    done
+    makeWrapper "$out/bin/python3" "$out/bin/grabowski-pr-review-gate" \
+      --prefix PATH : "$out/bin:${pkgs.openssh}/bin:${pkgs.coreutils}/bin" \
+      --add-flags "-I -B -m pr_review_gate"
+
     # Nix-native integrity: adapt only the two expected manifest discovery
     # sites in the pinned upstream module. Everything else stays canonical.
     install -m 0444 ${./grabowski-nixos-integrity.py} \
@@ -360,7 +369,23 @@ if health.get("ready") is not True:
 if Path(health["path"]).resolve(strict=True) != root / "share/grabowski/config/coding-agent-catalog.json":
     raise SystemExit("Nix coding-agent catalog is not the pinned store asset")
 print("nix isolated jobfinalizer and immutable catalog verified")
+# Exercise the exact packaged CLI import graph, not a mutable checkout.
+import pr_review_gate as review_gate
+import review_evidence_schemas
+import plain_llm_review_contract
+import external_review_plain
+review_site = root / "lib/python3.12/site-packages"
+for module in (review_gate, review_evidence_schemas, plain_llm_review_contract,
+               external_review_plain, review_gate.review_provenance):
+    if not Path(module.__file__).resolve(strict=True).is_relative_to(review_site):
+        raise SystemExit("PR review helper escaped pinned package")
+trusted_signers = root / "share/grabowski/config/self-review-allowed-signers"
+if (review_gate.review_provenance.TRUSTED_SIGNERS != trusted_signers
+        or not trusted_signers.is_file() or trusted_signers.is_symlink()):
+    raise SystemExit("PR review helper did not resolve the immutable signer allowlist")
+print("nix isolated PR review helper and signer locator verified")
 PY
+    "$out/bin/grabowski-pr-review-gate" --help > "$TMPDIR/grabowski-pr-review-gate-help"
     test -x "$out/bin/grabowski-operator"
     test -x "$out/bin/git"
     test -x "$out/bin/gh"
