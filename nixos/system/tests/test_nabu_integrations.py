@@ -1047,3 +1047,8 @@ class ChatGPTToolTests(IsolatedAsyncioTestCase):
             self.assertEqual(record["access_token"], "new")
             self.assertEqual(login.load_private(path)["refresh_token"], "refresh_new")
             self.assertEqual(path.stat().st_mode & 0o077, 0)
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()
