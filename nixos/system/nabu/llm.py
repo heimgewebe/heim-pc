@@ -18,7 +18,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 import probatio as vol
 from homeassistant.components.llm import LLMTools
-from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation
+from .grabowski_client import GrabowskiUnavailable, mcp_call, read_request, normalize_read_operation, compact_result, register_obligation, start_chatgpt_browser_voice, start_chatgpt_browser_text
 from .chatgpt_client import ChatGPTUnavailable, chatgpt_answer
 from .radio import resolve_radio
 from homeassistant.core import HomeAssistant, callback
@@ -870,27 +870,53 @@ class PlayMusic(Tool):
 
 
 class ChatGPTAnswer(Tool):
-    """Optional ChatGPT plan tool; local Nabu remains the main Assist agent."""
+    """Hand work to the user's text chat, with Voice and OAuth as explicit options."""
 
     name = "nabu_web__chatgpt"
-    title = "ChatGPT über offiziell verbundenes Konto befragen"
+    title = "ChatGPT-Textchat im Browser, auf Wunsch Sprache oder direkte Antwort"
     description = (
-        "Nur auf ausdrücklichen Wunsch 'Frag ChatGPT' oder 'Nutze GPT' aufrufen. "
-        "question enthält die vollständige Sachfrage, ohne Geräteaktionen. "
-        "Weder Browserkonto noch unberechtigte API-Credits verwenden."
+        "Nur bei einem ausdrücklich an ChatGPT gerichteten Benutzerwunsch benutzen. "
+        "Standard ist mode=browser_chat: öffnet den normalen angemeldeten Desktopbrowser "
+        "mit dem vom Benutzer gesprochenen question-Text im ChatGPT-Eingabefeld. "
+        "Den Auftrag sinngemäß vollständig übergeben, nichts als erledigt ausgeben; "
+        "eine vorbereitete Eingabe ist noch KEINE bestätigte gesendete Nachricht. "
+        "Bei 'öffne ChatGPT' darf question fehlen. "
+        "Nur bei 'ChatGPT Live/Voice', 'Sprachmodus' oder ausdrücklichem "
+        "Sprachgespräch mode=browser_voice wählen. "
+        "Nur wenn ausdrücklich eine Antwort hier über Nabu ohne Browser gewünscht "
+        "wird, mode=answer mit question für den vorhandenen OAuth-Antwortweg verwenden. "
+        "Home-Assistant-Geräteaktionen bleiben bei Nabu; Browser-ChatGPT kann seine "
+        "eigenen verbundenen Plugins einschließlich Grabowski verwenden."
     )
-    parameters = vol.Schema({vol.Required("question"): str})
-    annotations = ToolAnnotations(read_only=True, open_world=True)
+    parameters = vol.Schema({
+        vol.Optional("mode", default="browser_chat"): vol.In(
+            ["browser_chat", "browser_voice", "answer"]
+        ),
+        vol.Optional("question"): str,
+    })
+    annotations = ToolAnnotations(read_only=False, destructive=False, open_world=False)
     integration = DOMAIN
 
     async def async_call(self, hass: HomeAssistant, tool_input: ToolInput,
                          llm_context: LLMContext) -> ToolResult:
         try:
-            result = await chatgpt_answer(
-                async_get_clientsession(hass), tool_input.tool_args["question"]
-            )
+            mode = tool_input.tool_args.get("mode", "browser_chat")
+            session = async_get_clientsession(hass)
+            if mode == "browser_chat":
+                result = await start_chatgpt_browser_text(
+                    session, tool_input.tool_args.get("question")
+                )
+            elif mode == "browser_voice":
+                result = await start_chatgpt_browser_voice(session)
+            elif mode == "answer":
+                question = tool_input.tool_args.get("question", "")
+                if not isinstance(question, str) or not question.strip():
+                    raise ValueError("Für ChatGPT-Antworten ist eine Frage erforderlich")
+                result = await chatgpt_answer(session, question)
+            else:
+                raise ValueError("Unbekannter ChatGPT-Modus")
             return ToolResult(data=result)
-        except (ValueError, ChatGPTUnavailable) as exc:
+        except (ValueError, ChatGPTUnavailable, GrabowskiUnavailable) as exc:
             return message(exc)
 
 
@@ -1025,8 +1051,19 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
             "dass ein Licht geändert oder Musik hörbar ist; bei nicht bestätigter "
             "Wirkung sage ausdrücklich, was belegt ist. Bei Werkzeugfehlern nie Erfolg "
             "melden. Antworte nicht grundsätzlich, dass du keine Gerätewerkzeuge hast. "
-            "Auf ausdrücklichen Wunsch nach ChatGPT nabu_web__chatgpt benutzen, "
-            "sonst ausschließlich mit dem lokalen Modell antworten. "
+            "Bei ausdrücklichem Wunsch nach ChatGPT nabu_web__chatgpt benutzen. "
+            "Standard ist mode=browser_chat mit dem vollständig verstandenen "
+            "Benutzerauftrag als question: 'frag ChatGPT', 'schreibe ChatGPT', "
+            "'gib das an ChatGPT weiter', 'bearbeite das mit ChatGPT und Grabowski'. "
+            "Ein ChatGPT-Browserlink bereitet den Text vor, bestätigt aber weder "
+            "das Absenden noch die Antwort: weise gegebenenfalls auf Senden hin. "
+            "Erst bei 'ChatGPT Live', 'Sprachmodus' oder 'sprich per ChatGPT Voice' "
+            "mode=browser_voice verwenden. "
+            "Nur bei ausdrücklich gewünschter ChatGPT-Antwort direkt über Nabu "
+            "ohne Browser mode=answer mit question verwenden. "
+            "ChatGPT im Browser kann seine dort verbundenen Plugins selbst nutzen; "
+            "Nabu behauptet keine Pluginwirkung ohne Ergebnis. "
+            "Sonst ausschließlich mit dem lokalen Modell antworten. "
             "Bei Fragen nach Grabowski, Status oder seinen Aufgaben nabu_web__grabowski "
             "verwenden; bei ausdrücklich beauftragten Aufgaben nabu_web__grabowski_request "
             "mit Ziel und Erfolgskriterium verwenden. Ein Request-Receipt belegt nur "

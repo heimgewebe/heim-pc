@@ -71,8 +71,11 @@ class SingleModelContract(unittest.TestCase):
             self.assertIn(phrase, self.prompt)
 
     def test_optional_chatgpt_only_when_explicit(self):
-        self.assertIn("Auf ausdrücklichen Wunsch nach ChatGPT", self.prompt)
-        self.assertIn("sonst ausschließlich mit dem lokalen Modell", self.prompt)
+        self.assertIn("Bei ausdrücklichem Wunsch nach ChatGPT", self.prompt)
+        self.assertIn("mode=browser_chat", self.prompt)
+        self.assertIn("mode=browser_voice", self.prompt)
+        self.assertIn("mode=answer", self.prompt)
+        self.assertIn("Sonst ausschließlich mit dem lokalen Modell", self.prompt)
 
 
 if __name__ == "__main__":

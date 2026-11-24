@@ -55,6 +55,16 @@ class NabuQwenEvalTest(unittest.TestCase):
         self.assertFalse(nabu.valid_arguments("climate__HassClimateSetTemperature", {"temperature": 21}))
         self.assertTrue(nabu.valid_arguments("climate__HassClimateSetTemperature", {"area": "Flur", "temperature": 21}))
 
+    def test_chatgpt_text_is_default_and_voice_needs_explicit_mode(self):
+        good = nabu.valid_arguments
+        self.assertTrue(good("nabu_web__chatgpt", {"question": "Frag Grabowski nach seinen Aufgaben"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "browser_chat", "question": "Test"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "browser_voice"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "browser_voice", "question": "Test"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "answer", "question": "Test"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "answer"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "delete", "question": "Test"}))
+
     def test_browser_operation_specific_required_arguments(self):
         good = nabu.valid_arguments
         self.assertFalse(good("nabu_web__browser", {"operation": "open"}))
