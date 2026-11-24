@@ -49,16 +49,51 @@ Bei einem passenden Auftrag diese bereits vorhandenen Anwendungen **in Betracht 
 
 ## Wiederherstellung
 
-Für die sieben Heim-PC-Webdienste ist die Haupt-Verlässlichkeit die bestehende
-Restic-Sicherung von Home und `/persist`, ergänzt durch sechs konsistente
-DB-Exporte und isolierte DB-Restore-Checks. Diese Angabe ist **kein in dieser
-Writer-Sandbox frisch geprüfter Backupnachweis**. Der vorhandene Datenbank-Exporter liegt unter `~/.local/bin/heimgewebe-app-db-export`;
-seine Einheiten sind `~/.config/systemd/user/heimgewebe-app-db-export.service`
-und `~/.config/systemd/user/heimgewebe-app-db-export.timer`.
-App-Backupartefakte liegen in
-der Quellpfadklasse `~/.local/share/heimgewebe/app-backups`; die lokalen
-App-Konfigurationen verbinden Laufzeit und Daten. Restic ist die
-Backup-/Restore-Authority, nicht dieser Report.
+Die bestehende Restic-Sicherung von Home und `/persist` enthält auch die
+lokalen Anwendungs- und Konfigurationspfade, soweit sie nicht ausgeschlossen
+sind. Der vorhandene Datenbank-Exporter liegt unter
+`~/.local/bin/heimgewebe-app-db-export`; seine Einheiten sind
+`~/.config/systemd/user/heimgewebe-app-db-export.service` und
+`~/.config/systemd/user/heimgewebe-app-db-export.timer`. Diese drei Dateien
+gehören zum Wiederaufbau des Sicherungswegs. Der ältere
+`heimgewebe-app-db-backup.timer` bleibt deaktiviert.
+
+Nach der Erweiterung vom 24. November 2026 schreibt derselbe Timer vor
+den Restic-Läufen zwei getrennte, manifestgebundene Exportsätze unter
+`~/.local/share/heimgewebe/app-backups`:
+
+- `current/`: PostgreSQL-Dumps für Penpot und Immich, SQLite-Exporte für
+  Paperless, Audiobookshelf, Readeck und Home Assistant sowie Penpot-Assets.
+- `music-assistant/current/`: konsistente Exporte von `library.db` und
+  `auth.db` aus einem gemeinsamen Btrfs-Snapshot des laufenden Music Assistant.
+  Ein Fehler dieses zusätzlichen Exports entwertet den bereits publizierten
+  ersten Satz nicht. Jeweils `previous/` hält den vorherigen erfolgreichen Satz.
+
+Beide Manifeste enthalten Erstellungszeit, Dateigrößen und SHA-256.
+Vor dem Einsatz Dateiinhalte und Manifest prüfen und die Datenbanken isoliert
+wiederherstellen; weder laufende Originaldatenbanken noch bestehende
+Anwendungsdaten für eine Probe überschreiben. Medien, Anwendungssettings
+und lokale Startdefinitionen sind zusätzlich aus dem tatsächlich gesicherten
+Restic-Snapshot wiederherzustellen. Restic ist die Backup-/Restore-Authority,
+nicht dieser Report.
+
+**Besonderheit Music Assistant:** Der Dienst hält SQLite im exklusiven
+WAL-Modus. Ein gewöhnlicher Online-Backup-Zugriff von außen kann deshalb
+blockieren. Der Exporter nutzt das eigene Btrfs-Subvolume
+`~/.local/share/heimgewebe/music-assistant` und entfernt den privaten Snapshot
+nach dem Export. Bei einer Neuinstallation dieses Ziel vor der Datenrückgabe
+als Benutzer `alex` auf Btrfs als Subvolume anlegen (nur bei fehlendem Ziel,
+nicht über einem vorhandenen Datenverzeichnis). Der Restore muss diese
+Topologie erhalten oder wiederherstellen: eine normale Verzeichniskopie
+allein reicht für den nächsten Snapshotexport nicht. Die Anwendung danach
+mit passenden Datenbank-/Imageversionen starten, Dienst- und HTTP-Funktion
+prüfen und einen frischen Lauf des vorhandenen Exportdienstes verifizieren.
+Die Sicherung benötigt weder einen zusätzlichen Timer noch regelmäßige
+Music-Assistant-Dienststopps.
+
+Der lokale Export und isolierte SQLite-Integritätsprüfungen wurden am
+24. November 2026 erfolgreich ausgeführt; dies ist kein Nachweis einer
+vollständigen Wiederherstellung aller Anwendungen vom externen Datenträger.
 
 Der versionierte Host-Vertrag liegt in
 [`restic-seagate-backup.nix`](../nixos/system/modules/restic-seagate-backup.nix),
