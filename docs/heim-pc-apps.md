@@ -63,7 +63,8 @@ den Restic-Läufen zwei getrennte, manifestgebundene Exportsätze unter
 `~/.local/share/heimgewebe/app-backups`:
 
 - `current/`: PostgreSQL-Dumps für Penpot und Immich, SQLite-Exporte für
-  Paperless, Audiobookshelf, Readeck und Home Assistant sowie Penpot-Assets.
+  Paperless, Audiobookshelf, Readeck, Home Assistant und FileBrowser Quantum
+  sowie Penpot-Assets.
 - `music-assistant/current/`: konsistente Exporte von `library.db` und
   `auth.db` aus einem gemeinsamen Btrfs-Snapshot des laufenden Music Assistant.
   Ein Fehler dieses zusätzlichen Exports entwertet den bereits publizierten
