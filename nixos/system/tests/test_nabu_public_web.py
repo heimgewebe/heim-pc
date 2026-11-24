@@ -31,11 +31,12 @@ class Resolver:
 
 
 class FakeResponse:
-    def __init__(self, url, status=200, headers=None, content=b"<p>Public text</p>"):
+    def __init__(self, url, status=200, headers=None, content=b"<p>Public text</p>",
+                 charset="utf-8"):
         self.url = url
         self.status = status
         self.headers = headers or {"content-type": "text/html"}
-        self.charset = "utf-8"
+        self.charset = charset
         self.content = SimpleNamespace(read=self._read)
         self.chunks = list(content) if isinstance(content, (tuple, list)) else [content]
 
@@ -194,6 +195,19 @@ class PublicWebTests(unittest.TestCase):
             self.assertEqual(["https://example.org/", "https://example.org/next"], FakeSession.requests)
         asyncio.run(scenario())
 
+
+    def test_unknown_charset_label_falls_back_to_utf8(self):
+        async def scenario():
+            FakeSession.responses = [{
+                "status": 200, "headers": {"content-type": "text/html; charset=utf8mb4"},
+                "charset": "utf8mb4", "content": "<p>Grüße aus Berlin</p>".encode(),
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={"url": "https://example.org/"}), None
+            )
+            self.assertFalse(result.error)
+            self.assertIn("Grüße aus Berlin", result.data["text"])
+        asyncio.run(scenario())
 
     def test_websearch_fallback_rejects_poisoned_rss(self):
         """Source order is subject-validated, not whatever Bing RSS returned."""
