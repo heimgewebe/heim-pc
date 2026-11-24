@@ -129,7 +129,10 @@ die lokalen Modelle nutzbar.
 Voice-Modus verwenden ausschließlich Google Chrome mit
 `--profile-directory="Profile 1"`. Das ist ein eigenständiges, persistentes
 Profil unter `~/.config/google-chrome/Profile 1`, getrennt vom normalen
-Chrome-Profil `Default`. Ein weiterer Browserdienst ist nicht notwendig.
+Chrome-Profil `Default`. Ein weiterer Browserdienst ist nicht notwendig. Der KDE-Anwendungsstarter
+`kstart --desktopfile nabu-chatgpt` übergibt Chrome an den normalen
+Desktop-Lebenszyklus, statt einen neu gestarteten Browser mit dem Zeitlimit
+des kurzlebigen Grabowski-Starttasks zu beenden.
 Nabu benutzt weder `xdg-open` noch das Standardprofil als Rückfallweg.
 Der lokale Nabu-Headless-Browser für öffentliche Webrecherchen bleibt davon
 separat; der OAuth-Antwortmodus bleibt ebenfalls unverändert.

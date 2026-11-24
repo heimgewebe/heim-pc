@@ -34,12 +34,16 @@ CHATGPT_HOME_URL = "https://chatgpt.com/"
 CHATGPT_TEXT_PREFIX = CHATGPT_HOME_URL + "?prompt="
 CHATGPT_VOICE_URL = CHATGPT_HOME_URL + "?mode=voice"
 # The new Nabu profile is intentionally distinct from the user's Default.
-# Chrome forwards this invocation to the already-running browser process,
-# selecting only this internal profile. Never fall back to xdg-open.
+# KDE hands the application to its desktop lifecycle, also on a cold start.
+# Running Chrome directly inside a bounded task kills a new browser at timeout.
+# Keep the exact dedicated profile and URL; never fall back to xdg-open.
 CHATGPT_BROWSER_BIN = "/home/alex/.nix-profile/bin/google-chrome"
 CHATGPT_BROWSER_PROFILE = "Profile 1"
 CHATGPT_BROWSER_PROFILE_ARG = "--profile-directory=" + CHATGPT_BROWSER_PROFILE
-CHATGPT_BROWSER_ARGV = (CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, CHATGPT_VOICE_URL)
+CHATGPT_BROWSER_PREFIX = ("/run/current-system/sw/bin/kstart", "--desktopfile",
+                          "nabu-chatgpt", "--", CHATGPT_BROWSER_BIN,
+                          CHATGPT_BROWSER_PROFILE_ARG)
+CHATGPT_BROWSER_ARGV = (*CHATGPT_BROWSER_PREFIX, CHATGPT_VOICE_URL)
 MAX_CHATGPT_PROMPT_URL_BYTES = 4800
 CHATGPT_SENDER_KEY_PATH = Path("/config/.nabu-chatgpt-autosend.key")
 
@@ -90,7 +94,7 @@ def chatgpt_text_launch_args(question: str | None = None) -> dict:
     """Open ChatGPT only in the dedicated persistent Nabu Chrome profile."""
     return {
         "host": "heim-pc",
-        "argv": [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, chatgpt_text_url(question)],
+        "argv": [*CHATGPT_BROWSER_PREFIX, chatgpt_text_url(question)],
         "runtime_seconds": 60,
         "resume_policy": "never",
         "resource_keys": [],
@@ -104,10 +108,10 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
     if not isinstance(args, dict):
         return False
     argv = args.get("argv")
-    if (not isinstance(argv, list) or len(argv) != 3
-            or argv[:2] != [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG]):
+    if (not isinstance(argv, list) or len(argv) != len(CHATGPT_BROWSER_PREFIX) + 1
+            or argv[:-1] != list(CHATGPT_BROWSER_PREFIX)):
         return False
-    url = argv[2]
+    url = argv[-1]
     if url == CHATGPT_HOME_URL:
         valid_url = True
     elif isinstance(url, str) and url.startswith(CHATGPT_TEXT_PREFIX):
@@ -150,7 +154,7 @@ def is_fixed_chatgpt_text_launch(args: dict) -> bool:
         return False
     expected = {
         "host": "heim-pc",
-        "argv": [CHATGPT_BROWSER_BIN, CHATGPT_BROWSER_PROFILE_ARG, url],
+        "argv": [*CHATGPT_BROWSER_PREFIX, url],
         "runtime_seconds": 60,
         "resume_policy": "never",
         "resource_keys": [],
