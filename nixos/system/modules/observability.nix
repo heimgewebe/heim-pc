@@ -1,7 +1,13 @@
 { config, lib, options, pkgs, ... }:
 let
+  persistentBtrfs = builtins.hasAttr "/persist" config.fileSystems
+    && config.fileSystems."/persist".fsType == "btrfs";
   journalLimits = {
-    SystemMaxUse = "1G";
+    # At the observed user-journal volume, 1 GiB retained only two days of
+    # history, losing kernel evidence needed for storage-error diagnosis.
+    # Preserve the 30-day target on the large persistent production volume
+    # without reserving disk space or expanding the small ext4 prototype.
+    SystemMaxUse = if persistentBtrfs then "16G" else "1G";
     MaxRetentionSec = "30day";
   };
 in
@@ -10,10 +16,7 @@ in
 
   # Scrub checks the complete Btrfs volume, independently of its subvolumes.
   # The ext4 prototype/VM must not schedule a nonexistent Btrfs mount.
-  services.btrfs.autoScrub = lib.mkIf (
-    builtins.hasAttr "/persist" config.fileSystems
-    && config.fileSystems."/persist".fsType == "btrfs"
-  ) {
+  services.btrfs.autoScrub = lib.mkIf persistentBtrfs {
     enable = true;
     fileSystems = [ "/persist" ];
     interval = "monthly";
