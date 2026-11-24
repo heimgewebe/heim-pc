@@ -67,10 +67,66 @@ class SystemkatalogReliabilityTests(unittest.TestCase):
     def test_installer_respects_declarative_timer(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            receipt = installer.install(home=home, apply=True, enable=True, declarative=True)
+            declared = home / "declared"
+            with mock.patch.object(installer, "DECLARED_USER_UNITS", declared), \
+                 mock.patch.object(installer, "_systemctl", side_effect=lambda *args: str(declared / args[-1]) if args[0] == "show" else "") as ctl:
+                receipt = installer.install(home=home, apply=True, enable=True, declarative=True)
+            self.assertIn(mock.call("start", "systemkatalog-drift-watch.timer"), ctl.call_args_list)
             self.assertEqual(receipt["systemd"], "declarative")
             self.assertEqual(len(receipt["files"]), 1)
             self.assertFalse((home / ".config/systemd/user/systemkatalog-drift-watch.timer").exists())
+
+    def test_declarative_installer_migrates_owned_legacy_units(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installer.install(home=home, apply=True, enable=False, declarative=False)
+            units = home / ".config/systemd/user"
+            timer = units / "systemkatalog-drift-watch.timer"
+            service = units / "systemkatalog-drift-watch.service"
+            wants = units / "timers.target.wants"
+            wants.mkdir()
+            link = wants / timer.name
+            link.symlink_to(timer)
+            plan = installer.install(home=home, apply=False, enable=False, declarative=True)
+            self.assertEqual(plan["legacyUnits"]["status"], "migration_needed")
+            self.assertTrue(timer.is_file() and service.is_file() and link.is_symlink())
+            result = installer.install(home=home, apply=True, enable=False, declarative=True)
+            self.assertEqual(result["legacyUnits"]["status"], "migrated")
+            self.assertFalse(timer.exists() or service.exists() or link.is_symlink())
+            self.assertTrue((home / ".local/bin/systemkatalog-drift-watch").exists())
+            again = installer.install(home=home, apply=True, enable=False, declarative=True)
+            self.assertEqual(again["legacyUnits"]["status"], "absent")
+
+    def test_declarative_installer_verifies_and_preserves_native_enable_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config/systemd/user"
+            declared = home / "declared"
+            declared.mkdir()
+            timer = declared / "systemkatalog-drift-watch.timer"
+            timer.write_text("[Timer]\\n", encoding="utf-8")
+            wants = units / "timers.target.wants"
+            wants.mkdir(parents=True)
+            link = wants / timer.name
+            link.symlink_to(timer)
+            with mock.patch.object(installer, "DECLARED_USER_UNITS", declared), \
+                 mock.patch.object(installer, "_systemctl", side_effect=lambda *args: str(declared / args[-1]) if args[0] == "show" else ""):
+                result = installer.install(home=home, apply=True, enable=True, declarative=True)
+            self.assertEqual(result["legacyUnits"]["status"], "absent")
+            self.assertTrue(link.is_symlink())
+
+    def test_declarative_installer_preserves_custom_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installer.install(home=home, apply=True, enable=False, declarative=False)
+            units = home / ".config/systemd/user"
+            service = units / "systemkatalog-drift-watch.service"
+            service.write_text("[Service]\nExecStart=/custom\n", encoding="utf-8")
+            timer = units / "systemkatalog-drift-watch.timer"
+            with self.assertRaisesRegex(RuntimeError, "custom.*override"):
+                installer.install(home=home, apply=True, enable=False, declarative=True)
+            self.assertIn("/custom", service.read_text(encoding="utf-8"))
+            self.assertTrue(timer.is_file())
 
     def test_candidate_assessment_reads_exact_candidate_identity(self) -> None:
         payload = {
