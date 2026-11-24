@@ -704,7 +704,9 @@ class WeatherForecast(Tool):
                     response.raise_for_status()
                     data = await response.json(content_type=None)
             return ToolResult(data=weather_report(place, data))
-        except (KeyError, TypeError, ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except asyncio.TimeoutError:
+            return message(TimeoutError("Der Wetterdienst hat nicht rechtzeitig geantwortet."))
+        except (KeyError, TypeError, ValueError, aiohttp.ClientError) as exc:
             return message(exc)
 
 

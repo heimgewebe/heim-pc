@@ -29,6 +29,8 @@ class FakeResponse:
         self.payload = payload
 
     async def __aenter__(self):
+        if isinstance(self.payload, BaseException):
+            raise self.payload
         return self
 
     async def __aexit__(self, *args):
@@ -144,6 +146,23 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual("zu Hause", result.data["ort"])
         self.assertEqual(1, len(FakeSession.requests))
         self.assertEqual("53.55", FakeSession.requests[0][1]["latitude"])
+
+    def test_geocoding_timeout_reports_explainable_error(self):
+        FakeSession.responses = [asyncio.TimeoutError()]
+        result = self.call({"location": "Berlin"})
+        self.assertTrue(result.error)
+        self.assertIn("nicht rechtzeitig", result.data["error"])
+        self.assertEqual(1, len(FakeSession.requests))
+
+    def test_forecast_timeout_reports_explainable_error(self):
+        FakeSession.responses = [
+            {"results": [{"name": "Wien", "latitude": 48.2, "longitude": 16.37}]},
+            asyncio.TimeoutError(),
+        ]
+        result = self.call({"location": "Wien"})
+        self.assertTrue(result.error)
+        self.assertIn("nicht rechtzeitig", result.data["error"])
+        self.assertEqual(2, len(FakeSession.requests))
 
     def test_unknown_place_reports_error(self):
         FakeSession.responses = [{"results": []}]
