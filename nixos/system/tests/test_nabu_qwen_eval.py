@@ -27,17 +27,18 @@ class NabuQwenEvalTest(unittest.TestCase):
 
     def test_actual_public_nabu_tool_prompt_is_included(self):
         prompt = nabu.registered_nabu_prompt()
-        self.assertIn("Für aktuelle Ereignisse, Wetter, Preise", prompt)
+        self.assertIn("Für aktuelle Ereignisse, Preise", prompt)
         self.assertIn("Eine konkret gewünschte Aktion hat Vorrang", prompt)
         self.assertIn("nabu_web__play_music", prompt)
         self.assertIn("nabu_web__search", prompt)
+        self.assertIn("nabu_web__weather", prompt)
 
     def test_same_input_same_digest(self):
         a, tools = nabu.validate_fixture()
         b, other = nabu.validate_fixture()
         self.assertEqual(nabu.digest(a), nabu.digest(b))
         self.assertEqual(nabu.digest(tools), nabu.digest(other))
-        self.assertEqual(10, len(tools))
+        self.assertEqual(11, len(tools))
 
     def test_reject_null_music_parameters(self):
         self.assertFalse(nabu.valid_arguments("nabu_web__play_music", {"media_id": None}))
