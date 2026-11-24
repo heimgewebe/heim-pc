@@ -715,11 +715,36 @@ class ChatGPTTextTransportChallengeTests(IsolatedAsyncioTestCase):
         self.assertTrue(roundtrip["allow_mutation"])
         self.assertEqual(roundtrip["parameters"]["target_arguments"], bound)
         self.assertEqual(roundtrip["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertEqual(session.calls[0][1]["timeout"], {"total": 20, "connect": 4})
+        self.assertEqual(session.calls[1][1]["timeout"], {"total": 60, "connect": 4})
         invalid = dict(bound, argv=[*bound["argv"][:-1], "https://chatgpt.com/c/fake"])
         denied = DummySession([DummyResponse(200, chunks=[encode(err)])])
         with self.assertRaises(grabowski.GrabowskiUnavailable):
             await grabowski.mcp_call(denied, "grabowski_task_start", invalid)
         self.assertEqual(len(denied.calls), 1)
+
+
+    async def test_lost_browser_receipt_reports_uncertainty_without_retry(self):
+        challenge = "c" * 64
+        denied = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+
+        class LostReceipt(DummyResponse):
+            async def __aenter__(self):
+                raise TimeoutError("receipt not delivered")
+
+        session = DummySession([
+            DummyResponse(200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]),
+            LostReceipt(200),
+        ])
+        with self.assertRaisesRegex(grabowski.GrabowskiUnavailable, "möglicherweise ausgelöst"):
+            await grabowski.mcp_call(session, "grabowski_task_start",
+                                     grabowski.chatgpt_text_launch_args("Status"))
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[1][1]["timeout"]["total"], 60)
 
 
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):

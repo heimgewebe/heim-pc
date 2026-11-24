@@ -286,7 +286,7 @@ def parse_mcp_response(raw: str, request_id: int = 1) -> dict:
 
 
 async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
-                   *, endpoint: str = MCP_ENDPOINT) -> dict:
+                   *, endpoint: str = MCP_ENDPOINT, timeout_seconds: int = 20) -> dict:
     """Invoke a fixed call; success requires a matching server result."""
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -295,7 +295,7 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
     try:
         async with session.post(
             endpoint, headers=MCP_HEADERS, json=payload,
-            timeout=aiohttp.ClientTimeout(total=20, connect=4),
+            timeout=aiohttp.ClientTimeout(total=timeout_seconds, connect=4),
         ) as response:
             response.raise_for_status()
             chunks = []
@@ -352,13 +352,20 @@ async def mcp_call(session: aiohttp.ClientSession, name: str, args: dict,
                     "user_intent": ("Nabu öffnet auf ausdrücklichen Wunsch ChatGPT im Browser"
                                     if fixed_browser_launch else
                                     "Nabu liest vom Benutzer verlangte Grabowski-Daten"),
-                }, endpoint=endpoint)
+                }, endpoint=endpoint, timeout_seconds=60 if fixed_browser_launch else 20)
                 output = verified.get("output") or {}
                 if (verified.get("status") != "passed" or output.get("state") != "executed"
                         or not isinstance(output.get("target_result"), dict)):
                     raise GrabowskiUnavailable("Grabowski hat die Read-only-Verifikation nicht bestätigt")
                 return output["target_result"]
     except (aiohttp.ClientError, TimeoutError) as exc:
+        if timeout_seconds == 60:
+            # The bound browser launch may already have executed before the
+            # receipt reaches us. Do not retry or misreport it as not started.
+            raise GrabowskiUnavailable(
+                "ChatGPT-Browserstart möglicherweise ausgelöst; Bestätigung fehlt. "
+                "Bitte Browser prüfen, nicht automatisch erneut senden."
+            ) from exc
         raise GrabowskiUnavailable("Grabowski derzeit nicht erreichbar; Aktion nicht bestätigt") from exc
 
 
