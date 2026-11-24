@@ -27,17 +27,18 @@ class NabuQwenEvalTest(unittest.TestCase):
 
     def test_actual_public_nabu_tool_prompt_is_included(self):
         prompt = nabu.registered_nabu_prompt()
-        self.assertIn("Für aktuelle Ereignisse, Wetter, Preise", prompt)
+        self.assertIn("Für aktuelle Ereignisse, Preise", prompt)
         self.assertIn("Eine konkret gewünschte Aktion hat Vorrang", prompt)
         self.assertIn("nabu_web__play_music", prompt)
         self.assertIn("nabu_web__search", prompt)
+        self.assertIn("nabu_web__weather", prompt)
 
     def test_same_input_same_digest(self):
         a, tools = nabu.validate_fixture()
         b, other = nabu.validate_fixture()
         self.assertEqual(nabu.digest(a), nabu.digest(b))
         self.assertEqual(nabu.digest(tools), nabu.digest(other))
-        self.assertEqual(10, len(tools))
+        self.assertEqual(11, len(tools))
 
     def test_reject_null_music_parameters(self):
         self.assertFalse(nabu.valid_arguments("nabu_web__play_music", {"media_id": None}))
@@ -53,6 +54,16 @@ class NabuQwenEvalTest(unittest.TestCase):
         self.assertFalse(nabu.valid_arguments("nabu_web__browser", {"operation": "shell"}))
         self.assertFalse(nabu.valid_arguments("climate__HassClimateSetTemperature", {"temperature": 21}))
         self.assertTrue(nabu.valid_arguments("climate__HassClimateSetTemperature", {"area": "Flur", "temperature": 21}))
+
+    def test_chatgpt_text_is_default_and_voice_needs_explicit_mode(self):
+        good = nabu.valid_arguments
+        self.assertTrue(good("nabu_web__chatgpt", {"question": "Frag Grabowski nach seinen Aufgaben"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "browser_chat", "question": "Test"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "browser_voice"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "browser_voice", "question": "Test"}))
+        self.assertTrue(good("nabu_web__chatgpt", {"mode": "answer", "question": "Test"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "answer"}))
+        self.assertFalse(good("nabu_web__chatgpt", {"mode": "delete", "question": "Test"}))
 
     def test_browser_operation_specific_required_arguments(self):
         good = nabu.valid_arguments
