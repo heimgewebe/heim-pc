@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "purpose": "Non-private Nabu Assist configuration source and observed recovery identity; not an automatic activation policy",
+  "observed_at": "2026-11-24T19:17:13.742174+01:00",
+  "tested_software": {
+    "home_assistant": "2026.11.2",
+    "wyoming_faster_whisper": "3.8.1",
+    "sherpa_onnx": "1.13.8",
+    "hassil": "3.12.1",
+    "home_assistant_intents": "2026.10.27",
+    "containers": {
+      "heimgewebe-assist-whisper": {
+        "image_id": "e246c5e9a469065c9f6d2a606e7bf408e90e16a3911fa599905ac442af6ae22c",
+        "repo_digests": [
+          "docker.io/rhasspy/wyoming-whisper@sha256:99999ececb7b5d1d176689a81cc78f281d5fdd2a3b29a24b51b85154ab704acd",
+          "docker.io/rhasspy/wyoming-whisper@sha256:ba6fcb6056ebe237d15a325381763a80af2fc8fcedaa04f6a714a7375eb20d80"
+        ]
+      },
+      "heimgewebe-assist-piper": {
+        "image_id": "88050dcc853f1f8af2608395ed6595057337522a9c8e3fa8264195eb17fa99a2",
+        "repo_digests": [
+          "docker.io/rhasspy/wyoming-piper@sha256:0f4598a8f8a984275f67c066d7cd96d26ef2601947d0372b8f32c82ae18fb7cd",
+          "docker.io/rhasspy/wyoming-piper@sha256:2dd49da0e92acd0c191721f6c103a27acedea0075e63b7614da78d69cb811ae2"
+        ]
+      },
+      "heimgewebe-homeassistant": {
+        "image_id": "a5e826be5db5dc9188a381063ecb72ba34dd4cc105687bb4fd6b6497a138a416",
+        "repo_digests": [
+          "ghcr.io/home-assistant/home-assistant@sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f",
+          "ghcr.io/home-assistant/home-assistant@sha256:69193f00e76147a1649a910d39673680e37ce4362dfb410a328a806a824f2000"
+        ]
+      },
+      "heimgewebe-assist-ollama": {
+        "image_id": "6c437ef9d364e1712bc7e2342b224369e3669c29d9373f1bbdd68f4601d58fd9",
+        "repo_digests": [
+          "docker.io/ollama/ollama@sha256:910d0d8107b538fb0894e63163eb195de0cc7aefcbc666dc62d3b18f71124592",
+          "docker.io/ollama/ollama@sha256:a372a1c0d1e15b68e9521189785c3ca17795c26c2356f8b1b10122cfb59ed0d7"
+        ]
+      }
+    }
+  },
+  "pipeline": {
+    "language": "de",
+    "conversation_language": "de",
+    "stt_language": "de",
+    "stt_engine": "stt.faster_whisper",
+    "tts_engine": "tts.piper",
+    "tts_language": "de_DE",
+    "tts_voice": "de_DE-thorsten-medium",
+    "prefer_local_intents": true
+  },
+  "ollama": {
+    "options": {
+      "model": "nabu-qwen38-q3-text-renderer35:20261124",
+      "think": true,
+      "num_ctx": 16384,
+      "max_history": 8,
+      "keep_alive": 600,
+      "llm_hass_api": [
+        "assist"
+      ]
+    },
+    "model_manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+      "config": {
+        "mediaType": "application/vnd.docker.container.image.v1+json",
+        "digest": "sha256:d1ac100171dd37287a0b94d75ede144b24dc8f86055b30c49151adfbc5edb49d",
+        "size": 158
+      },
+      "layers": [
+        {
+          "mediaType": "application/vnd.ollama.image.model",
+          "digest": "sha256:bf36be02870bd1147131472627f3545851f5114aeee97acc8ebfabac34c1b59a",
+          "size": 13500737344,
+          "from": "model.gguf"
+        },
+        {
+          "mediaType": "application/vnd.ollama.image.license",
+          "digest": "sha256:50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32",
+          "size": 11343
+        }
+      ],
+      "runner": "llamacpp",
+      "format": "gguf"
+    },
+    "model_config": {
+      "model_format": "gguf",
+      "model_family": "qwen35",
+      "model_families": [
+        "qwen35"
+      ],
+      "model_type": "27.3B",
+      "file_type": "Q3_K_M",
+      "renderer": "qwen3.5",
+      "parser": "qwen3.5"
+    }
+  },
+  "stt": {
+    "unit": "heimgewebe-assist-whisper.service",
+    "quadlet": "~/.config/containers/systemd/heimgewebe-assist-whisper.container",
+    "listen": "127.0.0.1:10300",
+    "exec": "--stt-library sherpa --model sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 --language de --local-files-only",
+    "model_cache": "~/.local/share/heimgewebe/assist/whisper",
+    "model_directory": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+    "model_source": {
+      "repo": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+      "revision": "ed5d745623472f97cfc2e6c2916ee248798fc5a8",
+      "files": {
+        "tokens.txt": {
+          "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+          "bytes": 93939
+        },
+        "decoder.int8.onnx": {
+          "sha256": "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5",
+          "bytes": 11845274
+        },
+        "joiner.int8.onnx": {
+          "sha256": "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98",
+          "bytes": 6355277
+        },
+        "encoder.int8.onnx": {
+          "sha256": "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479",
+          "bytes": 652282294
+        }
+      }
+    }
+  },
+  "native_intents": {
+    "grammar_target": "~/.local/share/heimgewebe/home-assistant/custom_sentences/de/nabu_native_commands.yaml",
+    "intent_script_target": "existing intent_script mapping in ~/.local/share/heimgewebe/home-assistant/configuration.yaml",
+    "retain_local_aliases_and_exposure": true
+  },
+  "files": {
+    "native_commands.yaml": {
+      "sha256": "be52c6840d6af40a9223e50ef04d10ecc40e31826b408a7658019f7fddacbf9f",
+      "bytes": 1473
+    },
+    "native_intent_scripts.yaml": {
+      "sha256": "f22a8cdf495335b7dbb086a5617054a141f42ad062654121b95fa5f6116dca5d",
+      "bytes": 212
+    },
+    "prompt-addendum.txt": {
+      "sha256": "5b0daa98c4c56c73db47ff21f3b8ae7b4131c1cf0b652134d07f1e1f8288c5ec",
+      "bytes": 774
+    }
+  }
+}
