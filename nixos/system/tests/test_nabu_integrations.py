@@ -143,7 +143,7 @@ class ChatGPTBrowserVoiceTests(TestCase):
         self.assertEqual(
             grabowski.CHATGPT_BROWSER_ARGV,
             ("/run/current-system/sw/bin/kstart", "--desktopfile", "nabu-chatgpt", "--",
-             "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Profile 1",
+             "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Default",
              "https://chatgpt.com/?mode=voice"),
         )
         task_id = "d" * 24
@@ -168,16 +168,18 @@ class ChatGPTBrowserVoiceTests(TestCase):
         self.assertEqual(call.call_args_list[1].args[1], "grabowski_task_status")
         self.assertEqual(call.call_args_list[1].args[2]["task_id"], task_id)
 
-    def test_voice_and_text_share_only_dedicated_chrome_profile(self):
+    def test_voice_and_text_reuse_existing_personal_chrome_profile(self):
         voice = grabowski.chatgpt_voice_launch_args()["argv"]
         text = grabowski.chatgpt_text_launch_args("Status")["argv"]
         self.assertEqual(voice[:-1], text[:-1])
         self.assertEqual(voice[:-1], [
             "/run/current-system/sw/bin/kstart", "--desktopfile", "nabu-chatgpt", "--",
-            "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Profile 1",
+            "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Default",
         ])
         self.assertNotIn("xdg-open", " ".join(voice + text))
         self.assertNotIn("--guest", voice + text)
+        self.assertFalse(any(arg.startswith("--user-data-dir") for arg in voice + text))
+        self.assertNotIn("--new-window", voice + text)
         self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(
             grabowski.chatgpt_text_launch_args("Status")
         ))
@@ -250,7 +252,7 @@ class ChatGPTBrowserTextTests(TestCase):
         valid = grabowski.chatgpt_text_launch_args("Test")
         failures = [
             dict(valid, argv=["/bin/sh", *valid["argv"][1:]]),
-            dict(valid, argv=[*valid["argv"][:-2], "--profile-directory=Default", valid["argv"][-1]]),
+            dict(valid, argv=[*valid["argv"][:-2], "--profile-directory=Profile 1", valid["argv"][-1]]),
             dict(valid, argv=[*valid["argv"][:-2], "--profile-directory=Profile 2", valid["argv"][-1]]),
             dict(valid, argv=["/run/current-system/sw/bin/xdg-open", valid["argv"][-1]]),
             dict(valid, argv=[*valid["argv"][:-1], "https://evil.example/?prompt=Test"]),
@@ -676,7 +678,7 @@ class BrowserVoiceTransportChallengeTests(IsolatedAsyncioTestCase):
             200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]
         )
         illegal = grabowski.chatgpt_voice_launch_args()
-        illegal["argv"][-2] = "--profile-directory=Default"
+        illegal["argv"][-2] = "--profile-directory=Profile 1"
         for name, args in (
             ("grabowski_task_start", illegal),
             ("grabowski_terminal_run", {"argv": ["echo", "hello"]}),

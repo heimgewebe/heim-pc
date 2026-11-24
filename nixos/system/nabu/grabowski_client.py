@@ -33,12 +33,12 @@ class GrabowskiUnavailable(RuntimeError):
 CHATGPT_HOME_URL = "https://chatgpt.com/"
 CHATGPT_TEXT_PREFIX = CHATGPT_HOME_URL + "?prompt="
 CHATGPT_VOICE_URL = CHATGPT_HOME_URL + "?mode=voice"
-# The new Nabu profile is intentionally distinct from the user's Default.
+# Nabu reuses the user's existing Default Chrome profile and login session.
 # KDE hands the application to its desktop lifecycle, also on a cold start.
 # Running Chrome directly inside a bounded task kills a new browser at timeout.
-# Keep the exact dedicated profile and URL; never fall back to xdg-open.
+# Keep the exact existing profile and URL; never fall back to xdg-open.
 CHATGPT_BROWSER_BIN = "/home/alex/.nix-profile/bin/google-chrome"
-CHATGPT_BROWSER_PROFILE = "Profile 1"
+CHATGPT_BROWSER_PROFILE = "Default"
 CHATGPT_BROWSER_PROFILE_ARG = "--profile-directory=" + CHATGPT_BROWSER_PROFILE
 CHATGPT_BROWSER_PREFIX = ("/run/current-system/sw/bin/kstart", "--desktopfile",
                           "nabu-chatgpt", "--", CHATGPT_BROWSER_BIN,
@@ -91,7 +91,7 @@ def chatgpt_text_url(question: str | None) -> str:
 
 
 def chatgpt_text_launch_args(question: str | None = None) -> dict:
-    """Open ChatGPT only in the dedicated persistent Nabu Chrome profile."""
+    """Open ChatGPT only in the user's existing Default Chrome profile."""
     return {
         "host": "heim-pc",
         "argv": [*CHATGPT_BROWSER_PREFIX, chatgpt_text_url(question)],

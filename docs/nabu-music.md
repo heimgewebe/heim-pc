@@ -125,27 +125,30 @@ die lokalen Modelle nutzbar.
 
 ### Textchat statt Sprachchat als Standard
 
-**Festes Nabu-Chrome-Profil:** Nabus Textchat und ausdrücklich angeforderter
-Voice-Modus verwenden ausschließlich Google Chrome mit
-`--profile-directory="Profile 1"`. Das ist ein eigenständiges, persistentes
-Profil unter `~/.config/google-chrome/Profile 1`, getrennt vom normalen
-Chrome-Profil `Default`. Ein weiterer Browserdienst ist nicht notwendig. Der KDE-Anwendungsstarter
+**Vorhandenes persönliches Chrome-Profil:** Nabus Textchat und ausdrücklich
+angeforderter Voice-Modus verwenden ausschließlich das bereits genutzte
+Chrome-Profil `Default` (`--profile-directory=Default`). Nabu benutzt den
+normalen Chrome-Profilspeicher unter `~/.config/google-chrome/Default` und
+übergibt Links an die bestehende Sitzung, ohne einen anderen Profilspeicher,
+ein neues Browserprofil oder ein neues Fenster zu erzwingen. Ein weiterer
+Browserdienst ist nicht notwendig. Der KDE-Anwendungsstarter
 `kstart --desktopfile nabu-chatgpt` übergibt Chrome an den normalen
 Desktop-Lebenszyklus, statt einen neu gestarteten Browser mit dem Zeitlimit
 des kurzlebigen Grabowski-Starttasks zu beenden.
-Nabu benutzt weder `xdg-open` noch das Standardprofil als Rückfallweg.
+Nabu benutzt weder `xdg-open` noch ein anderes Profil als Rückfallweg.
 Der lokale Nabu-Headless-Browser für öffentliche Webrecherchen bleibt davon
 separat; der OAuth-Antwortmodus bleibt ebenfalls unverändert.
 
-Einmalig im neuen Profil persönlich bei **dem gewünschten ChatGPT-Konto**
-anmelden. Über den KDE-Starter **Nabu – ChatGPT** lässt sich genau dieses
-Profil öffnen. Vor der Anmeldung ist die Kontoidentität nicht nachgewiesen;
+Die vorhandene Anmeldung bei **dem gewünschten ChatGPT-Konto** bleibt
+bestehen. Über den KDE-Starter **Nabu – ChatGPT** lässt sich genau dieses
+Profil öffnen. Falls noch keine Anmeldung besteht, persönlich anmelden;
+die Kontoidentität ist ansonsten nicht nachgewiesen;
 ein Browserstart allein beweist weder Anmeldung noch richtige Kontoauswahl.
 Das Profil kann auch einen ChatGPT-Kontowechsel enthalten, weshalb die
 Kontozugehörigkeit im Browser geprüft werden muss.
 
 Die lokale Erweiterung für signierte Nabu-Textaufträge wird **pro Chrome-Profil**
-aktiviert. In **Profile 1** `chrome://extensions` öffnen, Entwicklermodus
+aktiviert. In **Default** `chrome://extensions` öffnen, Entwicklermodus
 anschalten, »Entpackte Erweiterung laden« und das bereits vorbereitete
 Verzeichnis `/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`
 wählen. Anschließend ChatGPT neu laden und einen harmlosen Textauftrag
@@ -200,7 +203,7 @@ Sie bewahrt einen privaten Schlüssel in
 `~/.local/share/heimgewebe/home-assistant/.nabu-chatgpt-autosend.key`
 und erstellt die entpackte Chrome-Erweiterung unter
 `/home/alex/.local/share/heimgewebe/nabu-chatgpt-autosend-extension`.
-**Einmalig in der mit ChatGPT angemeldeten Chrome-Sitzung `Profile 1`:**
+**Einmalig in der mit ChatGPT angemeldeten Chrome-Sitzung `Default`:**
 `chrome://extensions` öffnen, Entwicklermodus einschalten,
 **Entpackte Erweiterung laden** und genau diesen Verzeichnispfad wählen.
 Danach die ChatGPT-Seite einmal neu laden. Dafür muss kein Browserprofil
