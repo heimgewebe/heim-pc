@@ -7,7 +7,7 @@ import unittest
 
 SRC = Path(__file__).resolve().parents[1] / "nabu" / "llm.py"
 EXPECTED = [
-    "WebSearch", "WebRead", "Browser", "PlayMusic",
+    "WeatherForecast", "WebSearch", "WebRead", "Browser", "PlayMusic",
     "GrabowskiStatus", "GrabowskiRequest", "ChatGPTAnswer",
 ]
 
@@ -25,7 +25,7 @@ class SingleModelContract(unittest.TestCase):
         cls.prompt = ast.literal_eval(next(k.value for k in cls.llm.keywords
                                            if k.arg == "prompt"))
 
-    def test_exactly_seven_tools_without_second_model(self):
+    def test_exactly_eight_tools_without_second_model(self):
         tools = next(k.value for k in self.llm.keywords if k.arg == "tools")
         self.assertEqual(EXPECTED, [call.func.id for call in tools.elts])
         names = [n.name for n in self.tree.body if isinstance(n, ast.ClassDef)]
@@ -53,10 +53,16 @@ class SingleModelContract(unittest.TestCase):
 
     def test_source_first_without_model_switch(self):
         for phrase in ("nabu_web__search", "nabu_web__read_page",
-                       "Wetter", "Amtsinhaber", "tatsächlich gelesene URLs"):
+                       "Amtsinhaber", "tatsächlich gelesene URLs"):
             self.assertIn(phrase, self.prompt)
         self.assertNotIn("Zweitmodell", self.prompt)
         self.assertNotIn("nabu_web__deep_answer", self.prompt)
+
+    def test_weather_uses_dedicated_tool_not_web_search(self):
+        self.assertIn("Für Wetter, Temperatur, Regen", self.prompt)
+        self.assertIn("nabu_web__weather", self.prompt)
+        self.assertIn("nicht im Web suchen", self.prompt)
+        self.assertNotIn("Ereignisse, Wetter", self.prompt)
 
     def test_no_unverified_success_claims(self):
         for phrase in ("Bei Werkzeugfehlern nie Erfolg",
@@ -65,8 +71,11 @@ class SingleModelContract(unittest.TestCase):
             self.assertIn(phrase, self.prompt)
 
     def test_optional_chatgpt_only_when_explicit(self):
-        self.assertIn("Auf ausdrücklichen Wunsch nach ChatGPT", self.prompt)
-        self.assertIn("sonst ausschließlich mit dem lokalen Modell", self.prompt)
+        self.assertIn("Bei ausdrücklichem Wunsch nach ChatGPT", self.prompt)
+        self.assertIn("mode=browser_chat", self.prompt)
+        self.assertIn("mode=browser_voice", self.prompt)
+        self.assertIn("mode=answer", self.prompt)
+        self.assertIn("Sonst ausschließlich mit dem lokalen Modell", self.prompt)
 
 
 if __name__ == "__main__":

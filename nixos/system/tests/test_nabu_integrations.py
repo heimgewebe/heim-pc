@@ -135,6 +135,240 @@ class GrabowskiContractTests(TestCase):
                 grabowski.compact_result("obligation", result)
 
 
+
+class ChatGPTBrowserVoiceTests(TestCase):
+    """Browser handoff must remain fixed and never impersonate a Voice E2E."""
+
+    def test_success_uses_only_fixed_chatgpt_url_and_grabowski_task(self):
+        self.assertEqual(
+            grabowski.CHATGPT_BROWSER_ARGV,
+            ("/run/current-system/sw/bin/kstart", "--desktopfile", "nabu-chatgpt", "--",
+             "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Default",
+             "https://chatgpt.com/?mode=voice"),
+        )
+        task_id = "d" * 24
+        replies = [
+            {"task": {"task_id": task_id, "launcher": {"returncode": 0}}},
+            {"task_id": task_id, "state": "completed"},
+        ]
+        with mock.patch.object(grabowski, "mcp_call",
+                               new=mock.AsyncMock(side_effect=replies)) as call:
+            result = asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+        self.assertEqual(result["status"], "start_completed")
+        self.assertEqual(result["task_id"], task_id)
+        for key in ("browser_login_verified", "microphone_verified",
+                    "chatgpt_voice_active_verified"):
+            self.assertIs(result[key], False)
+        first = call.call_args_list[0]
+        self.assertEqual(first.args[1], "grabowski_task_start")
+        start = first.args[2]
+        self.assertEqual(start["host"], "heim-pc")
+        self.assertEqual(start["argv"], list(grabowski.CHATGPT_BROWSER_ARGV))
+        self.assertEqual(start["resume_policy"], "never")
+        self.assertEqual(call.call_args_list[1].args[1], "grabowski_task_status")
+        self.assertEqual(call.call_args_list[1].args[2]["task_id"], task_id)
+
+    def test_voice_and_text_reuse_existing_personal_chrome_profile(self):
+        voice = grabowski.chatgpt_voice_launch_args()["argv"]
+        text = grabowski.chatgpt_text_launch_args("Status")["argv"]
+        self.assertEqual(voice[:-1], text[:-1])
+        self.assertEqual(voice[:-1], [
+            "/run/current-system/sw/bin/kstart", "--desktopfile", "nabu-chatgpt", "--",
+            "/home/alex/.nix-profile/bin/google-chrome", "--profile-directory=Default",
+        ])
+        self.assertNotIn("xdg-open", " ".join(voice + text))
+        self.assertNotIn("--guest", voice + text)
+        self.assertFalse(any(arg.startswith("--user-data-dir") for arg in voice + text))
+        self.assertNotIn("--new-window", voice + text)
+        self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(
+            grabowski.chatgpt_text_launch_args("Status")
+        ))
+
+    def test_no_valid_launch_receipt_means_no_success(self):
+        for reply in ({}, {"task": {"task_id": "not-a-task", "launcher": {"returncode": 0}}},
+                      {"task": {"task_id": "f" * 24, "launcher": {"returncode": 1}}}):
+            with self.subTest(reply=reply), mock.patch.object(
+                grabowski, "mcp_call", new=mock.AsyncMock(return_value=reply),
+            ) as call:
+                with self.assertRaises(grabowski.GrabowskiUnavailable):
+                    asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+                self.assertEqual(call.call_count, 1)
+
+    def test_failed_or_unknown_execution_does_not_claim_browser_open(self):
+        for state in ("failed", "timed_out", "outcome_unknown"):
+            replies = [
+                {"task": {"task_id": "f" * 24, "launcher": {"returncode": 0}}},
+                {"task_id": "f" * 24, "state": state},
+            ]
+            with self.subTest(state=state), mock.patch.object(
+                grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+            ):
+                with self.assertRaises(grabowski.GrabowskiUnavailable):
+                    asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+
+    def test_other_task_status_cannot_confirm_voice_launch(self):
+        replies = [
+            {"task": {"task_id": "f" * 24, "launcher": {"returncode": 0}}},
+            {"task_id": "e" * 24, "state": "completed"},
+        ]
+        with mock.patch.object(
+            grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+        ):
+            with self.assertRaises(grabowski.GrabowskiUnavailable):
+                asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+
+    def test_launching_is_not_confused_with_complete_or_authenticated_voice(self):
+        replies = [
+            {"task": {"task_id": "e" * 24, "launcher": {"returncode": 0}}},
+            {"task_id": "e" * 24, "state": "running"},
+        ]
+        with mock.patch.object(
+            grabowski, "mcp_call", new=mock.AsyncMock(side_effect=replies),
+        ):
+            result = asyncio.run(grabowski.start_chatgpt_browser_voice(object()))
+        self.assertEqual(result["status"], "start_requested")
+        self.assertFalse(result["chatgpt_voice_active_verified"])
+
+class ChatGPTBrowserTextTests(TestCase):
+    """Sending a desktop link cannot be confused with sending a chat message."""
+
+    def test_prefill_url_is_canonical_and_encodes_user_text(self):
+        from urllib.parse import parse_qs, urlsplit
+        question = "Prüfe: Büro & Haus? #Grabowski + Nabu"
+        url = grabowski.chatgpt_text_url(question)
+        self.assertEqual(urlsplit(url).scheme, "https")
+        self.assertEqual(urlsplit(url).hostname, "chatgpt.com")
+        self.assertEqual(parse_qs(urlsplit(url).query), {"prompt": [question]})
+        self.assertNotIn("& Haus", url)
+        self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(
+            grabowski.chatgpt_text_launch_args(question)
+        ))
+        self.assertEqual(grabowski.chatgpt_text_url(None), "https://chatgpt.com/")
+        self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(
+            grabowski.chatgpt_text_launch_args()
+        ))
+
+    def test_no_arbitrary_url_or_command_is_permitted(self):
+        valid = grabowski.chatgpt_text_launch_args("Test")
+        failures = [
+            dict(valid, argv=["/bin/sh", *valid["argv"][1:]]),
+            dict(valid, argv=[*valid["argv"][:-2], "--profile-directory=Profile 1", valid["argv"][-1]]),
+            dict(valid, argv=[*valid["argv"][:-2], "--profile-directory=Profile 2", valid["argv"][-1]]),
+            dict(valid, argv=["/run/current-system/sw/bin/xdg-open", valid["argv"][-1]]),
+            dict(valid, argv=[*valid["argv"][:-1], "https://evil.example/?prompt=Test"]),
+            dict(valid, argv=[*valid["argv"][:-1], "https://chatgpt.com/?mode=voice"]),
+            dict(valid, argv=[*valid["argv"][:-1], "https://chatgpt.com/?prompt=Test&x=1"]),
+            dict(valid, argv=[*valid["argv"][:-1], "https://chatgpt.com/?prompt=%4eabu"]),
+            dict(valid, argv=valid["argv"][4:]),  # direct Chrome task is not allowed
+            dict(valid, argv=[*valid["argv"][:2], "other-app", *valid["argv"][3:]]),
+            dict(valid, resource_keys=["repo.heim-pc"]),
+        ]
+        for args in failures:
+            with self.subTest(args=args):
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(args))
+        for text in ("", "  ", "Prüfen\nSystem", "\x00", "\t", "x" * 5100):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                grabowski.chatgpt_text_url(text)
+
+    def test_verifier_rejects_invalid_drafts_that_generator_refuses(self):
+        for encoded in ("", "%00", "%0A", "x" * 5000):
+            with self.subTest(payload=encoded[:16]):
+                launch = grabowski.chatgpt_text_launch_args(None)
+                launch["argv"][-1] = grabowski.CHATGPT_TEXT_PREFIX + encoded
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+
+    def test_text_start_receipt_does_not_claim_chat_submission(self):
+        task_id = "a" * 24
+        reply = [
+            {"task": {"task_id": task_id, "launcher": {"returncode": 0}}},
+            {"task_id": task_id, "state": "completed"},
+        ]
+        with mock.patch.object(grabowski, "mcp_call",
+                               new=mock.AsyncMock(side_effect=reply)) as call:
+            result = asyncio.run(
+                grabowski.start_chatgpt_browser_text(object(), "Schreib ChatGPT!")
+            )
+        self.assertEqual(result["status"], "browser_opened")
+        self.assertTrue(result["text_prefill_requested"])
+        for key in ("composer_prefill_verified", "message_sent_verified",
+                    "chatgpt_login_verified", "chatgpt_response_verified"):
+            self.assertIs(result[key], False)
+        self.assertIn("Senden", result["message"])
+        self.assertEqual(call.call_args_list[0].args[1], "grabowski_task_start")
+        self.assertEqual(
+            call.call_args_list[0].args[2],
+            grabowski.chatgpt_text_launch_args("Schreib ChatGPT!")
+        )
+        self.assertEqual(call.call_args_list[1].args[1], "grabowski_task_status")
+
+    def test_blank_open_and_unconfirmed_status(self):
+        with mock.patch.object(grabowski, "mcp_call", new=mock.AsyncMock(
+            side_effect=[
+                {"task": {"task_id": "b" * 24, "launcher": {"returncode": 0}}},
+                {"task_id": "b" * 24, "state": "running"},
+            ]
+        )):
+            result = asyncio.run(grabowski.start_chatgpt_browser_text(object()))
+        self.assertEqual(result["status"], "browser_open_requested")
+        self.assertFalse(result["text_prefill_requested"])
+        self.assertFalse(result["message_sent_verified"])
+
+
+class ChatGPTSignedSenderTests(TestCase):
+    """Only an installation-local fresh signed Nabu link may auto-submit."""
+
+    def test_signed_url_is_canonical_and_exactly_bound_to_request(self):
+        from urllib.parse import parse_qs, urlsplit
+        with tempfile.TemporaryDirectory() as root:
+            key = Path(root) / "sender.key"
+            key.write_text("ab" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value="cd" * 12):
+                question = "Prüfe Grabowski, aber ändere nichts."
+                launch = grabowski.chatgpt_text_launch_args(question)
+                fields = parse_qs(urlsplit(launch["argv"][-1]).query)
+                self.assertEqual(fields["prompt"], [question])
+                self.assertEqual(fields["nabu_ts"], ["1795425000"])
+                self.assertEqual(fields["nabu_nonce"], ["cd" * 12])
+                self.assertEqual(len(fields["nabu_sig"][0]), 64)
+                self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(launch))
+
+                original = launch["argv"][-1]
+                for bogus in (
+                    original.replace("Pr%C3%BCfe", "L%C3%B6sche"),
+                    original.replace("nabu_nonce=" + "cd" * 12, "nabu_nonce=" + "ce" * 12),
+                    original.replace(fields["nabu_sig"][0], "f" * 64),
+                    original + "&nabu_send=1",
+                ):
+                    with self.subTest(bogus=bogus[-30:]):
+                        invalid = dict(launch, argv=[*launch["argv"][:-1], bogus])
+                        self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(invalid))
+
+    def test_expired_and_wrong_key_rejected_without_retry(self):
+        with tempfile.TemporaryDirectory() as root:
+            key = Path(root) / "sender.key"
+            key.write_text("12" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value="56" * 12):
+                launch = grabowski.chatgpt_text_launch_args("Frag ChatGPT nach Projektstatus")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425300):
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+            key.write_text("13" * 32 + "\n", encoding="ascii")
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski.time, "time", return_value=1795425000):
+                self.assertFalse(grabowski.is_fixed_chatgpt_text_launch(launch))
+
+    def test_absent_sender_key_retains_manual_handoff(self):
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", Path(root) / "missing"):
+                link = grabowski.chatgpt_text_launch_args("Schreib ChatGPT")
+                self.assertNotIn("nabu_sig", link["argv"][-1])
+                self.assertTrue(grabowski.is_fixed_chatgpt_text_launch(link))
+
+
 class OAuthContractTests(TestCase):
     def test_private_storage_and_host_identity_are_stable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -402,6 +636,117 @@ class GrabowskiReadChallengeTests(IsolatedAsyncioTestCase):
                 "allow_mutation": False,
             })
         self.assertEqual(len(session.calls), 1)
+
+
+class BrowserVoiceTransportChallengeTests(IsolatedAsyncioTestCase):
+    async def test_exact_voice_browser_start_completes_challenge_once(self):
+        challenge = "b" * 64
+        first = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        target = {"task": {"task_id": "d" * 24, "launcher": {"returncode": 0}}}
+        second = {"jsonrpc": "2.0", "id": 1, "result": {
+            "structuredContent": {"status": "passed", "output": {
+                "state": "executed", "target_result": target,
+            }},
+        }}
+        encode = lambda obj: ("data: " + json.dumps(obj) + "\n\n").encode()
+        session = DummySession([
+            DummyResponse(200, chunks=[encode(first)]),
+            DummyResponse(200, chunks=[encode(second)]),
+        ])
+        args = grabowski.chatgpt_voice_launch_args()
+        result = await grabowski.mcp_call(session, "grabowski_task_start", args)
+        self.assertEqual(result, target)
+        self.assertEqual(len(session.calls), 2)
+        roundtrip = session.calls[1][1]["json"]["params"]
+        self.assertEqual(roundtrip["name"], "grip_run")
+        self.assertEqual(roundtrip["arguments"]["parameters"]["target_arguments"], args)
+        self.assertEqual(roundtrip["arguments"]["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertTrue(roundtrip["arguments"]["allow_mutation"])
+
+    async def test_no_generic_mutation_via_transport_challenge(self):
+        challenge = "c" * 64
+        denied = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        response = lambda: DummyResponse(
+            200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]
+        )
+        illegal = grabowski.chatgpt_voice_launch_args()
+        illegal["argv"][-2] = "--profile-directory=Profile 1"
+        for name, args in (
+            ("grabowski_task_start", illegal),
+            ("grabowski_terminal_run", {"argv": ["echo", "hello"]}),
+        ):
+            with self.subTest(name=name), self.assertRaises(grabowski.GrabowskiUnavailable):
+                session = DummySession([response()])
+                await grabowski.mcp_call(session, name, args)
+            self.assertEqual(len(session.calls), 1)
+
+
+class ChatGPTTextTransportChallengeTests(IsolatedAsyncioTestCase):
+    async def test_only_canonical_text_draft_qualifies_for_mutating_roundtrip(self):
+        challenge = "c" * 64
+        err = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+        accepted = {"jsonrpc": "2.0", "id": 1, "result": {
+            "structuredContent": {"status": "passed", "output": {
+                "state": "executed", "target_result": {
+                    "task": {"task_id": "e" * 24, "launcher": {"returncode": 0}}
+                },
+            }},
+        }}
+        encode = lambda obj: ("data: " + json.dumps(obj) + "\n\n").encode()
+        session = DummySession([
+            DummyResponse(200, chunks=[encode(err)]),
+            DummyResponse(200, chunks=[encode(accepted)]),
+        ])
+        bound = grabowski.chatgpt_text_launch_args("Nabu: Bitte teste den Status")
+        answer = await grabowski.mcp_call(session, "grabowski_task_start", bound)
+        self.assertEqual(answer["task"]["task_id"], "e" * 24)
+        self.assertEqual(len(session.calls), 2)
+        roundtrip = session.calls[1][1]["json"]["params"]["arguments"]
+        self.assertTrue(roundtrip["allow_mutation"])
+        self.assertEqual(roundtrip["parameters"]["target_arguments"], bound)
+        self.assertEqual(roundtrip["parameters"]["challenge_receipt_sha256"], challenge)
+        self.assertEqual(session.calls[0][1]["timeout"], {"total": 20, "connect": 4})
+        self.assertEqual(session.calls[1][1]["timeout"], {"total": 60, "connect": 4})
+        invalid = dict(bound, argv=[*bound["argv"][:-1], "https://chatgpt.com/c/fake"])
+        denied = DummySession([DummyResponse(200, chunks=[encode(err)])])
+        with self.assertRaises(grabowski.GrabowskiUnavailable):
+            await grabowski.mcp_call(denied, "grabowski_task_start", invalid)
+        self.assertEqual(len(denied.calls), 1)
+
+
+    async def test_lost_browser_receipt_reports_uncertainty_without_retry(self):
+        challenge = "c" * 64
+        denied = {"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True, "content": [{"type": "text", "text":
+                "fresh intent-bound transport verification required; "
+                "challenge_receipt_sha256=" + challenge}],
+        }}
+
+        class LostReceipt(DummyResponse):
+            async def __aenter__(self):
+                raise TimeoutError("receipt not delivered")
+
+        session = DummySession([
+            DummyResponse(200, chunks=[("data: " + json.dumps(denied) + "\n\n").encode()]),
+            LostReceipt(200),
+        ])
+        with self.assertRaisesRegex(grabowski.GrabowskiUnavailable, "möglicherweise ausgelöst"):
+            await grabowski.mcp_call(session, "grabowski_task_start",
+                                     grabowski.chatgpt_text_launch_args("Status"))
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[1][1]["timeout"]["total"], 60)
 
 
 class GrabowskiDispatchTests(IsolatedAsyncioTestCase):

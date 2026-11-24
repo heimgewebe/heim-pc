@@ -179,6 +179,7 @@ BROWSER_OPERATIONS = ("open", "open", "click", "scroll", "inspect",
 GRABOWSKI_READ_OPERATIONS = ("status", "status", "tasks", "tasks", "status",
                             "tasks", "status", "tasks", "status", "tasks")
 OVERRIDE = {
+    ("fresh", 0): "nabu_web__weather",
     ("device", 1): "intent__HassTurnOff",
     ("device", 2): "climate__HassClimateSetTemperature",
     ("device", 4): "intent__HassTurnOff",
@@ -216,13 +217,15 @@ DEVELOPMENT_SMOKE = [
     ("Frag ChatGPT nach einer Erklärung von Sternen.", "nabu_web__chatgpt"),
 ]
 MODEL_TOOLS = {
+    "WeatherForecast": ("nabu_web__weather", {"location": {"type": "string"}}, []),
     "WebSearch": ("nabu_web__search", {"query": {"type": "string"}}, ["query"]),
     "WebRead": ("nabu_web__read_page", {"url": {"type": "string"}, "question": {"type": "string"}}, ["url"]),
     "Browser": ("nabu_web__browser", {"operation": {"type": "string", "enum": ["open", "inspect", "click", "type", "scroll"]},
                                        "url": {"type": "string"}, "target": {"type": "string"}, "value": {"type": "string"}}, ["operation"]),
     "PlayMusic": ("nabu_web__play_music", {"media_id": {"type": "string"}, "media_type": {"type": "string", "enum": ["track", "album", "artist", "playlist", "radio"]},
                                           "artist": {"type": "string"}}, []),
-    "ChatGPTAnswer": ("nabu_web__chatgpt", {"question": {"type": "string"}}, ["question"]),
+    "ChatGPTAnswer": ("nabu_web__chatgpt", {"mode": {"type": "string", "enum": ["browser_chat", "browser_voice", "answer"]},
+                                             "question": {"type": "string"}}, []),
     "GrabowskiRequest": ("nabu_web__grabowski_request", {"objective": {"type": "string"}, "acceptance": {"type": "string"}}, ["objective", "acceptance"]),
     "GrabowskiStatus": ("nabu_web__grabowski", {"operation": {"type": "string", "enum": ["status", "tasks", "task", "obligation"]},
                                               "task_id": {"type": "string"}, "obligation_id": {"type": "string"}}, ["operation"]),
@@ -378,10 +381,20 @@ def valid_arguments(kind, args):
         return op in ("inspect", "scroll")
     if kind == "nabu_web__read_page":
         return isinstance(args.get("url"), str) and args["url"].startswith(("http://", "https://"))
+    if kind == "nabu_web__weather":
+        return isinstance(args.get("location", ""), str)
     if kind == "nabu_web__search":
         return isinstance(args.get("query"), str) and bool(args["query"].strip())
     if kind == "nabu_web__chatgpt":
-        return isinstance(args.get("question"), str) and bool(args["question"].strip())
+        mode = args.get("mode", "browser_chat")
+        if mode == "browser_voice":
+            return not args.get("question")
+        if mode == "browser_chat":
+            return ("question" not in args or
+                    isinstance(args["question"], str) and bool(args["question"].strip()))
+        if mode == "answer":
+            return isinstance(args.get("question"), str) and bool(args["question"].strip())
+        return False
     if kind == "nabu_web__grabowski_request":
         return all(isinstance(args.get(x), str) and bool(args[x].strip()) for x in ("objective", "acceptance"))
     if kind == "nabu_web__grabowski":
