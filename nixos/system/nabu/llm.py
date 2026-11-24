@@ -558,7 +558,12 @@ class WebRead(Tool):
                             raise ValueError("Die Seite enthält keinen lesbaren Text")
                         data = await read_bounded(resp.content, 240000)
                         actual = str(resp.url)
-                        document = data.decode(resp.charset or "utf-8", errors="replace")
+                        try:
+                            document = data.decode(resp.charset or "utf-8", errors="replace")
+                        except LookupError:
+                            # Unknown charset labels (e.g. "utf8mb4") must not
+                            # abort WebRead or the whole news search bundle.
+                            document = data.decode("utf-8", errors="replace")
                         break
             parser = TextExtractor()
             parser.feed(document)
