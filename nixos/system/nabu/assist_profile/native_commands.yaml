@@ -4,6 +4,8 @@ lists:
     values:
       - in: "lila"
         out: "purple"
+      - in: "türkis"
+        out: "turquoise"
       - in: "hell[ ]gelb"
         out: "lightyellow"
 intents:
@@ -12,7 +14,7 @@ intents:
       - sentences:
           - "[<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [auf ]{color} (an[ ]machen|ein[ ]schalten|machen)"
           - "(kannst du|könntest du) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [auf ]{color} machen"
-          - "(mach[e]|färbe) [<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [auf ]{color}"
+          - "(mach[e|t]|färbe) [<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [(auf|in) ]{color}"
           - "ach [<artikel_bestimmt> ]{name} {color}"
         requires_context:
           domain: "light"

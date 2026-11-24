@@ -12,7 +12,7 @@ das Profil nicht automatisch.
   Pipelineoptionen und Zielpfade. OCI-IDs und RepoDigests bezeichnen den
   getesteten Bestand, nicht eine Behauptung über das jeweils neueste Image.
 - `native_commands.yaml`: additive deutsche HassLightSet-Sätze, die Farben
-  Lila/Hellgelb und eindeutige Musik-Stopp-Befehle. Unbekannte Ziele, Fragen,
+  Lila/Hellgelb/Türkis und eindeutige Musik-Stopp-Befehle. Unbekannte Ziele, Fragen,
   Negationen und mehrdeutige Mehrfachbefehle bleiben beim normalen Fallback.
 - `native_intent_scripts.yaml`: ausschließlich NabuStopMusic; die
   bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
