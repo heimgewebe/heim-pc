@@ -677,7 +677,12 @@ class WeatherForecast(Tool):
     async def async_call(self, hass: HomeAssistant, tool_input: ToolInput, llm_context: LLMContext) -> ToolResult:
         try:
             location = str(tool_input.tool_args.get("location") or "").strip()[:100]
-            async with aiohttp.ClientSession(timeout=WEATHER_TIMEOUT) as session:
+            # Use the system resolver: HA's default aiodns/AsyncResolver has
+            # repeatedly timed out here while getaddrinfo resolves both hosts.
+            async with aiohttp.ClientSession(
+                timeout=WEATHER_TIMEOUT,
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver()),
+            ) as session:
                 if location.casefold() in HOME_WORDS:
                     latitude, longitude = hass.config.latitude, hass.config.longitude
                     place = "zu Hause"
