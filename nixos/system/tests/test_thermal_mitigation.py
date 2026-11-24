@@ -111,6 +111,39 @@ class ThermalMitigationTest(unittest.TestCase):
         self.assertEqual(self.value(self.fan + "pwm2_auto_point2_pwm"), "114")
         self.assertFalse(self.state.exists())
 
+    def test_stricter_cap_selected_during_planning_is_not_increased(self):
+        original_read = thermal.read
+        changed = False
+
+        def intervene(path):
+            nonlocal changed
+            value = original_read(path)
+            if path.name == "scaling_max_freq" and not changed:
+                changed = True
+                self.put(self.policy + "scaling_max_freq", "3800000")
+            return value
+
+        with patch.object(thermal, "read", side_effect=intervene):
+            with self.assertRaisesRegex(RuntimeError, "concurrent setting change"):
+                thermal.apply(self.root, self.state)
+        self.assertEqual(self.value(self.policy + "scaling_max_freq"), "3800000")
+        self.assertFalse(self.state.exists())
+
+    def test_rollback_does_not_restore_unattempted_external_target(self):
+        original_write = thermal.write
+
+        def intervene(path, value):
+            original_write(path, value)
+            if path.name == "scaling_max_freq" and value == "4200000":
+                self.put(self.policy + "energy_performance_preference", "balance_power")
+
+        with patch.object(thermal, "write", side_effect=intervene):
+            with self.assertRaisesRegex(RuntimeError, "concurrent setting change"):
+                thermal.apply(self.root, self.state)
+        self.assertEqual(self.value(self.policy + "scaling_max_freq"), "4981510")
+        self.assertEqual(self.value(self.policy + "energy_performance_preference"), "balance_power")
+        self.assertFalse(self.state.exists())
+
     def test_missing_fan_device_keeps_cpu_mitigation(self):
         (self.root / self.fan / "name").unlink()
         thermal.apply(self.root, self.state)
