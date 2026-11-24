@@ -124,6 +124,23 @@ let
                 "cloud_link_available": i.get("aclk-available"), "memory_mode": i.get("memory-mode")}
 
 
+    def coverage_errors(series, now):
+        # These contexts exist on the production Heim-PC. Keep a bounded
+        # snapshot honest when collectors are missing, empty or stale.
+        fresh = {k: v for k, v in series.items()
+                 if finite(v.get("newest")) and 0 <= now - v["newest"] <= 90
+                 and any(finite(d.get("latest")) for d in v["dimensions"].values())}
+        contexts = {v["context"] for v in fresh.values()}
+        required = {"system.cpu", "system.ram", "system.memory_some_pressure",
+                    "system.io_some_pressure", "disk.io", "btrfs.device_errors",
+                    "nvidia_smi.gpu_utilization"}
+        errors = ["coverage:" + k for k in sorted(required - contexts)]
+        if not any("k10temp" in k and k.endswith("_Tctl_input")
+                   for k in fresh):
+            errors.append("coverage:cpu_tctl")
+        return errors
+
+
     def snapshot(minutes):
         result = {"schema_version": 1, "observed_at": int(time.time()), "status": "ok",
                   "errors": [], "source": BASE, "window_minutes": minutes}
@@ -146,6 +163,7 @@ let
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     result["errors"].append("series:" + k + ":" + type(exc).__name__)
             result["omitted_charts"] = max(0, len(selected) - 64)
+            result["errors"].extend(coverage_errors(result["series"], time.time()))
             result["alarms"] = alarms()
         except (OSError, ValueError, KeyError, TypeError) as exc:
             result["errors"].append("netdata:" + type(exc).__name__)
@@ -155,11 +173,16 @@ let
                 result["errors"].append("podman:incomplete")
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             result["errors"].append("podman:" + type(exc).__name__)
-        p = subprocess.run(["systemctl", "show", "netdata.service", "-p", "MemoryCurrent",
-                            "-p", "CPUUsageNSec", "-p", "ActiveState", "-p", "NRestarts"],
-                           capture_output=True, text=True, timeout=6)
-        result["unit"] = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
-        result["status"] = "partial" if result["errors"] or p.returncode else "ok"
+        try:
+            p = subprocess.run(["systemctl", "show", "netdata.service", "-p", "MemoryCurrent",
+                                "-p", "CPUUsageNSec", "-p", "ActiveState", "-p", "NRestarts"],
+                               capture_output=True, text=True, timeout=6)
+            result["unit"] = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
+            if p.returncode or result["unit"].get("ActiveState") != "active":
+                result["errors"].append("netdata:unit_not_active")
+        except (OSError, subprocess.SubprocessError) as exc:
+            result["errors"].append("unit:" + type(exc).__name__)
+        result["status"] = "partial" if result["errors"] else "ok"
         return result
 
 
@@ -214,7 +237,7 @@ let
         for key, value in counters.items():
             previous = state["counters"].get(key)
             if previous is not None and value > previous:
-                state["pending"].append({"key": "btrfs:" + key, "event": str(value),
+                state["pending"].append({"key": "btrfs:" + key, "event": f"{now}:{value}",
                     "class": "owner_decision", "fields": {"condition": "new_btrfs_device_errors",
                     "counter": key.rsplit(":", 1)[-1][:100], "count": str(value)}})
             # A reset changes the baseline, it is not itself evidence of repair.

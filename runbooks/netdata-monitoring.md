@@ -24,7 +24,8 @@ All results are JSON. The doctor performs a real local native MCP CPU
 metric query (not only a handshake). Snapshot includes bounded per-series
 statistics, timestamps, units, raised alarms, service resource counters
 and rootless Podman statistics. A partial result is not healthy by
-definition. The selected time series are not the entire Netdata catalog.
+definition. Missing, empty or stale core host metrics also make the
+snapshot partial. The selected time series are not the entire Netdata catalog.
 For deeper historical analysis use the native MCP endpoint
 `http://127.0.0.1:19999/mcp` and its own list_metrics, get_metrics_details,
 query_metrics, list_raised_alerts and anomaly tools. Always supply all
@@ -53,7 +54,8 @@ from the preceding five-minute window, or an increase in a previously observed B
 device-error counter. Thermal recovery requires 80% of samples below
 85 C; missing readings retain an active episode. Existing Btrfs totals
 are initially baselines, not new failures. A decreasing counter updates
-the baseline without proving repair. Two consecutive unsuccessful
+the baseline without proving repair. A later increase to a previously
+seen counter value has a new event identity. Two consecutive unsuccessful
 monitor reads produce one service-failure event per failure episode.
 Generic NVMe backlog warnings remain visible in snapshots; use await
 and I/O PSI to judge actual contention, not backlog alone.
