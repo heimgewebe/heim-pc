@@ -419,6 +419,7 @@
             ./modules/fotoatelier.nix
             ./modules/grosser-adler.nix
             ./modules/netdata.nix
+            ./modules/thermal-mitigation.nix
             ({ pkgs, lib, ... }: {
               # Only the complete Grabowski/Nixer/Restic successor may
               # replace the active workstation's systemd service set.
