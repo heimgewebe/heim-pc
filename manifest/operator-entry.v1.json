@@ -104,6 +104,46 @@
         "layout_fidelity",
         "cloud_or_metered_cost_authorization"
       ]
+    },
+    "netdataDiagnostics": {
+      "schemaVersion": 1,
+      "purpose": "Bounded host-local Netdata history, native MCP, actionable alert status and current rootless Podman statistics",
+      "intents": [
+        "monitoring.netdata",
+        "host.diagnostics",
+        "netdata.diagnostics"
+      ],
+      "authority": "heim_pc_netdata",
+      "authorityKind": "capability_locator_only",
+      "repository": "${HOME}/repos/heim-pc",
+      "runbook": "${HOME}/repos/heim-pc/runbooks/netdata-monitoring.md",
+      "entryKind": "argv",
+      "entryArgvPrefix": [
+        "/run/current-system/sw/bin/heim-pc-netdata",
+        "--minutes=10"
+      ],
+      "defaultOperation": "snapshot",
+      "readinessOperation": "doctor",
+      "mcpEndpoint": "http://127.0.0.1:19999/mcp",
+      "restEndpoint": "http://127.0.0.1:19999/api/v1",
+      "readOnlyOperations": [
+        "doctor",
+        "snapshot"
+      ],
+      "notificationPreviewArgv": [
+        "/run/current-system/sw/bin/heim-pc-netdata",
+        "watch",
+        "--dry-run"
+      ],
+      "policyResolution": "read_at_execution_time",
+      "cloudOrMeteredUseAuthorizedByLocator": false,
+      "doesNotEstablish": [
+        "current_tool_readiness",
+        "all_container_history_available",
+        "external_notification_delivery",
+        "automatic_remediation_authority",
+        "cloud_or_metered_cost_authorization"
+      ]
     }
   },
   "transferPolicy": {
