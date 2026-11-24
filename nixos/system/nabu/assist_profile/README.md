@@ -91,3 +91,17 @@ Der bisherige Paket-Deploy darf bei der späteren Konsolidierung diese
 Profilquelle berücksichtigen, ohne private Runtime-Dateien pauschal zu
 überschreiben. Bis dahin bleibt die oben beschriebene selektive Anwendung
 die Wiederherstellungsanleitung, keine automatische Rollout-Garantie.
+
+
+## Synthetischer Routing-Eval
+
+`python3 scripts/nabu_qwen_eval.py --check` zeigt die aktuellen Defaults
+offline; `--smoke` bzw. `--run` verwendet Modell, Thinking, Kontext und
+Keepalive aus diesem Profil sowie den öffentlichen Toolprompt und das Addendum.
+Ein explizites `--model` wählt weiterhin einen Vergleichskandidaten.
+Der Eval nutzt einen synthetischen Basisprompt, Temperatur 0 und keine
+privaten HA-Prompts oder realen Geräte-Schemas. Er führt keine Werkzeuge aus.
+Er ist deshalb ein reproduzierbarer Routingtest, **keine** Assist-Endabnahme.
+Manifest und Summary binden Profil, Prompt und Optionen; alte Ergebnisse mit
+8192 Kontext, Thinking aus und 190 Ausgabetokens bleiben historische
+Vergleichsmessungen und sind nicht direkt mit dem neuen Profil vergleichbar.
