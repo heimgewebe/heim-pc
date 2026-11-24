@@ -1,4 +1,13 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
+let
+  # Keep the already-reviewed comparison and its documentation in the same
+  # immutable target closure. No live checkout, network or mutable user path.
+  integrationInventory = pkgs.runCommand "heim-pc-integration-inventory" {} ''
+    mkdir -p "$out/scripts"
+    cp ${../../../scripts/generate_nixos_program_inventory.py} "$out/scripts/generate_nixos_program_inventory.py"
+    cp ${../../../README.md} "$out/README.md"
+  '';
+in
 {
   # The observed Seagate Stage0 Btrfs layout is the only admissible source of
   # filesystem mounts here. Importing storage-layout.nix would incorrectly
@@ -97,6 +106,29 @@
   # Reuse the existing gated executor; it provides no root service, sudo
   # policy, or unattended activation permission on its own.
   heimPc.day2Activation.enable = true;
+
+  # NixOS supplies the exact target closure and switch action as $1/$2.
+  # Advisory only: a structural observation is not a release/health gate.
+  # Keep recovery and boot working even when the inventory is unavailable.
+  system.preSwitchChecks.heim-pc-integration-inventory =
+    lib.mkIf config.heimPc.grabowskiProduction.enable ''
+      case "$2" in
+        switch|test|boot)
+          if [ -e /run/current-system ]; then
+            echo "Heim-PC integration inventory ($2):"
+            if ! ${pkgs.coreutils}/bin/timeout --kill-after=2s 15s \
+                ${pkgs.python3}/bin/python3 -I -B \
+                ${integrationInventory}/scripts/generate_nixos_program_inventory.py \
+                --baseline-closure /run/current-system --compare-closure "$1"; then
+              echo "WARNING: Heim-PC integration inventory unavailable; inspect rollout separately." >&2
+            fi
+          else
+            echo "Heim-PC integration inventory: no active baseline; comparison skipped."
+          fi
+          ;;
+      esac
+      true
+    '';
 
   assertions = [
     {
