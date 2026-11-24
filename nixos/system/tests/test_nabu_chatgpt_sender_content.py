@@ -89,6 +89,7 @@ function openTab() {
       querySelectorAll(selector) {
         if (selector === "button") return data.missingSend ? [] : [send];
         if (selector.includes('data-message-author-role="user"')) {
+          if (data.directUserTestId && !selector.includes('[data-testid="user-message"]')) return [];
           if (!(data.verify || clicks && data.confirm !== false)) return [];
           const value = data.messageText ?? data.composer;
           return [{...visible, innerText: data.wrapped ? "You said:\n" + value : value,
@@ -238,6 +239,12 @@ class NabuChromeSendContentTests(unittest.TestCase):
         result = self.send_once(wrapped=True)
         self.assertEqual(result["clicks"], 1)
         self.assertEqual(result["stage"], "message_sent")
+
+    def test_read_only_recovery_recognizes_standalone_user_message_testid(self):
+        result = self.send_once(verify=True, directUserTestId=True)
+        self.assertEqual(result["clicks"], 0)
+        self.assertEqual(result["stage"], "message_verified")
+        self.assertEqual(result["nativeReceipts"][-1]["body"]["stage"], "message_verified")
 
     def test_read_only_recovery_requires_prior_attempt_and_never_clicks(self):
         for fixture, expected in (
