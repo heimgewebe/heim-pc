@@ -35,6 +35,51 @@ intents:
         response: "brightness"
         metadata:
           slot_combination: "area_brightness"
+      - sentences:
+          - "(stell[e]|setz[e]) [bitte ](das Licht|die Beleuchtung|die Lichter|die Lampen) <area> [bitte ]auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) <area> [bitte ](das Licht|die Beleuchtung|die Lichter|[alle ]Lampen) [bitte ]auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) [bitte ](das Licht|die Beleuchtung|die Lichter|die Lampen) <area> auf {brightness} (Prozent|%) [Helligkeit] und {color_temperature:temperature} Kelvin"
+        slots:
+          domain: "light"
+        response: "temperature"
+        metadata:
+          slot_combination: "area_temperature_brightness"
+      - sentences:
+          - "(stell[e]|setz[e]) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} auf {brightness} (Prozent|%) [Helligkeit] und {color_temperature:temperature} Kelvin"
+        requires_context:
+          domain: "light"
+        response: "temperature"
+        metadata:
+          slot_combination: "name_temperature_brightness"
+  HassTurnOff:
+    data:
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} [bitte ]aus"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_only"
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} <area> [bitte ]aus"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_area"
+  HassTurnOn:
+    data:
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} [bitte ](an|ein)"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_only"
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} <area> [bitte ](an|ein)"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_area"
   NabuStopMusic:
     data:
       - sentences:

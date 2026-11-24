@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "purpose": "Non-private Nabu Assist configuration source and observed recovery identity; not an automatic activation policy",
-  "observed_at": "2026-11-24T19:26:58.925701+01:00",
+  "observed_at": "2026-11-24T21:33:27.173024+01:00",
   "tested_software": {
     "home_assistant": "2026.11.2",
     "wyoming_faster_whisper": "3.8.1",
@@ -133,8 +133,8 @@
   },
   "files": {
     "native_commands.yaml": {
-      "sha256": "3ed21d428aea72dab97da736308eadcb583de6e3fc76b17c8c75ca386a71fdd5",
-      "bytes": 1527
+      "sha256": "6079f8c59fc1755920cd1b8dc1c2766441f4b88c2122dbf2d8d5aa53179dfaa2",
+      "bytes": 3666
     },
     "native_intent_scripts.yaml": {
       "sha256": "f22a8cdf495335b7dbb086a5617054a141f42ad062654121b95fa5f6116dca5d",
