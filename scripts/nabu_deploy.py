@@ -121,7 +121,7 @@ def smoke():
         "names={t.name for t in result.tools}; "
         "assert {'nabu_web__search','nabu_web__read_page','nabu_web__browser',"
         "'nabu_web__play_music','nabu_web__grabowski','nabu_web__grabowski_request',"
-        "'nabu_web__chatgpt'} <= names")
+        "'nabu_web__chatgpt','nabu_web__weather'} <= names")
 
 
 def restart():

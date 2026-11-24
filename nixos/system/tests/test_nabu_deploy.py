@@ -41,6 +41,40 @@ class DeployTests(unittest.TestCase):
                            restart_service=lambda: self.events.append("restart"),
                            verify_health=health or (lambda: self.events.append("health")))
 
+    def test_import_smoke_requires_weather_tool(self):
+        from unittest import mock
+        from types import SimpleNamespace
+        import sys
+
+        # Execute the actual probe with synthetic HA modules, not a live service.
+        llm = SimpleNamespace(
+            LLM_API_ASSIST="assist",
+            async_get_tools=lambda *_: SimpleNamespace(tools=[
+                SimpleNamespace(name=name) for name in names
+            ]),
+        )
+        names = {"nabu_web__search", "nabu_web__read_page", "nabu_web__browser",
+                 "nabu_web__play_music", "nabu_web__grabowski",
+                 "nabu_web__grabowski_request", "nabu_web__chatgpt"}
+        components = SimpleNamespace()
+        package = SimpleNamespace(llm=llm)
+        components.nabu_web = package
+        modules = {"custom_components": components,
+                   "custom_components.nabu_web": package,
+                   "custom_components.nabu_web.llm": llm}
+        def execute(*argv):
+            self.assertEqual(argv[-2], "-c")
+            old_path = sys.path[:]
+            try:
+                exec(argv[-1], {})
+            finally:
+                sys.path[:] = old_path
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(nabu, "run", execute):
+            with self.assertRaises(AssertionError):
+                nabu.smoke()
+            names.add("nabu_web__weather")
+            nabu.smoke()
+
     def test_no_change_no_restart_or_backup(self):
         result = self.apply()
         self.assertEqual(result["status"], "already_current")
