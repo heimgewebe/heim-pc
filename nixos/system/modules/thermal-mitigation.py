@@ -71,8 +71,7 @@ def plan(root: Path) -> list[dict[str, str]]:
         return []
     changes: list[dict[str, str]] = []
 
-    def add(path: Path, value: str) -> None:
-        old = read(path)
+    def add(path: Path, old: str, value: str) -> None:
         if old != value:
             changes.append({"path": str(path.relative_to(root)), "old": old, "new": value})
 
@@ -86,13 +85,14 @@ def plan(root: Path) -> list[dict[str, str]]:
         minimum = int(read(p / "scaling_min_freq"))
         if minimum > CAP_KHZ:
             raise RuntimeError("CPU minimum exceeds thermal cap")
-        add(p / "scaling_max_freq", str(min(maximum, CAP_KHZ)))
+        add(p / "scaling_max_freq", str(maximum), str(min(maximum, CAP_KHZ)))
         epp = p / "energy_performance_preference"
         # Do not override another explicitly selected power profile.
-        if read(epp) == "balance_performance":
+        preference = read(epp)
+        if preference == "balance_performance":
             if "balance_power" not in read(p / "energy_performance_available_preferences").split():
                 raise RuntimeError("balance_power unavailable")
-            add(epp, "balance_power")
+            add(epp, preference, "balance_power")
 
     device = fan_device(root)
     if device is None:
@@ -110,7 +110,7 @@ def plan(root: Path) -> list[dict[str, str]]:
         desired = [max(a, b) for a, b in zip(current, targets)]
         # Raise the later point first; restoration reverses this ordering.
         for index in (1, 0):
-            add(points[index], str(desired[index]))
+            add(points[index], str(current[index]), str(desired[index]))
     return changes
 
 
@@ -181,13 +181,24 @@ def apply(root: Path, state: Path) -> None:
     if state.exists():
         raise RuntimeError("previous mitigation state still present; stop before reapply")
     changes = plan(root)
-    # Record rollback values before the first sysfs write.
-    state.write_text(json.dumps(changes) + "\n")
+    # Record only attempted writes. An unattempted target may already have
+    # been selected by another actor; it is not ours to restore.
+    attempted: list[dict[str, str]] = []
+
+    def save() -> None:
+        pending = state.with_suffix(".tmp")
+        pending.write_text(json.dumps(attempted) + "\n")
+        pending.replace(state)
+
+    save()
     try:
         for change in changes:
             path = root / change["path"]
             if read(path) != change["old"]:
                 raise RuntimeError(f"concurrent setting change: {path}")
+            # A failed sysfs write/readback may still have changed the value.
+            attempted.append(change)
+            save()
             write(path, change["new"])
     except Exception:
         restore(root, state)
