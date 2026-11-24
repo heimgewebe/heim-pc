@@ -122,6 +122,12 @@ bei Bedarf und akzeptiert nur vollständig bestätigte Streaming-Antworten.
 Bei fehlender/abgelehnter Autorisierung, Limits oder API-Ausfall bleiben
 die lokalen Modelle nutzbar.
 
+**Wetter** beantwortet `nabu_web__weather` direkt über Open-Meteo
+(Geocoding plus 7-Tage-Vorhersage, ohne API-Schlüssel), nicht über
+Websuche und Seitenlesen. Ohne Ortsangabe gilt der in Home Assistant
+gesetzte Heimstandort. Das Werkzeug liefert eine vorlesbare
+`zusammenfassung` (jetzt, heute, morgen) und Tageswerte für Folgetage.
+
 **Grabowski** wird über den bestehenden lokalen Streamable-HTTP-MCP-Endpunkt
 `http://127.0.0.1:18181/mcp` angesprochen. Dieser muss **aus dem aktiven
 HA-Container-Netzkontext** erreichbar sein, nicht nur vom Host. Die

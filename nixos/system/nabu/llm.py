@@ -577,6 +577,137 @@ class WebRead(Tool):
         except (ValueError, UnicodeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             return message(exc)
 
+WEATHER_TIMEOUT = aiohttp.ClientTimeout(total=8)
+WEATHER_CODES = {
+    0: "klar", 1: "überwiegend klar", 2: "teils bewölkt", 3: "bedeckt",
+    45: "Nebel", 48: "Nebel mit Reif",
+    51: "leichter Nieselregen", 53: "Nieselregen", 55: "starker Nieselregen",
+    56: "gefrierender Nieselregen", 57: "gefrierender Nieselregen",
+    61: "leichter Regen", 63: "Regen", 65: "starker Regen",
+    66: "gefrierender Regen", 67: "starker gefrierender Regen",
+    71: "leichter Schneefall", 73: "Schneefall", 75: "starker Schneefall",
+    77: "Schneegriesel", 80: "leichte Regenschauer", 81: "Regenschauer",
+    82: "heftige Regenschauer", 85: "leichte Schneeschauer", 86: "starke Schneeschauer",
+    95: "Gewitter", 96: "Gewitter mit Hagel", 99: "schweres Gewitter mit Hagel",
+}
+WEEKDAYS = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+HOME_WORDS = {"", "zuhause", "zu hause", "daheim", "hier", "home", "heim", "heim-pc"}
+
+
+def spoken_number(value, digits: int = 0) -> str | None:
+    """Format a measurement so German TTS reads it naturally."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = round(float(value), digits)
+    if number == int(number):
+        text = str(abs(int(number)))
+    else:
+        text = f"{abs(number):.{digits}f}".replace(".", ",")
+    return "minus " + text if number < 0 else text
+
+
+def weather_report(place: str, data: dict) -> dict:
+    """Reduce an Open-Meteo forecast to a short, speakable German report."""
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+    daily = data.get("daily") if isinstance(data.get("daily"), dict) else {}
+
+    def column(key: str, index: int):
+        values = daily.get(key)
+        return values[index] if isinstance(values, list) and index < len(values) else None
+
+    now = {
+        "temperatur_grad": spoken_number(current.get("temperature_2m")),
+        "gefuehlt_grad": spoken_number(current.get("apparent_temperature")),
+        "lage": WEATHER_CODES.get(current.get("weather_code"), "unbekannt"),
+        "wind_kmh": spoken_number(current.get("wind_speed_10m")),
+    }
+    days = []
+    for index, day in enumerate((daily.get("time") or [])[:7]):
+        try:
+            weekday = WEEKDAYS[datetime.strptime(str(day), "%Y-%m-%d").weekday()]
+        except ValueError:
+            continue
+        days.append({
+            "tag": ("heute" if index == 0 else "morgen" if index == 1 else weekday),
+            "datum": str(day),
+            "lage": WEATHER_CODES.get(column("weather_code", index), "unbekannt"),
+            "min_grad": spoken_number(column("temperature_2m_min", index)),
+            "max_grad": spoken_number(column("temperature_2m_max", index)),
+            "regen_mm": spoken_number(column("precipitation_sum", index), 1),
+            "regenwahrscheinlichkeit_prozent": spoken_number(
+                column("precipitation_probability_max", index)),
+        })
+
+    sentences = []
+    if now["temperatur_grad"] is not None:
+        sentence = f"In {place} sind es gerade {now['temperatur_grad']} Grad"
+        if now["gefuehlt_grad"] not in (None, now["temperatur_grad"]):
+            sentence += f", gefühlt {now['gefuehlt_grad']}"
+        sentence += f", {now['lage']}"
+        if now["wind_kmh"] is not None:
+            sentence += f", Wind {now['wind_kmh']} Kilometer pro Stunde"
+        sentences.append(sentence + ".")
+    for item in days[:2]:
+        if item["min_grad"] is None or item["max_grad"] is None:
+            continue
+        sentence = (f"{item['tag'].capitalize()} {item['lage']}, "
+                    f"{item['min_grad']} bis {item['max_grad']} Grad")
+        chance = item["regenwahrscheinlichkeit_prozent"]
+        if chance is not None and chance != "0":
+            sentence += f", Regenrisiko {chance} Prozent"
+        if item["regen_mm"] not in (None, "0"):
+            sentence += f", {item['regen_mm']} Millimeter"
+        sentences.append(sentence + ".")
+    if not sentences:
+        raise ValueError("Der Wetterdienst lieferte keine verwertbaren Daten")
+    return {"ort": place, "quelle": "Open-Meteo (DWD und andere Wettermodelle)",
+            "zusammenfassung": " ".join(sentences), "jetzt": now, "tage": days}
+
+
+class WeatherForecast(Tool):
+    name = "nabu_web__weather"
+    title = "Wetter abfragen"
+    description = ("Aktuelles Wetter und 7-Tage-Vorhersage für einen Ort. location weglassen "
+                   "für zu Hause, sonst Ortsname wie Hamburg oder Wien. Liefert eine "
+                   "vorlesbare zusammenfassung sowie Werte für heute, morgen und die Folgetage.")
+    parameters = vol.Schema({vol.Optional("location"): str})
+    annotations = ToolAnnotations(read_only=True, open_world=True)
+    integration = DOMAIN
+
+    async def async_call(self, hass: HomeAssistant, tool_input: ToolInput, llm_context: LLMContext) -> ToolResult:
+        try:
+            location = str(tool_input.tool_args.get("location") or "").strip()[:100]
+            async with aiohttp.ClientSession(timeout=WEATHER_TIMEOUT) as session:
+                if location.casefold() in HOME_WORDS:
+                    latitude, longitude = hass.config.latitude, hass.config.longitude
+                    place = "zu Hause"
+                    if latitude is None or longitude is None:
+                        raise ValueError("Für zu Hause ist in Home Assistant kein Standort gesetzt")
+                else:
+                    async with session.get(
+                        "https://geocoding-api.open-meteo.com/v1/search",
+                        params={"name": location, "count": "1", "language": "de", "format": "json"},
+                    ) as response:
+                        response.raise_for_status()
+                        found = (await response.json(content_type=None)).get("results") or []
+                    if not found:
+                        raise ValueError(f"Ort '{location}' nicht gefunden")
+                    latitude, longitude = found[0]["latitude"], found[0]["longitude"]
+                    place = str(found[0].get("name") or location)
+                async with session.get("https://api.open-meteo.com/v1/forecast", params={
+                    "latitude": str(latitude), "longitude": str(longitude),
+                    "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+                    "daily": ("weather_code,temperature_2m_max,temperature_2m_min,"
+                              "precipitation_sum,precipitation_probability_max"),
+                    "timezone": "auto", "forecast_days": "7",
+                }) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+            return ToolResult(data=weather_report(place, data))
+        except (KeyError, TypeError, ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            return message(exc)
+
+
 async def cdp_call(ws, command_id: int, method: str, params: dict) -> dict:
     await ws.send_json({"id": command_id, "method": method, "params": params})
     for _ in range(100):
@@ -836,7 +967,7 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
     if api_id != LLM_API_ASSIST:
         return None
     return LLMTools(
-        tools=[WebSearch(), WebRead(), Browser(), PlayMusic(),
+        tools=[WeatherForecast(), WebSearch(), WebRead(), Browser(), PlayMusic(),
                GrabowskiStatus(), GrabowskiRequest(), ChatGPTAnswer()],
         prompt=(
             "Du bist Nabu. Das einzige lokale Gesprächsmodell beantwortet einfache und "
@@ -866,9 +997,12 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
             "Licht an' muss ein intent__HassTurnOn mit name=Licht und "
             "area=Wohnzimmer kommen, niemals eine bloße Erfolgsmeldung. "
             "Dieses Beispiel ist keine ausgeführte Aktion. "
-            "Bei Browserbefehlen nabu_web__browser benutzen. Für aktuelle Ereignisse, "
-            "Wetter, Preise, Amtsinhaber, neue Regelungen und jüngere Studien erst "
-            "nabu_web__search und danach nabu_web__read_page benutzen. "
+            "Bei Browserbefehlen nabu_web__browser benutzen. "
+            "Für Wetter, Temperatur, Regen, Schnee oder Wind immer nabu_web__weather "
+            "benutzen, ohne Ortsangabe für zu Hause, und nicht im Web suchen; "
+            "antworte mit der zusammenfassung oder den passenden Tageswerten. "
+            "Für aktuelle Ereignisse, Preise, Amtsinhaber, neue Regelungen und "
+            "jüngere Studien erst nabu_web__search und danach nabu_web__read_page benutzen. "
             "Bei aktuellen Sachfragen auch ohne ausdrückliches 'heute' recherchieren. "
             "Bei allgemeinen Tagesnachrichten suche ausdrücklich nach Nachrichten "
             "oder Schlagzeilen des heutigen Datums. Das Suchwerkzeug liest dafür "
