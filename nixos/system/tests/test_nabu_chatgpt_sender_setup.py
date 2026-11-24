@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -20,7 +21,8 @@ class NabuChatGPTSenderSetupTests(unittest.TestCase):
             key = Path(folder) / "private" / "key"
             directory = Path(folder) / "extension"
             with mock.patch.object(setup, "KEY_PATH", key), \
-                 mock.patch.object(setup, "EXTENSION_DIR", directory):
+                 mock.patch.object(setup, "EXTENSION_DIR", directory), \
+                 mock.patch.object(setup, "NATIVE_HOST_MANIFEST", Path(folder) / "native" / "host.json"):
                 result = setup.install()
                 private = key.read_text().strip()
                 self.assertEqual(len(private), 64)
@@ -37,7 +39,20 @@ class NabuChatGPTSenderSetupTests(unittest.TestCase):
                 self.assertTrue(result["chrome_activation_required"])
                 self.assertFalse(result["chatgpt_send_verified"])
                 self.assertEqual(result["extension_directory"], str(directory))
+                self.assertTrue(result["native_receipt_host_installed"])
+                native = json.loads(setup.NATIVE_HOST_MANIFEST.read_text())
+                self.assertEqual(native["type"], "stdio")
+                self.assertEqual(native["path"], str(directory / "receipt_host.py"))
+                self.assertEqual(len(native["allowed_origins"]), 1)
+                self.assertRegex(native["allowed_origins"][0], r"^chrome-extension://[a-p]{32}/$")
+                self.assertEqual((directory / "receipt_host.py").stat().st_mode & 0o777, 0o700)
+                manifest = json.loads((directory / "manifest.json").read_text())
+                self.assertEqual(manifest["permissions"], ["storage", "nativeMessaging"])
+                receipt_path = key.parent / ".nabu-chatgpt-send-receipts.json"
+                self.assertEqual(json.loads(receipt_path.read_text()), {})
+                receipt_path.write_text('{"example":"existing"}')
                 second = setup.install()
+                self.assertEqual(json.loads(receipt_path.read_text()), {"example": "existing"})
                 self.assertEqual(key.read_text().strip(), private)
                 self.assertEqual(result["content_sha256"], second["content_sha256"])
                 self.assertIn('"https://chatgpt.com/*"',
@@ -49,7 +64,8 @@ class NabuChatGPTSenderSetupTests(unittest.TestCase):
             key.write_text("bad\n")
             directory = Path(folder) / "extension"
             with mock.patch.object(setup, "KEY_PATH", key), \
-                 mock.patch.object(setup, "EXTENSION_DIR", directory):
+                 mock.patch.object(setup, "EXTENSION_DIR", directory), \
+                 mock.patch.object(setup, "NATIVE_HOST_MANIFEST", Path(folder) / "native" / "host.json"):
                 with self.assertRaises(RuntimeError):
                     setup.install()
                 self.assertEqual(key.read_text(), "bad\n")
