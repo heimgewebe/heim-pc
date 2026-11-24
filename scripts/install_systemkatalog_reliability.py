@@ -27,15 +27,20 @@ def _install_file(source: Path, target: Path, mode: int, *, apply: bool) -> dict
     return {"source": str(source), "target": str(target), "mode": oct(mode), "action": action}
 
 
-def install(*, home: Path, apply: bool, enable: bool) -> dict[str, object]:
+def install(*, home: Path, apply: bool, enable: bool, declarative: bool | None = None) -> dict[str, object]:
+    if declarative is None:
+        declarative = Path('/run/current-system/etc/systemd/user/systemkatalog-drift-watch.timer').is_file()
     targets = [
         _install_file(ROOT / "config/agents/repos-root-AGENTS.md", home / "repos/AGENTS.md", 0o644, apply=apply),
+    ]
+    if not declarative:
+        targets.extend([
         _install_file(ROOT / "scripts/systemkatalog_drift_watch.py", home / ".local/bin/systemkatalog-drift-watch", 0o755, apply=apply),
         _install_file(ROOT / "systemd/user/systemkatalog-drift-watch.service", home / ".config/systemd/user/systemkatalog-drift-watch.service", 0o644, apply=apply),
         _install_file(ROOT / "systemd/user/systemkatalog-drift-watch.timer", home / ".config/systemd/user/systemkatalog-drift-watch.timer", 0o644, apply=apply),
-    ]
-    systemd = "not-requested"
-    if enable:
+        ])
+    systemd = "declarative" if declarative else "not-requested"
+    if enable and not declarative:
         if not apply:
             raise ValueError("--enable requires --apply")
         for argv in (

@@ -219,11 +219,15 @@ def test_closure_diff_detects_removal_new_unit_mask_and_activation_link(tmp_path
         "new_units_without_literal_function_map_reference"] == ["netdata.service"]
 
 
-def test_closure_diff_refuses_missing_scope_and_reports_omissions(tmp_path):
+def test_closure_diff_refuses_missing_scope_and_compares_opaque_names(tmp_path):
     before = fake_closure(tmp_path / "old")
     after = fake_closure(tmp_path / "new", units=[("user", "personal@instance.service")])
     diff = inv.compare_closures(before, after, "")
-    assert diff["skipped_metadata_names"]["candidate"]["user"] == 1
+    assert diff["skipped_metadata_names"]["candidate"]["user"] == 0
+    assert diff["opaque_metadata_names"]["candidate"]["user"] == 1
+    identity = inv.opaque_name("personal@instance.service")
+    assert diff["changes"]["user_units"]["added"] == [identity]
+    assert inv.compare_closures(after, before, "")["changes"]["user_units"]["removed"] == [identity]
     assert "personal" not in json.dumps(diff)
     (after / "etc/systemd/system").rmdir()
     with pytest.raises(ValueError, match="missing declared system unit"):
@@ -239,3 +243,17 @@ def test_closure_diff_recognizes_indirect_nixos_mask(tmp_path):
     diff = inv.compare_closures(before, after, "")
     assert diff["changes"]["system_units"]["removed"] == ["retired.service"]
     assert diff["changes"]["system_masked"]["added"] == ["retired.service"]
+
+
+def test_closure_diff_tracks_opaque_links_and_extra_systemd_unit_types(tmp_path):
+    before = fake_closure(tmp_path / "old", units=[("system", "personal@abc.service"),
+                          ("system", "test.slice")],
+                          links=[("system", "multi-user.target.wants/personal@abc.service")])
+    after = fake_closure(tmp_path / "new", units=[("system", "personal@def.service")])
+    report = inv.compare_closures(before, after, "")
+    assert report["changes"]["system_units"]["removed"] == sorted([
+        inv.opaque_name("personal@abc.service"), "test.slice"])
+    assert report["changes"]["system_units"]["added"] == [inv.opaque_name("personal@def.service")]
+    assert report["changes"]["system_dependency_links"]["removed"] == [
+        inv.opaque_name("multi-user.target.wants/personal@abc.service")]
+    assert "personal@" not in json.dumps(report)

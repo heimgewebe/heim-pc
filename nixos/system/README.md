@@ -36,7 +36,7 @@ Wiederherstellungsweg. Ein Rollback in eine ältere Generation ohne diesen
 Hook kann den Vergleich nicht ausführen. Die tatsächliche Nutzbarkeit,
 persistente Daten und externe/manuelle Integrationen sind anschließend über
 die vorhandenen Funktions- und Recovery-Proben zu prüfen. Kein Neustart nur
-zur Erzeugung eines Prüfnachweises.
+zur Erzeugung eines Prüfnachweises. Der native User-Timer `systemkatalog-drift-watch.timer` übernimmt stündlich den bereits erzeugten zentralen CI-Bericht (kein zweiter Scan). Nicht darstellbare Unit-/Link-Namen werden im lokalen Vergleich als opake Identitäten erfasst, nicht stillschweigend ausgelassen.
 
 ## Freigegebener Bootstandard und Recovery auf dem physischen NixOS-Host
 

@@ -130,6 +130,38 @@ in
       true
     '';
 
+  # Consume the already-computed catalog CI report. The timer remains native
+  # and only alex's user manager may register proposal-only Bureau candidates.
+  systemd.user.services.systemkatalog-drift-watch =
+    lib.mkIf config.heimPc.grabowskiProduction.enable {
+      description = "Consume central Systemkatalog CI drift report";
+      unitConfig.ConditionUser = "alex";
+      serviceConfig = {
+        Type = "oneshot";
+        WorkingDirectory = "/home/alex";
+        Environment = [
+          "HOME=/home/alex"
+          "PATH=${lib.makeBinPath [ pkgs.gh pkgs.coreutils pkgs.git pkgs.openssh pkgs.systemd pkgs.python3 ]}:/home/alex/.local/bin:/run/current-system/sw/bin"
+        ];
+        ExecStart = "${pkgs.python3}/bin/python3 -I -B ${../../../scripts/systemkatalog_drift_watch.py}";
+        TimeoutStartSec = "180s";
+        Nice = 10;
+      };
+    };
+
+  systemd.user.timers.systemkatalog-drift-watch =
+    lib.mkIf config.heimPc.grabowskiProduction.enable {
+      description = "Hourly Systemkatalog CI drift report consumer";
+      unitConfig.ConditionUser = "alex";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "hourly";
+        Persistent = true;
+        RandomizedDelaySec = "5min";
+        Unit = "systemkatalog-drift-watch.service";
+      };
+    };
+
   assertions = [
     {
       assertion = config.fileSystems."/".device == "/dev/disk/by-label/NIXOS_STAGE0_ROOT";

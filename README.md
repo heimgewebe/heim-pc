@@ -87,7 +87,7 @@ Neue dauerhafte Nutzerfunktionen erhalten im selben Arbeitsauftrag eine deklarat
 python3 scripts/generate_nixos_program_inventory.py --compare-closure /nix/store/<realisierte-ziel-closure>
 ```
 
-Standard-Baseline ist die aktive Closure; `--baseline-closure` erlaubt einen expliziten Vergleich mit einer früheren Closure. JSON meldet hinzugekommene/entfernte deklarierte System-/User-Units, Masks, Abhängigkeitslinks und Desktopstarter. Neue Units ohne literalen Backtick-Verweis in dieser README sind **Prüfhinweise**, keine Feststellung fehlender Dokumentation. Ausgelassene Metadatennamen sind gezählt. Der Vergleich prüft keine Unit-Inhalte, manuellen Home-Installationen, Datenintegrität oder tatsächliche Dienstfunktion. Er ist keine neue Aktivierungssperre. Bewusste Ablösungen dokumentieren; unerwartete Verluste klären; nach Aktivierung und bei nachfolgenden Rollouts die betroffenen Nutzerwege frisch prüfen. Fehlende nichtkritische Dokumentation blockiert keinen notwendigen Rollout.
+Standard-Baseline ist die aktive Closure; `--baseline-closure` erlaubt einen expliziten Vergleich mit einer früheren Closure. JSON meldet hinzugekommene/entfernte deklarierte System-/User-Units, Masks, Abhängigkeitslinks und Desktopstarter. Neue Units ohne literalen Backtick-Verweis in dieser README sind **Prüfhinweise**, keine Feststellung fehlender Dokumentation. Nicht darstellbare Namen werden als stabile, opake SHA-256-Identitäten verglichen statt ausgelassen; tatsächliche Auslassungen sind separat gezählt. Der Vergleich prüft keine Unit-Inhalte, manuellen Home-Installationen, Datenintegrität oder tatsächliche Dienstfunktion. Er ist keine neue Aktivierungssperre. Bewusste Ablösungen dokumentieren; unerwartete Verluste klären; nach Aktivierung und bei nachfolgenden Rollouts die betroffenen Nutzerwege frisch prüfen. Fehlende nichtkritische Dokumentation blockiert keinen notwendigen Rollout.
 
 ## Kanonischer Maschinenstart
 
@@ -493,12 +493,9 @@ Leitstand zeigt die Karte read-only an. Für aktuelle Aufgaben, PRs, CI oder Run
 
 `config/agents/repos-root-AGENTS.md` ist die versionierte Vorlage für `~/repos/AGENTS.md`. Sie beginnt beim Host-Maschinenvertrag und verweist nur bei repositoryübergreifenden Systemfragen auf den Systemkatalog. Dadurch wird bei gewöhnlicher Einzelrepo-Arbeit kein unnötiger Gesamtkontext geladen.
 
-Der stündliche `systemkatalog-drift-watch.timer` prüft unabhängig vom GitHub-Zeitplan Organisations-, Fleet- und Primärquellendrift. Er darf keine Semantik schreiben oder mergen. Bei materieller Drift registriert oder verfeinert er über den integritätsgeprüften kanonischen Runtime-Snapshot genau einen Bureau-Kandidaten mit vollständigem Operator-Kontext und SHA-256-Bindung an den lokalen Bericht. Eine aktive Kandidaten-ID allein genügt nicht zur Deduplizierung: Entscheidung, Pflichtfelder und Report-Digest müssen übereinstimmen. Bericht, versionierte Bureau-Anfrage und proposal-only Vorschlag liegen lokal unter `~/.local/state/heim-pc/systemkatalog-drift-watch/`.
+Der native stündliche `systemkatalog-drift-watch.timer` des produktiven NixOS-Profils übernimmt den bereits erzeugten Driftbericht aus dem zentralen Systemkatalog-Workflow `ecosystem-map.yml`. Er liest genau den letzten abgeschlossenen Main-Lauf, verifiziert Run-/Artefaktidentität, ZIP-SHA-256, Berichtsform und Frische (maximal 48 Stunden) und führt **keinen zweiten Organisationsscan** aus. Fehlende, beschädigte oder veraltete Berichte sind Fehler, keine Driftfreiheit. Bei materieller Drift wird über den kanonischen Bureau-Pfad der bestehende Kandidat aktualisiert; ein stabiler Digest der tatsächlichen Abweichungen ignoriert reine Beobachtungszeit und irrelevante Commitwechsel bei unverändertem Inhalt. Lokale Belege liegen unter `~/.local/state/heim-pc/systemkatalog-drift-watch/`. Der Bericht ist proposal-only, keine Merge- oder Health-Autorität.
 
-```bash
-python3 scripts/install_systemkatalog_reliability.py          # Plan anzeigen
-python3 scripts/install_systemkatalog_reliability.py --apply --enable
-```
+Prüfung ohne Bureau- oder lokale Zustandsänderung: `python3 scripts/systemkatalog_drift_watch.py --check-only`. Auf dem produktiven NixOS ist keine manuelle Unit-Installation erforderlich. Der alte Installer bleibt nur für nicht deklarativ verwaltete Umgebungen erhalten.
 
 ## Goldene Regel
 

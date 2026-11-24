@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -210,52 +211,68 @@ def write_outputs(snapshot, directory):
 
 
 # Only metadata from realized, declarative closures, not mutable /etc or home.
-# Report omission counts instead of claiming complete coverage of instance names.
-UNIT_SUFFIXES = (".service", ".socket", ".timer", ".path", ".target", ".mount", ".automount")
+# Unpublishable names remain comparable through stable opaque identities.
+UNIT_SUFFIXES = (".service", ".socket", ".timer", ".path", ".target",
+                 ".mount", ".automount", ".swap", ".device", ".slice", ".scope")
+OPAQUE_PREFIX = "opaque-sha256:"
+
+
+def opaque_name(value: str) -> str:
+    return OPAQUE_PREFIX + hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def closure_inventory(root: Path):
     root = root.resolve(strict=True)
-    groups = {}
-    skipped = {}
+    groups, opaque, skipped = {}, {}, {}
     for scope in ("system", "user"):
         directory = root / "etc/systemd" / scope
         if not directory.is_dir():
             raise ValueError(f"missing declared {scope} unit directory")
         names, masked, links = set(), set(), set()
-        omitted = 0
+        hidden, omitted = 0, 0
 
-        def eligible(name):
-            return name.endswith(UNIT_SUFFIXES) and safe_name(name) != "[redacted]"
+        def display(name):
+            nonlocal hidden
+            if safe_name(name) == "[redacted]":
+                hidden += 1
+                return opaque_name(name)
+            return name
 
         for entry in directory.iterdir():
             if entry.name.endswith(UNIT_SUFFIXES):
-                if not eligible(entry.name):
-                    omitted += 1
-                elif entry.is_symlink() and entry.resolve(strict=True) == Path("/dev/null"):
-                    masked.add(entry.name)
+                name = display(entry.name)
+                if entry.is_symlink() and entry.resolve(strict=True) == Path("/dev/null"):
+                    masked.add(name)
                 elif entry.is_file():
-                    names.add(entry.name)
+                    names.add(name)
                 else:
                     raise ValueError(f"unreadable declared {scope} unit")
             elif entry.name.endswith((".wants", ".requires")) and entry.is_dir():
                 target = entry.name.rsplit(".", 1)[0]
                 for child in entry.iterdir():
-                    if eligible(target) and eligible(child.name):
-                        links.add(f"{entry.name}/{child.name}")
-                    else:
+                    if not (target.endswith(UNIT_SUFFIXES) and child.name.endswith(UNIT_SUFFIXES)):
                         omitted += 1
+                        continue
+                    raw = f"{entry.name}/{child.name}"
+                    if safe_name(target) == "[redacted]" or safe_name(child.name) == "[redacted]":
+                        hidden += 1
+                        links.add(opaque_name(raw))
+                    else:
+                        links.add(raw)
         groups[f"{scope}_units"] = sorted(names)
         groups[f"{scope}_masked"] = sorted(masked)
         groups[f"{scope}_dependency_links"] = sorted(links)
-        skipped[scope] = omitted
+        opaque[scope], skipped[scope] = hidden, omitted
     desktop = root / "sw/share/applications"
     if not desktop.is_dir():
         raise ValueError("missing declared desktop application directory")
     entries = [entry.name for entry in desktop.glob("*.desktop")]
-    groups["desktop_entries"] = sorted(name for name in entries if safe_name(name) != "[redacted]")
-    skipped["desktop"] = len(entries) - len(groups["desktop_entries"])
-    return {"groups": groups, "skipped_metadata_names": skipped}
+    groups["desktop_entries"] = sorted(
+        opaque_name(name) if safe_name(name) == "[redacted]" else name for name in entries
+    )
+    opaque["desktop"] = sum(safe_name(name) == "[redacted]" for name in entries)
+    skipped["desktop"] = 0
+    return {"groups": groups, "opaque_metadata_names": opaque, "skipped_metadata_names": skipped}
 
 
 def compare_closures(baseline: Path, candidate: Path, function_map: str):
@@ -271,11 +288,13 @@ def compare_closures(baseline: Path, candidate: Path, function_map: str):
     # A missing literal reference is a review hint, not proof of missing docs.
     hints = sorted({name for scope in ("system", "user")
                     for name in changes[f"{scope}_units"]["added"]
-                    if name not in references})
+                    if name not in references and not name.startswith(OPAQUE_PREFIX)})
     return {"schema": "nixos-closure-inventory-diff.v1",
             "baseline": baseline.name,
             "candidate": candidate.name,
             "changes": changes,
+            "opaque_metadata_names": {"baseline": before["opaque_metadata_names"],
+                                      "candidate": after["opaque_metadata_names"]},
             "skipped_metadata_names": {"baseline": before["skipped_metadata_names"],
                                        "candidate": after["skipped_metadata_names"]},
             "new_units_without_literal_function_map_reference": hints,
