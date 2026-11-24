@@ -46,9 +46,10 @@ class FakeResponse:
 class FakeSession:
     responses: list = []
     requests: list = []
+    options: list = []
 
     def __init__(self, **kwargs):
-        pass
+        self.options.append(kwargs)
 
     async def __aenter__(self):
         return self
@@ -86,6 +87,8 @@ def load():
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
         "ToolResult": lambda data: SimpleNamespace(data=data, error=False),
         "aiohttp": SimpleNamespace(ClientSession=FakeSession,
+                                   TCPConnector=lambda **kw: kw,
+                                   resolver=SimpleNamespace(ThreadedResolver=lambda: "system-resolver"),
                                    ClientError=type("ClientError", (Exception,), {})),
     }
     module = ast.fix_missing_locations(ast.Module(body=chosen, type_ignores=[]))
@@ -101,6 +104,7 @@ class WeatherTests(unittest.TestCase):
     def setUp(self):
         FakeSession.responses = []
         FakeSession.requests = []
+        FakeSession.options = []
 
     def call(self, args, hass=None):
         hass = hass or SimpleNamespace(config=SimpleNamespace(latitude=53.55, longitude=10.0))
@@ -138,6 +142,8 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual("Wien", result.data["ort"])
         self.assertIn("geocoding-api.open-meteo.com", FakeSession.requests[0][0])
         self.assertEqual("48.2", FakeSession.requests[1][1]["latitude"])
+        self.assertEqual([{"timeout": None, "connector": {"resolver": "system-resolver"}}],
+                         FakeSession.options)
 
     def test_missing_location_uses_home_assistant_home(self):
         FakeSession.responses = [FORECAST]
