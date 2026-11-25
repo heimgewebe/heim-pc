@@ -31,8 +31,8 @@ Die Sendspin-User-Unit liegt unter
 `~/.config/systemd/user/heimgewebe-music-sendspin.service`, ihr optionaler
 MOTU-Hotplug-Starter unter `~/.config/systemd/user/heimgewebe-music-sendspin.path`.
 Dieses Verzeichnis enthält die entsprechenden wiederherstellbaren Vorlagen.
-Die öffentlichen Vorlagen erkennen das MOTU M2 mit einem **Modell-Glob**
-(`usb-MOTU_M2_*`) und einem Audio-Sink-Präfix; sie enthalten keine
+Die öffentlichen Vorlagen verwenden Platzhalter für den lokal ausgewählten
+MOTU-Gerätepfad und die dazugehörige systemd-Geräteunit; sie enthalten keine
 eindeutige Geräte-Seriennummer. Lokale Seriennummern gehören nur in
 private Hostdaten. `python3 nixos/system/tests/test_nabu_public_web.py` prüft
 numerische Loopback-Adressen, private DNS-Antworten und Redirect-Sperren.
@@ -55,41 +55,36 @@ PortAudio-Library unter `nabu-portaudio-gcroot/lib`.
 
 ## MOTU: pegelbasierter Sprach- und Musikstart
 
-Der Sprachsatellit wird über `heimgewebe-assist-motu-hotplug.path` direkt
-gestartet, sobald der **ausgewählte** MOTU-Gerätepfad existiert. Nicht mehr
-über einen `PathChanged=/dev/snd/by-id`-Oneshot, der die USB-Ereignisse
-während des Bootens verpassen kann. Die Quadlet-Datei hat deshalb kein
+Beide Path-Units starten den jeweiligen langlebigen Audiodienst direkt,
+sobald der ausgewählte MOTU-Gerätepfad existiert. Der frühere
+`PathChanged=/dev/snd/by-id`-Oneshot konnte verspätete USB-Ereignisse
+beim Booten verpassen. Die Mikrofon-Quadlet-Datei hat kein
 `WantedBy=default.target`: Ohne MOTU gibt es keinen wartenden Startjob.
-`BindsTo=` zusammen mit `After=` auf die konkrete systemd-Geräteunit
-beendet den Sprachsatelliten und Sendspin bei Geräteverlust. Sendspin
-behält seinen vorhandenen Modell-Glob-Path; der lokale Gerätebezug muss
-bei einem Hardwarewechsel entsprechend aktualisiert werden.
+`BindsTo=` und `After=` binden beide Dienste an dieselbe konkrete systemd-Geräteunit.
 
-Die generischen Vorlagen `heimgewebe-assist-microphone.container.in`,
-`heimgewebe-assist-motu-hotplug.path` und `motu-device-binding.conf.in`
-liegen unter `nixos/system/nabu/`. Bei einer Wiederherstellung zuerst
-die private Hostbindung bestimmen:
+Die vier Quellvorlagen unter `nixos/system/nabu/` entsprechen der aktiven
+Hostkonfiguration bis auf die privaten Geräteplatzhalter:
 
-- genau einen vorhandenen `/dev/snd/by-id/usb-MOTU_M2_*`-Pfad auswählen
-  (bei Mehrdeutigkeit nicht automatisch irgendein Gerät auswählen);
-- `@MOTU_DEVICE@` durch dessen Basename und `@MOTU_DEVICE_UNIT@`
-  durch die Ausgabe von `systemd-escape --path --suffix=device "$pfad"`
-  ersetzen. Die Seriennummer bleibt ausschließlich in lokalen Dateien;
-- gerenderte Quadlet-Datei unter
-  `~/.config/containers/systemd/heimgewebe-assist-microphone.container`,
-  gerenderten Path unter `~/.config/systemd/user/heimgewebe-assist-motu-hotplug.path`
-  und die gerenderte `[Unit]`-Gerätebindung für Sendspin unter
-  `~/.config/systemd/user/heimgewebe-music-sendspin.service.d/motu-device.conf`
-  installieren. Vorhandene Einträge bzw. die private Audioauswahl prüfen,
-  nicht blind überschreiben. Die alte Hotplug-Oneshot-Unit ist nicht mehr nötig.
-- `systemctl --user daemon-reload`; die beiden Path-Units aktivieren.
-  `systemctl --user show heimgewebe-assist-microphone.service -p BindsTo -p After -p WantedBy`
-  muss die exakte Gerätebindung, aber keine unbedingte default.target-Aktivierung
-  zeigen. Beim nächsten echten Ab-/Anschalten den Stopp und Wiederanlauf prüfen.
+- `heimgewebe-assist-microphone.container.in` →
+  `~/.config/containers/systemd/heimgewebe-assist-microphone.container`
+- `heimgewebe-assist-motu-hotplug.path`, `heimgewebe-music-sendspin.path`
+  und `heimgewebe-music-sendspin.service` → `~/.config/systemd/user/`
 
-Keine neue Timer-, Polling- oder Hintergrunddienstarchitektur. Die vorhandene
-begrenzte PipeWire-Startprüfung bleibt erhalten; Ton und Sprachdialog
-sind separat abzunehmen.
+Bei Wiederherstellung genau einen vorhandenen `/dev/snd/by-id/usb-MOTU_M2_*`-
+Pfad auswählen; bei Mehrdeutigkeit nicht automatisch irgendein Gerät wählen.
+In allen vier Dateien `@MOTU_DEVICE@` durch dessen Basename und
+`@MOTU_DEVICE_UNIT@` durch die Ausgabe von
+`systemd-escape --path --suffix=device "$pfad"` ersetzen. Lokale Seriennummern
+bleiben in Hostdaten. Dateien nicht ungerendert installieren; vorhandene private
+Audioauswahl und Änderungen vorher prüfen. Der alte Hotplug-Oneshot entfällt.
+
+Nach `systemctl --user daemon-reload` beide Path-Units aktivieren.
+Mit `systemctl --user show heimgewebe-assist-microphone.service -p BindsTo -p After -p WantedBy`
+die exakte Gerätebindung und die fehlende unbedingte default.target-Aktivierung
+prüfen; Sendspin muss an dieselbe Geräteunit gebunden sein. Beim nächsten echten
+Ab-/Anschalten Stopp und Wiederanlauf prüfen. Kein zusätzlicher Timer oder
+Dauerdienst; die bestehende begrenzte PipeWire-Startprüfung bleibt erhalten.
+Ton und Sprachdialog sind separat abzunehmen.
 
 ## Browser: öffentliche Ziele ohne zusätzlichen Dienst
 
@@ -317,10 +312,10 @@ Provider-Eintrag und Quadlet sind Host-Runtime und werden nicht durch Git instal
    `chatgpt_client.py` und `manifest.json` in
    `custom_components/nabu_web/` zurückkopieren und Home Assistant starten.
    Bestehende Runtime-Konfiguration nicht durch Quellkopien überschreiben.
-2. Falls Sendspin-Units fehlen: die beiden Versionen aus diesem Verzeichnis
-   in `~/.config/systemd/user/` installieren, vorher den GC-Root prüfen und
-   anschließend `systemctl --user daemon-reload` sowie
-   `systemctl --user enable --now heimgewebe-music-sendspin.path` ausführen.
+2. Falls Audio-Units fehlen: die vier Vorlagen wie oben mit derselben lokalen
+   MOTU-Gerätebindung rendern und installieren; vorher den GC-Root prüfen.
+   Anschließend `systemctl --user daemon-reload` und
+   `systemctl --user enable --now heimgewebe-assist-motu-hotplug.path heimgewebe-music-sendspin.path` ausführen.
    Sendspin selbst bleibt geräteabhängig und darf den User-Desktop ohne
    angeschlossenes MOTU nicht blockieren.
 3. `systemctl --user status heimgewebe-homeassistant.service

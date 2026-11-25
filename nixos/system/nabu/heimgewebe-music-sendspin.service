@@ -1,8 +1,10 @@
 [Unit]
+BindsTo=@MOTU_DEVICE_UNIT@
+After=@MOTU_DEVICE_UNIT@
 Description=Heimgewebe Music Assistant Sendspin output (MOTU M2 / PipeWire)
 Wants=pipewire-pulse.service heimgewebe-music-assistant.service
 After=pipewire-pulse.service heimgewebe-music-assistant.service
-ConditionPathExistsGlob=/dev/snd/by-id/usb-MOTU_M2_*
+ConditionPathExists=/dev/snd/by-id/@MOTU_DEVICE@
 
 [Service]
 Type=simple

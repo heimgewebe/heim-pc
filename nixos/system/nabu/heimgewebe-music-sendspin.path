@@ -2,7 +2,7 @@
 Description=Start Sendspin when MOTU M2 is connected
 
 [Path]
-PathExistsGlob=/dev/snd/by-id/usb-MOTU_M2_*
+PathExists=/dev/snd/by-id/@MOTU_DEVICE@
 Unit=heimgewebe-music-sendspin.service
 
 [Install]

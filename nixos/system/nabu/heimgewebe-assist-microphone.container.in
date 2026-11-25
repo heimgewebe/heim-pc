@@ -1,10 +1,11 @@
 [Unit]
+BindsTo=@MOTU_DEVICE_UNIT@
+After=@MOTU_DEVICE_UNIT@
 Description=Heimgewebe Assist PC microphone satellite (MOTU M2 / PipeWire)
-# The level-triggered path starts this unit only when the selected MOTU exists.
+# Skip cleanly when MOTU is powered off; the existing hotplug path rearms on connection.
 ConditionPathExists=/dev/snd/by-id/@MOTU_DEVICE@
 Wants=pipewire-pulse.service
-BindsTo=@MOTU_DEVICE_UNIT@
-After=pipewire-pulse.service @MOTU_DEVICE_UNIT@
+After=pipewire-pulse.service
 
 [Container]
 Image=ghcr.io/ohf-voice/linux-voice-assistant:latest

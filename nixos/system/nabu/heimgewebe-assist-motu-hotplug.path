@@ -1,5 +1,5 @@
 [Unit]
-Description=Start Heim-PC voice satellite when the selected MOTU is connected
+Description=Start Nabu microphone when the MOTU M2 is present
 
 [Path]
 PathExists=/dev/snd/by-id/@MOTU_DEVICE@
