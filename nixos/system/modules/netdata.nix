@@ -1,6 +1,38 @@
 { config, pkgs, ... }:
 let
   diagnostics = ./netdata-diagnostics.py;
+  # Netdata 2.10.3's first-match default excludes user.slice. Preserve the
+  # stock filters and admit only Alex's actual rootless Podman payload
+  # cgroups (both Quadlet and libpod scope/container layouts).
+  # Keep raw IDs: the daemon cannot resolve another user's Podman names
+  # without management access. Recheck these pinned defaults on upgrade.
+  operatorUid = toString config.users.users.alex.uid;
+  rootlessPrefix = "/user.slice/user-${operatorUid}.slice/user@${operatorUid}.service";
+  podmanPayload = "${rootlessPrefix}/*/libpod-payload-*";
+  podmanScope = "${rootlessPrefix}/*/libpod-*.scope/container";
+  cgroupSelection = builtins.concatStringsSep " " [
+    "!*/init.scope" "!/system.slice/run-*.scope" "*user.slice/docker-*"
+    "!${podmanPayload}/*" podmanPayload podmanScope
+    "!*user.slice*" "*.scope"
+    "!/machine.slice/*/.control" "!/machine.slice/*/payload*"
+    "!/machine.slice/*/supervisor" "/machine.slice/*.service"
+    "*/kubepods/pod*/*" "*/kubepods/*/pod*/*" "*/*-kubepods-pod*/*"
+    "*/*-kubepods-*-pod*/*" "!*kubepods*" "!*kubelet*"
+    "!*/vcpu*" "!*/emulator" "!*.mount" "!*.partition"
+    "!*.service" "!*.service/udev" "!*.socket" "!*.slice"
+    "!*.swap" "!*.user" "!/" "!/docker" "!*/libvirt" "!/lxc"
+    "!/lxc/*/*" "!/lxc.monitor*" "!/lxc.pivot" "!/lxc.payload"
+    "!*lxcfs.service/.control" "!/machine" "!/qemu" "!/system"
+    "!/systemd" "!/user" "*"
+  ];
+  cgroupRenameSelection = builtins.concatStringsSep " " [
+    "!${podmanPayload}" "!${podmanScope}"
+    "!/" "!*.mount" "!*.socket" "!*.partition" "/machine.slice/*.service"
+    "!*.service" "!*.slice" "!*.swap" "!*.user" "!init.scope"
+    "!*.scope/vcpu*" "!*.scope/emulator" "*.scope" "*docker*" "*lxc*" "*qemu*"
+    "*/kubepods/pod*/*" "*/kubepods/*/pod*/*" "*/*-kubepods-pod*/*"
+    "*/*-kubepods-*-pod*/*" "!*kubepods*" "!*kubelet*" "*.libvirt-qemu" "*"
+  ];
   command = pkgs.writeShellApplication {
     name = "heim-pc-netdata";
     runtimeInputs = [ pkgs.podman pkgs.systemd ];
@@ -20,14 +52,20 @@ in
     claimTokenFile = null;
     config = {
       web."bind to" = "127.0.0.1";
+      "plugin:cgroups" = {
+        "enable by default cgroups matching" = cgroupSelection;
+        "run script to rename cgroups matching" = cgroupRenameSelection;
+      };
       db = {
         db = "dbengine";
         "update every" = 2;
         "storage tiers" = 2;
         # Time and disk size are soft retention targets, not filesystem quotas.
-        "dbengine tier 0 retention size" = "512MiB";
+        # Observed baseline growth plus additional container series: provision
+        # headroom without changing the 2s resolution or the 14d time goal.
+        "dbengine tier 0 retention size" = "4GiB";
         "dbengine tier 0 retention time" = "14d";
-        "dbengine tier 1 retention size" = "256MiB";
+        "dbengine tier 1 retention size" = "1GiB";
         "dbengine tier 1 retention time" = "14d";
       };
     };

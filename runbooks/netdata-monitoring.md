@@ -35,9 +35,22 @@ dimension and instance rather than averaging unrelated metrics together.
 Container statistics are read with the normal account's existing
 `podman ps` and `podman stats --no-stream --format json`. Expected and
 observed names are compared; missing names are explicit. This is a
-current snapshot, not historical per-container telemetry. Do not grant
-the Netdata daemon unrestricted access to the rootless Podman management
-socket just to obtain container names.
+current snapshot, not a historical per-container series.
+
+The native cgroup collector separately admits Alex's rootless Podman
+payload cgroups and libpod scope/container leaves before Netdata 2.10.3's
+general user.slice exclusion. All other stock filters remain in place.
+CPU, memory, I/O and PSI are collected from the existing cgroup files;
+no Podman management socket or new collector is required. Resolve the
+current container ID with `podman ps --no-trunc` and use native MCP
+`get_metrics_details` for `cgroup.cpu`, `cgroup.mem` or `cgroup.io` to
+find the corresponding instance. If needed, correlate the ID and
+`podman inspect --format '{{.State.Pid}}' <container>` with the process's
+`/proc/<pid>/cgroup`. The native ID can change when a container is
+recreated. Do not claim name-stable cross-recreation history. Use the
+actual returned finite series, not only a chart name, as evidence.
+The collector does not need permission to rename or manage rootless
+containers. Recheck the pinned native filter defaults on a Netdata upgrade.
 
 ## Actionable notifications
 
@@ -97,15 +110,21 @@ Acceptance:
 - Native MCP doctor returns finite CPU metrics.
 - Snapshot returns recent time-series data and compares all running
   Podman names. Missing metrics and partial results stay explicit.
+- Query finite native cgroup CPU and memory series for the actual running
+  container IDs after activation. A readable cgroup or a matching filter
+  alone does not prove historical coverage.
 - Watch preview and controlled fixture checks cover initial cumulative
   Btrfs counts, a new counter increase, sustained heat, thermal
   hysteresis, a clear and recurrence, and temporary API unavailability.
 - Verify the actual user timer and one existing-route ntfy acknowledgement;
   enqueue or HTTP acknowledgement alone does not prove phone display.
 - Record Netdata unit CPU time and cgroup memory, oldest/newest timestamps
-  and tier retention metrics. The configured 14-day/768 MiB targets
-  are soft limits. A recently started daemon cannot establish 14 days
-  of real history. Do not interpret an unreadable cache directory as
-  zero DB size.
+  and tier retention metrics. The 14-day targets and initial 4 GiB/1 GiB
+  tier sizes are soft limits, not a guarantee: the size limit can remove
+  history earlier. These sizes allow headroom for the measured host
+  growth and new container series. Check growth, effective retention,
+  memory and CPU overhead after representative use; adjust only if needed.
+  A recently started daemon cannot establish 14 days of real history.
+  Do not interpret an unreadable cache directory as zero DB size.
 
 No other monitoring stack is required.
