@@ -19,6 +19,18 @@ TEST_SOURCE_REVISION = "a" * 40
 
 
 class T(unittest.TestCase):
+    def test_integration_inventory_is_native_bounded_advisory_preswitch(self):
+        host = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
+        self.assertIn("system.preSwitchChecks.heim-pc-integration-inventory =", host)
+        self.assertIn("lib.mkIf config.heimPc.grabowskiProduction.enable", host)
+        self.assertIn("../../../scripts/generate_nixos_program_inventory.py", host)
+        self.assertIn("../../../README.md", host)
+        self.assertIn("--baseline-closure /run/current-system --compare-closure \"$1\"", host)
+        self.assertIn("switch|test|boot)", host)
+        self.assertIn("timeout --kill-after=2s 15s", host)
+        self.assertIn("if !", host)
+        self.assertIn("comparison skipped", host)
+
     def test_smartd_alerts_reach_kde_wayland_without_xmessage(self):
         host = (SOURCE / "modules/seagate-primary-candidate.nix").read_text()
         self.assertIn("services.smartd.enable = true;", host)
