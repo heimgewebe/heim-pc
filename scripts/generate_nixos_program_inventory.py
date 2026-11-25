@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -209,10 +210,111 @@ def write_outputs(snapshot, directory):
     (directory / "nixos-program-inventory.md").write_text(render(snapshot), encoding="utf-8")
 
 
+# Only metadata from realized, declarative closures, not mutable /etc or home.
+# Unpublishable names remain comparable through stable opaque identities.
+UNIT_SUFFIXES = (".service", ".socket", ".timer", ".path", ".target",
+                 ".mount", ".automount", ".swap", ".device", ".slice", ".scope")
+OPAQUE_PREFIX = "opaque-sha256:"
+
+
+def opaque_name(value: str) -> str:
+    return OPAQUE_PREFIX + hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def closure_inventory(root: Path):
+    root = root.resolve(strict=True)
+    groups, opaque, skipped = {}, {}, {}
+    for scope in ("system", "user"):
+        directory = root / "etc/systemd" / scope
+        if not directory.is_dir():
+            raise ValueError(f"missing declared {scope} unit directory")
+        names, masked, links = set(), set(), set()
+        hidden, omitted = 0, 0
+
+        def display(name):
+            nonlocal hidden
+            if safe_name(name) == "[redacted]":
+                hidden += 1
+                return opaque_name(name)
+            return name
+
+        for entry in directory.iterdir():
+            if entry.name.endswith(UNIT_SUFFIXES):
+                name = display(entry.name)
+                if entry.is_symlink() and entry.resolve(strict=True) == Path("/dev/null"):
+                    masked.add(name)
+                elif entry.is_file():
+                    names.add(name)
+                else:
+                    raise ValueError(f"unreadable declared {scope} unit")
+            elif entry.name.endswith((".wants", ".requires")) and entry.is_dir():
+                target = entry.name.rsplit(".", 1)[0]
+                for child in entry.iterdir():
+                    if not (target.endswith(UNIT_SUFFIXES) and child.name.endswith(UNIT_SUFFIXES)):
+                        omitted += 1
+                        continue
+                    raw = f"{entry.name}/{child.name}"
+                    if safe_name(target) == "[redacted]" or safe_name(child.name) == "[redacted]":
+                        hidden += 1
+                        links.add(opaque_name(raw))
+                    else:
+                        links.add(raw)
+        groups[f"{scope}_units"] = sorted(names)
+        groups[f"{scope}_masked"] = sorted(masked)
+        groups[f"{scope}_dependency_links"] = sorted(links)
+        opaque[scope], skipped[scope] = hidden, omitted
+    desktop = root / "sw/share/applications"
+    if not desktop.is_dir():
+        raise ValueError("missing declared desktop application directory")
+    entries = [entry.name for entry in desktop.glob("*.desktop")]
+    groups["desktop_entries"] = sorted(
+        opaque_name(name) if safe_name(name) == "[redacted]" else name for name in entries
+    )
+    opaque["desktop"] = sum(safe_name(name) == "[redacted]" for name in entries)
+    skipped["desktop"] = 0
+    return {"groups": groups, "opaque_metadata_names": opaque, "skipped_metadata_names": skipped}
+
+
+def compare_closures(baseline: Path, candidate: Path, function_map: str):
+    """Advisory structural diff, not enablement/health or a removal veto."""
+    baseline, candidate = baseline.resolve(strict=True), candidate.resolve(strict=True)
+    before, after = closure_inventory(baseline), closure_inventory(candidate)
+    changes = {}
+    for key, prior in before["groups"].items():
+        target = after["groups"][key]
+        changes[key] = {"added": sorted(set(target) - set(prior)),
+                        "removed": sorted(set(prior) - set(target))}
+    references = set(re.findall(r"\x60([^\x60\n]+)\x60", function_map))
+    # A missing literal reference is a review hint, not proof of missing docs.
+    hints = sorted({name for scope in ("system", "user")
+                    for name in changes[f"{scope}_units"]["added"]
+                    if name not in references and not name.startswith(OPAQUE_PREFIX)})
+    return {"schema": "nixos-closure-inventory-diff.v1",
+            "baseline": baseline.name,
+            "candidate": candidate.name,
+            "changes": changes,
+            "opaque_metadata_names": {"baseline": before["opaque_metadata_names"],
+                                      "candidate": after["opaque_metadata_names"]},
+            "skipped_metadata_names": {"baseline": before["skipped_metadata_names"],
+                                       "candidate": after["skipped_metadata_names"]},
+            "new_units_without_literal_function_map_reference": hints,
+            "scope": "declared closure metadata only; no runtime health, user data, or completeness claim"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path.home() / ".local/state/heim-pc/inventory")
+    parser.add_argument("--compare-closure", type=Path, help="realized target closure; read-only structural JSON")
+    parser.add_argument("--baseline-closure", type=Path, default=Path("/run/current-system"))
     args = parser.parse_args()
+    if args.compare_closure is not None:
+        try:
+            report = compare_closures(args.baseline_closure, args.compare_closure,
+                                      (ROOT / "README.md").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            parser.error(f"closure comparison unavailable: {exc}")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
     write_outputs(collect(), args.output_dir)
 
 
