@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Nabu ChatGPT Textversand",
-  "version": "1.1.3",
+  "version": "1.1.5",
   "description": "Sendet ausschließlich frische, lokal signierte Nabu-Aufträge auf chatgpt.com.",
   "content_scripts": [
     {
@@ -15,7 +15,8 @@
     }
   ],
   "permissions": [
-    "storage"
+    "storage",
+    "nativeMessaging"
   ],
   "background": {
     "service_worker": "background.js"

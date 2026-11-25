@@ -28,11 +28,17 @@ const stored = data.verify && data.priorAttempt !== false ? {
 } : {};
 let backgroundListener;
 let installListener;
+const nativeReceipts = [];
 const backgroundChrome = {
   runtime: {
     onMessage: { addListener(fn) { backgroundListener = fn; } },
     onInstalled: { addListener(fn) { installListener = fn; } },
-    getManifest() { return {version: "1.1.0"}; }
+    getManifest() { return {version: "1.1.4"}; },
+    async sendNativeMessage(host, body) {
+      nativeReceipts.push({host, body});
+      if (data.nativeFailure) throw new Error("native host unavailable");
+      return {recorded: true};
+    }
   },
   storage: { local: {
     async get(key) { return {[key]: stored[key]}; },
@@ -83,6 +89,7 @@ function openTab() {
       querySelectorAll(selector) {
         if (selector === "button") return data.missingSend ? [] : [send];
         if (selector.includes('data-message-author-role="user"')) {
+          if (data.directUserTestId && !selector.includes('[data-testid="user-message"]')) return [];
           if (!(data.verify || clicks && data.confirm !== false)) return [];
           const value = data.messageText ?? data.composer;
           return [{...visible, innerText: data.wrapped ? "You said:\n" + value : value,
@@ -115,7 +122,8 @@ Promise.all(tabs.map(tab => tab.finished)).then(() => {
     perTabClicks: tabs.map(tab => tab.clicks),
     marked: Object.keys(stored.nabu_consumed_nonces_v1 || {}).length,
     stage: receipts[0]?.stage || null,
-    noPromptInReceipts: !JSON.stringify(receipts).includes(data.composer)
+    noPromptInReceipts: !JSON.stringify(receipts).includes(data.composer),
+    nativeReceipts
   }));
 }).catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -159,6 +167,15 @@ class NabuChromeSendContentTests(unittest.TestCase):
         self.assertEqual(result["marked"], 1)
         self.assertEqual(result["stage"], "message_sent")
         self.assertTrue(result["noPromptInReceipts"])
+        self.assertEqual(result["nativeReceipts"], [
+            {"host": "net.heimgewebe.nabu_receipt", "body": {"nonce": "cd" * 12, "stage": stage}}
+            for stage in ("click_attempted", "message_sent")
+        ])
+
+    def test_native_transport_failure_does_not_repeat_send(self):
+        result = self.send_once(nativeFailure=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "message_sent")
 
     def test_capture_survives_query_removal_before_composer_hydration(self):
         result = self.send_once(delayedHydration=True)
@@ -223,6 +240,12 @@ class NabuChromeSendContentTests(unittest.TestCase):
         self.assertEqual(result["clicks"], 1)
         self.assertEqual(result["stage"], "message_sent")
 
+    def test_read_only_recovery_recognizes_standalone_user_message_testid(self):
+        result = self.send_once(verify=True, directUserTestId=True)
+        self.assertEqual(result["clicks"], 0)
+        self.assertEqual(result["stage"], "message_verified")
+        self.assertEqual(result["nativeReceipts"][-1]["body"]["stage"], "message_verified")
+
     def test_read_only_recovery_requires_prior_attempt_and_never_clicks(self):
         for fixture, expected in (
             ({"verify": True, "wrapped": True}, "message_verified"),
@@ -264,6 +287,7 @@ class NabuChromeSendContentTests(unittest.TestCase):
                 result = self.send_once(**kwargs)
                 self.assertEqual(result["clicks"], 0)
                 self.assertEqual(result["marked"], 0)
+                self.assertEqual(result["nativeReceipts"], [])
 
 
 if __name__ == "__main__":
