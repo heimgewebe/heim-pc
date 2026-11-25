@@ -94,6 +94,21 @@
       "file_type": "Q3_K_M",
       "renderer": "qwen3.5",
       "parser": "qwen3.5"
+    },
+    "server_cache": {
+      "observed_at": "2026-11-25T13:28:46.034778+01:00",
+      "unit": "heimgewebe-assist-ollama.service",
+      "quadlet": "~/.config/containers/systemd/heimgewebe-assist-ollama.container",
+      "environment": {
+        "OLLAMA_FLASH_ATTENTION": "1",
+        "OLLAMA_KV_CACHE_TYPE": "q8_0",
+        "CUDA_CACHE_PATH": "/root/.ollama/cuda-cache"
+      },
+      "persistent_mount": {
+        "source": "~/.local/share/heimgewebe/assist/ollama",
+        "target": "/root/.ollama"
+      },
+      "cache_relative_directory": "cuda-cache"
     }
   },
   "stt": {

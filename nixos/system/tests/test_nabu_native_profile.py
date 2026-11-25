@@ -20,6 +20,24 @@ class NabuNativeProfileTests(unittest.TestCase):
                 self.assertEqual(len(content), expected["bytes"])
                 self.assertEqual(hashlib.sha256(content).hexdigest(), expected["sha256"])
 
+    def test_ollama_cache_uses_existing_persistent_model_mount(self):
+        data = json.loads((PROFILE / "profile.json").read_text())
+        cache = data["ollama"]["server_cache"]
+        self.assertEqual(cache["unit"], "heimgewebe-assist-ollama.service")
+        self.assertEqual(cache["quadlet"], "~/.config/containers/systemd/heimgewebe-assist-ollama.container")
+        env = cache["environment"]
+        self.assertEqual(env, {"OLLAMA_FLASH_ATTENTION": "1",
+                               "OLLAMA_KV_CACHE_TYPE": "q8_0",
+                               "CUDA_CACHE_PATH": "/root/.ollama/cuda-cache"})
+        mount = cache["persistent_mount"]
+        self.assertEqual(mount["source"], "~/.local/share/heimgewebe/assist/ollama")
+        self.assertEqual(mount["target"], "/root/.ollama")
+        self.assertEqual(Path(env["CUDA_CACHE_PATH"]).relative_to(mount["target"]),
+                         Path(cache["cache_relative_directory"]))
+        self.assertEqual(data["ollama"]["options"]["keep_alive"], 600)
+        self.assertEqual(data["ollama"]["options"]["num_ctx"], 16384)
+        self.assertNotIn("OLLAMA_KV_CACHE_TYPE", data["ollama"]["options"])
+
     def test_projector_color_target_is_not_master_or_laser(self):
         grammar = (PROFILE / "native_commands.yaml").read_text()
         block = grammar.split("  HassLightSet:", 1)[1].split("  HassTurnOff:", 1)[0]

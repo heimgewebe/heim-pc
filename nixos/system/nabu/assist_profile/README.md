@@ -66,7 +66,21 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
    die Manifestreferenzen sind kein neuer Modelldownload. Kein LoRA-Adapter
    erforderlich. Den vorhandenen Systemprompt beibehalten und die additive
    Regel nur anfügen, wenn sie fehlt. Nicht den gesamten privaten
-   HA-Config-Entry überschreiben.
+   HA-Config-Entry überschreiben. Die unter `ollama.server_cache` separat
+   beobachteten drei Server-Umgebungsvariablen gehören in den bestehenden
+   Ollama-Quadlet, nicht in die HA-LLM-Optionen. Die vorhandene persistente
+   Ollama-Einbindung bleibt erhalten. Flash Attention und Q8-KV reduzieren
+   den Speicherbedarf; `CUDA_CACHE_PATH` liegt unter dieser Einbindung,
+   damit der CUDA-ComputeCache den Containerwechsel überlebt. Keine
+   zusätzliche GPU-Residenz, kein zweiter Container und kein Modellwechsel.
+   Den Cache bei Wiederherstellung aus dem passenden vorhandenen lokalen
+   Bestand übernehmen oder von der Runtime neu erzeugen lassen; er ist
+   regenerierbar und kein verpflichtendes Git-Artefakt. Bei inkompatiblem
+   Treiber/Image nicht auf einen alten Cache vertrauen. Den bestehenden
+   Keepalive-Wert nicht zur Kompensation eines leeren Caches erhöhen.
+   Nur falls die drei Einstellungen tatsächlich abweichen, den Quadlet
+   gezielt korrigieren, daemon-reload und einen koordinierten Neustart des
+   Ollama-Dienstes durchführen; aktive Sprachdialoge/GPU-Arbeit abwarten.
 6. YAML und Intent-Script-Schema mit der tatsächlich installierten
    HA-Runtime prüfen. Änderungen möglichst in einer einzigen HA-Aktivierung
    übernehmen, nicht während einer laufenden Sprachinteraktion. Nach
@@ -90,6 +104,13 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
   Verneinung, ein realer Geräte-/Auftragsname und Stille). Die echten
   Mikrofon-/TTS-/Gerätewege separat abnehmen; Service-Health und Stubtests
   ersetzen sie nicht.
+- Bei einer Ollama-Wiederherstellung die drei Cache-Variablen im laufenden
+  Container, den persistenten Mount und die tatsächliche Kaltstartdauer
+  prüfen. Der 25.11.2026 dokumentierte direkte synthetische Vergleich ergab
+  mit wiederverwendetem CUDA-Cache 8,158 statt 74,769 Sekunden; die erste
+  produktive direkte Modellprobe benötigte 10,190 statt zuvor 70,787 Sekunden.
+  Q8-KV reduzierte den KV-Speicher von 1024 auf 544 MiB; kein Warm-Speedup
+  nachgewiesen. Diese Messungen sind keine Garantie für reale Sprachdialoge.
 - Frische HA-Erreichbarkeit, Satelliten-Reconnect, aktive Sprachdienste,
   tatsächliche Quell-/Runtime-Drift und den nächsten Restic-Snapshot prüfen.
   Vorhandene Modellcache-Dateien und private Konfigurationsdaten nicht
