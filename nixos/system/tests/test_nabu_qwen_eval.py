@@ -183,6 +183,38 @@ class NabuQwenEvalTest(unittest.TestCase):
         self.assertFalse(nabu.score(cases["fresh-10"], "answer", {},
                                     "Aktuelle Beschlüsse ohne Quelle."))
 
+    def test_default_request_uses_versioned_assist_profile(self):
+        profile_path = ROOT / "nixos/system/nabu/assist_profile/profile.json"
+        expected = json.loads(profile_path.read_text())["ollama"]["options"]
+        self.assertEqual(expected["model"], nabu.MODEL)
+        addendum = profile_path.with_name("prompt-addendum.txt").read_text().strip()
+        with patch.object(nabu, "http_json", return_value={}) as request:
+            nabu.chat(nabu.MODEL, "Test", [], [], 30)
+        payload = request.call_args.args[1]
+        self.assertEqual(expected["model"], payload["model"])
+        self.assertEqual(expected["think"], payload["think"])
+        self.assertEqual(expected["num_ctx"], payload["options"]["num_ctx"])
+        self.assertEqual(f'{expected["keep_alive"]}s', payload["keep_alive"])
+        self.assertNotIn("num_predict", payload["options"])
+        self.assertEqual(1, payload["messages"][0]["content"].count(addendum))
+
+    def test_unrequested_chatgpt_handoff_is_critical(self):
+        case = next(x for x in nabu.cases() if x["id"] == "answer-01")
+        message = {"tool_calls": [
+            {"function": {"name": "nabu_web__chatgpt",
+                          "arguments": {"question": "Test"}}}
+        ]}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(nabu, "validate_fixture", return_value=([case], [])), \
+                 patch.object(nabu, "model_identity", return_value={"name": nabu.MODEL, "digest": "c" * 64}), \
+                 patch.object(nabu, "chat", return_value=({"message": message}, 0.1)):
+                self.assertEqual(0, nabu.run("run", nabu.MODEL, 30, Path(temp)))
+            rows = [json.loads(line) for line in next(Path(temp).glob("*.jsonl")).read_text().splitlines()]
+            result = next(x for x in rows if x.get("record") == "case")
+            self.assertEqual(["nabu_web__chatgpt"], result["unrequested_effectful_tools"])
+            self.assertTrue(result["critical"])
+            self.assertFalse(result["pass"])
+
     def test_check_never_touches_ollama(self):
         with patch.object(nabu, "http_json", side_effect=AssertionError("Network not allowed")):
             self.assertEqual(0, nabu.run("check", nabu.MODEL, 95, Path("/unused")))
