@@ -17,6 +17,27 @@ Non-production prototype for the long-term Heim-PC operating-system architecture
 
 This directory is deliberately safe to evaluate/build in isolation. It must not be interpreted as permission to install NixOS, change partitions, replace the bootloader or switch the running Heim-PC.
 
+## Automatischer Integrationsvergleich beim regulären Rollout
+
+Die produktive Seagate-/Grabowski-Konfiguration bindet den vorhandenen
+Inventarvergleich deklarativ in `system.preSwitchChecks.heim-pc-integration-inventory`
+ein. Das native `switch-to-configuration` übergibt die exakte Ziel-Closure
+und den Aktionsmodus (`switch`, `test`, `boot`). Der Vergleich liest
+ausschließlich deklarative Metadaten der aktiven und der gebauten Ziel-Closure;
+Skript und Funktionskarte stammen aus dem unveränderlichen Zielsystem, nicht
+aus einem möglicherweise veralteten Checkout. Die strukturierte Ausgabe steht
+im normalen Rollout-Log. Hinzugekommene und entfernte Units, Masks,
+Abhängigkeitslinks und Desktopstarter sowie fehlende literale Dokumentationsverweise
+sind Prüfhinweise, keine neuen Freigaben oder pauschalen Aktivierungsverbote.
+
+Fehlt die Ausgangs-Closure oder scheitert der Vergleich, wird das ausdrücklich
+gemeldet; der auf 15 Sekunden begrenzte Beobachter blockiert keinen
+Wiederherstellungsweg. Ein Rollback in eine ältere Generation ohne diesen
+Hook kann den Vergleich nicht ausführen. Die tatsächliche Nutzbarkeit,
+persistente Daten und externe/manuelle Integrationen sind anschließend über
+die vorhandenen Funktions- und Recovery-Proben zu prüfen. Kein Neustart nur
+zur Erzeugung eines Prüfnachweises. Der native User-Timer `systemkatalog-drift-watch.timer` übernimmt stündlich den bereits erzeugten zentralen CI-Bericht (kein zweiter Scan). Nicht darstellbare Unit-/Link-Namen werden im lokalen Vergleich als opake Identitäten erfasst, nicht stillschweigend ausgelassen.
+
 ## Freigegebener Bootstandard und Recovery auf dem physischen NixOS-Host
 
 Das native `systemd-boot`-Installationsskript setzt bei jeder regulären
