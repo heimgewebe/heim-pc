@@ -1,0 +1,4 @@
+[Unit]
+# Stop the running audio output cleanly when the selected USB device disappears.
+BindsTo=@MOTU_DEVICE_UNIT@
+After=@MOTU_DEVICE_UNIT@

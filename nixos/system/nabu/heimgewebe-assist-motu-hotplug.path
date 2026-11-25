@@ -1,0 +1,9 @@
+[Unit]
+Description=Start Heim-PC voice satellite when the selected MOTU is connected
+
+[Path]
+PathExists=/dev/snd/by-id/@MOTU_DEVICE@
+Unit=heimgewebe-assist-microphone.service
+
+[Install]
+WantedBy=default.target

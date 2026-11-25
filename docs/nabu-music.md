@@ -53,6 +53,44 @@ ist kein Recovery-Nachweis. Die vorliegende Unit benötigt eine existierende
 PortAudio-Library unter `nabu-portaudio-gcroot/lib`.
 
 
+## MOTU: pegelbasierter Sprach- und Musikstart
+
+Der Sprachsatellit wird über `heimgewebe-assist-motu-hotplug.path` direkt
+gestartet, sobald der **ausgewählte** MOTU-Gerätepfad existiert. Nicht mehr
+über einen `PathChanged=/dev/snd/by-id`-Oneshot, der die USB-Ereignisse
+während des Bootens verpassen kann. Die Quadlet-Datei hat deshalb kein
+`WantedBy=default.target`: Ohne MOTU gibt es keinen wartenden Startjob.
+`BindsTo=` zusammen mit `After=` auf die konkrete systemd-Geräteunit
+beendet den Sprachsatelliten und Sendspin bei Geräteverlust. Sendspin
+behält seinen vorhandenen Modell-Glob-Path; der lokale Gerätebezug muss
+bei einem Hardwarewechsel entsprechend aktualisiert werden.
+
+Die generischen Vorlagen `heimgewebe-assist-microphone.container.in`,
+`heimgewebe-assist-motu-hotplug.path` und `motu-device-binding.conf.in`
+liegen unter `nixos/system/nabu/`. Bei einer Wiederherstellung zuerst
+die private Hostbindung bestimmen:
+
+- genau einen vorhandenen `/dev/snd/by-id/usb-MOTU_M2_*`-Pfad auswählen
+  (bei Mehrdeutigkeit nicht automatisch irgendein Gerät auswählen);
+- `@MOTU_DEVICE@` durch dessen Basename und `@MOTU_DEVICE_UNIT@`
+  durch die Ausgabe von `systemd-escape --path --suffix=device "$pfad"`
+  ersetzen. Die Seriennummer bleibt ausschließlich in lokalen Dateien;
+- gerenderte Quadlet-Datei unter
+  `~/.config/containers/systemd/heimgewebe-assist-microphone.container`,
+  gerenderten Path unter `~/.config/systemd/user/heimgewebe-assist-motu-hotplug.path`
+  und die gerenderte `[Unit]`-Gerätebindung für Sendspin unter
+  `~/.config/systemd/user/heimgewebe-music-sendspin.service.d/motu-device.conf`
+  installieren. Vorhandene Einträge bzw. die private Audioauswahl prüfen,
+  nicht blind überschreiben. Die alte Hotplug-Oneshot-Unit ist nicht mehr nötig.
+- `systemctl --user daemon-reload`; die beiden Path-Units aktivieren.
+  `systemctl --user show heimgewebe-assist-microphone.service -p BindsTo -p After -p WantedBy`
+  muss die exakte Gerätebindung, aber keine unbedingte default.target-Aktivierung
+  zeigen. Beim nächsten echten Ab-/Anschalten den Stopp und Wiederanlauf prüfen.
+
+Keine neue Timer-, Polling- oder Hintergrunddienstarchitektur. Die vorhandene
+begrenzte PipeWire-Startprüfung bleibt erhalten; Ton und Sprachdialog
+sind separat abzunehmen.
+
 ## Browser: öffentliche Ziele ohne zusätzlichen Dienst
 
 `nabu-browser.service` verwendet den ebenfalls versionierten

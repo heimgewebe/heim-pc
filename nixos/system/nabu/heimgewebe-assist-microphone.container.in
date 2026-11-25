@@ -1,0 +1,39 @@
+[Unit]
+Description=Heimgewebe Assist PC microphone satellite (MOTU M2 / PipeWire)
+# The level-triggered path starts this unit only when the selected MOTU exists.
+ConditionPathExists=/dev/snd/by-id/@MOTU_DEVICE@
+Wants=pipewire-pulse.service
+BindsTo=@MOTU_DEVICE_UNIT@
+After=pipewire-pulse.service @MOTU_DEVICE_UNIT@
+
+[Container]
+Image=ghcr.io/ohf-voice/linux-voice-assistant:latest
+ContainerName=heimgewebe-assist-microphone
+Network=host
+UserNS=keep-id
+User=1000
+Environment=CLIENT_NAME=Heim-PC-Sprachassistent
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+Environment="AUDIO_INPUT_DEVICE=M Series Stereo Mic In 1L+2R"
+Environment=AUDIO_OUTPUT_DEVICE=pulse/alsa_output.@MOTU_DEVICE@.HiFi__Line__sink
+Environment=AUDIO_INPUT_CHANNELS=2
+Environment=HOST=127.0.0.1
+Environment=PORT=6053
+Environment=WAKE_MODEL=okay_nabu
+Environment=DISABLE_PERIPHERAL_API=1
+Volume=/run/user/1000/pulse:/run/user/1000/pulse:rw
+Volume=/home/alex/.local/share/heimgewebe/assist/lva-config:/app/configuration
+Volume=/home/alex/.local/share/heimgewebe/assist/lva-models:/app/local
+Volume=/home/alex/.local/share/heimgewebe/assist/lva-wakewords:/app/wakewords/custom
+Volume=/home/alex/.local/share/heimgewebe/assist/lva-sounds:/app/sounds/custom
+Volume=/home/alex/.local/share/heimgewebe/assist/lva-overrides/satellite.py:/app/linux_voice_assistant/satellite.py:ro
+Pull=missing
+
+[Service]
+# MOTU is powered off at night. Wait for actual PipeWire input instead of restart-storm.
+ExecStartPre=/run/current-system/sw/bin/bash -c "until /run/current-system/sw/bin/test -e /dev/snd/by-id/@MOTU_DEVICE@ && /home/alex/.nix-profile/bin/pactl list short sources | /run/current-system/sw/bin/grep -Fq alsa_input.@MOTU_DEVICE@.HiFi__Mic3__source; do /run/current-system/sw/bin/sleep 5; done"
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=90
+TimeoutStopSec=35
