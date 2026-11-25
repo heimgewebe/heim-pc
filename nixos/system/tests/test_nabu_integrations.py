@@ -314,6 +314,105 @@ class ChatGPTBrowserTextTests(TestCase):
         self.assertFalse(result["message_sent_verified"])
 
 
+class ChatGPTLocalReceiptTests(TestCase):
+    def test_receipt_bound_to_exact_fresh_nonce(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "receipts.json"
+            nonce = "ab" * 12
+            now = 1795425000
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_RECEIPTS_PATH", path), \
+                 mock.patch.object(grabowski.time, "time", return_value=now):
+                for entry, expected in (
+                    ({"stage": "message_sent", "at": now}, "message_sent"),
+                    ({"stage": "message_sent", "at": now - 1}, None),
+                    ({"stage": "message_sent", "at": now + 16}, None),
+                    ({"stage": "message_sent", "at": True}, None),
+                    ({"stage": "unknown", "at": now}, None),
+                    ({"stage": "send_unconfirmed", "at": now}, "send_unconfirmed"),
+                ):
+                    path.write_text(json.dumps({nonce: entry}))
+                    self.assertEqual(grabowski._read_sender_receipt(nonce, now), expected)
+                    self.assertIsNone(grabowski._read_sender_receipt("cd" * 12, now))
+                path.write_text("not JSON")
+                self.assertIsNone(grabowski._read_sender_receipt(nonce, now))
+
+    def test_confirmed_send_survives_lost_browser_start_receipt_without_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / "key"
+            key.write_text("ab" * 32)
+            path = Path(folder) / "receipts.json"
+            nonce = "cd" * 12
+            now = 1795425000
+            path.write_text(json.dumps({nonce: {"stage": "message_sent", "at": now}}))
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski, "CHATGPT_SENDER_RECEIPTS_PATH", path), \
+                 mock.patch.object(grabowski.time, "time", return_value=now), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value=nonce), \
+                 mock.patch.object(grabowski, "_start_chatgpt_desktop", new=mock.AsyncMock(
+                     side_effect=grabowski.GrabowskiUnavailable("lost start receipt"))) as start:
+                result = asyncio.run(grabowski.start_chatgpt_browser_text(object(), "Nabu-Test"))
+                self.assertEqual(start.await_count, 1)
+                self.assertIsNone(result["task_id"])
+                self.assertFalse(result["browser_start_verified"])
+                self.assertTrue(result["message_sent_verified"])
+                self.assertFalse(result["chatgpt_response_verified"])
+                self.assertEqual(result["status"], "message_sent")
+
+    def test_click_attempt_or_unconfirmed_is_not_send_proof(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / "key"
+            key.write_text("ab" * 32)
+            path = Path(folder) / "receipts.json"
+            nonce = "cd" * 12
+            now = 1795425000
+            path.write_text(json.dumps({nonce: {"stage": "send_unconfirmed", "at": now}}))
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski, "CHATGPT_SENDER_RECEIPTS_PATH", path), \
+                 mock.patch.object(grabowski.time, "time", return_value=now), \
+                 mock.patch.object(grabowski.secrets, "token_hex", return_value=nonce), \
+                 mock.patch.object(grabowski, "_start_chatgpt_desktop", new=mock.AsyncMock(
+                     return_value=("a" * 24, "completed"))) as start:
+                result = asyncio.run(grabowski.start_chatgpt_browser_text(object(), "Nabu-Test"))
+                self.assertEqual(start.await_count, 1)
+                self.assertTrue(result["browser_start_verified"])
+                self.assertFalse(result["message_sent_verified"])
+                self.assertEqual(result["status"], "send_unconfirmed")
+                path.write_text(json.dumps({nonce: {"stage": "click_attempted", "at": now}}))
+                self.assertEqual(asyncio.run(grabowski._wait_sender_receipt(nonce, now, seconds=0)),
+                                 "click_attempted")
+
+    def test_confirmed_receipt_returns_before_slow_launch_reply(self):
+        async def exercise():
+            stopped = asyncio.Event()
+            async def slow_start(*args):
+                try:
+                    await asyncio.sleep(120)
+                finally:
+                    stopped.set()
+            with mock.patch.object(grabowski, "_start_chatgpt_desktop",
+                                   new=mock.AsyncMock(side_effect=slow_start)) as start, \
+                 mock.patch.object(grabowski, "_wait_sender_receipt",
+                                   new=mock.AsyncMock(return_value="message_sent")):
+                result = await asyncio.wait_for(grabowski._launch_signed_text(
+                    object(), {}, "cd" * 12, 1795425000), timeout=1)
+                self.assertEqual(result, (None, None, "message_sent"))
+                self.assertEqual(start.await_count, 1)
+                self.assertTrue(stopped.is_set())
+        asyncio.run(exercise())
+
+    def test_absent_receipt_preserves_ambiguous_error_and_never_retries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / "key"
+            key.write_text("ab" * 32)
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_KEY_PATH", key), \
+                 mock.patch.object(grabowski, "CHATGPT_SENDER_RECEIPTS_PATH", Path(folder) / "missing"), \
+                 mock.patch.object(grabowski, "_start_chatgpt_desktop", new=mock.AsyncMock(
+                     side_effect=grabowski.GrabowskiUnavailable("lost start receipt"))) as start:
+                with self.assertRaisesRegex(grabowski.GrabowskiUnavailable, "lost start receipt"):
+                    asyncio.run(grabowski.start_chatgpt_browser_text(object(), "Nabu-Test"))
+                self.assertEqual(start.await_count, 1)
+
+
 class ChatGPTSignedSenderTests(TestCase):
     """Only an installation-local fresh signed Nabu link may auto-submit."""
 

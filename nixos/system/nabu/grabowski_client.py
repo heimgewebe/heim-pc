@@ -5,6 +5,7 @@ The server remains the sole authority for admission, mutations and receipts.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -46,6 +47,17 @@ CHATGPT_BROWSER_PREFIX = ("/run/current-system/sw/bin/kstart", "--desktopfile",
 CHATGPT_BROWSER_ARGV = (*CHATGPT_BROWSER_PREFIX, CHATGPT_VOICE_URL)
 MAX_CHATGPT_PROMPT_URL_BYTES = 4800
 CHATGPT_SENDER_KEY_PATH = Path("/config/.nabu-chatgpt-autosend.key")
+CHATGPT_SENDER_RECEIPTS_PATH = Path("/config/.nabu-chatgpt-send-receipts.json")
+SENDER_CONFIRMED = {"message_sent", "message_verified"}
+SENDER_STAGES = SENDER_CONFIRMED | {
+    "click_attempted", "send_unconfirmed", "already_present", "claim_unconfirmed",
+    "claim_denied", "composer_changed", "expired", "verification_not_found",
+    "verification_login_required", "verification_text_mismatch",
+    "verification_no_user_messages", "timeout_login_required",
+    "timeout_account_unconfirmed", "timeout_composer_missing",
+    "timeout_composer_mismatch", "timeout_send_button_missing",
+    "timeout_send_button_unavailable",
+}
 
 
 def _sender_key() -> bytes | None:
@@ -219,31 +231,119 @@ async def start_chatgpt_browser_voice(session: aiohttp.ClientSession) -> dict:
     }
 
 
+def _read_sender_receipt(nonce: str, issued_at: int) -> str | None:
+    """Accept only a fresh receipt for this exact signed launch, without chat text."""
+    if not re.fullmatch(r"[a-f0-9]{24}", nonce):
+        return None
+    try:
+        with CHATGPT_SENDER_RECEIPTS_PATH.open("rb") as stream:
+            raw = stream.read(32769)
+        if len(raw) > 32768:
+            return None
+        data = json.loads(raw)
+        receipt = data.get(nonce) if isinstance(data, dict) else None
+        if not isinstance(receipt, dict):
+            return None
+        stage, at = receipt.get("stage"), receipt.get("at")
+        if (not isinstance(stage, str) or stage not in SENDER_STAGES or type(at) is not int
+                or not issued_at <= at <= min(issued_at + 195, int(time.time()) + 15)):
+            return None
+        return stage
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+async def _wait_sender_receipt(nonce: str, issued_at: int, *, seconds: float = 30) -> str | None:
+    """Bounded read-only wait; never repeat the browser mutation."""
+    if not await asyncio.to_thread(CHATGPT_SENDER_RECEIPTS_PATH.exists):
+        return None
+    deadline = time.monotonic() + seconds
+    while True:
+        stage = await asyncio.to_thread(_read_sender_receipt, nonce, issued_at)
+        if stage is not None and stage != "click_attempted":
+            return stage
+        if time.monotonic() >= deadline:
+            return stage
+        await asyncio.sleep(0.25)
+
+
+async def _launch_signed_text(session, launch, nonce, issued_at):
+    """Prefer a real send receipt over a delayed transport reply.
+
+    A confirmed outgoing message proves the one launch already took effect.
+    Cancelling only the client wait at that point never reissues the mutation.
+    No pending coroutine survives this function.
+    """
+    start = asyncio.create_task(_start_chatgpt_desktop(session, launch))
+    receipt = asyncio.create_task(_wait_sender_receipt(nonce, issued_at))
+    try:
+        await asyncio.wait({start, receipt}, return_when=asyncio.FIRST_COMPLETED)
+        stage = receipt.result() if receipt.done() else None
+        if stage in SENDER_CONFIRMED and not start.done():
+            return None, None, stage
+        launch_error = None
+        try:
+            task_id, state = await start
+        except GrabowskiUnavailable as exc:
+            launch_error = exc
+            task_id, state = None, None
+        stage = await receipt
+        # The launch reply can arrive after the bounded receipt wait.
+        latest = await asyncio.to_thread(_read_sender_receipt, nonce, issued_at)
+        if latest is not None:
+            stage = latest
+        if launch_error is not None and stage is None:
+            raise launch_error
+        return task_id, state, stage
+    finally:
+        for pending in (start, receipt):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(start, receipt, return_exceptions=True)
+
+
 async def start_chatgpt_browser_text(
     session: aiohttp.ClientSession, question: str | None = None,
 ) -> dict:
-    """Open the text composer with Nabu's user-authored message; no output extraction."""
+    """One browser launch; an exact local sender receipt can confirm its message."""
     launch = chatgpt_text_launch_args(question)
-    task_id, state = await _start_chatgpt_desktop(session, launch)
+    fields = dict(parse_qsl(urlsplit(launch["argv"][-1]).query))
+    signed = "nabu_sig" in fields
+    if signed:
+        task_id, state, stage = await _launch_signed_text(
+            session, launch, fields["nabu_nonce"], int(fields["nabu_ts"]))
+    else:
+        task_id, state = await _start_chatgpt_desktop(session, launch)
+        stage = None
+    confirmed = stage in SENDER_CONFIRMED
+    if confirmed:
+        status = "message_sent"
+        message = "Der Auftrag wurde im ChatGPT-Textchat abgesendet. Eine Antwort ist noch nicht bestaetigt."
+    elif signed and stage is not None:
+        status = "send_unconfirmed"
+        message = "Der ChatGPT-Versand ist nicht bestaetigt (" + stage + "). Bitte im Browser pruefen; nicht erneut senden."
+    else:
+        status = "browser_opened" if state == "completed" else "browser_open_requested"
+        message = (
+            "ChatGPT-Textchat im normalen Desktopbrowser angefordert. "
+            + ("Automatischer Sendeklick ist angefordert; pruefe die Nachricht im Browser. "
+               if signed else "Pruefe den Entwurf und klicke auf Senden. "
+               if question is not None else "Gib den Auftrag im ChatGPT-Eingabefeld ein. ")
+            + "Ein abgeschickter ChatGPT-Auftrag ist noch nicht bestaetigt."
+        )
     return {
-        "status": "browser_opened" if state == "completed" else "browser_open_requested",
+        "status": status,
         "task_id": task_id,
         "mode": "browser_chat",
         "text_prefill_requested": question is not None,
-        "auto_send_requested": "&nabu_sig=" in launch["argv"][-1],
-        "composer_prefill_verified": False,
-        "message_sent_verified": False,
+        "auto_send_requested": signed,
+        "sender_receipt_stage": stage,
+        "browser_start_verified": state == "completed",
+        "composer_prefill_verified": confirmed,
+        "message_sent_verified": confirmed,
         "chatgpt_login_verified": False,
         "chatgpt_response_verified": False,
-        "message": (
-            "ChatGPT-Textchat im normalen Desktopbrowser angefordert. "
-            + ("Automatischer Sendeklick ist angefordert; pruefe die Nachricht im Browser. "
-               if "&nabu_sig=" in launch["argv"][-1] else
-               "Pruefe den Entwurf und klicke auf Senden. "
-               if question is not None else
-               "Gib den Auftrag im ChatGPT-Eingabefeld ein. ")
-            + "Ein abgeschickter ChatGPT-Auftrag ist noch nicht bestaetigt."
-        ),
+        "message": message,
     }
 
 
