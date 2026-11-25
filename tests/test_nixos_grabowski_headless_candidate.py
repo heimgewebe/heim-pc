@@ -38,7 +38,7 @@ class PinnedGrabowskiNixosCandidateTests(unittest.TestCase):
         self.assertIn("heimPc.grabowskiProduction = {", self.candidate)
         self.assertIn("users.users.alex.linger = pkgs.lib.mkForce true;", self.candidate)
         self.assertIn(
-            "users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];",
+            "users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])) ];",
             self.candidate,
         )
         self.assertIn("enable = true;", self.candidate)
