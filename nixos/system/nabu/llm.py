@@ -525,8 +525,9 @@ class WebSearch(Tool):
 class WebRead(Tool):
     name = "nabu_web__read_page"
     title = "Eine Webseite lesen"
-    description = ("Öffentliche Webseite lesen; bei langen Quellen die zu prüfende Frage "
-                   "als optionales question-Argument für relevante Textauszüge übergeben.")
+    description = ("Öffentliche Webseite lesen; bei PubMed-Artikeln auch das eindeutig "
+                   "zugeordnete Abstract aus Europe PMC (kein Volltext). Bei langen Quellen "
+                   "die Frage als optionales question-Argument übergeben.")
     parameters = vol.Schema({vol.Required("url"): str, vol.Optional("question"): str})
     annotations = ToolAnnotations(read_only=True, open_world=True)
     integration = DOMAIN
@@ -534,11 +535,74 @@ class WebRead(Tool):
     async def async_call(self, hass: HomeAssistant, tool_input: ToolInput, llm_context: LLMContext) -> ToolResult:
         try:
             url = public_url(tool_input.tool_args["url"])
+            question = tool_input.tool_args.get("question")
+            if question is not None and not isinstance(question, str):
+                raise ValueError("Die Quellenfrage muss Text sein")
             async with aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
                 timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
                 max_field_size=32768,
             ) as session:
+                # Use the documented public literature API for an exact PubMed
+                # article ID, not the HTML access challenge. It supplies only
+                # the abstract, not the publisher's full article.
+                parsed = urlsplit(url)
+                pmid = (re.fullmatch(r"/([0-9]{1,10})/?", parsed.path)
+                        if parsed.hostname == "pubmed.ncbi.nlm.nih.gov" else None)
+                if pmid:
+                    identifier = pmid.group(1)
+                    endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+                    try:
+                        async with session.get(
+                            endpoint, allow_redirects=False,
+                            params={"query": f"EXT_ID:{identifier} AND SRC:MED",
+                                    "resultType": "core", "pageSize": "2",
+                                    "format": "json"},
+                        ) as resp:
+                            if resp.status != 200:
+                                raise ValueError("Abstract-Schnittstelle nicht verfügbar")
+                            payload = json.loads(await read_bounded(resp.content, 240000))
+                            actual = str(resp.url)
+                        result_list = (payload.get("resultList")
+                                       if isinstance(payload, dict) else None)
+                        rows = (result_list.get("result")
+                                if isinstance(result_list, dict) else None)
+                        if not isinstance(rows, list) or len(rows) != 1:
+                            raise ValueError("Keine eindeutige Abstract-Zuordnung")
+                        record = rows[0]
+                        if (not isinstance(record, dict)
+                                or record.get("source") != "MED"
+                                or record.get("id") != identifier
+                                or record.get("pmid") != identifier):
+                            raise ValueError("Abstract gehört nicht zum angefragten Artikel")
+                        abstract = record.get("abstractText")
+                        if not isinstance(abstract, str):
+                            raise ValueError("Kein Abstract vorhanden")
+                        parser = TextExtractor()
+                        parser.feed(abstract)
+                        body = parser.get_text()
+                        if not body.strip():
+                            raise ValueError("Kein lesbares Abstract vorhanden")
+                        title = record.get("title")
+                        if isinstance(title, str) and title.strip():
+                            body = title.strip()[:300] + "\n" + body
+                        text = (relevant_source_excerpt(body, question) if question
+                                else body[:8000])
+                        return ToolResult(data={
+                            "url": actual,
+                            "requested_url": url,
+                            "publication_url": "https://europepmc.org/article/MED/" + identifier,
+                            "source": "Europe PMC REST API",
+                            "source_kind": "abstract",
+                            "pmid": identifier,
+                            "doi": (record.get("doi") if isinstance(record.get("doi"), str)
+                                    else None),
+                            "text": text,
+                        })
+                    except (ValueError, UnicodeError, aiohttp.ClientError, asyncio.TimeoutError):
+                        # No matching abstract from the public API: ordinary
+                        # page reading is still allowed, but not gate bypass.
+                        pass
                 # Every redirect is validated before its next network request.
                 redirects = 0
                 while True:
@@ -568,9 +632,22 @@ class WebRead(Tool):
             parser = TextExtractor()
             parser.feed(document)
             body = parser.get_text()
-            question = tool_input.tool_args.get("question")
-            if question is not None and not isinstance(question, str):
-                raise ValueError("Die Quellenfrage muss Text sein")
+            if not body.strip():
+                raise ValueError("Die Seite enthält keinen lesbaren Text")
+            # A successful HTTP status does not mean the article was read.
+            # Detect the two observed short gate pages by both their heading
+            # and instruction, not by the mere presence of cookie terminology.
+            lines = [" ".join(line.casefold().split())
+                     for line in body.splitlines() if line.strip()]
+            folded = " ".join(lines)
+            if len(body) <= 600 and (
+                ("cookies must be enabled" in lines[:2]
+                 and re.search(r"\benable cookies for [\w.-]+ and reload this page to continue\b",
+                               folded))
+                or ("checking your browser - recaptcha" in lines[:2]
+                    and "checking your browser before accessing" in folded)
+            ):
+                raise ValueError("Zugriffssperrseite statt lesbarer Quelle")
             text = (relevant_source_excerpt(body, question) if question
                     else body[:8000])
             return ToolResult(data={"url": actual, "text": text})
