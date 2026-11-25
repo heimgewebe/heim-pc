@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 BOARD = "ROG STRIX B550-F GAMING"
 CPU = "AMD Ryzen 9 5900XT 16-Core Processor"
 CAP_KHZ = 4_200_000
+CPU_READBACK_TIMEOUT_SECONDS = 0.25
+CPU_READBACK_INTERVAL_SECONDS = 0.015
 FAN_CURVES = {
     2: (8, (55_000, 70_000, 85_000), (128, 230)),
     3: (1, (40_000, 45_000, 55_000), (102, 153)),
@@ -132,8 +135,21 @@ def allowed_paths(root: Path) -> set[str]:
 
 def write(path: Path, value: str) -> None:
     path.write_text(value + "\n")
-    if read(path) != value:
-        raise RuntimeError(f"readback failed: {path}")
+    observed = read(path)
+    # amd-pstate publishes frequency QoS updates asynchronously. On the
+    # physical 5900XT the old value was still visible on 13 policies, but
+    # the exact requested value appeared within the first 15 ms poll.
+    # Do not relax the equality check or retry the write itself.
+    if path.name == "scaling_max_freq":
+        deadline = time.monotonic() + CPU_READBACK_TIMEOUT_SECONDS
+        while observed != value:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(CPU_READBACK_INTERVAL_SECONDS, remaining))
+            observed = read(path)
+    if observed != value:
+        raise RuntimeError(f"readback failed: {path}: requested {value}, observed {observed}")
 
 
 def restore(root: Path, state: Path) -> None:

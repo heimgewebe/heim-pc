@@ -144,6 +144,25 @@ class ThermalMitigationTest(unittest.TestCase):
         self.assertEqual(self.value(self.policy + "energy_performance_preference"), "balance_power")
         self.assertFalse(self.state.exists())
 
+    def test_cpu_frequency_readback_can_converge_after_write(self):
+        path = self.root / (self.policy + "scaling_max_freq")
+        with patch.object(thermal, "read", side_effect=["4981510", "4200000"]):
+            thermal.write(path, "4200000")
+        self.assertEqual(path.read_text().strip(), "4200000")
+
+    def test_cpu_frequency_readback_timeout_is_not_success(self):
+        path = self.root / (self.policy + "scaling_max_freq")
+        with patch.object(thermal, "read", return_value="4981510"):
+            with self.assertRaisesRegex(RuntimeError, "readback failed"):
+                thermal.write(path, "4200000")
+
+    def test_fan_readback_mismatch_is_not_retried(self):
+        path = self.root / (self.fan + "pwm2_auto_point1_pwm")
+        with patch.object(thermal, "read", return_value="51") as observed:
+            with self.assertRaisesRegex(RuntimeError, "readback failed"):
+                thermal.write(path, "128")
+        self.assertEqual(observed.call_count, 1)
+
     def test_missing_fan_device_keeps_cpu_mitigation(self):
         (self.root / self.fan / "name").unlink()
         thermal.apply(self.root, self.state)
