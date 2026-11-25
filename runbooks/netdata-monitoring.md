@@ -69,7 +69,11 @@ The small user-owned state at
 `~/.local/state/heim-pc/netdata-watch/state.json` records active episodes,
 counter baselines and pending events. An event is persisted before
 publication; repeated publication uses the existing outbox idempotency
-contract. The outbox, not this state, owns notification acknowledgement.
+contract. The outbox, not this state, owns notification acknowledgement. A failed
+publication keeps the original event identity for retry. Each poll
+publishes at most 64 pending events; larger backlogs are drained over
+successive polls rather than rejected. The JSON status publication_pending
+reports remaining events and any publication error.
 `watch --dry-run` previews without modifying state or sending anything.
 The normal `watch` operation may enqueue and dispatch notifications and
 is not a read-only capability. Missing ntfy topic configuration and a full
