@@ -12,10 +12,11 @@ das Profil nicht automatisch.
   Pipelineoptionen und Zielpfade. OCI-IDs und RepoDigests bezeichnen den
   getesteten Bestand, nicht eine Behauptung über das jeweils neueste Image.
 - `native_commands.yaml`: additive deutsche HassLightSet-Sätze, die Farben
-  Lila/Hellgelb/Türkis und eindeutige Musik-Stopp-Befehle. Unbekannte Ziele, Fragen,
+  Lila/Hellgelb/Türkis, eindeutige Musik-Stopp-Befehle und explizite
+  Farbaufträge für den Wohnzimmerprojektor. Unbekannte Ziele, Fragen,
   Negationen und mehrdeutige Mehrfachbefehle bleiben beim normalen Fallback.
-- `native_intent_scripts.yaml`: ausschließlich NabuStopMusic; die
-  bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
+- `native_intent_scripts.yaml`: NabuStopMusic und NabuProjectorDifferentColor.
+  Die bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
   muss vorhanden und verwendbar sein. Der Handler ruft `media_stop`, nicht
   `media_pause` auf.
 - `prompt-addendum.txt`: zusätzliche Regel für kompakte Werkzeugentscheidungen
@@ -41,14 +42,17 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
 2. Die native Grammatik nach
    `~/.local/share/heimgewebe/home-assistant/custom_sentences/de/nabu_native_commands.yaml`
    übernehmen. Die vorhandene `nabu_music.yaml` bleibt erhalten.
-   Den einzelnen NabuStopMusic-Block aus `native_intent_scripts.yaml`
-   unter dem vorhandenen `intent_script:`-Mapping ergänzen, nicht die
-   vollständige `configuration.yaml` ersetzen. Einen bereits abweichend
-   definierten NabuStopMusic-Handler nicht still überschreiben.
+   Die beiden Blöcke aus `native_intent_scripts.yaml` unter dem vorhandenen
+   `intent_script:`-Mapping ergänzen, nicht die vollständige
+   `configuration.yaml` ersetzen. Bereits abweichend definierte Handler
+   nicht still überschreiben.
 3. In der HA-Entitätsverwaltung nur bei Bedarf beobachtete, eindeutig
    zuordenbare Transkriptionsvarianten als Alias des vorhandenen Geräts
    ergänzen. Den berechneten Namen beibehalten. Raumgruppen und
-   unfreigegebene Geräte nicht zusätzlich exponieren.
+   unfreigegebene Geräte nicht zusätzlich exponieren. Der Projektorfarbpfad
+   setzt die vorhandene Alias-Zuordnung `Projektor Hintergrund` zur
+   HS-fähigen Entität `light.wohnzimmer_projektor_background` voraus.
+   Der Master bleibt das Schaltziel; Lasersterne unterstützen nur Helligkeit.
 4. Den vorhandenen STT-Quadlet-Dienst (Name und Port bleiben stabil) mit
    der in `profile.json` angegebenen Exec-Zeile betreiben. Der Parakeet-
    Modellordner muss unter dem vorhandenen gemounteten Modellcache liegen.
@@ -62,7 +66,21 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
    die Manifestreferenzen sind kein neuer Modelldownload. Kein LoRA-Adapter
    erforderlich. Den vorhandenen Systemprompt beibehalten und die additive
    Regel nur anfügen, wenn sie fehlt. Nicht den gesamten privaten
-   HA-Config-Entry überschreiben.
+   HA-Config-Entry überschreiben. Die unter `ollama.server_cache` separat
+   beobachteten drei Server-Umgebungsvariablen gehören in den bestehenden
+   Ollama-Quadlet, nicht in die HA-LLM-Optionen. Die vorhandene persistente
+   Ollama-Einbindung bleibt erhalten. Flash Attention und Q8-KV reduzieren
+   den Speicherbedarf; `CUDA_CACHE_PATH` liegt unter dieser Einbindung,
+   damit der CUDA-ComputeCache den Containerwechsel überlebt. Keine
+   zusätzliche GPU-Residenz, kein zweiter Container und kein Modellwechsel.
+   Den Cache bei Wiederherstellung aus dem passenden vorhandenen lokalen
+   Bestand übernehmen oder von der Runtime neu erzeugen lassen; er ist
+   regenerierbar und kein verpflichtendes Git-Artefakt. Bei inkompatiblem
+   Treiber/Image nicht auf einen alten Cache vertrauen. Den bestehenden
+   Keepalive-Wert nicht zur Kompensation eines leeren Caches erhöhen.
+   Nur falls die drei Einstellungen tatsächlich abweichen, den Quadlet
+   gezielt korrigieren, daemon-reload und einen koordinierten Neustart des
+   Ollama-Dienstes durchführen; aktive Sprachdialoge/GPU-Arbeit abwarten.
 6. YAML und Intent-Script-Schema mit der tatsächlich installierten
    HA-Runtime prüfen. Änderungen möglichst in einer einzigen HA-Aktivierung
    übernehmen, nicht während einer laufenden Sprachinteraktion. Nach
@@ -77,11 +95,22 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
   und Raumwünsche exakt Zielentitäten, Farbwerte und Prozent/Kelvin prüfen;
   keine zusätzlichen Hue-Raumgruppen. Musik aus muss den vorgesehenen
   Player stoppen. Negative/mehrdeutige Fälle dürfen keinen neu eingeführten
-  Geräte- oder Musikbefehl auslösen.
+  Geräte- oder Musikbefehl auslösen. Projektor mit/ohne Raumzusatz auf
+  Hintergrundlicht, Ein/Aus ausschließlich auf Master; andere Farbe auf
+  einen um 120 Grad verschobenen Farbton bei vorhandenem HS-Wert. Falscher
+  Raum, Negation und Mehrfachbefehl dürfen nicht in den neuen Pfad gelangen.
+  Fehlende Entität muss als Fehler behandelt werden, nicht als Erfolg.
 - STT über den existierenden Wyoming-Port prüfen (deutsche Sprache, klare
   Verneinung, ein realer Geräte-/Auftragsname und Stille). Die echten
   Mikrofon-/TTS-/Gerätewege separat abnehmen; Service-Health und Stubtests
   ersetzen sie nicht.
+- Bei einer Ollama-Wiederherstellung die drei Cache-Variablen im laufenden
+  Container, den persistenten Mount und die tatsächliche Kaltstartdauer
+  prüfen. Der 25.11.2026 dokumentierte direkte synthetische Vergleich ergab
+  mit wiederverwendetem CUDA-Cache 8,158 statt 74,769 Sekunden; die erste
+  produktive direkte Modellprobe benötigte 10,190 statt zuvor 70,787 Sekunden.
+  Q8-KV reduzierte den KV-Speicher von 1024 auf 544 MiB; kein Warm-Speedup
+  nachgewiesen. Diese Messungen sind keine Garantie für reale Sprachdialoge.
 - Frische HA-Erreichbarkeit, Satelliten-Reconnect, aktive Sprachdienste,
   tatsächliche Quell-/Runtime-Drift und den nächsten Restic-Snapshot prüfen.
   Vorhandene Modellcache-Dateien und private Konfigurationsdaten nicht

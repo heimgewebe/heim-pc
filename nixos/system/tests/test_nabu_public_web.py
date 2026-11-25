@@ -63,6 +63,7 @@ class FakeSession:
     responses = []
     requests = []
     query_params = []
+    timeouts = []
 
     def __init__(self, **kwargs):
         self.connector = kwargs["connector"]
@@ -75,11 +76,15 @@ class FakeSession:
     async def __aexit__(self, *args):
         return None
 
-    def get(self, url, *, allow_redirects, params=None):
+    def get(self, url, *, allow_redirects, params=None, timeout=None):
         assert allow_redirects is False, "Redirects must never auto-follow"
         self.requests.append(url)
         self.query_params.append(params)
-        return FakeResponse(url, **self.responses.pop(0))
+        self.timeouts.append(timeout)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return FakeResponse(url, **response)
 
 
 class Extractor:
@@ -116,7 +121,7 @@ def source_functions():
     assert len(chosen) == 9, "Expected URL/resolver/body reader/WebRead and evidence helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
-        "HTMLParser": HTMLParser, "datetime": datetime, "json": json,
+        "HTMLParser": HTMLParser, "datetime": datetime, "json": json, "ET": ET,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
         "TIMEOUT": None,
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
@@ -125,6 +130,7 @@ def source_functions():
             abc=SimpleNamespace(AbstractResolver=object),
             resolver=SimpleNamespace(ThreadedResolver=Resolver),
             ClientError=type("ClientError", (Exception,), {}),
+            ClientTimeout=lambda **kwargs: kwargs,
             TCPConnector=lambda **kwargs: kwargs,
             ClientSession=FakeSession,
         ),
@@ -143,6 +149,7 @@ class PublicWebTests(unittest.TestCase):
         FakeSession.responses = []
         FakeSession.requests = []
         FakeSession.query_params = []
+        FakeSession.timeouts = []
         Resolver.answers = [{"host": "8.8.8.8"}]
 
     def test_private_and_ambiguous_numeric_hosts_are_rejected(self):
@@ -447,13 +454,46 @@ class PublicWebTests(unittest.TestCase):
             self.assertIn("Bericht zur Institutsleitung", excerpt)
         asyncio.run(scenario())
 
+    def test_pubmed_efetch_exact_article_uses_one_fast_public_api_call(self):
+        async def scenario():
+            FakeSession.responses = [{
+                "headers": {"content-type": "application/xml"},
+                "content": b"""<PubmedArticleSet><PubmedArticle>
+                  <MedlineCitation><PMID>12345678</PMID><Article>
+                    <ArticleTitle>Example <i>randomized</i> trial</ArticleTitle>
+                    <Abstract><AbstractText Label="RESULTS">Failures fell by <b>12</b> percent.</AbstractText>
+                    <AbstractText Label="CONCLUSION">Benefit was observed.</AbstractText></Abstract>
+                  </Article></MedlineCitation>
+                  <PubmedData><ArticleIdList><ArticleId IdType="doi">10.1234/example</ArticleId></ArticleIdList></PubmedData>
+                </PubmedArticle></PubmedArticleSet>""",
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/"}), None)
+            self.assertFalse(result.error, result.data)
+            self.assertEqual("abstract", result.data["source_kind"])
+            self.assertEqual("NCBI EFetch", result.data["source"])
+            self.assertEqual("12345678", result.data["pmid"])
+            self.assertEqual("10.1234/example", result.data["doi"])
+            self.assertEqual("https://pubmed.ncbi.nlm.nih.gov/12345678/",
+                             result.data["publication_url"])
+            self.assertEqual(["https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"],
+                             FakeSession.requests)
+            self.assertEqual({"db": "pubmed", "id": "12345678", "retmode": "xml"},
+                             FakeSession.query_params[0])
+            self.assertEqual({"total": 5}, FakeSession.timeouts[0])
+            self.assertIn("Example randomized trial", result.data["text"])
+            self.assertIn("RESULTS: Failures fell by 12 percent.", result.data["text"])
+            self.assertIn("CONCLUSION: Benefit was observed.", result.data["text"])
+        asyncio.run(scenario())
+
     def test_pubmed_uses_identified_public_abstract_not_blocked_html(self):
         async def scenario():
             endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
             record = {"id": "12345678", "source": "MED", "pmid": "12345678",
                       "title": "Example randomized trial", "doi": "10.1234/example",
                       "abstractText": "<p>The intervention reduced failures by 12 percent.</p>"}
-            FakeSession.responses = [{
+            FakeSession.responses = [asyncio.TimeoutError(), {
                 "headers": {"content-type": "application/json"},
                 "content": json.dumps({"resultList": {"result": [record]}}).encode(),
             }]
@@ -468,9 +508,10 @@ class PublicWebTests(unittest.TestCase):
             self.assertEqual("10.1234/example", result.data["doi"])
             self.assertEqual("https://europepmc.org/article/MED/12345678",
                              result.data["publication_url"])
-            self.assertEqual([endpoint], FakeSession.requests)
+            self.assertEqual(["https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi", endpoint], FakeSession.requests)
             self.assertEqual("EXT_ID:12345678 AND SRC:MED",
-                             FakeSession.query_params[0]["query"])
+                             FakeSession.query_params[1]["query"])
+            self.assertEqual([{"total": 5}, {"total": 5}], FakeSession.timeouts)
             self.assertIn("reduced failures by 12 percent", result.data["text"])
             self.assertNotIn("<p>", result.data["text"])
         asyncio.run(scenario())
@@ -481,6 +522,8 @@ class PublicWebTests(unittest.TestCase):
                       "title": "Different article",
                       "abstractText": "A different paper is not evidence for the requested article."}
             FakeSession.responses = [
+                {"headers": {"content-type": "application/xml"},
+                 "content": b"<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>99999999</PMID><Article><Abstract><AbstractText>Wrong XML abstract</AbstractText></Abstract></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"},
                 {"headers": {"content-type": "application/json"},
                  "content": json.dumps({"resultList": {"result": [record]}}).encode()},
                 {"content": b"<main>Cookies must be enabled<p>Enable cookies for pubmed.ncbi.nlm.nih.gov and reload this page to continue.</p></main>"},
@@ -489,7 +532,8 @@ class PublicWebTests(unittest.TestCase):
                 None, None, SimpleNamespace(tool_args={
                     "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/"}), None)
             self.assertTrue(result.error, result.data)
-            self.assertEqual(2, len(FakeSession.requests))
+            self.assertEqual(3, len(FakeSession.requests))
+            self.assertNotIn("Wrong XML abstract", str(result.data))
             self.assertNotIn("Different article", str(result.data))
         asyncio.run(scenario())
 
