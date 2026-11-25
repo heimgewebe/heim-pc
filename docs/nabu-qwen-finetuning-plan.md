@@ -1,5 +1,8 @@
 # Nabu: Qwen-Fine-Tuning und nachweisbare Modellverbesserung
 
+> Historischer Plan vom 22.11.2026: Der damals geplante Qwen3-14B-Q6-Pilot ist im Bureau als superseded stillgelegt. Der aktuelle Assist-Modell-/Kontextvertrag steht im [versionierten Assist-Profil](../nixos/system/nabu/assist_profile/README.md). Die unten dokumentierten alten Modelle und Messwerte sind keine aktuellen Runtime-Defaults und kein Auftrag zu neuem Training.
+
+
 **Stand:** 22. November 2026 · **Status:** Umsetzungsplan, kein Trainings- oder Rolloutnachweis  
 **Owner:** heimgewebe/heim-pc · **Betrieb:** Heim-PC / Ollama / Home Assistant / Nabu  
 **Grundsatz:** Verbesserungen an realen Nutzerwegen messen; bestehende produktive Modelle bis zur erfolgreichen Abnahme unverändert lassen.

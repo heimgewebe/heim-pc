@@ -1,0 +1,8 @@
+NabuStopMusic:
+  description: "Musik auf dem Heim-PC stoppen"
+  action:
+    action: media_player.media_stop
+    target:
+      entity_id: media_player.nabu_musik_motu
+  speech:
+    text: "Die Musik ist gestoppt."
