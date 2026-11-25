@@ -107,7 +107,7 @@
   const ownMessageTexts = () => {
     const result = [];
     const roots = Array.from(document.querySelectorAll(
-      '[data-message-author-role="user"],[data-turn="user"]'
+      '[data-message-author-role="user"],[data-turn="user"],[data-testid="user-message"]'
     )).slice(-12);
     for (const el of roots) {
       if (!visible(el)) continue;
