@@ -62,6 +62,7 @@ class FakeResponse:
 class FakeSession:
     responses = []
     requests = []
+    query_params = []
 
     def __init__(self, **kwargs):
         self.connector = kwargs["connector"]
@@ -74,9 +75,10 @@ class FakeSession:
     async def __aexit__(self, *args):
         return None
 
-    def get(self, url, *, allow_redirects):
+    def get(self, url, *, allow_redirects, params=None):
         assert allow_redirects is False, "Redirects must never auto-follow"
         self.requests.append(url)
+        self.query_params.append(params)
         return FakeResponse(url, **self.responses.pop(0))
 
 
@@ -114,7 +116,7 @@ def source_functions():
     assert len(chosen) == 9, "Expected URL/resolver/body reader/WebRead and evidence helpers"
     namespace = {
         "ipaddress": ipaddress, "socket": socket, "re": re,
-        "HTMLParser": HTMLParser, "datetime": datetime,
+        "HTMLParser": HTMLParser, "datetime": datetime, "json": json,
         "urlsplit": urlsplit, "urljoin": urljoin, "asyncio": asyncio,
         "TIMEOUT": None,
         "message": lambda exc: SimpleNamespace(data={"error": str(exc)}, error=True),
@@ -140,6 +142,7 @@ class PublicWebTests(unittest.TestCase):
     def setUp(self):
         FakeSession.responses = []
         FakeSession.requests = []
+        FakeSession.query_params = []
         Resolver.answers = [{"host": "8.8.8.8"}]
 
     def test_private_and_ambiguous_numeric_hosts_are_rejected(self):
@@ -442,6 +445,80 @@ class PublicWebTests(unittest.TestCase):
             self.assertLessEqual(len(excerpt), 6000)
             self.assertIn("Dr. Beispiel", excerpt)
             self.assertIn("Bericht zur Institutsleitung", excerpt)
+        asyncio.run(scenario())
+
+    def test_pubmed_uses_identified_public_abstract_not_blocked_html(self):
+        async def scenario():
+            endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            record = {"id": "12345678", "source": "MED", "pmid": "12345678",
+                      "title": "Example randomized trial", "doi": "10.1234/example",
+                      "abstractText": "<p>The intervention reduced failures by 12 percent.</p>"}
+            FakeSession.responses = [{
+                "headers": {"content-type": "application/json"},
+                "content": json.dumps({"resultList": {"result": [record]}}).encode(),
+            }]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+                    "question": "What did the trial find?"}), None)
+            self.assertFalse(result.error, result.data)
+            self.assertEqual("abstract", result.data["source_kind"])
+            self.assertEqual("Europe PMC REST API", result.data["source"])
+            self.assertEqual("12345678", result.data["pmid"])
+            self.assertEqual("10.1234/example", result.data["doi"])
+            self.assertEqual("https://europepmc.org/article/MED/12345678",
+                             result.data["publication_url"])
+            self.assertEqual([endpoint], FakeSession.requests)
+            self.assertEqual("EXT_ID:12345678 AND SRC:MED",
+                             FakeSession.query_params[0]["query"])
+            self.assertIn("reduced failures by 12 percent", result.data["text"])
+            self.assertNotIn("<p>", result.data["text"])
+        asyncio.run(scenario())
+
+    def test_pubmed_mismatched_record_is_not_substituted_as_evidence(self):
+        async def scenario():
+            record = {"id": "99999999", "source": "MED", "pmid": "99999999",
+                      "title": "Different article",
+                      "abstractText": "A different paper is not evidence for the requested article."}
+            FakeSession.responses = [
+                {"headers": {"content-type": "application/json"},
+                 "content": json.dumps({"resultList": {"result": [record]}}).encode()},
+                {"content": b"<main>Cookies must be enabled<p>Enable cookies for pubmed.ncbi.nlm.nih.gov and reload this page to continue.</p></main>"},
+            ]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/"}), None)
+            self.assertTrue(result.error, result.data)
+            self.assertEqual(2, len(FakeSession.requests))
+            self.assertNotIn("Different article", str(result.data))
+        asyncio.run(scenario())
+
+    def test_observed_access_pages_and_empty_text_are_read_errors(self):
+        async def scenario():
+            for body in (
+                "<main><h1>Cookies must be enabled</h1><p>Enable cookies for pubmed.ncbi.nlm.nih.gov and reload this page to continue.</p></main>",
+                "<main><h1>Checking your browser - reCAPTCHA</h1><p>Checking your browser before accessing pmc.ncbi.nlm.nih.gov ...</p></main>",
+                "<html><body><script>empty()</script></body></html>",
+            ):
+                FakeSession.responses = [{"content": body.encode()}]
+                result = await self.functions["call_web_read"](
+                    None, None, SimpleNamespace(tool_args={
+                        "url": "https://example.org/article"}), None)
+                self.assertTrue(result.error, result.data)
+                self.assertNotIn("text", result.data)
+        asyncio.run(scenario())
+
+    def test_cookie_topic_is_not_a_challenge_page(self):
+        async def scenario():
+            FakeSession.responses = [{"content": (
+                b"<main><h1>Cookie policy</h1><p>Cookies must be enabled "
+                b"for selected preferences. This policy describes data retention.</p></main>"
+            )}]
+            result = await self.functions["call_web_read"](
+                None, None, SimpleNamespace(tool_args={
+                    "url": "https://example.org/privacy"}), None)
+            self.assertFalse(result.error, result.data)
+            self.assertIn("data retention", result.data["text"])
         asyncio.run(scenario())
 
     def test_direct_webread_remains_8k_bounded(self):
