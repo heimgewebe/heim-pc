@@ -1,4 +1,13 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
+let
+  # Keep the already-reviewed comparison and its documentation in the same
+  # immutable target closure. No live checkout, network or mutable user path.
+  integrationInventory = pkgs.runCommand "heim-pc-integration-inventory" {} ''
+    mkdir -p "$out/scripts"
+    cp ${../../../scripts/generate_nixos_program_inventory.py} "$out/scripts/generate_nixos_program_inventory.py"
+    cp ${../../../README.md} "$out/README.md"
+  '';
+in
 {
   # The observed Seagate Stage0 Btrfs layout is the only admissible source of
   # filesystem mounts here. Importing storage-layout.nix would incorrectly
@@ -97,6 +106,61 @@
   # Reuse the existing gated executor; it provides no root service, sudo
   # policy, or unattended activation permission on its own.
   heimPc.day2Activation.enable = true;
+
+  # NixOS supplies the exact target closure and switch action as $1/$2.
+  # Advisory only: a structural observation is not a release/health gate.
+  # Keep recovery and boot working even when the inventory is unavailable.
+  system.preSwitchChecks.heim-pc-integration-inventory =
+    lib.mkIf config.heimPc.grabowskiProduction.enable ''
+      case "$2" in
+        switch|test|boot)
+          if [ -e /run/current-system ]; then
+            echo "Heim-PC integration inventory ($2):"
+            if ! ${pkgs.coreutils}/bin/timeout --kill-after=2s 15s \
+                ${pkgs.python3}/bin/python3 -I -B \
+                ${integrationInventory}/scripts/generate_nixos_program_inventory.py \
+                --baseline-closure /run/current-system --compare-closure "$1"; then
+              echo "WARNING: Heim-PC integration inventory unavailable; inspect rollout separately." >&2
+            fi
+          else
+            echo "Heim-PC integration inventory: no active baseline; comparison skipped."
+          fi
+          ;;
+      esac
+      true
+    '';
+
+  # Consume the already-computed catalog CI report. The timer remains native
+  # and only alex's user manager may register proposal-only Bureau candidates.
+  systemd.user.services.systemkatalog-drift-watch =
+    lib.mkIf config.heimPc.grabowskiProduction.enable {
+      description = "Consume central Systemkatalog CI drift report";
+      unitConfig.ConditionUser = "alex";
+      serviceConfig = {
+        Type = "oneshot";
+        WorkingDirectory = "/home/alex";
+        Environment = [
+          "HOME=/home/alex"
+          "PATH=${lib.makeBinPath [ pkgs.gh pkgs.coreutils pkgs.git pkgs.openssh pkgs.systemd pkgs.python3 ]}:/home/alex/.local/bin:/run/current-system/sw/bin"
+        ];
+        ExecStart = "${pkgs.python3}/bin/python3 -I -B ${../../../scripts/systemkatalog_drift_watch.py}";
+        TimeoutStartSec = "180s";
+        Nice = 10;
+      };
+    };
+
+  systemd.user.timers.systemkatalog-drift-watch =
+    lib.mkIf config.heimPc.grabowskiProduction.enable {
+      description = "Hourly Systemkatalog CI drift report consumer";
+      unitConfig.ConditionUser = "alex";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "hourly";
+        Persistent = true;
+        RandomizedDelaySec = "5min";
+        Unit = "systemkatalog-drift-watch.service";
+      };
+    };
 
   assertions = [
     {

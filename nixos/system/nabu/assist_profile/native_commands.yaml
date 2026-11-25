@@ -1,0 +1,89 @@
+language: "de"
+lists:
+  color:
+    values:
+      - in: "lila"
+        out: "purple"
+      - in: "türkis"
+        out: "turquoise"
+      - in: "hell[ ]gelb"
+        out: "lightyellow"
+intents:
+  HassLightSet:
+    data:
+      - sentences:
+          - "[<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [auf ]{color} (an[ ]machen|ein[ ]schalten|machen)"
+          - "(kannst du|könntest du) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [auf ]{color} machen"
+          - "(mach[e|t]|färbe) [<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} [(auf|in) ]{color}"
+          - "ach [<artikel_bestimmt> ]{name} {color}"
+        requires_context:
+          domain: "light"
+        response: "color"
+        metadata:
+          slot_combination: "name_color"
+      - sentences:
+          - "(schalt[e]|stell[e]|setz[e]) (das Licht|die Beleuchtung|die Lichter|die Lampen) <area> auf {color}"
+        slots:
+          domain: "light"
+        response: "color"
+        metadata:
+          slot_combination: "area_color"
+      - sentences:
+          - "(stell[e]|setz[e]|dimme) (das Licht|die Beleuchtung|die Lichter|die Lampen) <area> auf {brightness} (Prozent|%)"
+        slots:
+          domain: "light"
+        response: "brightness"
+        metadata:
+          slot_combination: "area_brightness"
+      - sentences:
+          - "(stell[e]|setz[e]) [bitte ](das Licht|die Beleuchtung|die Lichter|die Lampen) <area> [bitte ]auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) <area> [bitte ](das Licht|die Beleuchtung|die Lichter|[alle ]Lampen) [bitte ]auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) [bitte ](das Licht|die Beleuchtung|die Lichter|die Lampen) <area> auf {brightness} (Prozent|%) [Helligkeit] und {color_temperature:temperature} Kelvin"
+        slots:
+          domain: "light"
+        response: "temperature"
+        metadata:
+          slot_combination: "area_temperature_brightness"
+      - sentences:
+          - "(stell[e]|setz[e]) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} auf {color_temperature:temperature} Kelvin und {brightness} (Prozent|%) [Helligkeit]"
+          - "(stell[e]|setz[e]) [bitte ][<artikel_bestimmt> ][(Lampe|Leuchte) ]{name} auf {brightness} (Prozent|%) [Helligkeit] und {color_temperature:temperature} Kelvin"
+        requires_context:
+          domain: "light"
+        response: "temperature"
+        metadata:
+          slot_combination: "name_temperature_brightness"
+  HassTurnOff:
+    data:
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} [bitte ]aus"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_only"
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} <area> [bitte ]aus"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_area"
+  HassTurnOn:
+    data:
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} [bitte ](an|ein)"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_only"
+      - sentences:
+          - "stell[e] [bitte ][<artikel_bestimmt> ]{name} <area> [bitte ](an|ein)"
+        requires_context:
+          domain: "switch"
+        metadata:
+          slot_combination: "name_area"
+  NabuStopMusic:
+    data:
+      - sentences:
+          - "[die ]musik aus"
+          - "(stopp|stoppe|stop|beende) [die ]musik"
+          - "(schalt[e]|mach[e]) [die ]musik aus"
+          - "[die ]musik (stoppen|ausschalten|ausmachen)"

@@ -23,9 +23,19 @@ import time
 import urllib.error
 import urllib.request
 
-MODEL = "hf.co/Xylolabs/Qwen3.8-27B-GGUF:Q3_K_M"
 API = "http://127.0.0.1:11434"
 SOURCE = Path(__file__).resolve().parents[1] / "nixos/system/nabu/llm.py"
+PROFILE_DIR = SOURCE.parent / "assist_profile"
+PROFILE_PATH = PROFILE_DIR / "profile.json"
+PROFILE = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+ASSIST_OPTIONS = PROFILE["ollama"]["options"]
+MODEL = ASSIST_OPTIONS["model"]
+# The synthetic benchmark retains temperature=0 for controlled comparisons.
+# HA supplies num_ctx and think, but does not impose the old 190-token cap.
+EVAL_OPTIONS = {"num_ctx": ASSIST_OPTIONS["num_ctx"], "temperature": 0}
+THINK = ASSIST_OPTIONS["think"]
+KEEP_ALIVE = f'{ASSIST_OPTIONS["keep_alive"]}s'
+PROMPT_ADDENDUM = (PROFILE_DIR / "prompt-addendum.txt").read_text(encoding="utf-8").strip()
 RESULT_DIR = Path.home() / ".local/state/nabu-model-eval"
 SYS = (
     "Du bist Nabu, ein lokaler deutschsprachiger Home-Assistant-Sprachassistent. "
@@ -332,11 +342,15 @@ def model_identity(name):
     return {"name": name, "digest": matches[0]["digest"],
             "details": matches[0].get("details", {}), "ollama": http_json("/api/version")["version"]}
 
+def evaluation_prompt():
+    return "\n".join((SYS, registered_nabu_prompt(), PROMPT_ADDENDUM))
+
+
 def chat(model, prompt, history, tools, timeout, options=None):
-    messages = [{"role": "system", "content": SYS + "\n" + registered_nabu_prompt()}, *history, {"role": "user", "content": prompt}]
+    messages = [{"role": "system", "content": evaluation_prompt()}, *history, {"role": "user", "content": prompt}]
     payload = {"model": model, "messages": messages, "tools": tools, "stream": False,
-               "think": False, "keep_alive": "5m",
-               "options": options or {"num_ctx": 8192, "num_predict": 190, "temperature": 0}}
+               "think": THINK, "keep_alive": KEEP_ALIVE,
+               "options": dict(EVAL_OPTIONS if options is None else options)}
     started = time.monotonic()
     response = http_json("/api/chat", payload, timeout=timeout)
     return response, round(time.monotonic() - started, 3)
@@ -446,10 +460,12 @@ def run(mode, model, timeout, output_dir):
     fixture, tools = validate_fixture()
     fixed = {"case_set_sha256": digest(fixture), "tool_schema_sha256": digest(tools),
              "nabu_source_sha256": hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
-             "system_prompt_sha256": hashlib.sha256((SYS + "\n" + registered_nabu_prompt()).encode()).hexdigest(),
+             "system_prompt_sha256": hashlib.sha256(evaluation_prompt().encode()).hexdigest(),
+             "assist_profile_sha256": hashlib.sha256(PROFILE_PATH.read_bytes()).hexdigest(),
+             "requested_model": model,
              "public_tool_prompt_sha256": hashlib.sha256(registered_nabu_prompt().encode()).hexdigest(),
-             "options": {"num_ctx": 8192, "num_predict": 190, "temperature": 0, "think": False},
-             "scope": "direct Ollama; synthetic prompts; tools never executed; no HA authentication"}
+             "options": dict(EVAL_OPTIONS), "think": THINK, "keep_alive": KEEP_ALIVE,
+             "scope": "direct Ollama; versioned Assist profile; synthetic public prompt and temperature=0; no private HA prompt or live device schemas; tools never executed; no HA authentication"}
     if mode == "check":
         print(json.dumps({"ok": True, "cases": len(fixture), "families": len(GROUPS), **fixed}, sort_keys=True))
         return 0
@@ -494,7 +510,7 @@ def run(mode, model, timeout, output_dir):
                 row["tool_calls"] = raw_calls
                 allowed = {case["expected"], *case["alternates"]}
                 effectful = {"nabu_web__play_music", "nabu_web__browser",
-                             "nabu_web__grabowski_request"}
+                             "nabu_web__grabowski_request", "nabu_web__chatgpt"}
                 unrequested = []
                 for index, call in enumerate(raw_calls if isinstance(raw_calls, list) else []):
                     fn = call.get("function") if isinstance(call, dict) else None
@@ -527,6 +543,9 @@ def run(mode, model, timeout, output_dir):
     summary = {"status": "completed", "model": identity["name"], "model_digest": identity["digest"],
                "nabu_source_sha256": fixed["nabu_source_sha256"], "case_set_sha256": fixed["case_set_sha256"],
                "tool_schema_sha256": fixed["tool_schema_sha256"],
+               "assist_profile_sha256": fixed["assist_profile_sha256"],
+               "system_prompt_sha256": fixed["system_prompt_sha256"],
+               "options": fixed["options"], "think": fixed["think"], "keep_alive": fixed["keep_alive"],
                "cases": sum(len(v) for v in successes.values()),
                "passed": sum(sum(v) for v in successes.values()),
                "critical_failures": sum(1 for f in failures if f["critical"]),
