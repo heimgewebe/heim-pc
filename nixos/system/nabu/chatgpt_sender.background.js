@@ -13,6 +13,14 @@ const STAGES = new Set([
   "timeout_account_unconfirmed", "timeout_composer_missing",
   "timeout_composer_mismatch", "timeout_send_button_missing", "timeout_send_button_unavailable"
 ]);
+// Forward only attempted or terminal outcomes, never the prompt, URL or account.
+const nativeStages = new Set([...STAGES].filter(stage =>
+  stage === "click_attempted" || stage === "message_sent" ||
+  stage === "message_verified" || stage === "send_unconfirmed" ||
+  stage === "already_present" || stage === "claim_denied" ||
+  stage === "claim_unconfirmed" || stage === "composer_changed" ||
+  stage === "expired" || stage.startsWith("verification_") || stage.startsWith("timeout_")
+));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const validNonce = value => typeof value === "string" && /^[a-f0-9]{24}$/.test(value);
 
@@ -55,6 +63,12 @@ async function record(nonce, stage) {
        ![...confirmed, ...attempted].includes(stage))) return {recorded: true};
   records[nonce] = {stage, at: now};
   await chrome.storage.local.set({[RECEIPTS]: records});
+  if (nativeStages.has(stage)) {
+    // A local receipt transport failure is never a reason to click again.
+    try {
+      await chrome.runtime.sendNativeMessage("net.heimgewebe.nabu_receipt", {nonce, stage});
+    } catch { /* Chrome-local receipt remains authoritative. */ }
+  }
   return {recorded: true};
 }
 
