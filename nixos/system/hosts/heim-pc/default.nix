@@ -114,8 +114,8 @@ in
     uid = 1000;
     extraGroups = [ "wheel" "audio" "video" "networkmanager" ];
     # Bureau launchers use /usr/bin/env python3 from the alex user environment.
-    # Keep their declared jsonschema runtime dependency available under NixOS.
-    packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
+    # Keep the same JSONSchema and PyYAML environment as system Python.
+    packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])) ];
   };
 
   # Console autologin belongs solely to the non-physical VM proof. A future
