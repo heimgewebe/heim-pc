@@ -52,6 +52,16 @@ intents:
         response: "temperature"
         metadata:
           slot_combination: "name_temperature_brightness"
+
+      - sentences:
+          - "(mach[e|t]|färbe) [bitte ][<artikel_bestimmt> ](Projektor|Lichtprojektor) [(im Wohnzimmer|im Wohnraum) ][(auf|in) ]{color}"
+          - "[<artikel_bestimmt> ](Projektor|Lichtprojektor) [(im Wohnzimmer|im Wohnraum) ]in {color} leuchten lassen"
+        slots:
+          name: "Projektor Hintergrund"
+          domain: "light"
+        response: "color"
+        metadata:
+          slot_combination: "name_color"
   HassTurnOff:
     data:
       - sentences:
@@ -87,3 +97,8 @@ intents:
           - "(stopp|stoppe|stop|beende) [die ]musik"
           - "(schalt[e]|mach[e]) [die ]musik aus"
           - "[die ]musik (stoppen|ausschalten|ausmachen)"
+
+  NabuProjectorDifferentColor:
+    data:
+      - sentences:
+          - "(mach[e|t]|färbe) [bitte ][<artikel_bestimmt> ](Projektor|Lichtprojektor) [im Wohnzimmer ](in einer anderen Farbe|in eine andere Farbe|andersfarbig)"

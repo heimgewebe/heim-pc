@@ -12,10 +12,11 @@ das Profil nicht automatisch.
   Pipelineoptionen und Zielpfade. OCI-IDs und RepoDigests bezeichnen den
   getesteten Bestand, nicht eine Behauptung über das jeweils neueste Image.
 - `native_commands.yaml`: additive deutsche HassLightSet-Sätze, die Farben
-  Lila/Hellgelb/Türkis und eindeutige Musik-Stopp-Befehle. Unbekannte Ziele, Fragen,
+  Lila/Hellgelb/Türkis, eindeutige Musik-Stopp-Befehle und explizite
+  Farbaufträge für den Wohnzimmerprojektor. Unbekannte Ziele, Fragen,
   Negationen und mehrdeutige Mehrfachbefehle bleiben beim normalen Fallback.
-- `native_intent_scripts.yaml`: ausschließlich NabuStopMusic; die
-  bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
+- `native_intent_scripts.yaml`: NabuStopMusic und NabuProjectorDifferentColor.
+  Die bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
   muss vorhanden und verwendbar sein. Der Handler ruft `media_stop`, nicht
   `media_pause` auf.
 - `prompt-addendum.txt`: zusätzliche Regel für kompakte Werkzeugentscheidungen
@@ -41,14 +42,17 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
 2. Die native Grammatik nach
    `~/.local/share/heimgewebe/home-assistant/custom_sentences/de/nabu_native_commands.yaml`
    übernehmen. Die vorhandene `nabu_music.yaml` bleibt erhalten.
-   Den einzelnen NabuStopMusic-Block aus `native_intent_scripts.yaml`
-   unter dem vorhandenen `intent_script:`-Mapping ergänzen, nicht die
-   vollständige `configuration.yaml` ersetzen. Einen bereits abweichend
-   definierten NabuStopMusic-Handler nicht still überschreiben.
+   Die beiden Blöcke aus `native_intent_scripts.yaml` unter dem vorhandenen
+   `intent_script:`-Mapping ergänzen, nicht die vollständige
+   `configuration.yaml` ersetzen. Bereits abweichend definierte Handler
+   nicht still überschreiben.
 3. In der HA-Entitätsverwaltung nur bei Bedarf beobachtete, eindeutig
    zuordenbare Transkriptionsvarianten als Alias des vorhandenen Geräts
    ergänzen. Den berechneten Namen beibehalten. Raumgruppen und
-   unfreigegebene Geräte nicht zusätzlich exponieren.
+   unfreigegebene Geräte nicht zusätzlich exponieren. Der Projektorfarbpfad
+   setzt die vorhandene Alias-Zuordnung `Projektor Hintergrund` zur
+   HS-fähigen Entität `light.wohnzimmer_projektor_background` voraus.
+   Der Master bleibt das Schaltziel; Lasersterne unterstützen nur Helligkeit.
 4. Den vorhandenen STT-Quadlet-Dienst (Name und Port bleiben stabil) mit
    der in `profile.json` angegebenen Exec-Zeile betreiben. Der Parakeet-
    Modellordner muss unter dem vorhandenen gemounteten Modellcache liegen.
@@ -77,7 +81,11 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
   und Raumwünsche exakt Zielentitäten, Farbwerte und Prozent/Kelvin prüfen;
   keine zusätzlichen Hue-Raumgruppen. Musik aus muss den vorgesehenen
   Player stoppen. Negative/mehrdeutige Fälle dürfen keinen neu eingeführten
-  Geräte- oder Musikbefehl auslösen.
+  Geräte- oder Musikbefehl auslösen. Projektor mit/ohne Raumzusatz auf
+  Hintergrundlicht, Ein/Aus ausschließlich auf Master; andere Farbe auf
+  einen um 120 Grad verschobenen Farbton bei vorhandenem HS-Wert. Falscher
+  Raum, Negation und Mehrfachbefehl dürfen nicht in den neuen Pfad gelangen.
+  Fehlende Entität muss als Fehler behandelt werden, nicht als Erfolg.
 - STT über den existierenden Wyoming-Port prüfen (deutsche Sprache, klare
   Verneinung, ein realer Geräte-/Auftragsname und Stille). Die echten
   Mikrofon-/TTS-/Gerätewege separat abnehmen; Service-Health und Stubtests
