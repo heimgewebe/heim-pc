@@ -372,7 +372,9 @@ class ChatGPTLocalReceiptTests(TestCase):
                  mock.patch.object(grabowski.secrets, "token_hex", return_value=nonce), \
                  mock.patch.object(grabowski, "_start_chatgpt_desktop", new=mock.AsyncMock(
                      return_value=("a" * 24, "completed"))) as start:
-                result = asyncio.run(grabowski.start_chatgpt_browser_text(object(), "Nabu-Test"))
+                with mock.patch.object(grabowski, "_wait_sender_receipt",
+                                       new=mock.AsyncMock(return_value="send_unconfirmed")):
+                    result = asyncio.run(grabowski.start_chatgpt_browser_text(object(), "Nabu-Test"))
                 self.assertEqual(start.await_count, 1)
                 self.assertTrue(result["browser_start_verified"])
                 self.assertFalse(result["message_sent_verified"])
@@ -380,6 +382,17 @@ class ChatGPTLocalReceiptTests(TestCase):
                 path.write_text(json.dumps({nonce: {"stage": "click_attempted", "at": now}}))
                 self.assertEqual(asyncio.run(grabowski._wait_sender_receipt(nonce, now, seconds=0)),
                                  "click_attempted")
+
+    def test_provisional_unconfirmed_can_turn_into_verified(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "receipts.json"
+            path.write_text("{}")
+            nonce = "ab" * 12
+            with mock.patch.object(grabowski, "CHATGPT_SENDER_RECEIPTS_PATH", path), \
+                 mock.patch.object(grabowski, "_read_sender_receipt",
+                                   side_effect=["click_attempted", "send_unconfirmed", "message_verified"]):
+                self.assertEqual(asyncio.run(grabowski._wait_sender_receipt(nonce, 1795425000, seconds=2)),
+                                 "message_verified")
 
     def test_confirmed_receipt_returns_before_slow_launch_reply(self):
         async def exercise():

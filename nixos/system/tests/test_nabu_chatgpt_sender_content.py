@@ -29,11 +29,12 @@ const stored = data.verify && data.priorAttempt !== false ? {
 let backgroundListener;
 let installListener;
 const nativeReceipts = [];
+const sessionStored = {};
 const backgroundChrome = {
   runtime: {
     onMessage: { addListener(fn) { backgroundListener = fn; } },
     onInstalled: { addListener(fn) { installListener = fn; } },
-    getManifest() { return {version: "1.1.4"}; },
+    getManifest() { return {version: "1.1.6"}; },
     async sendNativeMessage(host, body) {
       nativeReceipts.push({host, body});
       if (data.nativeFailure) throw new Error("native host unavailable");
@@ -46,11 +47,17 @@ const backgroundChrome = {
       if (data.storageFailure) throw new Error("storage failed");
       Object.assign(stored, values);
     }
+  }, session: {
+    async get(key) { return {[key]: sessionStored[key]}; },
+    async set(values) {
+      if (data.sessionFailure) throw new Error("session storage failed");
+      Object.assign(sessionStored, values);
+    }
   } }
 };
 vm.runInNewContext(data.background, {chrome: backgroundChrome, Date, URL});
-function openTab() {
-  const loc = {origin: url.origin, pathname: url.pathname, search: url.search, href: url.href};
+function openTab(tabId, documentURL = url, recovery = false, recoveredText = null) {
+  const loc = {origin: documentURL.origin, pathname: documentURL.pathname, search: documentURL.search, href: documentURL.href};
   let hydrated = !data.delayedHydration;
   let clicks = 0;
   const visible = {getClientRects() {return hydrated ? [{}] : [];}};
@@ -79,7 +86,7 @@ function openTab() {
     chrome: { runtime: {
       sendMessage(message) {
         return new Promise(resolve => {
-          if (!backgroundListener(message, {url: loc.href, frameId: 0}, resolve)) {
+          if (!backgroundListener(message, {url: loc.href, frameId: 0, tab: {id: tabId}}, resolve)) {
             resolve({granted: false, recorded: false});
           }
         });
@@ -90,10 +97,11 @@ function openTab() {
         if (selector === "button") return data.missingSend ? [] : [send];
         if (selector.includes('data-message-author-role="user"')) {
           if (data.directUserTestId && !selector.includes('[data-testid="user-message"]')) return [];
-          if (!(data.verify || clicks && data.confirm !== false)) return [];
-          const value = data.messageText ?? data.composer;
-          return [{...visible, innerText: data.wrapped ? "You said:\n" + value : value,
-            querySelectorAll() {return data.wrapped ? [{...visible, innerText: value}] : [];}
+          if (!(recovery || data.verify || clicks && data.confirm !== false && !data.navigate)) return [];
+          const value = recoveredText ?? data.messageText ?? data.composer;
+          return [{...visible, ...(data.hiddenWrapper ? {getClientRects() {return [];}} : {}),
+            innerText: data.wrapped ? "You said:\n" + value : value,
+            querySelectorAll() {return data.wrapped || data.hiddenWrapper ? [{...visible, innerText: value}] : [];}
           }];
         }
         if (selector.includes('data-testid="login-button"')) return data.login ? [visible] : [];
@@ -114,11 +122,28 @@ function openTab() {
   }
   return {finished, get clicks() {return clicks;}};
 }
-const tabs = Array.from({length: data.tabs || 1}, () => openTab());
-Promise.all(tabs.map(tab => tab.finished)).then(() => {
+const tabs = Array.from({length: data.tabs || 1}, (_, i) => openTab(i + 1));
+Promise.all(tabs.map(tab => tab.finished)).then(async () => {
+  let recoveryClicks = 0;
+  if (data.navigate) {
+    if (data.expirePending) {
+      for (const p of Object.values(sessionStored.nabu_pending_proof_v1 || {})) p.at -= 61;
+    }
+    if (data.removeAttempt) stored.nabu_send_receipts_v1 = {};
+    const first = openTab(data.otherTab ? 99 : 1, new URL("https://chatgpt.com/c/new-chat-12345678"), true, data.wrongRecoveredText ? "different message" : null);
+    await first.finished;
+    recoveryClicks += first.clicks;
+    if (data.secondRoute) {
+      const second = openTab(1, new URL("https://chatgpt.com/c/other-chat-12345678"), true);
+      await second.finished;
+      recoveryClicks += second.clicks;
+    }
+  }
   const receipts = Object.values(stored.nabu_send_receipts_v1 || {});
   console.log(JSON.stringify({
-    clicks: tabs.reduce((n, tab) => n + tab.clicks, 0),
+    clicks: tabs.reduce((n, tab) => n + tab.clicks, 0) + recoveryClicks,
+    recoveryClicks,
+    noPromptInSession: !JSON.stringify(sessionStored).includes(data.composer),
     perTabClicks: tabs.map(tab => tab.clicks),
     marked: Object.keys(stored.nabu_consumed_nonces_v1 || {}).length,
     stage: receipts[0]?.stage || null,
@@ -171,6 +196,34 @@ class NabuChromeSendContentTests(unittest.TestCase):
             {"host": "net.heimgewebe.nabu_receipt", "body": {"nonce": "cd" * 12, "stage": stage}}
             for stage in ("click_attempted", "message_sent")
         ])
+
+    def test_message_proof_survives_replaced_document_in_same_tab(self):
+        result = self.send_once(navigate=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["recoveryClicks"], 0)
+        self.assertEqual(result["stage"], "message_verified")
+        self.assertTrue(result["noPromptInSession"])
+        self.assertEqual(result["nativeReceipts"][-1]["body"]["stage"], "message_verified")
+
+    def test_document_recovery_rejects_other_tab_stale_or_unattempted_claim(self):
+        for fixture in ({"otherTab": True}, {"expirePending": True},
+                        {"removeAttempt": True}, {"sessionFailure": True}):
+            with self.subTest(fixture=fixture):
+                result = self.send_once(navigate=True, **fixture)
+                self.assertEqual(result["clicks"], 1)
+                self.assertEqual(result["recoveryClicks"], 0)
+                self.assertNotIn(result["stage"], ("message_sent", "message_verified"))
+
+    def test_document_recovery_never_follows_second_conversation(self):
+        result = self.send_once(navigate=True, wrongRecoveredText=True, secondRoute=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "verification_text_mismatch")
+        self.assertEqual(result["recoveryClicks"], 0)
+
+    def test_semantic_wrapper_without_rectangle_has_visible_text_child(self):
+        result = self.send_once(hiddenWrapper=True, wrapped=True)
+        self.assertEqual(result["clicks"], 1)
+        self.assertEqual(result["stage"], "message_sent")
 
     def test_native_transport_failure_does_not_repeat_send(self):
         result = self.send_once(nativeFailure=True)
