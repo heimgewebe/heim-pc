@@ -55,8 +55,13 @@ device-error counter. Thermal recovery requires 80% of samples below
 85 C; missing readings retain an active episode. Existing Btrfs totals
 are initially baselines, not new failures. A decreasing counter updates
 the baseline without proving repair. A later increase to a previously
-seen counter value has a new event identity. Two consecutive unsuccessful
-monitor reads produce one service-failure event per failure episode.
+seen counter value has a new event identity. Two consecutive incomplete or unsuccessful monitor reads produce one
+service-failure event per failure episode. Missing, stale or non-finite
+Tctl readings and incomplete Btrfs counter sets count as failed reads,
+not as healthy polls. Valid independent readings still advance their
+own episodes/counters, and unavailable thermal readings retain any
+active heat episode. The normal hysteresis band is not a read failure.
+The JSON output includes explicit read_errors.
 Generic NVMe backlog warnings remain visible in snapshots; use await
 and I/O PSI to judge actual contention, not backlog alone.
 

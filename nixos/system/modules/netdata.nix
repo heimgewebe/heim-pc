@@ -160,6 +160,8 @@ let
             for k, v in selected[:64]:
                 try:
                     result["series"][k] = summarize(k, v, minutes)
+                    if not result["series"][k]["dimensions"]:
+                        result["errors"].append("series:" + k + ":no_finite_values")
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     result["errors"].append("series:" + k + ":" + type(exc).__name__)
             result["omitted_charts"] = max(0, len(selected) - 64)
@@ -186,6 +188,14 @@ let
         return result
 
 
+    BTRFS_COUNTERS = {"write_errs", "read_errs", "flush_errs",
+                      "corruption_errs", "generation_errs"}
+
+
+    def fresh_row(rows, now):
+        return bool(rows and finite(rows[-1][0]) and -5 <= now - rows[-1][0] <= 30)
+
+
     def read_conditions():
         charts = request("/api/v1/charts")["charts"]
         raised = alarms()
@@ -194,29 +204,50 @@ let
         active = {"critical:" + a["key"]: {"condition": "native_critical",
                   "alarm": str(a["name"])[:100]} for a in raised
                   if a["status"] == "CRITICAL" and not str(a["name"]).startswith("btrfs_device_")}
+        errors = []
         tctl = next((k for k in charts if "k10temp" in k and k.endswith("_Tctl_input")), None)
         thermal = None
-        if tctl:
-            labels, rows = history(tctl, 5, 30)
-            values = [r[1] for r in rows if len(r) > 1 and finite(r[1])]
-            # Require fresh, sustained measurements; missing or stale data is not
-            # equivalent to a cool CPU. A few transient peaks do not notify.
-            if len(values) >= 24 and rows and time.time() - rows[-1][0] <= 30:
-                if sum(v >= 89 for v in values) >= 0.8 * len(values):
+        if not tctl:
+            errors.append("cpu_tctl_missing")
+        else:
+            try:
+                labels, rows = history(tctl, 5, 30)
+                values = [r[1] for r in rows if len(r) > 1 and finite(r[1])]
+                # None is also the normal hysteresis band. Explicit errors
+                # distinguish it from unavailable measurements.
+                if (len(values) < 24 or not fresh_row(rows, time.time())
+                        or len(rows[-1]) < 2 or not finite(rows[-1][1])):
+                    errors.append("cpu_tctl_incomplete_or_stale")
+                elif sum(v >= 89 for v in values) >= 0.8 * len(values):
                     thermal = True
                 elif sum(v < 85 for v in values) >= 0.8 * len(values):
                     thermal = False
+            except (OSError, ValueError, KeyError, TypeError):
+                errors.append("cpu_tctl_read_failed")
         counters = {}
-        for chart, meta in charts.items():
-            if meta.get("context") != "btrfs.device_errors":
-                continue
-            labels, rows = history(chart, 2, 6, group="max")
-            if rows and time.time() - rows[-1][0] <= 30:
-                for idx, label in enumerate(labels[1:], 1):
-                    if len(rows[-1]) > idx and finite(rows[-1][idx]):
-                        counters[chart + ":" + label] = int(rows[-1][idx])
-        return active, thermal, counters
-
+        disks = [chart for chart, meta in charts.items()
+                 if meta.get("context") == "btrfs.device_errors"]
+        if not disks:
+            errors.append("btrfs_counters_missing")
+        for chart in disks:
+            try:
+                labels, rows = history(chart, 2, 6, group="max")
+                if not fresh_row(rows, time.time()):
+                    errors.append("btrfs_counters_stale")
+                    continue
+                valid = {label: int(rows[-1][idx])
+                         for idx, label in enumerate(labels[1:], 1)
+                         if label in BTRFS_COUNTERS and len(rows[-1]) > idx
+                         and finite(rows[-1][idx]) and rows[-1][idx] >= 0
+                         and int(rows[-1][idx]) == rows[-1][idx]}
+                if set(valid) != BTRFS_COUNTERS:
+                    errors.append("btrfs_counters_incomplete")
+                counters.update({chart + ":" + label: value for label, value in valid.items()})
+            except (OSError, ValueError, KeyError, TypeError):
+                errors.append("btrfs_counters_read_failed")
+        # Keep valid independent measurements useful even during a partial
+        # collector outage. Missing measurements must never clear an episode.
+        return (active, thermal, counters), sorted(set(errors))
 
     def advance(state, observed, now):
         active, thermal, counters = observed
@@ -242,7 +273,23 @@ let
                     "counter": key.rsplit(":", 1)[-1][:100], "count": str(value)}})
             # A reset changes the baseline, it is not itself evidence of repair.
             state["counters"][key] = value
-        state["failures"] = 0
+
+
+    def poll(state, now):
+        try:
+            observed, errors = read_conditions()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errors = ["netdata_read:" + type(exc).__name__]
+        else:
+            advance(state, observed, now)
+        if errors:
+            state["failures"] += 1
+            if state["failures"] == 2:
+                state["pending"].append({"key": "netdata_unavailable", "event": str(now),
+                    "class": "service_failure", "fields": {"error_type": "two_failed_reads"}})
+        else:
+            state["failures"] = 0
+        return errors
 
 
     def save_state(path, state):
@@ -267,18 +314,13 @@ let
             if state.get("schema_version") != 1:
                 raise ValueError("unsupported watch state")
             now = time.time_ns()
-            try:
-                advance(state, read_conditions(), now)
-            except (OSError, ValueError, KeyError, TypeError):
-                state["failures"] += 1
-                if state["failures"] == 2:
-                    state["pending"].append({"key": "netdata_unavailable", "event": str(now),
-                        "class": "service_failure", "fields": {"error_type": "two_failed_reads"}})
+            read_errors = poll(state, now)
             if len(state["pending"]) > 64:
                 raise ValueError("pending alert bound exceeded")
             if dry_run:
                 return {"status": "preview", "active": list(state["active"]),
-                        "would_enqueue": state["pending"], "read_failures": state["failures"]}
+                        "would_enqueue": state["pending"], "read_failures": state["failures"],
+                        "read_errors": read_errors}
             save_state(path, state)
             import grabowski_alert_outbox as outbox
             sent = []
@@ -318,7 +360,8 @@ let
                     "queue_window_full": window_full,
                     "pending_after_dispatch": remaining_ids,
                     "delivery_blocker": blocker,
-                    "dispatch_exit": dispatch, "read_failures": state["failures"]}
+                    "dispatch_exit": dispatch, "read_failures": state["failures"],
+                    "read_errors": read_errors}
         if dry_run:
             return evaluate()
         STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
