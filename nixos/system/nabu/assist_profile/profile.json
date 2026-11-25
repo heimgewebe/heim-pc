@@ -94,6 +94,21 @@
       "file_type": "Q3_K_M",
       "renderer": "qwen3.5",
       "parser": "qwen3.5"
+    },
+    "server_cache": {
+      "observed_at": "2026-11-25T13:28:46.034778+01:00",
+      "unit": "heimgewebe-assist-ollama.service",
+      "quadlet": "~/.config/containers/systemd/heimgewebe-assist-ollama.container",
+      "environment": {
+        "OLLAMA_FLASH_ATTENTION": "1",
+        "OLLAMA_KV_CACHE_TYPE": "q8_0",
+        "CUDA_CACHE_PATH": "/root/.ollama/cuda-cache"
+      },
+      "persistent_mount": {
+        "source": "~/.local/share/heimgewebe/assist/ollama",
+        "target": "/root/.ollama"
+      },
+      "cache_relative_directory": "cuda-cache"
     }
   },
   "stt": {
@@ -133,12 +148,12 @@
   },
   "files": {
     "native_commands.yaml": {
-      "sha256": "6079f8c59fc1755920cd1b8dc1c2766441f4b88c2122dbf2d8d5aa53179dfaa2",
-      "bytes": 3666
+      "sha256": "d7f382b2074f53de66dba86993fd05c92e8aa7b99d2298a177335bc8dadd4d05",
+      "bytes": 4334
     },
     "native_intent_scripts.yaml": {
-      "sha256": "f22a8cdf495335b7dbb086a5617054a141f42ad062654121b95fa5f6116dca5d",
-      "bytes": 212
+      "sha256": "e3c5ef87cdeb7fa986253f33ef68913e6264298335cfd8352feb91a800aa3877",
+      "bytes": 970
     },
     "prompt-addendum.txt": {
       "sha256": "5b0daa98c4c56c73db47ff21f3b8ae7b4131c1cf0b652134d07f1e1f8288c5ec",
