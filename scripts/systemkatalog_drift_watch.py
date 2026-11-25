@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an independent proposal-only Systemkatalog drift check and dedupe Bureau notice."""
+"""Consume the existing CI drift report and deduplicate Bureau notices."""
 
 from __future__ import annotations
 
@@ -10,29 +10,22 @@ import os
 import re
 import subprocess
 import sys
-import tarfile
-import tempfile
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, NamedTuple
-from urllib.parse import urlparse
+import io
+import zipfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, NamedTuple
 
 CANDIDATE_ID = "SYSTEMKATALOG-DRIFT-CLOSED-LOOP-V1"
 NONTERMINAL_CANDIDATE_STATUSES = {"active", "paused", "observed", "promoted"}
 TERMINAL_CANDIDATE_STATUSES = {"closed", "dropped"}
 LIVE_CANDIDATE_STATUSES = NONTERMINAL_CANDIDATE_STATUSES | TERMINAL_CANDIDATE_STATUSES
 SYSTEMKATALOG_REPOSITORY = "heimgewebe/systemkatalog"
-METAREPO_REPOSITORY = "heimgewebe/metarepo"
-REMOTE_NAME = "origin"
+WORKFLOW = "ecosystem-map.yml"
+ARTIFACT = "systemkatalog-drift-report"
+MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+MAX_REPORT_AGE = timedelta(hours=48)
 GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
-
-
-class SourceSnapshot(NamedTuple):
-    systemkatalog_root: Path
-    fleet_file: Path
-    systemkatalog_commit: str
-    metarepo_commit: str
 
 
 class CandidateAssessment(NamedTuple):
@@ -44,21 +37,13 @@ class CandidateAssessment(NamedTuple):
 
 
 def _run(argv: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
+    return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=30)
 
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
-
-
-def _write_private_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
     os.chmod(temporary, 0o600)
     temporary.replace(path)
 
@@ -73,171 +58,134 @@ def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     return completed.stderr.strip() or completed.stdout.strip() or f"exit status {completed.returncode}"
 
 
-def _github_repository_from_remote(remote_url: str) -> str | None:
-    value = remote_url.strip().rstrip("/")
-    scp_match = re.fullmatch(r"[^/@:]+@github\.com:(.+)", value)
-    if scp_match is not None:
-        path = scp_match.group(1)
-    else:
-        parsed = urlparse(value)
-        if parsed.hostname != "github.com":
-            return None
-        path = parsed.path.lstrip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = path.strip("/").split("/")
-    if len(parts) != 2 or not all(parts):
-        return None
-    return f"{parts[0]}/{parts[1]}"
-
-
-def _fetch_remote_main(repo_root: Path, expected_repository: str) -> str:
-    remote = _run(["git", "-C", str(repo_root), "remote", "get-url", REMOTE_NAME])
-    if remote.returncode != 0:
-        raise RuntimeError(
-            f"cannot read {expected_repository} origin: {_command_error(remote)}"
-        )
-    remote_url = remote.stdout.strip()
-    observed_repository = _github_repository_from_remote(remote_url)
-    if observed_repository is None or observed_repository.lower() != expected_repository.lower():
-        raise RuntimeError(
-            f"unexpected origin for {repo_root}: {remote_url!r}; "
-            f"expected GitHub repository {expected_repository}"
-        )
-    listed = _run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "ls-remote",
-            "--exit-code",
-            remote_url,
-            "refs/heads/main",
-        ]
+def _gh_api(path: str) -> bytes:
+    response = subprocess.run(
+        ["gh", "api", path], capture_output=True, timeout=30, check=False
     )
-    fields = listed.stdout.strip().split()
-    commit = fields[0].lower() if len(fields) == 2 and fields[1] == "refs/heads/main" else ""
-    if listed.returncode != 0 or GIT_SHA_RE.fullmatch(commit) is None:
-        raise RuntimeError(
-            f"cannot resolve remote {expected_repository} main: {_command_error(listed)}"
-        )
-    fetched = _run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            remote_url,
-            commit,
-        ]
+    if response.returncode != 0:
+        raise RuntimeError(f"GitHub artifact API failed (exit {response.returncode})")
+    if len(response.stdout) > MAX_ARTIFACT_BYTES:
+        raise ValueError("GitHub artifact response too large")
+    return response.stdout
+
+
+def _utc(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("missing report timestamp")
+    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if result.tzinfo is None:
+        raise ValueError("report timestamp lacks timezone")
+    return result.astimezone(timezone.utc)
+
+
+def fetch_ci_report(api=_gh_api, *, now: datetime | None = None):
+    """One completed main run; no fallback to an older missing/failed report."""
+    now = now or datetime.now(timezone.utc)
+    prefix = f"repos/{SYSTEMKATALOG_REPOSITORY}/actions"
+    runs = json.loads(api(
+        f"{prefix}/workflows/{WORKFLOW}/runs?branch=main&status=completed&per_page=1"
+    ))["workflow_runs"]
+    if len(runs) != 1:
+        raise ValueError("no unique completed catalog workflow run")
+    run = runs[0]
+    run_id, head = run.get("id"), run.get("head_sha")
+    if (
+        type(run_id) is not int or run_id <= 0
+        or not isinstance(head, str) or GIT_SHA_RE.fullmatch(head) is None
+        or run.get("head_branch") != "main"
+        or run.get("path") != f".github/workflows/{WORKFLOW}"
+        or run.get("head_repository", {}).get("full_name") != SYSTEMKATALOG_REPOSITORY
+        or run.get("repository", {}).get("full_name") != SYSTEMKATALOG_REPOSITORY
+        or run.get("status") != "completed"
+        or run.get("event") not in {"push", "schedule", "workflow_dispatch"}
+        or run.get("conclusion") not in {"success", "failure"}
+    ):
+        raise ValueError("latest completed catalog workflow run is not usable")
+    started, finished = _utc(run["run_started_at"]), _utc(run["updated_at"])
+    if not started <= finished or not timedelta(0) <= now - finished <= MAX_REPORT_AGE:
+        raise ValueError("catalog workflow run is stale or has invalid timing")
+    payload = json.loads(api(f"{prefix}/runs/{run_id}/artifacts?per_page=100"))
+    artifacts = payload["artifacts"]
+    if payload.get("total_count") != len(artifacts):
+        raise ValueError("incomplete catalog artifact listing")
+    matches = [item for item in artifacts if item.get("name") == ARTIFACT]
+    if len(matches) != 1:
+        raise ValueError("latest completed catalog run lacks a unique drift artifact")
+    artifact = matches[0]
+    binding = artifact.get("workflow_run", {})
+    artifact_id, size, digest = (
+        artifact.get("id"), artifact.get("size_in_bytes"), artifact.get("digest")
     )
-    if fetched.returncode != 0:
-        raise RuntimeError(
-            f"cannot fetch {expected_repository} commit {commit}: {_command_error(fetched)}"
-        )
-    verified = _run(
-        ["git", "-C", str(repo_root), "cat-file", "-e", f"{commit}^{{commit}}"]
-    )
-    if verified.returncode != 0:
-        raise RuntimeError(
-            f"fetched {expected_repository} commit is unavailable: {_command_error(verified)}"
-        )
-    return commit
+    if (
+        type(artifact_id) is not int or artifact_id <= 0
+        or artifact.get("expired") is not False
+        or type(size) is not int or not 0 < size <= MAX_ARTIFACT_BYTES
+        or not isinstance(digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+        or binding.get("id") != run_id
+        or binding.get("head_sha") != head
+        or binding.get("head_branch") != "main"
+        or binding.get("repository_id") != run["repository"]["id"]
+        or binding.get("head_repository_id") != run["head_repository"]["id"]
+    ):
+        raise ValueError("catalog artifact identity, digest or size invalid")
+    raw = api(f"{prefix}/artifacts/{artifact_id}/zip")
+    if len(raw) != size or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("catalog artifact bytes do not match provider digest")
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        members = archive.infolist()
+        if (
+            len(members) != 1
+            or members[0].filename != ARTIFACT + ".json"
+            or members[0].is_dir()
+            or not 0 < members[0].file_size <= MAX_ARTIFACT_BYTES
+        ):
+            raise ValueError("unexpected catalog artifact archive contents")
+        report = json.loads(archive.read(members[0]))
+    changes = report.get("changes")
+    material = report.get("materialDrift")
+    proposal = report.get("proposal")
+    candidate = report.get("bureauCandidate")
+    observed = _utc(report.get("generatedAt"))
+    if (
+        report.get("schemaVersion") != 1 or report.get("kind") != "system_catalog_drift_report"
+        or type(material) is not bool or not isinstance(changes, list)
+        or type(report.get("changeCount")) is not int
+        or report["changeCount"] != len(changes) or material != bool(changes)
+        or any(not isinstance(change, dict) or not isinstance(change.get("kind"), str)
+               or not change["kind"] for change in changes)
+        or not isinstance(proposal, dict) or proposal.get("proposalOnly") is not True
+        or proposal.get("autoMerge") is not False or proposal.get("candidateId") != CANDIDATE_ID
+        or (material and (not isinstance(candidate, dict) or candidate.get("candidateId") != CANDIDATE_ID
+                          or candidate.get("repo") != "repo.systemkatalog"))
+        or (not material and candidate is not None)
+        or (run["conclusion"] == "failure" and not material)
+        or not started <= observed <= finished
+        or not timedelta(0) <= now - observed <= MAX_REPORT_AGE
+    ):
+        raise ValueError("catalog artifact report inconsistent, stale or not proposal-only")
+    return report, {
+        "repository": SYSTEMKATALOG_REPOSITORY, "workflow": WORKFLOW,
+        "runId": run_id, "commit": head, "conclusion": run["conclusion"],
+        "artifactId": artifact_id, "artifactDigest": digest,
+        "observedAt": report["generatedAt"],
+    }
 
 
-def _extract_git_archive(archive_path: Path, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    destination_root = destination.resolve()
-    with tarfile.open(archive_path, mode="r:") as archive:
-        members = archive.getmembers()
-        for member in members:
-            member_path = PurePosixPath(member.name)
-            if member_path.is_absolute() or ".." in member_path.parts:
-                raise RuntimeError(f"unsafe path in Git archive: {member.name!r}")
-            target = (destination / Path(*member_path.parts)).resolve()
-            if target != destination_root and destination_root not in target.parents:
-                raise RuntimeError(f"Git archive path escapes snapshot root: {member.name!r}")
-            if not (member.isdir() or member.isfile()):
-                raise RuntimeError(
-                    f"unsupported non-regular entry in Git archive: {member.name!r}"
-                )
-        archive.extractall(destination, members=members)
-
-
-def _archive_commit(repo_root: Path, commit: str, destination: Path, archive_path: Path) -> None:
-    archived = _run(
-        [
-            "git",
-            "-C",
-            str(repo_root),
-            "archive",
-            "--format=tar",
-            "--output",
-            str(archive_path),
-            commit,
-        ]
-    )
-    if archived.returncode != 0:
-        raise RuntimeError(f"cannot archive {repo_root} at {commit}: {_command_error(archived)}")
-    try:
-        _extract_git_archive(archive_path, destination)
-    finally:
-        archive_path.unlink(missing_ok=True)
-
-
-def _read_git_file(repo_root: Path, commit: str, relative_path: str, output: Path) -> None:
-    shown = _run(["git", "-C", str(repo_root), "show", f"{commit}:{relative_path}"])
-    if shown.returncode != 0:
-        raise RuntimeError(
-            f"cannot read {relative_path} from {repo_root} at {commit}: {_command_error(shown)}"
-        )
-    _write_private_text(output, shown.stdout)
-
-
-@contextmanager
-def _fresh_source_snapshot(
-    *,
-    systemkatalog_root: Path,
-    fleet_file: Path,
-    state_root: Path,
-) -> Iterator[SourceSnapshot]:
-    metarepo_root = fleet_file.parent.parent
-    systemkatalog_commit = _fetch_remote_main(
-        systemkatalog_root, SYSTEMKATALOG_REPOSITORY
-    )
-    metarepo_commit = _fetch_remote_main(metarepo_root, METAREPO_REPOSITORY)
-    with tempfile.TemporaryDirectory(prefix=".source-snapshot-", dir=state_root) as directory:
-        snapshot_root = Path(directory)
-        snapshot_systemkatalog = snapshot_root / "systemkatalog"
-        snapshot_fleet = snapshot_root / "metarepo/fleet/repos.yml"
-        _archive_commit(
-            systemkatalog_root,
-            systemkatalog_commit,
-            snapshot_systemkatalog,
-            snapshot_root / "systemkatalog.tar",
-        )
-        _read_git_file(
-            metarepo_root,
-            metarepo_commit,
-            "fleet/repos.yml",
-            snapshot_fleet,
-        )
-        required = [
-            snapshot_systemkatalog / "scripts/read_github_catalog_observations.py",
-            snapshot_systemkatalog / "scripts/system_catalog_drift.py",
-            snapshot_fleet,
-        ]
-        missing = [str(path) for path in required if not path.is_file()]
-        if missing:
-            raise RuntimeError(f"fresh source snapshot is incomplete: {missing}")
-        yield SourceSnapshot(
-            systemkatalog_root=snapshot_systemkatalog,
-            fleet_file=snapshot_fleet,
-            systemkatalog_commit=systemkatalog_commit,
-            metarepo_commit=metarepo_commit,
-        )
+def material_fingerprint(report: dict[str, Any]) -> dict[str, Any]:
+    """Stable semantic changes, not run timestamps or unrelated commit churn."""
+    changes = []
+    for row in report["changes"]:
+        value = dict(row)
+        if value["kind"] == "primary_source_changed" and value.get("observedSha256"):
+            value.pop("observedCommit", None)
+        changes.append(value)
+    changes.sort(key=lambda row: json.dumps(row, sort_keys=True, ensure_ascii=False))
+    return {
+        "schemaVersion": 1, "kind": "system_catalog_material_drift_projection",
+        "materialDrift": report["materialDrift"], "changeCount": len(changes),
+        "changes": changes,
+    }
 
 
 def _candidate_assessment(
@@ -340,7 +288,7 @@ def _ensure_bureau_candidate(
     title = "Systemkatalog-Drift prüfen und proposal-only aktualisieren"
     source_kind = "heim-pc-systemkatalog-drift-watch-v1"
     note = (
-        f"Unabhängiger Heim-PC-Watchdog erkannte {report.get('changeCount')} Systemkatalog-Abweichungen. "
+        f"Zentraler Systemkatalog-CI-Bericht meldet {report.get('changeCount')} Systemkatalog-Abweichungen. "
         f"Driftarten: {', '.join(kinds) or 'unknown'}. Lokaler Bericht: {report_path}; sha256={digest}. "
         "Nur proposal-only prüfen; keine Katalogsemantik automatisch mergen."
     )
@@ -449,7 +397,7 @@ def _ensure_bureau_candidate(
 
     request = {
         "schema_version": 1,
-        "idempotency_key": f"systemkatalog-drift:{digest}",
+        "idempotency_key": f"systemkatalog-drift:{digest}:{latest_event_id or 'initial'}",
         "title": title,
         "source_kind": source_kind,
         "desired_outcome": (
@@ -535,99 +483,56 @@ def _ensure_bureau_candidate(
     return result
 
 
-def run_watch(
-    *,
-    systemkatalog_root: Path,
-    fleet_file: Path,
-    bureau_root: Path,
-    state_root: Path,
-) -> dict[str, Any]:
-    # Kept for existing callers. Candidate helpers use the wrapper's
-    # integrity-checked canonical snapshot and ignore checkout state.
-    state_root.mkdir(parents=True, exist_ok=True)
-    os.chmod(state_root, 0o700)
-    observations = state_root / "observations.json"
+def run_watch(*, bureau_root: Path, state_root: Path, check_only: bool = False):
+    report, source = fetch_ci_report()
+    projection = material_fingerprint(report)
+    encoded = json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     report_path = state_root / "drift-report.json"
-    proposal_path = state_root / "update-proposal.json"
-    with _fresh_source_snapshot(
-        systemkatalog_root=systemkatalog_root,
-        fleet_file=fleet_file,
-        state_root=state_root,
-    ) as sources:
-        observed = _run([
-            sys.executable,
-            str(sources.systemkatalog_root / "scripts/read_github_catalog_observations.py"),
-            "--root", str(sources.systemkatalog_root),
-            "--output", str(observations),
-        ], cwd=sources.systemkatalog_root)
-        if observed.returncode != 0:
-            raise RuntimeError(f"GitHub observation failed: {_command_error(observed)}")
-        drift = _run([
-            sys.executable,
-            str(sources.systemkatalog_root / "scripts/system_catalog_drift.py"),
-            "--root", str(sources.systemkatalog_root),
-            "--github-observations", str(observations),
-            "--fleet-file", str(sources.fleet_file),
-            "--output", str(report_path),
-            "--proposal-output", str(proposal_path),
-        ], cwd=sources.systemkatalog_root)
-        if drift.returncode != 0:
-            raise RuntimeError(f"drift report failed: {_command_error(drift)}")
-        source_receipt = {
-            "systemkatalog": {
-                "repository": SYSTEMKATALOG_REPOSITORY,
-                "commit": sources.systemkatalog_commit,
-                "materialization": "git_archive",
-            },
-            "fleet": {
-                "repository": METAREPO_REPOSITORY,
-                "commit": sources.metarepo_commit,
-                "path": "fleet/repos.yml",
-                "materialization": "git_show",
-            },
-        }
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    material_path = state_root / "reports" / (digest + ".json")
     bureau = None
-    if report.get("materialDrift") is True:
-        bureau = _ensure_bureau_candidate(bureau_root, report_path, report)
+    if not check_only:
+        state_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(state_root, 0o700)
+        _write_json(report_path, report)
+        if report["materialDrift"]:
+            # Stable source bytes even across different CI run timestamps.
+            _write_json(material_path, json.loads(encoded))
+            if hashlib.sha256(material_path.read_bytes()).hexdigest() != digest:
+                raise RuntimeError("material report digest changed")
+            bureau = _ensure_bureau_candidate(bureau_root, material_path, report)
     result = {
-        "schemaVersion": 1,
-        "kind": "heim_pc_systemkatalog_drift_watch_receipt",
+        "schemaVersion": 1, "kind": "heim_pc_systemkatalog_drift_watch_receipt",
         "checkedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "materialDrift": bool(report.get("materialDrift")),
-        "changeCount": int(report.get("changeCount") or 0),
-        "bureau": bureau,
-        "sources": source_receipt,
-        "report": str(report_path),
-        "proposal": str(proposal_path),
+        "checkOnly": check_only, "materialDrift": report["materialDrift"],
+        "changeCount": report["changeCount"], "materialSha256": digest,
+        "bureau": bureau, "sources": {"systemkatalog": source},
+        "report": str(report_path) if not check_only else None,
+        "materialReport": str(material_path) if not check_only and report["materialDrift"] else None,
         "doesNotEstablish": ["semantic_truth", "automatic_merge_authority", "runtime_health"],
     }
-    _write_json(state_root / "last-run.json", result)
+    if not check_only:
+        _write_json(state_root / "last-run.json", result)
     return result
 
 
 def main() -> int:
     home = Path.home()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--systemkatalog-root", type=Path, default=home / "repos/systemkatalog")
-    parser.add_argument("--fleet-file", type=Path, default=home / "repos/metarepo/fleet/repos.yml")
-    parser.add_argument(
-        "--bureau-root",
-        type=Path,
-        default=home / "repos/bureau",
-        help="Deprecated compatibility argument; Bureau uses its canonical runtime snapshot.",
-    )
-    parser.add_argument("--state-root", type=Path, default=home / ".local/state/heim-pc/systemkatalog-drift-watch")
+    parser.add_argument("--bureau-root", type=Path, default=home / "repos/bureau",
+                        help="Deprecated compatibility argument; Bureau uses its runtime snapshot.")
+    parser.add_argument("--state-root", type=Path,
+                        default=home / ".local/state/heim-pc/systemkatalog-drift-watch")
+    parser.add_argument("--check-only", action="store_true",
+                        help="Read and validate CI artifact without local state or Bureau writes")
     args = parser.parse_args()
     try:
-        result = run_watch(
-            systemkatalog_root=args.systemkatalog_root.resolve(),
-            fleet_file=args.fleet_file.resolve(),
-            bureau_root=args.bureau_root.resolve(),
-            state_root=args.state_root.expanduser().resolve(),
-        )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, tarfile.TarError) as exc:
-        print(json.dumps({"kind": "heim_pc_systemkatalog_drift_watch_error", "error": str(exc)}), file=sys.stderr)
+        result = run_watch(bureau_root=args.bureau_root, state_root=args.state_root,
+                           check_only=args.check_only)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError,
+            zipfile.BadZipFile, subprocess.TimeoutExpired) as exc:
+        print(json.dumps({"kind": "heim_pc_systemkatalog_drift_watch_error",
+                          "error": str(exc)}), file=sys.stderr)
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
