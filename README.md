@@ -72,11 +72,22 @@ Die folgende Karte zeigt **vorhandene Nutzerwege und ihre Prüfstellen**, nicht 
 | Qobuz, Audioaufnahme, MIDI | `audio`-Repo: Audiozentrale und definierte Recovery-/Recorder-/Profilverträge | Vorhandene Komponenten wiederverwenden. Qobuz-Wiedergabe, MOTU-Pegel, Aufnahme, Roland und Exklusivmodus **nicht** ohne echten Ton-/Hardwaretest als produktiv behaupten. |
 | Sicherung und Restore | `restic-backups-heim-pc.timer` auf externer Backup-Platte, `journalctl -u restic-backups-heim-pc.service`; Recovery-Probe `heim-pc-restic-recovery-probe.service` | **9.11.:** Regulärer Snapshot `81afdf3e` um 07:48 gespeichert (5,65 Mio. Dateien / 512,696 GiB). Fünf produktive Espanso-Dateien in isolierten Restore mit `--verify` tatsächlich wiederhergestellt; unabhängige Restic-Dump-SHA-256 stimmten für **alle 5/5** exakt mit den aktiven Originaldateien überein, ohne sensible Match-Inhalte auszugeben. **Offen:** Root-Recovery-Probe scheiterte am 9.11. durch verlorene `systemctl show`-Last-Invocation-Metadaten; kein frischer `proof.json`-Beleg trotz nachgewiesenem Backup/Teilrestore. Befund in PR #311 dokumentiert. Keine Retention-Änderung oder zweite Backupstrecke. |
 | iPad-Agent | Vorhandene Grabowski/Juno-Verbindung und native Capability-Manifeste | Juno war am 8.11. gepaart. Ein erneuter Juno-Statuscheck am 9.11. lieferte `Connection refused` (Agent damals nicht erreichbar); daraus folgt **nicht**, dass Safari/PWA oder LocalSend auf dem iPad defekt sind. Native Safari-, Touch-, PWA- und App-Transfers bleiben echte Client-Abnahmen. |
+| Netdata – technische Zeitreihen und MCP | Deklarativ `nixos/system/modules/netdata.nix`; `netdata.service`; lokal `http://127.0.0.1:19999/api/v1/charts` und `/mcp`. Ergänzt das Heim-PC Dashboard, das Bureau/Git/Grabowski-Kontext verantwortet. | PR #447 integriert; kein Live-Status aus Git ableitbar. Nach Aktivierung API/MCP und echte Zeitreihen prüfen; nach regulärem Folge-Rollout erneut. DB-Engine-Historie am persistenten Dienstspeicher prüfen; kein zusätzlicher Backup-Zwang für rekonstruierbare Telemetrie. |
 | Diagnose und agentische Werkzeuge | Grabowski, Nixer (nur Nix), Heim-PC Dashboard, RepoGround, Chronik; `AGENTS.md` und `manifest/operator-entry.v1.json` | Native typed Operatorwerkzeuge und vorhandene Diagnostik verwenden; keine zweite Monitoring- oder Agentenruntime nur zum Selbstzweck. |
 
 **Bewusst nicht automatisch übernehmen:** Pop!_OS-Container/Mopidy/qbzd, alter iCloud-`rclone`-Remote (nie erfolgreich eingerichtet), zweite Stirling-PDF-/Beszel-Instanzen, Paperless-ngx ohne Klärung der alten Postgres-Datenbank, Dauer-Ollama ohne belegten Nutzen, Sunshine/Moonlight ohne Vorteil gegenüber vorhandenen Remotewegen. Die WD-Black-Altinstallation bleibt schreibgeschützt; selektiv übernommene Nutzdaten und bestehende Restic-Sicherungen haben Vorrang.
 
 **Abnahmesprache für Agenten:** `im Repo` ≠ `gemergt` ≠ `aktiv installiert` ≠ `laufender Dienst` ≠ `echter Benutzerweg` ≠ `nach Neustart wiederhergestellt`. Berichte je Fähigkeit die höchste **frisch belegte** Stufe und benenne fehlende iPad-/Hardware-/Restore-Gegenproben offen.
+
+### Dauerhafte Integrationen und Rollout-Vergleich
+
+Neue dauerhafte Nutzerfunktionen erhalten im selben Arbeitsauftrag eine deklarative Einbindung (oder explizite persistente externe Authority), einen auffindbaren Funktionsverweis, erforderliche Daten-/Restore-Pfade und eine angemessene Nutzungsprobe. Systemweite Zwecke und Beziehungen gehören in den Systemkatalog; interne Hilfsunits brauchen keinen eigenen Knoten. Vor Aktivierung einer bereits gebauten Closure ist der vorhandene Inventar-Generator auch als lesender Strukturvergleich nutzbar:
+
+```bash
+python3 scripts/generate_nixos_program_inventory.py --compare-closure /nix/store/<realisierte-ziel-closure>
+```
+
+Standard-Baseline ist die aktive Closure; `--baseline-closure` erlaubt einen expliziten Vergleich mit einer früheren Closure. JSON meldet hinzugekommene/entfernte deklarierte System-/User-Units, Masks, Abhängigkeitslinks und Desktopstarter. Neue Units ohne literalen Backtick-Verweis in dieser README sind **Prüfhinweise**, keine Feststellung fehlender Dokumentation. Nicht darstellbare Namen werden als stabile, opake SHA-256-Identitäten verglichen statt ausgelassen; tatsächliche Auslassungen sind separat gezählt. Der Vergleich prüft keine Unit-Inhalte, manuellen Home-Installationen, Datenintegrität oder tatsächliche Dienstfunktion. Er ist keine neue Aktivierungssperre. Bewusste Ablösungen dokumentieren; unerwartete Verluste klären; nach Aktivierung und bei nachfolgenden Rollouts die betroffenen Nutzerwege frisch prüfen. Fehlende nichtkritische Dokumentation blockiert keinen notwendigen Rollout.
 
 ## Kanonischer Maschinenstart
 
@@ -482,12 +493,9 @@ Leitstand zeigt die Karte read-only an. Für aktuelle Aufgaben, PRs, CI oder Run
 
 `config/agents/repos-root-AGENTS.md` ist die versionierte Vorlage für `~/repos/AGENTS.md`. Sie beginnt beim Host-Maschinenvertrag und verweist nur bei repositoryübergreifenden Systemfragen auf den Systemkatalog. Dadurch wird bei gewöhnlicher Einzelrepo-Arbeit kein unnötiger Gesamtkontext geladen.
 
-Der stündliche `systemkatalog-drift-watch.timer` prüft unabhängig vom GitHub-Zeitplan Organisations-, Fleet- und Primärquellendrift. Er darf keine Semantik schreiben oder mergen. Bei materieller Drift registriert oder verfeinert er über den integritätsgeprüften kanonischen Runtime-Snapshot genau einen Bureau-Kandidaten mit vollständigem Operator-Kontext und SHA-256-Bindung an den lokalen Bericht. Eine aktive Kandidaten-ID allein genügt nicht zur Deduplizierung: Entscheidung, Pflichtfelder und Report-Digest müssen übereinstimmen. Bericht, versionierte Bureau-Anfrage und proposal-only Vorschlag liegen lokal unter `~/.local/state/heim-pc/systemkatalog-drift-watch/`.
+Der native stündliche `systemkatalog-drift-watch.timer` des produktiven NixOS-Profils übernimmt den bereits erzeugten Driftbericht aus dem zentralen Systemkatalog-Workflow `ecosystem-map.yml`. Er liest genau den letzten abgeschlossenen Main-Lauf, verifiziert Run-/Artefaktidentität, ZIP-SHA-256, Berichtsform und Frische (maximal 48 Stunden) und führt **keinen zweiten Organisationsscan** aus. Fehlende, beschädigte oder veraltete Berichte sind Fehler, keine Driftfreiheit. Bei materieller Drift wird über den kanonischen Bureau-Pfad der bestehende Kandidat aktualisiert; ein stabiler Digest der tatsächlichen Abweichungen ignoriert reine Beobachtungszeit und irrelevante Commitwechsel bei unverändertem Inhalt. Lokale Belege liegen unter `~/.local/state/heim-pc/systemkatalog-drift-watch/`. Der Bericht ist proposal-only, keine Merge- oder Health-Autorität.
 
-```bash
-python3 scripts/install_systemkatalog_reliability.py          # Plan anzeigen
-python3 scripts/install_systemkatalog_reliability.py --apply --enable
-```
+Prüfung ohne Bureau- oder lokale Zustandsänderung: `python3 scripts/systemkatalog_drift_watch.py --check-only`. Auf dem produktiven NixOS ist keine manuelle Unit-Installation erforderlich. Der alte Installer bleibt nur für nicht deklarativ verwaltete Umgebungen erhalten.
 
 ## Goldene Regel
 
