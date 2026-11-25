@@ -102,3 +102,14 @@ intents:
     data:
       - sentences:
           - "(mach[e|t]|färbe) [bitte ][<artikel_bestimmt> ](Projektor|Lichtprojektor) [im Wohnzimmer ](in einer anderen Farbe|in eine andere Farbe|andersfarbig)"
+
+  NabuPlayRadio:
+    data:
+      - sentences:
+          - "(spiel|spiele|starte) [mir ] [mal ] [bitte ](Radio|Internetradio|Deutschlandfunk) [ab]"
+          - "(mach[e]|schalt[e]) [mal ] [bitte ] [das ]Radio (an|ein)"
+  NabuPlayRelaxedMusic:
+    data:
+      - sentences:
+          - "[ich möchte Musik hören ](spiel|spiele|starte) [mir ] [mal ] [bitte ] [etwas ]entspannte Musik [ab]"
+          - "ich möchte [gern ] [etwas ]entspannte Musik hören"
