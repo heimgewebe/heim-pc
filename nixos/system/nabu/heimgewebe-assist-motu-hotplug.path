@@ -1,0 +1,9 @@
+[Unit]
+Description=Start Nabu microphone when the MOTU M2 is present
+
+[Path]
+PathExists=/dev/snd/by-id/@MOTU_DEVICE@
+Unit=heimgewebe-assist-microphone.service
+
+[Install]
+WantedBy=default.target
