@@ -122,8 +122,31 @@ function openTab(tabId, documentURL = url, recovery = false, recoveredText = nul
   }
   return {finished, get clicks() {return clicks;}};
 }
-const tabs = Array.from({length: data.tabs || 1}, (_, i) => openTab(i + 1));
+const tabs = data.lateAttemptProbe ? [] : Array.from({length: data.tabs || 1}, (_, i) => openTab(i + 1));
 Promise.all(tabs.map(tab => tab.finished)).then(async () => {
+  if (data.lateAttemptProbe) {
+    const nonce = "cd".repeat(12), digest = "12".repeat(32);
+    const now = Math.floor(Date.now() / 1000);
+    const path = "/c/new-chat-12345678";
+    const ask = (message, route = path, tabId = 1) => new Promise(resolve => {
+      if (!backgroundListener(message, {url: "https://chatgpt.com" + route,
+                                        frameId: 0, tab: {id: tabId}}, resolve))
+        resolve({recorded: false});
+    });
+    const claim = await ask({type: "nabu-signed-send-claim-v1",
+                             nonce, digest, issuedAt: now}, "/");
+    stored.nabu_send_receipts_v1 = {[nonce]: {stage: data.priorStage, at: now}};
+    const query = {type: "nabu-pending-proof-v1"};
+    const other = await ask(query, path, 99);
+    const before = await ask(query);
+    const premature = await ask({type: "nabu-pending-proof-result-v1",
+                                 nonce, stage: "message_verified"});
+    const attempt = await ask({type: "nabu-send-status-v1", nonce,
+                               stage: "click_attempted"}, "/");
+    const after = await ask(query);
+    console.log(JSON.stringify({claim, other, before, premature, attempt, after}));
+    return;
+  }
   let recoveryClicks = 0;
   if (data.navigate) {
     if (data.expirePending) {
@@ -204,6 +227,30 @@ class NabuChromeSendContentTests(unittest.TestCase):
         self.assertEqual(result["stage"], "message_verified")
         self.assertTrue(result["noPromptInSession"])
         self.assertEqual(result["nativeReceipts"][-1]["body"]["stage"], "message_verified")
+
+    def test_pending_proof_waits_for_delayed_attempt_after_any_composer_wait(self):
+        for stage in ("validated", "login_required", "account_unconfirmed",
+                      "composer_missing", "composer_mismatch",
+                      "send_button_missing", "send_button_unavailable"):
+            with self.subTest(stage=stage):
+                result = self.send_once(lateAttemptProbe=True, priorStage=stage)
+                self.assertTrue(result["claim"]["granted"])
+                self.assertEqual(result["before"], {"available": False, "pending": True})
+                self.assertEqual(result["other"], {"available": False})
+                self.assertFalse(result["premature"]["recorded"])
+                self.assertTrue(result["attempt"]["recorded"])
+                self.assertTrue(result["after"]["available"])
+                self.assertEqual(result["after"]["digest"], "12" * 32)
+
+    def test_pending_proof_does_not_wait_after_terminal_preclick_outcome(self):
+        for stage in ("expired", "composer_changed", "claim_denied",
+                      "timeout_composer_missing"):
+            with self.subTest(stage=stage):
+                result = self.send_once(lateAttemptProbe=True, priorStage=stage)
+                self.assertFalse(result["before"]["available"])
+                self.assertFalse(result["before"]["pending"])
+                self.assertNotIn("digest", result["before"])
+                self.assertFalse(result["premature"]["recorded"])
 
     def test_document_recovery_rejects_other_tab_stale_or_unattempted_claim(self):
         for fixture in ({"otherTab": True}, {"expirePending": True},

@@ -119,7 +119,14 @@ async function continuation(sender, url, message) {
       entry.path = url.pathname;
       await chrome.storage.session.set({[PENDING]: pending});
     }
-    if (!attempted.includes(previous)) return {available: false, pending: previous === "validated"};
+    if (!attempted.includes(previous)) {
+      // Claiming does not replace the most recent composer-wait status.
+      // A new document can query before the actual click report arrives.
+      const waiting = ["validated", "login_required", "account_unconfirmed",
+        "composer_missing", "composer_mismatch", "send_button_missing",
+        "send_button_unavailable"];
+      return {available: false, pending: waiting.includes(previous)};
+    }
     return {available: true, nonce: entry.nonce, digest: entry.digest,
       expiresAt: entry.at + PROOF_SECONDS};
   }
