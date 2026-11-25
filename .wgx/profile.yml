@@ -1,15 +1,5 @@
 wgx:
-  version: "1.0"
-
-tasks:
-  guard:
-    enabled: true
-    steps:
-      - id: repository-syntax
-        run: python3 scripts/validate_syntax.py
-
-  smoke:
-    enabled: true
-    steps:
-      - id: state-readable
-        run: python3 -c "import json; json.load(open('state/index.json'))"
+  apiVersion: v1
+  tasks:
+    guard: "python3 scripts/validate_syntax.py"
+    smoke: "python3 -c \"import json; json.load(open('state/index.json'))\""
