@@ -526,7 +526,7 @@ class WebRead(Tool):
     name = "nabu_web__read_page"
     title = "Eine Webseite lesen"
     description = ("Öffentliche Webseite lesen; bei PubMed-Artikeln auch das eindeutig "
-                   "zugeordnete Abstract aus Europe PMC (kein Volltext). Bei langen Quellen "
+                   "zugeordnete Abstract aus einer öffentlichen Literatur-API (kein Volltext). Bei langen Quellen "
                    "die Frage als optionales question-Argument übergeben.")
     parameters = vol.Schema({vol.Required("url"): str, vol.Optional("question"): str})
     annotations = ToolAnnotations(read_only=True, open_world=True)
@@ -543,14 +543,67 @@ class WebRead(Tool):
                 timeout=TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
                 max_field_size=32768,
             ) as session:
-                # Use the documented public literature API for an exact PubMed
-                # article ID, not the HTML access challenge. It supplies only
-                # the abstract, not the publisher's full article.
+                # Prefer the official PubMed API for an exact article ID.
+                # Literature APIs supply abstracts, not publisher full text.
+                # Bound each attempt so an unavailable provider cannot stall
+                # a voice conversation before the ordinary page fallback.
                 parsed = urlsplit(url)
                 pmid = (re.fullmatch(r"/([0-9]{1,10})/?", parsed.path)
                         if parsed.hostname == "pubmed.ncbi.nlm.nih.gov" else None)
                 if pmid:
                     identifier = pmid.group(1)
+                    literature_timeout = aiohttp.ClientTimeout(total=5)
+                    endpoint = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+                    try:
+                        async with session.get(
+                            endpoint, allow_redirects=False,
+                            params={"db": "pubmed", "id": identifier, "retmode": "xml"},
+                            timeout=literature_timeout,
+                        ) as resp:
+                            if resp.status != 200:
+                                raise ValueError("Abstract-Schnittstelle nicht verfügbar")
+                            root = ET.fromstring(await read_bounded(resp.content, 240000))
+                            actual = str(resp.url)
+                        if (root.tag != "PubmedArticleSet" or len(root) != 1
+                                or root[0].tag != "PubmedArticle"):
+                            raise ValueError("Keine eindeutige Abstract-Zuordnung")
+                        record = root[0]
+                        if record.findtext("./MedlineCitation/PMID") != identifier:
+                            raise ValueError("Abstract gehört nicht zum angefragten Artikel")
+                        article = record.find("./MedlineCitation/Article")
+                        if article is None:
+                            raise ValueError("Kein Artikel vorhanden")
+                        sections = []
+                        for part in article.findall("./Abstract/AbstractText"):
+                            body_part = " ".join("".join(part.itertext()).split())
+                            if body_part:
+                                label = (part.get("Label") or "").strip()
+                                sections.append(f"{label}: {body_part}" if label else body_part)
+                        if not sections:
+                            raise ValueError("Kein lesbares Abstract vorhanden")
+                        body = "\n".join(sections)
+                        title_node = article.find("ArticleTitle")
+                        if title_node is not None:
+                            title = " ".join("".join(title_node.itertext()).split())
+                            if title:
+                                body = title[:300] + "\n" + body
+                        text = (relevant_source_excerpt(body, question) if question
+                                else body[:8000])
+                        return ToolResult(data={
+                            "url": actual,
+                            "requested_url": url,
+                            "publication_url": "https://pubmed.ncbi.nlm.nih.gov/" + identifier + "/",
+                            "source": "NCBI EFetch",
+                            "source_kind": "abstract",
+                            "pmid": identifier,
+                            "doi": record.findtext("./PubmedData/ArticleIdList/ArticleId[@IdType='doi']"),
+                            "text": text,
+                        })
+                    except (ET.ParseError, ValueError, UnicodeError, aiohttp.ClientError,
+                            asyncio.TimeoutError):
+                        # The existing second public literature API can still
+                        # recover the same exact abstract when EFetch fails.
+                        pass
                     endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
                     try:
                         async with session.get(
@@ -558,6 +611,7 @@ class WebRead(Tool):
                             params={"query": f"EXT_ID:{identifier} AND SRC:MED",
                                     "resultType": "core", "pageSize": "2",
                                     "format": "json"},
+                            timeout=literature_timeout,
                         ) as resp:
                             if resp.status != 200:
                                 raise ValueError("Abstract-Schnittstelle nicht verfügbar")
