@@ -18,14 +18,16 @@ SOURCE = Path(__file__).resolve().parent
 KEY_PATH = Path.home() / ".local/share/heimgewebe/home-assistant/.nabu-chatgpt-autosend.key"
 EXTENSION_DIR = Path.home() / ".local/share/heimgewebe/nabu-chatgpt-autosend-extension"
 MARKER = "__NABU_SEND_SECRET_HEX__"
+NATIVE_HOST_NAME = "net.heimgewebe.nabu_receipt"
+NATIVE_HOST_MANIFEST = Path.home() / ".config/google-chrome/NativeMessagingHosts" / (NATIVE_HOST_NAME + ".json")
 
 
-def _private_atomic_write(destination: Path, value: str) -> None:
+def _private_atomic_write(destination: Path, value: str, *, mode: int = 0o600) -> None:
     if destination.is_symlink():
         raise RuntimeError("refusing symlink target " + destination.name)
     fd, temporary = tempfile.mkstemp(prefix=".nabu-send-", dir=destination.parent)
     try:
-        os.fchmod(fd, 0o600)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(value)
             stream.flush()
@@ -70,12 +72,38 @@ def install() -> dict:
     for name in ("maintenance.html", "maintenance.js"):
         _private_atomic_write(EXTENSION_DIR / name,
                               (SOURCE / ("chatgpt_sender." + name)).read_text(encoding="utf-8"))
+    # The native host runs once per message and has no listener or arbitrary action API.
+    # Chrome derives the identity of this unpacked extension from its absolute path.
+    extension_id = hashlib.sha256(str(EXTENSION_DIR.resolve()).encode()).hexdigest()[:32].translate(
+        str.maketrans("0123456789abcdef", "abcdefghijklmnop"))
+    host_path = EXTENSION_DIR / "receipt_host.py"
+    _private_atomic_write(host_path, (SOURCE / "chatgpt_sender_receipt.py").read_text(encoding="utf-8"),
+                          mode=0o700)
+    NATIVE_HOST_MANIFEST.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _private_atomic_write(NATIVE_HOST_MANIFEST, json.dumps({
+        "name": NATIVE_HOST_NAME,
+        "description": "Nabu content-free ChatGPT send receipt",
+        "path": str(host_path.resolve()),
+        "type": "stdio",
+        "allowed_origins": ["chrome-extension://" + extension_id + "/"],
+    }) + "\n")
+    receipt_path = KEY_PATH.parent / ".nabu-chatgpt-send-receipts.json"
+    if receipt_path.is_symlink():
+        raise RuntimeError("receipt store must not be a symlink")
+    try:
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("{}\n")
     # Publish the manifest last, after all referenced resources exist.
     _private_atomic_write(EXTENSION_DIR / "manifest.json", manifest)
     return {
         "installed": True,
         "extension_directory": str(EXTENSION_DIR),
         "key_present": True,
+        "native_receipt_host_installed": True,
         "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
         "manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
         "chrome_activation_required": True,
