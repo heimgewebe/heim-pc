@@ -6,3 +6,22 @@ NabuStopMusic:
       entity_id: media_player.nabu_musik_motu
   speech:
     text: "Die Musik ist gestoppt."
+
+NabuProjectorDifferentColor:
+  description: "Eine andere Farbe für den Projektor einstellen"
+  action:
+    - variables:
+        current_hs: "{{ state_attr('light.wohnzimmer_projektor_background', 'hs_color') }}"
+    - if:
+        - condition: template
+          value_template: "{{ states('light.wohnzimmer_projektor_background') in ['unknown', 'unavailable'] }}"
+      then:
+        - stop: "Projektor nicht verfügbar"
+          error: true
+    - action: light.turn_on
+      target:
+        entity_id: light.wohnzimmer_projektor_background
+      data:
+        hs_color: "{{ [((current_hs[0] | float(0) + 120) % 360), 100] if current_hs is sequence and current_hs | length == 2 else [210, 100] }}"
+  speech:
+    text: "Andere Projektorfarbe eingestellt."
