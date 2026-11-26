@@ -282,6 +282,9 @@ jobs:
 
   live-system:
     needs: detect
+    permissions:
+      contents: read
+      actions: read
     # Always report this tracked check. Detection errors force the real build;
     # a proven documentation-only change may omit expensive realization.
     if: always()
@@ -361,8 +364,110 @@ jobs:
           nix eval --no-update-lock-file --raw .#checks.x86_64-linux.supply-chain-trust.drvPath
           nix eval --no-update-lock-file --raw .#checks.x86_64-linux.nix-lifecycle-contract.drvPath
 
+      - name: Select exact merge-group build reuse
+        id: reuse
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: python
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json
+          import os
+          import re
+          import subprocess
+
+          def api(path):
+              return json.loads(subprocess.run(
+                  ["gh", "api", path], check=True, capture_output=True,
+                  text=True, timeout=10,
+              ).stdout)
+
+          def complete_inventory(response, key):
+              rows = response[key]
+              if (not isinstance(rows, list) or type(response["total_count"]) is not int
+                      or response["total_count"] != len(rows)):
+                  raise ValueError("incomplete Actions inventory")
+              return rows
+
+          def full_group(repo, sha):
+              # Retired queue refs are found by exact SHA at repository level.
+              runs = complete_inventory(api(
+                  f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30"
+              ), "workflow_runs")
+              matches = [
+                  r for r in runs
+                  if r.get("head_sha") == sha
+                  and (r.get("repository") or {}).get("full_name") == repo
+                  and (r.get("head_repository") or {}).get("full_name") == repo
+                  and r.get("event") == "merge_group"
+                  and r.get("workflow_id") == 351684660
+                  and r.get("path") == ".github/workflows/heim-pc-nix.yml"
+                  and r.get("head_branch", "").startswith("gh-readonly-queue/main/")
+              ]
+              if len(matches) != 1 or not (
+                  matches[0].get("status") == "completed"
+                  and matches[0].get("conclusion") == "success"
+              ):
+                  return False
+              run_id, attempt = matches[0]["id"], matches[0]["run_attempt"]
+              if any(type(n) is not int or n < 1 for n in (run_id, attempt)):
+                  return False
+              jobs = complete_inventory(api(
+                  f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+              ), "jobs")
+              if sorted(j.get("name") for j in jobs) != ["detect", "live-system", "nix"]:
+                  return False
+              for job in jobs:
+                  if not (
+                      job.get("run_id") == run_id and job.get("head_sha") == sha
+                      and job.get("run_attempt") == attempt
+                      and job.get("status") == "completed"
+                  ):
+                      return False
+                  if job["name"] == "nix":
+                      if job.get("conclusion") != "skipped":
+                          return False
+                      continue
+                  if job.get("conclusion") != "success":
+                      return False
+                  if job["name"] == "live-system":
+                      for name in (
+                          "Verify source identity",
+                          "Check canonical lock projection",
+                          "Evaluate live trust and lifecycle contracts",
+                          "Build deployed live closure and execute both systemd VM proofs",
+                      ):
+                          steps = [s for s in job["steps"] if s.get("name") == name]
+                          if len(steps) != 1 or not (
+                              steps[0].get("status") == "completed"
+                              and steps[0].get("conclusion") == "success"
+                          ):
+                              return False
+              print(f"Reusing complete merge-group live-system build: run {run_id} attempt {attempt} for {sha}")
+              return True
+
+          reuse = False
+          repo, sha = os.environ["REPOSITORY"], os.environ["HEAD_SHA"]
+          if (
+              os.environ["EVENT_NAME"] == "push" and repo == "heimgewebe/heim-pc"
+              and os.environ["REF_NAME"] == "refs/heads/main" and re.fullmatch(r"[0-9a-f]{40}", sha)
+          ):
+              try:
+                  reuse = full_group(repo, sha)
+              except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+                  # No complete proof means the normal full build, never a skip.
+                  pass
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"reuse={'true' if reuse else 'false'}", file=output)
+          print(f"Exact merge-group build reuse: {reuse}")
+
       - name: Build deployed live closure and execute both systemd VM proofs
         if: >-
+          steps.reuse.outputs.reuse != 'true' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
           (needs.detect.result != 'success' ||
            needs.detect.outputs.control_changed != 'false' ||
