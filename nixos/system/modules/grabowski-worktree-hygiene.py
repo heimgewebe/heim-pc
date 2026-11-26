@@ -21,6 +21,8 @@ REPOSITORIES = (
 ROOTS = (
     "/home/alex/repos/.grabowski-worktrees",
     "/home/alex/repos/.grabowski-review-snapshots",
+    "/home/alex/repos/.commonthing-worktrees",
+    "/home/alex/repos/.heim-pc-worktrees",
 )
 
 
@@ -41,14 +43,15 @@ def main() -> int:
         repositories=repos,
         owner_id="grabowski-primary",
         allowed_checkout_roots=roots,
-        max_actions=2,
+        # Use the existing native per-cycle bound; avoid more full scans.
+        max_actions=8,
     )
     receipts = result["receipts"]
     print(json.dumps({
         "status": result["status"],
         "completed": result["completed"],
         "actions": result["actions"],
-        "repositories_checked": len(repos),
+        "repositories_checked": len(receipts),
         "archived": sum(len(r.get("output", {}).get("archived", [])) for r in receipts),
         "cleaned": sum(len(r.get("output", {}).get("cleaned", [])) for r in receipts),
         "blocked": sum(r.get("status") == "blocked" for r in receipts),
