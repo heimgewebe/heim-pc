@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "e8018b56-nixos-lock264e747ad05a-contract07fba47985cb";
-  expectedRevision = "e8018b56979938cc5236218465d6dcf7501c1b77";
+  expectedReleaseId = "125b6bae-nixos-lock264e747ad05a-contract07fba47985cb";
+  expectedRevision = "125b6bae31c81461b8d0f693b1e99d44638c4f04";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   # systemd After=grabowski-operator.service waits for process start, not
   # the MCP listener. A GET without MCP session legitimately returns HTTP 406

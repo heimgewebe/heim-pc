@@ -22,7 +22,7 @@ STORE_UNIT_RE = re.compile(
     r"^[0-9a-z]{32}-unit-grabowski-operator[.]service$"
 )
 OPERATOR_PACKAGE_RE = re.compile(
-    r"^[0-9a-z]{32}-grabowski-operator-e8018b56$"
+    r"^[0-9a-z]{32}-grabowski-operator-125b6bae$"
 )
 ACTIVE_OPERATOR_PACKAGE_RE = re.compile(
     r"^[0-9a-z]{32}-grabowski-operator-[0-9a-f]{8}$"
