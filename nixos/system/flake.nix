@@ -429,7 +429,7 @@
               users.users.alex.linger = pkgs.lib.mkForce true;
               # Bureau user services invoke python3; the prototype host profile
               # is not imported by this actual headless operator candidate.
-              users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ])) ];
+              users.users.alex.packages = [ (pkgs.python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])) ];
               heimPc.grosserAdler.enable = true;
               # Do not block activation of a known previous NixOS generation
               # merely because its kernel, systemd or Nix is older.
@@ -1073,8 +1073,14 @@ PY
           assert cfg.security.sudo.wheelNeedsPassword;
           assert cfg.users.users.alex.linger;
           assert builtins.any
-            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ])).outPath)
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])).outPath)
             cfg.users.users.alex.packages;
+          assert builtins.any
+            (package: package.outPath == (candidatePkgs.python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])).outPath)
+            cfg.environment.systemPackages;
+          assert builtins.any
+            (package: package.outPath == candidatePkgs.poppler-utils.outPath)
+            cfg.environment.systemPackages;
           assert cfg.heimPc.nixerHeadless.enable && !cfg.services.nixer.enable;
           assert !(builtins.hasAttr "nixer" cfg.systemd.user.services);
           assert cfg.systemd.services.nixer-headless.serviceConfig.User == "alex";
