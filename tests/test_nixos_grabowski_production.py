@@ -30,6 +30,14 @@ TARBALL_HASH = _pinned_value(_operator_source, "hash")
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
+    def test_operator_stop_budget_exceeds_http_response_drain(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        operator = production.split("systemd.services.grabowski-operator = ", 1)[1].split("\n    };", 1)[0]
+        match = re.search(r'TimeoutStopSec = "(\d+)s";', operator)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 90)
+        self.assertIn('KillMode = "mixed";', operator)
+
     def test_systemd_operator_home_and_shared_tmp_writable_under_strict_system(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         flake = (ROOT / "nixos/system/flake.nix").read_text()
