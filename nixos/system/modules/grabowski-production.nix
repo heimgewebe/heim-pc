@@ -308,7 +308,9 @@ in
         Restart = "on-failure";
         RestartSec = "10s";
         TimeoutStartSec = "20s";
-        TimeoutStopSec = "20s";
+        # The stateless MCP HTTP server drains admitted responses for up to
+        # 65s; retain headroom for lifespan and process cleanup before SIGKILL.
+        TimeoutStopSec = "90s";
         KillMode = "mixed";
         UMask = "0077";
         # The original operator's ready-status verifies a root-owned regular
