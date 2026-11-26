@@ -125,8 +125,8 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual(
             "In Hamburg sind es gerade 7 Grad, gefühlt 3, leichter Regen, "
             "Wind 18 Kilometer pro Stunde. Heute leichter Regen, 2 bis 7 Grad, "
-            "Regenrisiko 90 Prozent, 4,3 Millimeter. Morgen bedeckt, minus 1 bis "
-            "5 Grad, Regenrisiko 10 Prozent.", report["zusammenfassung"])
+            "Niederschlagsrisiko 90 Prozent, 4,3 Millimeter. Morgen bedeckt, minus 1 bis "
+            "5 Grad, Niederschlagsrisiko 10 Prozent.", report["zusammenfassung"])
         self.assertEqual(["heute", "morgen", "Donnerstag"], [d["tag"] for d in report["tage"]])
         self.assertEqual("leichter Schneefall", report["tage"][2]["lage"])
 
@@ -150,6 +150,7 @@ class WeatherTests(unittest.TestCase):
         result = self.call({})
         self.assertFalse(result.error)
         self.assertEqual("zu Hause", result.data["ort"])
+        self.assertTrue(result.data["zusammenfassung"].startswith("Zu Hause sind es gerade"))
         self.assertEqual(1, len(FakeSession.requests))
         self.assertEqual("53.55", FakeSession.requests[0][1]["latitude"])
 

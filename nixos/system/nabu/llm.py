@@ -771,7 +771,8 @@ def weather_report(place: str, data: dict) -> dict:
 
     sentences = []
     if now["temperatur_grad"] is not None:
-        sentence = f"In {place} sind es gerade {now['temperatur_grad']} Grad"
+        sentence = (f"{'Zu Hause' if place == 'zu Hause' else 'In ' + place} "
+                    f"sind es gerade {now['temperatur_grad']} Grad")
         if now["gefuehlt_grad"] not in (None, now["temperatur_grad"]):
             sentence += f", gefühlt {now['gefuehlt_grad']}"
         sentence += f", {now['lage']}"
@@ -785,7 +786,7 @@ def weather_report(place: str, data: dict) -> dict:
                     f"{item['min_grad']} bis {item['max_grad']} Grad")
         chance = item["regenwahrscheinlichkeit_prozent"]
         if chance is not None and chance != "0":
-            sentence += f", Regenrisiko {chance} Prozent"
+            sentence += f", Niederschlagsrisiko {chance} Prozent"
         if item["regen_mm"] not in (None, "0"):
             sentence += f", {item['regen_mm']} Millimeter"
         sentences.append(sentence + ".")
@@ -1164,7 +1165,8 @@ def async_get_tools(hass: HomeAssistant, llm_context: LLMContext, api_id: str) -
             "Bei Browserbefehlen nabu_web__browser benutzen. "
             "Für Wetter, Temperatur, Regen, Schnee oder Wind immer nabu_web__weather "
             "benutzen, ohne Ortsangabe für zu Hause, und nicht im Web suchen; "
-            "antworte mit der zusammenfassung oder den passenden Tageswerten. "
+            "antworte mit der zusammenfassung oder den passenden Tageswerten und "
+            "schreibe Einheiten aus (Grad, Kilometer pro Stunde, Millimeter), nie km/h. "
             "Für aktuelle Ereignisse, Preise, Amtsinhaber, neue Regelungen und "
             "jüngere Studien erst nabu_web__search und danach nabu_web__read_page benutzen. "
             "Bei aktuellen Sachfragen auch ohne ausdrückliches 'heute' recherchieren. "
