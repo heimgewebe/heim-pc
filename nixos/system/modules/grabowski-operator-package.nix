@@ -2,12 +2,12 @@
 let
   # Identical Git source as the already built canonical Rootbroker package.
   # Every dependency must also match the hashed upstream runtime.lock.txt.
-  sourceRevision = "e3e81c32e0f462c64c1b94021d9cbddfb6cb8e40";
-  releaseId = "e3e81c32-nixos-lock264e747ad05a-contract07fba47985cb";
+  sourceRevision = "03cf4106046c892f8b20aa39c5cb719fdb6284d2";
+  releaseId = "03cf4106-nixos-lock264e747ad05a-contract07fba47985cb";
   lockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   sourceArchive = pkgs.fetchurl {
     url = "https://codeload.github.com/heimgewebe/grabowski/tar.gz/${sourceRevision}";
-    hash = "sha256-uKaokfk+oV4FllgGq/5bEKscNqVpz06Q5JrUiXE1MJc=";
+    hash = "sha256-c/8W7iOguKRvcKozBj7gMFOob0O1v2TbFxLARlsBzq4=";
   };
   python = pkgs.python312;
   pip = pkgs.python312Packages.pip;
@@ -41,7 +41,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "grabowski-operator";
-  version = "e3e81c32";
+  version = "03cf4106";
   dontUnpack = true;
   nativeBuildInputs = [
     pkgs.gnutar pkgs.gzip pkgs.makeWrapper pip pkgs.coreutils
