@@ -99,6 +99,35 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _pull_pinned_image(docker: str) -> tuple[str, str]:
+    """CI-only transport fallback; both sources retain the canonical digest and ID."""
+    canonical = installer.PINNED_NIX_IMAGE_REF
+    refs = (f"mirror.gcr.io/{canonical}", canonical)
+    failures = []
+    for ref in refs:
+        try:
+            pull = _run([docker, "pull", ref], timeout_seconds=PULL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            failures.append(f"{ref}: pull timed out")
+            continue
+        if pull.returncode != 0:
+            failures.append(f"{ref}: {_detail(pull)}")
+            continue
+        inspect = _run(
+            [docker, "image", "inspect", "--format", "{{.Id}}", ref],
+            timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+        )
+        _require_success(inspect, "inspecting pinned Nix image")
+        image_id = inspect.stdout.decode("ascii", errors="strict").strip()
+        if image_id != managed_build.PINNED_NIX_IMAGE:
+            raise RuntimeError(
+                "pinned Nix image reference resolved to an unexpected image ID: "
+                f"expected {managed_build.PINNED_NIX_IMAGE}, got {image_id}"
+            )
+        return ref, image_id
+    raise RuntimeError("pulling pinned Nix image failed: " + "; ".join(failures))
+
+
 def main() -> int:
     args = _parse_args()
     verifier = verify_managed_nix_verifier_contract(args.trust_contract)
@@ -116,23 +145,7 @@ def main() -> int:
         return 0
 
     docker = managed_build._docker_executable()
-    pull = _run(
-        [docker, "pull", installer.PINNED_NIX_IMAGE_REF],
-        timeout_seconds=PULL_TIMEOUT_SECONDS,
-    )
-    _require_success(pull, "pulling pinned Nix image")
-
-    inspect = _run(
-        [docker, "image", "inspect", "--format", "{{.Id}}", installer.PINNED_NIX_IMAGE_REF],
-        timeout_seconds=COMMAND_TIMEOUT_SECONDS,
-    )
-    _require_success(inspect, "inspecting pinned Nix image")
-    image_id = inspect.stdout.decode("ascii", errors="strict").strip()
-    if image_id != managed_build.PINNED_NIX_IMAGE:
-        raise RuntimeError(
-            "pinned Nix image reference resolved to an unexpected image ID: "
-            f"expected {managed_build.PINNED_NIX_IMAGE}, got {image_id}"
-        )
+    pull_ref, image_id = _pull_pinned_image(docker)
 
     find_result = _run(
         [
@@ -190,6 +203,7 @@ def main() -> int:
                 "kind": "heim_pc.pinned_nix_find_contract",
                 "image_id": image_id,
                 "image_ref": installer.PINNED_NIX_IMAGE_REF,
+                "pull_ref": pull_ref,
                 "find": managed_build.NIX_LIVE_SCAN_FIND,
                 "returncode": find_result.returncode,
                 "stderr_sha256": hashlib.sha256(find_result.stderr).hexdigest(),
