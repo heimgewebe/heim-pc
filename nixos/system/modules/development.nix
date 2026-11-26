@@ -1,11 +1,11 @@
 { config, lib, pkgs, ... }:
 {
   environment.systemPackages = with pkgs; [
-    git gh nodejs python3 uv rustc cargo clang cmake gnumake pkg-config jq
+    git gh nodejs (python3.withPackages (ps: [ ps.jsonschema ps.pyyaml ])) uv rustc cargo clang cmake gnumake pkg-config jq
     ripgrep fd curl wget file patchelf appimage-run distrobox
   ] ++ lib.optionals config.heimPc.desktop.enable (with pkgs; [
     # Documents stay local: no permanent PDF server or unmaintained containers.
-    ocrmypdf qpdf tesseract pdfarranger
+    ocrmypdf qpdf tesseract pdfarranger poppler-utils
   ]);
 
   # Keep GitHub HTTPS authentication valid across gh updates and Nix store GC.
