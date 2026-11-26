@@ -103,6 +103,31 @@ class T(unittest.TestCase):
         self.assertIn("no Nix-relevant change", reason)
 
 
+    def test_merge_group_compares_exact_base_and_integration_tree(self):
+        base, head = "a" * 40, "b" * 40
+        result = mock.Mock(returncode=0, stdout=b"nixos/system/modules/networking.nix\0")
+        with mock.patch.object(nix_changed, "_commit_exists", return_value=True):
+            with mock.patch.object(nix_changed.subprocess, "run", return_value=result) as run:
+                required, _ = nix_changed.detect("merge_group", base, head)
+        self.assertTrue(required)
+        self.assertIn(f"{base}..{head}", run.call_args.args[0])
+        self.assertNotIn(f"{base}...{head}", run.call_args.args[0])
+
+    def test_merge_group_unknown_base_cannot_skip_heavy_ci(self):
+        with mock.patch.object(nix_changed, "_commit_exists", return_value=False):
+            required, reason = nix_changed.detect("merge_group", "", "b" * 40)
+        self.assertTrue(required)
+        self.assertIn("fail-open", reason)
+
+    def test_all_required_workflows_trigger_on_merge_group(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        for name in ("heim-pc-nix.yml", "heim-pc-validate.yml", "wgx-guard.yml", "wgx-smoke.yml"):
+            with self.subTest(name=name):
+                workflow = (root / name).read_text(encoding="utf-8")
+                self.assertIn("  merge_group:\n    types: [checks_requested]", workflow)
+
     def test_prototype_ci_is_manual_and_live_ci_handles_review_ready(self):
         # The old ISO/storage matrix is optional, not an automatic second build.
         from pathlib import Path

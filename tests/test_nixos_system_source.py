@@ -151,7 +151,7 @@ class T(unittest.TestCase):
         self.assertIn("jobs:\n  detect:", workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(
-            "BASE_SOURCE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}",
+            "BASE_SOURCE_REVISION: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before }}",
             workflow,
         )
         self.assertIn("Detect Nix CI control-plane changes independently", workflow)
