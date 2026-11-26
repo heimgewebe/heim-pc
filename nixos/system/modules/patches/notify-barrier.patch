@@ -1,0 +1,213 @@
+--- a/pkg/systemd/notifyproxy/notifyproxy.go
++++ b/pkg/systemd/notifyproxy/notifyproxy.go
+@@ -50,6 +50,74 @@
+ 
+ 	_, err = conn.Write([]byte(message))
+ 	return err
++}
++
++// SendMessageAndWait sends a notification and waits for the receiver to consume
++// it. A BARRIER message carries a pipe descriptor which the receiver closes
++// after processing previous messages. This is not an application health check.
++func SendMessageAndWait(socketPath, message string, timeout time.Duration) error {
++	if socketPath == "" {
++		socketPath = os.Getenv("NOTIFY_SOCKET")
++		if socketPath == "" {
++			return nil
++		}
++	}
++	deadline := time.Now().Add(timeout)
++	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: socketPath, Net: "unixgram"})
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++	if err := conn.SetWriteDeadline(deadline); err != nil {
++		return err
++	}
++	readEnd, writeEnd, err := os.Pipe()
++	if err != nil {
++		return err
++	}
++	defer readEnd.Close()
++	defer writeEnd.Close()
++	if err := readEnd.SetReadDeadline(deadline); err != nil {
++		return err
++	}
++	if _, err := conn.Write([]byte(message)); err != nil {
++		return err
++	}
++	// UnixConn.WriteMsgUnix rejects a connected unixgram socket. Send the
++	// descriptor using the existing connection, preserving datagram order
++	// and the net package's write deadline.
++	raw, err := conn.SyscallConn()
++	if err != nil {
++		return err
++	}
++	rights := unix.UnixRights(int(writeEnd.Fd()))
++	var sendErr error
++	if err := raw.Write(func(fd uintptr) bool {
++		for {
++			_, sendErr = unix.SendmsgN(int(fd), []byte(_notifyBarrierMsg), rights, nil, 0)
++			if errors.Is(sendErr, unix.EINTR) {
++				continue
++			}
++			return !errors.Is(sendErr, unix.EAGAIN) && !errors.Is(sendErr, unix.EWOULDBLOCK)
++		}
++	}); err != nil {
++		return err
++	}
++	if sendErr != nil {
++		return sendErr
++	}
++	if err := writeEnd.Close(); err != nil {
++		return err
++	}
++	var buf [1]byte
++	n, err := readEnd.Read(buf[:])
++	if n == 0 && errors.Is(err, io.EOF) {
++		return nil
++	}
++	if err != nil {
++		return fmt.Errorf("waiting for notify barrier: %w", err)
++	}
++	return fmt.Errorf("unexpected data on notify barrier")
+ }
+ 
+ // NotifyProxy can be used to proxy notify messages.
+--- a/pkg/systemd/notifyproxy/notifyproxy_test.go
++++ b/pkg/systemd/notifyproxy/notifyproxy_test.go
+@@ -3,6 +3,11 @@
+ package notifyproxy
+ 
+ import (
++	"net"
++	"os"
++	"path/filepath"
++
++	"golang.org/x/sys/unix"
+ 	"testing"
+ 	"time"
+ 
+@@ -61,3 +66,100 @@
+ 	}()
+ 	require.True(t, done, "READY MESSAGE SHOULD HAVE ARRIVED")
+ }
++
++// Receive an actual barrier FD, prove the sender stays blocked, then acknowledge.
++func TestSendMessageAndWait(t *testing.T) {
++	for _, mode := range []string{"ack", "timeout"} {
++		t.Run(mode, func(t *testing.T) {
++			path := filepath.Join(t.TempDir(), "notify")
++			conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
++			require.NoError(t, err)
++			defer conn.Close()
++			require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
++			done := make(chan error, 1)
++			timeout := 2 * time.Second
++			if mode == "timeout" {
++				timeout = 200 * time.Millisecond
++			}
++			go func() { done <- SendMessageAndWait(path, "MAINPID=123\nREADY=1", timeout) }()
++			buf := make([]byte, 4096)
++			oob := make([]byte, unix.CmsgSpace(4))
++			n, oobn, _, _, err := conn.ReadMsgUnix(buf, oob)
++			if err != nil {
++				select {
++				case e := <-done:
++					t.Fatalf("first read: %v; sender returned: %v", err, e)
++				default:
++					t.Fatalf("first read: %v; sender still running", err)
++				}
++			}
++			require.Equal(t, "MAINPID=123\nREADY=1", string(buf[:n]))
++			require.Zero(t, oobn)
++			n, oobn, _, _, err = conn.ReadMsgUnix(buf, oob)
++			if err != nil {
++				select {
++				case e := <-done:
++					t.Fatalf("barrier read: %v; sender returned: %v", err, e)
++				default:
++					t.Fatalf("barrier read: %v; sender still running", err)
++				}
++			}
++			require.Equal(t, "BARRIER=1", string(buf[:n]))
++			msgs, err := unix.ParseSocketControlMessage(oob[:oobn])
++			require.NoError(t, err)
++			require.Len(t, msgs, 1)
++			fds, err := unix.ParseUnixRights(&msgs[0])
++			require.NoError(t, err)
++			require.Len(t, fds, 1)
++			fd := fds[0]
++			defer func() {
++				if fd >= 0 {
++					_ = unix.Close(fd)
++				}
++			}()
++			if mode == "ack" {
++				select {
++				case err := <-done:
++					t.Fatalf("returned before barrier acknowledgment: %v", err)
++				case <-time.After(30 * time.Millisecond):
++				}
++				require.NoError(t, unix.Close(fd))
++				fd = -1
++				select {
++				case err := <-done:
++					require.NoError(t, err)
++				case <-time.After(3 * time.Second):
++					t.Fatal("did not finish after barrier acknowledgment")
++				}
++			} else {
++				select {
++				case err := <-done:
++					require.ErrorIs(t, err, os.ErrDeadlineExceeded)
++				case <-time.After(3 * time.Second):
++					t.Fatal("did not respect timeout")
++				}
++			}
++		})
++	}
++}
++
++func TestSendMessageAndWaitNoSocket(t *testing.T) {
++	t.Setenv("NOTIFY_SOCKET", "")
++	require.NoError(t, SendMessageAndWait("", "READY=1", time.Second))
++	require.Error(t, SendMessageAndWait(filepath.Join(t.TempDir(), "missing"), "READY=1", time.Second))
++}
++
++func TestSendMessageUnchanged(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "notify")
++	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
++	require.NoError(t, err)
++	defer conn.Close()
++	require.NoError(t, SendMessage(path, "READY=1"))
++	require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
++	buf := make([]byte, 4096)
++	n, _, err := conn.ReadFromUnix(buf)
++	require.NoError(t, err)
++	require.Equal(t, "READY=1", string(buf[:n]))
++	_, _, err = conn.ReadFromUnix(buf)
++	require.Error(t, err)
++}
+--- a/libpod/container_internal.go
++++ b/libpod/container_internal.go
+@@ -1307,7 +1307,17 @@
+ 			payload += "\n"
+ 			payload += daemon.SdNotifyReady
+ 		}
+-		if err := notifyproxy.SendMessage(c.config.SdNotifySocket, payload); err != nil {
++		notify := notifyproxy.SendMessage
++		if c.config.SdNotifyMode == define.SdNotifyModeConmon {
++			// Keep the sender alive until the service manager consumes READY
++			// and MAINPID. Do not change the protocol for alternate sockets.
++			if socket := os.Getenv("NOTIFY_SOCKET"); socket != "" && (c.config.SdNotifySocket == "" || c.config.SdNotifySocket == socket) {
++				notify = func(socketPath, message string) error {
++					return notifyproxy.SendMessageAndWait(socketPath, message, 5*time.Second)
++				}
++			}
++		}
++		if err := notify(c.config.SdNotifySocket, payload); err != nil {
+ 			logrus.Errorf("Notifying systemd of Conmon PID: %s", err.Error())
+ 		} else {
+ 			logrus.Debugf("Notify sent successfully")
