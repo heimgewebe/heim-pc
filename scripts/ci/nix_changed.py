@@ -67,7 +67,7 @@ def _commit_exists(revision: str) -> bool:
 
 
 def _changed_paths(event_name: str, base: str, head: str) -> list[str] | None:
-    if event_name not in {"push", "pull_request"}:
+    if event_name not in {"push", "pull_request", "merge_group"}:
         return None
     if not _commit_exists(head):
         return None
