@@ -138,6 +138,22 @@ class ExactMergeGroupReuseTests(unittest.TestCase):
                     jobs["jobs"][0]["conclusion"] = "failure"
                 self.assertEqual("reuse=false", self.select(runs, jobs)[0])
 
+    def test_every_job_identity_and_optional_nix_conclusion(self):
+        for job_index in (0, 1, 2):
+            for field, value in (
+                ("head_sha", "c" * 40), ("run_id", 124), ("run_attempt", 2),
+                ("status", "in_progress"),
+            ):
+                with self.subTest(job=job_index, field=field):
+                    runs, jobs = proof()
+                    jobs["jobs"][job_index][field] = value
+                    self.assertEqual("reuse=false", self.select(runs, jobs)[0])
+        for conclusion in ("success", "failure", "cancelled"):
+            with self.subTest(nix_conclusion=conclusion):
+                runs, jobs = proof()
+                jobs["jobs"][2]["conclusion"] = conclusion
+                self.assertEqual("reuse=false", self.select(runs, jobs)[0])
+
     def test_fresh_checks_and_conservative_build_condition_remain(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
         live = workflow.split("  live-system:\n", 1)[1]
