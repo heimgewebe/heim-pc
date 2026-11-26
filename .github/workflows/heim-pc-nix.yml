@@ -365,10 +365,25 @@ jobs:
           (needs.detect.result != 'success' ||
            needs.detect.outputs.control_changed != 'false' ||
            needs.detect.outputs.nix_changed != 'false')
-        run: >-
-          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs
-          .#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel
-          .#checks.x86_64-linux.supply-chain-trust
-          .#checks.x86_64-linux.nix-lifecycle-contract
-          .#packages.x86_64-linux.grabowski-headless-systemd-vm-proof
-          .#packages.x86_64-linux.nixer-headless-systemd-vm-proof
+        run: |
+          set -euo pipefail
+          nix build --no-link --no-update-lock-file --print-out-paths --print-build-logs \
+            .#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel \
+            .#checks.x86_64-linux.supply-chain-trust \
+            .#checks.x86_64-linux.nix-lifecycle-contract \
+            .#packages.x86_64-linux.grabowski-headless-systemd-vm-proof \
+            .#packages.x86_64-linux.nixer-headless-systemd-vm-proof
+          # Verify the actual realized physical-host unit graph. systemd-analyze
+          # can exit zero after deleting a job to break an ordering cycle;
+          # the old thermal unit was enabled but silently skipped at boot.
+          closure="$(nix eval --no-update-lock-file --raw .#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel.outPath)"
+          test -e "$closure/etc/systemd/system/multi-user.target.wants/heim-pc-thermal-mitigation.service"
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          LC_ALL=C SYSTEMD_LOG_LEVEL=info SYSTEMD_UNIT_PATH="$closure/etc/systemd/system" \
+            "$closure/sw/bin/systemd-analyze" --man=no --generators=no verify \
+            multi-user.target graphical.target heim-pc-thermal-mitigation.service >"$log" 2>&1 || { cat "$log"; exit 1; }
+          cat "$log"
+          if grep -Ei 'ordering cycle|deleted to break.*cycle|cyclic ordering' "$log"; then
+            exit 1
+          fi
