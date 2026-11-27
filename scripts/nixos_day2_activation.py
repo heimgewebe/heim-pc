@@ -6,12 +6,12 @@ executes only an already-built, already-authorized immutable system closure.
 It does not evaluate Nix, resolve Git/branches/locks/inputs, reboot the host, or
 grant itself request-staging/rootbroker authority.
 
-Inputs must already be staged as root-owned single-link 0600 JSON files below
-/run/heim-pc/nixos-activation/requests/<request-id>.  The caller must also bind
-their canonical JSON digests out-of-band.  That staging/capability boundary and
-the independent post-effect observer are intentionally separate successor
-work; this program emits execution evidence, never the final activation or
-persistent-promotion receipt.
+Inputs are root-owned single-link 0600 JSON files below
+/run/heim-pc/nixos-activation/requests/<request-id>. A privileged caller may
+supply the exact digest-bound request in the same dedicated scope; this
+executor stages only those fixed files. Capability authorization, scope launch,
+and independent post-effect observation remain separate. This program emits
+execution evidence, never the final activation or persistent-promotion receipt.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -159,7 +160,7 @@ def _load_contract() -> dict[str, Any]:
         "observe-next-boot": {
             "staging_receipt_file": "staging-receipt.json",
             "external_expected_sha256_required": True,
-            "effect": "read-only",
+            "effect": "request-staging-and-read-only-boot-observation",
             "promotion_authorized": False,
         },
         "persistent-promotion": {
@@ -222,7 +223,7 @@ def _load_contract() -> dict[str, Any]:
         "shell_execution_allowed": False,
         "nix_rebuild_allowed": False,
         "broad_root_shell_allowed": False,
-        "request_staging_implemented_here": False,
+        "request_staging_implemented_here": True,
         "rootbroker_authorization_implemented_here": False,
         "reboot_implemented_here": False,
     }
@@ -279,7 +280,7 @@ def _load_contract() -> dict[str, Any]:
         raise RuntimeExecutorError("runtime forbidden-effect contract drifted")
 
     if raw.get("successor_boundaries") != [
-        "root-owned request staging, dedicated transient scope launch, and capability authorization",
+        "dedicated transient scope launch and capability authorization",
         "boot-critical one-shot post-boot proof",
         "independent live-closure readback",
         "independent persistent-state observation provenance",
@@ -386,6 +387,69 @@ def _require_canonical_digest(value: Mapping[str, Any], expected: str, label: st
     if actual != expected_value:
         raise RuntimeExecutorError(f"{label} does not match externally bound digest")
     return actual
+
+
+def _stage_bound_request_files(
+    request_id: str,
+    files: Mapping[str, Any],
+    expected_digests: Mapping[str, str],
+) -> None:
+    """Stage an exact request under the existing root-only scope lock.
+
+    No arbitrary path or filename is accepted. Identical readback is a no-op;
+    a conflicting existing request is never replaced.
+    """
+    if REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise RuntimeExecutorError("request_id is not canonical")
+    if set(expected_digests) not in (
+        set(_REQUIRED_REQUEST_FILES), {"staging-receipt.json"},
+    ) or not isinstance(files, Mapping) or set(files) != set(expected_digests):
+        raise RuntimeExecutorError("invalid request bundle fields")
+    encoded = {}
+    for name, value in files.items():
+        if not isinstance(value, dict):
+            raise RuntimeExecutorError(f"request bundle {name} must be an object")
+        _require_canonical_digest(value, expected_digests[name], name)
+        encoded[name] = _canonical_json(value) + b"\n"
+        if len(encoded[name]) > MAX_FILE_BYTES:
+            raise RuntimeExecutorError(f"request bundle {name} exceeds size limit")
+    _require_secure_dir(REQUEST_ROOT, label="request root")
+    destination = REQUEST_ROOT / request_id
+    if os.path.lexists(destination):
+        directory = _request_dir(request_id)
+        for name, digest in expected_digests.items():
+            _require_canonical_digest(_read_bound_json(directory / name), digest, name)
+        return
+    try:
+        # A complete directory is published atomically under the same lock
+        # used by activation. Incomplete temporary directories are not requests.
+        with tempfile.TemporaryDirectory(prefix=".staging-", dir=REQUEST_ROOT) as tmp:
+            directory = Path(tmp)
+            for name, data in encoded.items():
+                fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+            if os.path.lexists(destination):
+                raise RuntimeExecutorError("request destination appeared during staging")
+            directory.rename(destination)
+    except OSError as exc:
+        raise RuntimeExecutorError(f"request staging failed: {exc}") from exc
+    for name, digest in expected_digests.items():
+        _require_canonical_digest(_read_bound_json(_request_dir(request_id) / name), digest, name)
+
+
+def _parse_request_bundle(text: str | None) -> dict[str, Any] | None:
+    if text is None:
+        return None
+    if len(text.encode("utf-8")) > 3 * MAX_FILE_BYTES:
+        raise RuntimeExecutorError("request bundle exceeds size limit")
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise RuntimeExecutorError("request bundle is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeExecutorError("request bundle must be an object")
+    return value
 
 
 def _resolve_link(path: Path, *, label: str) -> str:
@@ -1675,15 +1739,21 @@ def _execute_next_boot(
 def observe_next_boot(
     *, request_id: str, expected_staging_receipt_sha256: str,
     expected_target: str,
+    request_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Observe a staged boot after restart, without changing any profile or EFI variable.
 
-    The staging receipt must be restaged by the authorized caller after reboot.
+    The authorized caller supplies the staging receipt after reboot, either
+    as a bound bundle or through the existing root-owned request directory.
     This observation does not authorize promotion or establish application health.
     """
     _require_root()
     executor_cgroup = _require_dedicated_scope(request_id)
     with _exclusive_lock(executor_cgroup):
+        if request_bundle is not None:
+            _stage_bound_request_files(request_id, request_bundle, {
+                "staging-receipt.json": expected_staging_receipt_sha256,
+            })
         receipt = _read_bound_json(_request_dir(request_id) / "staging-receipt.json")
         digest = _require_canonical_digest(
             receipt, expected_staging_receipt_sha256, "staging receipt"
@@ -1779,9 +1849,17 @@ def execute_activation(
     expected_plan_sha256: str,
     expected_target: str,
     runner: Runner = _run_exact,
+    request_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _require_root()
     executor_cgroup = _require_dedicated_scope(request_id)
+    if request_bundle is not None:
+        with _exclusive_lock(executor_cgroup):
+            _stage_bound_request_files(request_id, request_bundle, {
+                "build-receipt.json": expected_build_receipt_sha256,
+                "authority.json": expected_authority_sha256,
+                "plan.json": expected_plan_sha256,
+            })
     build_receipt, authority, candidate_plan = _load_request(request_id)
     build_digest = _require_canonical_digest(
         build_receipt, expected_build_receipt_sha256, "build receipt"
@@ -2159,11 +2237,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     activation = sub.add_parser("execute-activation")
     common(activation)
+    activation.add_argument("--request-bundle-json")
 
     observe = sub.add_parser("observe-next-boot")
     observe.add_argument("--request-id", required=True)
     observe.add_argument("--expected-staging-receipt-sha256", required=True)
     observe.add_argument("--expected-target", required=True)
+    observe.add_argument("--request-bundle-json")
 
     promotion = sub.add_parser("execute-persistent-promotion")
     common(promotion)
@@ -2184,12 +2264,14 @@ def main(argv: list[str] | None = None) -> int:
                     expected_authority_sha256=args.expected_authority_sha256,
                     expected_plan_sha256=args.expected_plan_sha256,
                     expected_target=args.expected_target,
+                    request_bundle=_parse_request_bundle(args.request_bundle_json),
                 )
             elif args.command == "observe-next-boot":
                 result = observe_next_boot(
                     request_id=args.request_id,
                     expected_staging_receipt_sha256=args.expected_staging_receipt_sha256,
                     expected_target=args.expected_target,
+                    request_bundle=_parse_request_bundle(args.request_bundle_json),
                 )
             elif args.command == "execute-persistent-promotion":
                 result = execute_persistent_promotion(

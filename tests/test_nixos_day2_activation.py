@@ -762,6 +762,41 @@ def boot_runtime(runtime, monkeypatch):
     )
 
 
+def test_bundle_stages_only_exact_files_and_is_idempotent(boot_runtime):
+    state, boot, calls, runner, candidate, args = boot_runtime
+    receipt, authority, plan = executor._load_request(args["request_id"])
+    bundle = {"build-receipt.json": receipt, "authority.json": authority, "plan.json": plan}
+    new_args = dict(args, request_id="bundle-activation", request_bundle=bundle)
+    result = executor.execute_activation(runner=runner, **new_args)
+    assert result["next_boot_staged"] is True
+    directory = executor.REQUEST_ROOT / "bundle-activation"
+    assert set(p.name for p in directory.iterdir()) == set(bundle)
+    assert (directory.stat().st_mode & 0o777) == 0o700
+    for name in bundle:
+        assert ((directory / name).stat().st_mode & 0o777) == 0o600
+    before = list(calls)
+    digests = {name: managed_nix.sha256_json(value) for name, value in bundle.items()}
+    executor._stage_bound_request_files("bundle-activation", bundle, digests)
+    assert calls == before
+    with pytest.raises(executor.RuntimeExecutorError, match="externally bound digest"):
+        executor._stage_bound_request_files("bundle-activation", bundle, dict(digests, **{"plan.json": "0"*64}))
+    assert calls == before
+
+
+def test_bundle_invalid_input_has_no_staging_or_boot_effect(boot_runtime):
+    state, boot, calls, runner, candidate, args = boot_runtime
+    receipt, authority, plan = executor._load_request(args["request_id"])
+    bundle = {"build-receipt.json": receipt, "authority.json": authority, "plan.json": plan}
+    for invalid in (
+        dict(bundle, extra={}),
+        dict(bundle, **{"plan.json": {"invalid": True}}),
+    ):
+        with pytest.raises(executor.RuntimeExecutorError):
+            executor.execute_activation(runner=runner, **dict(args, request_id="bad-bundle", request_bundle=invalid))
+        assert not (executor.REQUEST_ROOT / "bad-bundle").exists()
+        assert calls == []
+
+
 def test_native_next_boot_stages_without_switch_or_promotion(boot_runtime):
     state, boot, calls, runner, candidate, args = boot_runtime
     prior_profile = "/nix/store/" + "3" * 32 + "-nixos-system-heim-pc-old"
@@ -805,7 +840,7 @@ def _postboot_fixture(boot_runtime, monkeypatch):
 def test_postboot_observation_binds_new_boot_and_exact_entry(boot_runtime, monkeypatch):
     state, boot, calls, candidate, receipt, observe = _postboot_fixture(boot_runtime, monkeypatch)
     before = list(calls)
-    result = executor.observe_next_boot(**observe)
+    result = executor.observe_next_boot(**dict(observe, request_id="observation-bundle", request_bundle={"staging-receipt.json": receipt}))
     assert result["boot_identity_established"] is True
     assert result["application_health_established"] is False
     assert result["persistent_promotion_authorized"] is False
@@ -1641,7 +1676,7 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert runtime["shell_execution_allowed"] is False
     assert runtime["nix_rebuild_allowed"] is False
     assert runtime["rootbroker_authorization_implemented_here"] is False
-    assert runtime["request_staging_implemented_here"] is False
+    assert runtime["request_staging_implemented_here"] is True
     assert runtime["reboot_implemented_here"] is False
     assert runtime["self_cgroup_path"] == "/proc/self/cgroup"
     assert runtime["cgroup_root"] == "/sys/fs/cgroup"
@@ -1670,7 +1705,7 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     assert contract["supported_operations"]["observe-next-boot"] == {
         "staging_receipt_file": "staging-receipt.json",
         "external_expected_sha256_required": True,
-        "effect": "read-only",
+        "effect": "request-staging-and-read-only-boot-observation",
         "promotion_authorized": False,
     }
     promotion = contract["supported_operations"]["persistent-promotion"]

@@ -15,7 +15,7 @@
     "observe-next-boot": {
       "staging_receipt_file": "staging-receipt.json",
       "external_expected_sha256_required": true,
-      "effect": "read-only",
+      "effect": "request-staging-and-read-only-boot-observation",
       "promotion_authorized": false
     },
     "persistent-promotion": {
@@ -79,7 +79,7 @@
     "shell_execution_allowed": false,
     "nix_rebuild_allowed": false,
     "broad_root_shell_allowed": false,
-    "request_staging_implemented_here": false,
+    "request_staging_implemented_here": true,
     "rootbroker_authorization_implemented_here": false,
     "reboot_implemented_here": false
   },
@@ -112,7 +112,7 @@
     "firmware-flash"
   ],
   "successor_boundaries": [
-    "root-owned request staging, dedicated transient scope launch, and capability authorization",
+    "dedicated transient scope launch and capability authorization",
     "boot-critical one-shot post-boot proof",
     "independent live-closure readback",
     "independent persistent-state observation provenance",
