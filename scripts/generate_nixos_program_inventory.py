@@ -221,6 +221,39 @@ def opaque_name(value: str) -> str:
     return OPAQUE_PREFIX + hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
 
 
+def declared_path_names(directory: Path, *, recursive: bool, label: str):
+    """Compare names only; never read file contents or follow nested symlinks.
+
+    The initial directory may be a NixOS closure link (etc or sw/bin).
+    A nested symlink is itself a declared entry, not a traversal root.
+    """
+    if not directory.is_dir():
+        raise ValueError(f"missing declared {label} directory")
+    entries, pending = set(), [(directory, ())]
+    hidden = omitted = 0
+    while pending:
+        parent, prefix = pending.pop()
+        for entry in parent.iterdir():
+            parts = (*prefix, entry.name)
+            if entry.is_symlink():
+                pass
+            elif entry.is_dir():
+                if not recursive:
+                    omitted += 1
+                    continue
+                pending.append((entry, parts))
+            elif not entry.is_file():
+                omitted += 1
+                continue
+            raw = "/".join(parts)
+            if any(safe_name(part) == "[redacted]" for part in parts):
+                hidden += 1
+                entries.add(opaque_name(raw))
+            else:
+                entries.add(raw)
+    return sorted(entries), hidden, omitted
+
+
 def closure_inventory(root: Path):
     root = root.resolve(strict=True)
     groups, opaque, skipped = {}, {}, {}
@@ -272,6 +305,13 @@ def closure_inventory(root: Path):
     )
     opaque["desktop"] = sum(safe_name(name) == "[redacted]" for name in entries)
     skipped["desktop"] = 0
+    for name, directory, recursive, label in (
+        ("cli_entries", root / "sw/bin", False, "CLI"),
+        ("etc_paths", root / "etc", True, "etc"),
+    ):
+        groups[name], opaque[name], skipped[name] = declared_path_names(
+            directory, recursive=recursive, label=label
+        )
     return {"groups": groups, "opaque_metadata_names": opaque, "skipped_metadata_names": skipped}
 
 
