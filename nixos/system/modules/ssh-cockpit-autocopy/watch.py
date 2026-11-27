@@ -24,7 +24,7 @@ QUIET_SECONDS = 2.0
 POLL_SECONDS = 0.5
 SHELL_PROMPT = re.compile(
     r"^(?:\[[^]\r\n]+@[^]\r\n]+:[^]\r\n]+\]|"
-    r"[^ @:\r\n]+@[^ :\r\n]+:[^\r\n]+|"
+    r"[^ @:\r\n]+@[^ :\r\n]+:[^\r\n]+?|"
     r"(?:bash|sh|zsh|fish)(?:-\d+(?:\.\d+)*)?)"
     r"[$#](?:\s|$)"
 )
@@ -66,6 +66,32 @@ def payload(raw: bytes) -> bytes:
     clipped = encoded[-(BYTES - len(prefix)):]
     return prefix + clipped.decode("utf-8", "ignore").encode("utf-8")
 
+def capture_rows(raw: bytes) -> list[str]:
+    """Recognize the last known prompt even after output without a newline.
+
+    Only reuse the most recent line-leading prompt, not an arbitrary
+    prompt-like fragment. An earlier recognized prompt on the last row
+    takes precedence over a repeated literal in its editable input.
+    """
+    rows = raw.decode("utf-8", "replace").splitlines()
+    while rows and not rows[-1].strip():
+        rows.pop()
+    for row in reversed(rows[:-1]):
+        previous = SHELL_PROMPT.match(row)
+        if previous is None:
+            continue
+        token = previous.group().rstrip()
+        last = rows[-1]
+        offset = last.find(token)
+        leading = SHELL_PROMPT.match(last)
+        if offset > 0 and (leading is None or leading.end() > offset):
+            inline = SHELL_PROMPT.match(last[offset:])
+            if inline and inline.group().rstrip() == token:
+                rows[-1:] = [last[:offset], last[offset:]]
+        break
+    return rows
+
+
 def output_marker(raw: bytes, current_command: str) -> bytes | None:
     """Content identity for actual output, invariant under editing at a shell prompt.
 
@@ -75,9 +101,7 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
     command's output between consecutive prompts. Exclude the active prompt
     line from the marker, so editing that line cannot retrigger a copy.
     """
-    rows = raw.decode("utf-8", "replace").splitlines()
-    while rows and not rows[-1].strip():
-        rows.pop()
+    rows = capture_rows(raw)
     prompt_positions = []
     for i, row in enumerate(rows):
         match = SHELL_PROMPT.match(row)
@@ -90,6 +114,11 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
             if line.strip() and not line.lstrip().startswith(("> ", "... "))
         ]
         if tail:
+            # Readline may redraw an inline prompt over preceding output
+            # (even erasing the prompt itself). With the shell in foreground,
+            # do not treat an unbounded tail as a new completed result.
+            if current_command in SHELLS:
+                return None
             return hashlib.sha256("\n".join(rows[:end] + tail).encode()).digest()
         # A command line is being edited but has not produced output.
         if rows[end][match.end():].strip():
@@ -110,12 +139,14 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
 
 def copy_payload(raw: bytes, current_command: str) -> bytes:
     """Keep normal pane copying; recover only a safe current shell result."""
+    rows = capture_rows(raw) if current_command in SHELLS else []
+    if current_command in SHELLS:
+        active = SHELL_PROMPT.match(rows[-1]) if rows else None
+        if not active or rows[-1][active.end():].strip():
+            return b""
     data = payload(raw)
     if data or current_command not in SHELLS:
         return data
-    rows = raw.decode("utf-8", "replace").splitlines()
-    while rows and not rows[-1].strip():
-        rows.pop()
     prompts = [(i, SHELL_PROMPT.match(row)) for i, row in enumerate(rows)
                if SHELL_PROMPT.match(row)]
     if not prompts:

@@ -19,12 +19,12 @@ führende Orientierung. Keine zweite Registry und keine pauschale Boot-Sperre.
   prüft die tatsächlich ausgesendete OSC52-Sequenz an zwei gleichzeitig
   verbundenen Clients, normales Ergebnis,
   historische sensitive Ausgabe, lange Ausgabe sensibler Befehle, keine
-  Ausgabe, Eingabe ohne Ausführung und
+  Ausgabe, Eingabe ohne Ausführung (auch nach Ausgabe ohne Zeilenumbruch) und
   expliziten Opt-out und Wiederaufnahme ohne erneuten Attach. Ein
   übersprungener PTY-Test ist kein Funktionsnachweis; im Linux-GitHub-CI
   sind die PTY-Voraussetzungen verpflichtend. Die Erkennung sensibler
   Ausgaben ist eine Heuristik innerhalb des erfassten Pane-Ausschnitts,
-  keine Garantie zur Geheimniserkennung.
+  keine Garantie zur Geheimniserkennung. Bei Shell-Ausgaben ohne sicher\n  erkannte Abschlussgrenze wird vorsorglich nicht kopiert; laufende\n  Nicht-Shell-Programme behalten die bisherige Ausgabeerkennung.
 - Produktiv: Generation und Quellrevision vergleichen, den neuen Hook und
   die Migration prüfen, mit neutralem Ergebnis OSC52 über einen isolierten
   PTY nachweisen. Der reale iPad-Paste bleibt eine separate Client-Abnahme.

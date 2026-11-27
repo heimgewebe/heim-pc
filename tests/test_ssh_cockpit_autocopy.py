@@ -47,6 +47,25 @@ class AutocopyTests(unittest.TestCase):
         ordinary = prompt + b"printf ordinary\n" + neutral_lines + prompt
         self.assertEqual(watcher.copy_payload(ordinary, "bash"), ordinary)
 
+    def test_inline_prompt_after_output_without_newline(self):
+        spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        prompt = b"[probe@heim-pc:~]$ "
+        result = prompt + b"printf hello\nhello" + prompt
+        marker = watcher.output_marker(result, "bash")
+        self.assertIsNotNone(marker)
+        self.assertIsNone(watcher.output_marker(result + b"unsubmitted-input", "bash"))
+        self.assertEqual(watcher.copy_payload(result + b"unsubmitted-input", "bash"), b"")
+        self.assertEqual(watcher.output_marker(result.rstrip(), "bash"), marker)
+        # Bash readline can erase the inline prompt and part of the output
+        # on Ctrl-U. This is not a new output event.
+        redraw = prompt + b"printf hello\nhe   "
+        self.assertIsNone(watcher.output_marker(redraw, "bash"))
+        self.assertEqual(watcher.copy_payload(redraw, "bash"), b"")
+        old = prompt + b"echo example\npassword=synthetic-test-only\n"
+        self.assertEqual(watcher.copy_payload(old + result, "bash"), prompt + b"printf hello\nhello")
+
     def test_migration_and_rollback_preserve_legacy(self):
         module = load_migration()
         old = b"known synthetic legacy config\n"
@@ -133,6 +152,16 @@ class AutocopyTests(unittest.TestCase):
                 normal = drain(4)
                 self.assertTrue(any(b"\nAUTO_NORMAL_73\n" in p for p in normal), normal)
                 self.assertTrue(any(b"\nAUTO_NORMAL_73\n" in p for p in second_updates), second_updates)
+                os.write(master, b"printf 'AUTO_NO_NEWLINE_27'\r")
+                inline = drain(4)
+                self.assertTrue(any(b"\nAUTO_NO_NEWLINE_27" in p for p in inline), inline)
+                self.assertTrue(any(b"\nAUTO_NO_NEWLINE_27" in p for p in second_updates), second_updates)
+                os.write(master, b"inline-unsubmitted-input")
+                self.assertFalse(drain(3.5), "inline editable prompt copied")
+                self.assertFalse(second_updates, "inline editable prompt copied (second client)")
+                os.write(master, b"\x15")
+                self.assertFalse(drain(3.5), "clearing inline input recopied output")
+                self.assertFalse(second_updates, "clearing inline input recopied output (second client)")
                 os.write(master, b"printf 'password=synthetic-test-only\\n'\r")
                 self.assertFalse(drain(4), "sensitive output copied")
                 self.assertFalse(second_updates, "sensitive output copied (second client)")
