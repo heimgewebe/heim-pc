@@ -518,6 +518,7 @@ in
     # The NixOS system operator and user tunnel must keep their existing split.
     # Reuse the authenticated tools/list observer; do not substitute its
     # server-loopback receipt for a ChatGPT platform publication receipt.
+    # After an approved generation is active, reconcile its existing publication journal.
     systemd.user.services."grabowski-client-snapshot-refresh" = lib.mkIf admit {
       description = "Renew source-bound Grabowski MCP tools/list and schema snapshot";
       after = [ "tunnel-client-grabowski.service" "grabowski-transport-ingress.service" ];
@@ -525,7 +526,7 @@ in
         Type = "oneshot";
         WorkingDirectory = "/home/alex";
         ExecStartPre = mcpListenerReady;
-        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId}";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId} --runtime-manifest ${cfg.operatorPackage}/share/grabowski/nixos-integrity-manifest.json";
         Environment = [
           "HOME=/home/alex"
           "XDG_RUNTIME_DIR=/run/user/1000"
