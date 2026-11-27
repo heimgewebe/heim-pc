@@ -30,6 +30,36 @@ TARBALL_HASH = _pinned_value(_operator_source, "hash")
 
 
 class GrabowskiProductionPackagingTests(unittest.TestCase):
+    def test_ntfy_retry_is_pinned_unprivileged_and_does_not_create_alerts(self):
+        production = (MODULES / "grabowski-production.nix").read_text()
+        service = production.split(
+            'systemd.services."grabowski-ntfy-retry" = lib.mkIf admit {', 1
+        )[1].split('systemd.timers."grabowski-ntfy-retry"', 1)[0]
+        timer = production.split(
+            'systemd.timers."grabowski-ntfy-retry" = lib.mkIf admit {', 1
+        )[1].split("\n    };", 1)[0]
+        for contract in (
+            'User = "alex";',
+            'Group = "users";',
+            'Type = "oneshot";',
+            'ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B -m grabowski_ntfy_dispatch";',
+            'NoNewPrivileges = true;',
+            'ProtectHome = "read-only";',
+            'ProtectSystem = "strict";',
+            'ReadWritePaths = [ "/home/alex/.local/state/grabowski" ];',
+            'ConditionPathExists = "/home/alex/.config/grabowski/ntfy-topic";',
+            'RequiresMountsFor = "/home/alex";',
+        ):
+            self.assertIn(contract, service)
+        self.assertNotIn("enqueue", service)
+        self.assertNotIn("ExecStartPre", service)
+        self.assertNotIn("delivery-hold.json", service)
+        self.assertNotIn("wantedBy", service)
+        self.assertIn('wantedBy = [ "timers.target" ];', timer)
+        self.assertIn('OnCalendar = "*:0/5";', timer)
+        self.assertIn('Persistent = false;', timer)
+        self.assertIn('Unit = "grabowski-ntfy-retry.service";', timer)
+
     def test_operator_stop_budget_exceeds_http_response_drain(self):
         production = (MODULES / "grabowski-production.nix").read_text()
         operator = production.split("systemd.services.grabowski-operator = ", 1)[1].split("\n    };", 1)[0]

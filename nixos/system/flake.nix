@@ -1157,6 +1157,9 @@ PY
             retentionUnit = proof.systemd.services."grabowski-runtime-retention";
             retention = retentionUnit.serviceConfig;
             retentionTimer = proof.systemd.timers."grabowski-runtime-retention";
+            ntfyRetryUnit = proof.systemd.services."grabowski-ntfy-retry";
+            ntfyRetry = ntfyRetryUnit.serviceConfig;
+            ntfyRetryTimer = proof.systemd.timers."grabowski-ntfy-retry";
             rootResticCandidate = self.nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config;
             rootResticProof = rootResticCandidate.systemd.services."heim-pc-restic-recovery-probe".serviceConfig;
             unitStore = toString proof.systemd.units."grabowski-operator.service".unit;
@@ -1173,6 +1176,21 @@ PY
           assert !(builtins.hasAttr "grabowski-privileged-broker" inactive.systemd.sockets);
           assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.services);
           assert !(builtins.hasAttr "grabowski-runtime-retention" inactive.systemd.timers);
+          assert !(builtins.hasAttr "grabowski-ntfy-retry" inactive.systemd.services);
+          assert !(builtins.hasAttr "grabowski-ntfy-retry" inactive.systemd.timers);
+          assert ntfyRetry.User == "alex" && ntfyRetry.Group == "users";
+          assert ntfyRetry.Type == "oneshot" && ntfyRetry.NoNewPrivileges;
+          assert ntfyRetry.ProtectHome == "read-only" && ntfyRetry.ProtectSystem == "strict";
+          assert ntfyRetry.ReadWritePaths == [ "/home/alex/.local/state/grabowski" ];
+          assert ntfyRetry.ExecStart ==
+            "${pinnedOperator}/bin/python3 -I -B -m grabowski_ntfy_dispatch";
+          assert ntfyRetryUnit.unitConfig.RequiresMountsFor == "/home/alex";
+          assert ntfyRetryUnit.unitConfig.ConditionPathExists == "/home/alex/.config/grabowski/ntfy-topic";
+          assert ntfyRetryUnit.wantedBy == [ ];
+          assert ntfyRetryTimer.wantedBy == [ "timers.target" ];
+          assert ntfyRetryTimer.timerConfig.OnCalendar == "*:0/5";
+          assert !ntfyRetryTimer.timerConfig.Persistent;
+          assert ntfyRetryTimer.timerConfig.Unit == "grabowski-ntfy-retry.service";
           assert retention.User == "alex" && retention.Group == "users";
           assert retention.Type == "oneshot" && retention.NoNewPrivileges;
           assert retention.SuccessExitStatus == "2";
