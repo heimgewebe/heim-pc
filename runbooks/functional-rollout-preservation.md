@@ -19,7 +19,8 @@ führende Orientierung. Keine zweite Registry und keine pauschale Boot-Sperre.
   prüft die tatsächlich ausgesendete OSC52-Sequenz an zwei gleichzeitig
   verbundenen Clients, normales Ergebnis,
   historische sensitive Ausgabe, keine Ausgabe, Eingabe ohne Ausführung und
-  expliziten Opt-out. Ein übersprungener PTY-Test ist kein Funktionsnachweis.
+  expliziten Opt-out und Wiederaufnahme ohne erneuten Attach. Ein
+  übersprungener PTY-Test ist kein Funktionsnachweis.
 - Produktiv: Generation und Quellrevision vergleichen, den neuen Hook und
   die Migration prüfen, mit neutralem Ergebnis OSC52 über einen isolierten
   PTY nachweisen. Der reale iPad-Paste bleibt eine separate Client-Abnahme.

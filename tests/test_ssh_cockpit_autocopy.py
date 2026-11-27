@@ -135,6 +135,13 @@ class AutocopyTests(unittest.TestCase):
                 os.write(master, b"printf 'AUTO_DISABLED_55\\n'\r")
                 self.assertFalse(drain(4), "opt-out ignored")
                 self.assertFalse(second_updates, "opt-out ignored (second client)")
+                tm("set-environment", "-t", "=probe", "-u", "HEIM_AUTOCOPY")
+                self.assertFalse(drain(3), "disabled-session history copied on re-enable")
+                self.assertFalse(second_updates, "disabled-session history copied on re-enable (second client)")
+                os.write(master, b"printf 'AUTO_REENABLED_83\\n'\r")
+                reenabled = drain(4)
+                self.assertTrue(any(b"\nAUTO_REENABLED_83" in p for p in reenabled), reenabled)
+                self.assertTrue(any(b"\nAUTO_REENABLED_83" in p for p in second_updates), second_updates)
             finally:
                 tm("kill-server")
                 client.wait(timeout=5)

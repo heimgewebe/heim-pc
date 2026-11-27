@@ -139,7 +139,7 @@ def already_published(marker: bytes | None, last_published: bytes | None) -> boo
     """A transient shell edit must not cause stale pane output to be copied again."""
     return marker is None or marker == last_published
 
-def active_panes(socket: str) -> dict[str, tuple[set[str], str]] | None:
+def active_panes(socket: str) -> tuple[dict[str, tuple[set[str], str]], bool] | None:
     res = tmux(socket, "list-clients", "-F", "#{client_session}\t#{client_tty}")
     if res is None or res.returncode:
         return None
@@ -168,7 +168,7 @@ def active_panes(socket: str) -> dict[str, tuple[set[str], str]] | None:
                 if pane not in panes:
                     panes[pane] = (set(), current_command)
                 panes[pane][0].update(ttys)
-    return panes
+    return panes, bool(clients)
 
 def capture(socket: str, pane: str) -> bytes | None:
     res = tmux(socket, "capture-pane", "-a", "-J", "-p", "-S", f"-{LINES}", "-t", pane)
@@ -220,16 +220,16 @@ def watch(socket: str) -> int:
     published: dict[str, bytes] = {}
     no_clients = 0
     while True:
-        pane_ids = active_panes(socket)
-        if pane_ids is None:
+        observation = active_panes(socket)
+        if observation is None:
             return 0
-        if not pane_ids:
+        pane_ids, has_clients = observation
+        if not has_clients:
             no_clients += 1
             if no_clients >= 6:
                 return 0
-            time.sleep(POLL_SECONDS)
-            continue
-        no_clients = 0
+        else:
+            no_clients = 0
         now = time.monotonic()
         for pane in pane_ids:
             raw = capture(socket, pane)
@@ -254,7 +254,8 @@ def watch(socket: str) -> int:
                 if data:
                     copied = tmux(socket, "load-buffer", "-", content=data)
                     if copied is not None and copied.returncode == 0:
-                        current_ttys = active_panes(socket) or {}
+                        current = active_panes(socket)
+                        current_ttys = current[0] if current is not None else {}
                         attached = current_ttys.get(pane)
                         targets = pane_ids[pane][0].intersection(attached[0] if attached else set())
                         # Attempt every attached client; any(generator) short-circuits.
