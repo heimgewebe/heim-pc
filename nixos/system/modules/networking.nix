@@ -2,9 +2,27 @@
 let
   # Real day-2 physical hosts only, not headless proof instances.
   physicalHost = lib.attrByPath [ "heimPc" "day2Activation" "enable" ] false config;
+  # The NixOS physical interface is authoritative for both wake and diagnosis.
+  # The older shared JSON remains the legacy installer's policy.
+  wiredInterface = "enp7s0";
+  networkPolicy = pkgs.writeText "heim-pc-nixos-network-identity.v1.json" (
+    builtins.toJSON (
+      (builtins.fromJSON (builtins.readFile ../../../config/network-identity.v1.json))
+      // { expected_default_interface = wiredInterface; }
+    )
+  );
+  networkDiagnostics = pkgs.writeShellApplication {
+    name = "heim-pc-network-link-diagnostics";
+    runtimeInputs = [ pkgs.ethtool ];
+    text = ''
+      export LC_ALL=C
+      exec ${pkgs.python3}/bin/python3 -I -B ${../../../scripts/network_link_diagnostics.py} --policy ${networkPolicy} "$@"
+    '';
+  };
 in
 {
   networking.networkmanager.enable = true;
+  environment.systemPackages = lib.mkIf physicalHost [ networkDiagnostics ];
 
   # The physical wired desktop must not wait for NetworkManager's startup-complete
   # check before starting Tailscale, Nixer and graphical.target. These services
@@ -34,7 +52,7 @@ in
   };
 
   # Heimberry may wake the real wired host without touching VM network.
-  networking.interfaces.enp7s0.wakeOnLan.enable =
+  networking.interfaces.${wiredInterface}.wakeOnLan.enable =
     lib.mkIf physicalHost true;
 
   # Keep the NixOS hardware watchdog under systemd PID 1.
