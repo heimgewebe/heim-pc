@@ -105,9 +105,12 @@ class PinnedBootProfilesTest(unittest.TestCase):
     @staticmethod
     def _resolve_fixture(
         variants: list[str], *,
-        title: str = "NixOS [heim-pc-approved]",
+        title: str | None = None,
         version: str = "Generation 2 NixOS test",
         init_suffix: str = "",
+        profile: str = "heim-pc-approved",
+        target_matches: bool = True,
+        target_supplied: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         # Execute the actual pinned_entry Bash function against temporary
         # profile/ESP fixtures only; no root or bootloader mutation.
@@ -121,8 +124,10 @@ class PinnedBootProfilesTest(unittest.TestCase):
             closure.mkdir(parents=True)
             (closure / "init").write_text("#!/bin/sh\nexit 0\n")
             (closure / "init").chmod(0o755)
-            (profiles / "heim-pc-approved-2-link").symlink_to(closure)
-            (profiles / "heim-pc-approved").symlink_to("heim-pc-approved-2-link")
+            (profiles / f"{profile}-2-link").symlink_to(closure)
+            (profiles / profile).symlink_to(f"{profile}-2-link")
+            if title is None:
+                title = "NixOS" if profile == "system" else f"NixOS [{profile}]"
             filenames = []
             for index, variant in enumerate(variants):
                 # Upstream hashes exactly the entry bytes, without a final LF.
@@ -137,7 +142,8 @@ class PinnedBootProfilesTest(unittest.TestCase):
                     contents += f"\n# alternate entry {index}"
                 digest = hashlib.sha256(contents.encode("utf-8")).hexdigest()
                 if variant == "legacy":
-                    filename = "nixos-heim-pc-approved-generation-2.conf"
+                    filename = ("nixos-generation-2.conf" if profile == "system"
+                                else f"nixos-{profile}-generation-2.conf")
                 elif variant == "hash":
                     filename = f"nixos-{digest}.conf"
                 elif variant == "counted":
@@ -159,15 +165,20 @@ class PinnedBootProfilesTest(unittest.TestCase):
             function = function.replace(
                 "/nix/var/nix/profiles/system-profiles", str(profiles)
             ).replace(
+                "/nix/var/nix/profiles/system", str(profiles / "system")
+            ).replace(
                 "/nix/store/*-nixos-system-*", str(root / "nix/store/*-nixos-system-*")
             ).replace(
                 "/boot/loader/entries", str(entries)
             )
+            call = f"pinned_entry {profile}"
+            if profile == "system" and target_supplied:
+                call += f" {closure if target_matches else str(closure) + '-wrong'}"
             result = subprocess.run(
                 ["bash", "-c",
                  "set -euo pipefail\n"
                  "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
-                 + function + "\npinned_entry heim-pc-approved\n"],
+                 + function + "\n" + call + "\n"],
                 text=True, capture_output=True, check=False,
             )
             return result, filenames
@@ -194,6 +205,29 @@ class PinnedBootProfilesTest(unittest.TestCase):
                 result, _ = self._resolve_fixture(variants, **overrides)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(error, result.stderr)
+
+
+    def test_exact_system_entry_supports_both_nixos_naming_schemes(self) -> None:
+        for variant in ("legacy", "hash", "counted"):
+            with self.subTest(variant=variant):
+                result, filenames = self._resolve_fixture([variant], profile="system")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), filenames[0].replace("+3-0.conf", ".conf"))
+
+    def test_system_entry_requires_exact_target_and_rejects_mismatches(self) -> None:
+        for overrides, message in (
+            ({"target_matches": False}, "system profile closure mismatch"),
+            ({"target_supplied": False}, "system entry requires exact target closure"),
+            ({"title": "NixOS [heim-pc-approved]"}, "missing pinned boot entry"),
+            ({"init_suffix": "-wrong"}, "pinned entry closure mismatch"),
+        ):
+            with self.subTest(overrides=overrides):
+                result, _ = self._resolve_fixture(["hash"], profile="system", **overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        result, _ = self._resolve_fixture(["hash", "hash"], profile="system")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ambiguous pinned boot entries", result.stderr)
 
 
 if __name__ == "__main__":

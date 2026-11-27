@@ -459,7 +459,10 @@ class Stage0SourceTests(unittest.TestCase):
             if name == "mkfs.btrfs":
                 return None
             return "/usr/bin/" + name
-        with patch.object(stage0.shutil, "which", side_effect=fake_which), \
+        # The real installer intentionally sets a trusted process PATH.
+        # Restore the pytest process environment even on admission failure.
+        with patch.dict(os.environ, {}), \
+             patch.object(stage0.shutil, "which", side_effect=fake_which), \
              patch.object(stage0.Path, "is_file", return_value=True), \
              patch.object(stage0.os, "access", return_value=True), \
              patch.object(stage0, "host_cmd") as mutate:
@@ -468,7 +471,8 @@ class Stage0SourceTests(unittest.TestCase):
         mutate.assert_not_called()
 
     def test_host_toolchain_requires_real_btrfs_version(self):
-        with patch.object(stage0.shutil, "which", side_effect=lambda n, path=None: "/usr/bin/" + n), \
+        with patch.dict(os.environ, {}), \
+             patch.object(stage0.shutil, "which", side_effect=lambda n, path=None: "/usr/bin/" + n), \
              patch.object(stage0.Path, "is_file", return_value=True), \
              patch.object(stage0.os, "access", return_value=True), \
              patch.object(stage0, "output", side_effect=["", "btrfs-progs v5.16.2"]), \

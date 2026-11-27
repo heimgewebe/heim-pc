@@ -16,14 +16,24 @@ let
       pinned_entry() {
         local name="$1"
         local link="/nix/var/nix/profiles/system-profiles/$name"
-        local ref generation closure entry entry_file candidate entry_digest actual_digest options token matches=0 seen=0
+        local ref generation closure entry entry_file candidate entry_digest actual_digest options token title expected_closure="''${2-}" matches=0 seen=0
+        case "$name" in
+          heim-pc-approved|heim-pc-recovery) title="NixOS [$name]" ;;
+          system) link="/nix/var/nix/profiles/system"; title="NixOS" ;;
+          *) fail "unsupported boot profile $name" ;;
+        esac
         [[ -L "$link" ]] || fail "missing pinned boot profile $name"
         ref="$(readlink -- "$link")"
         [[ "$ref" =~ ^$name-([1-9][0-9]*)-link$ ]] || fail "invalid pinned profile generation $name"
         generation="''${BASH_REMATCH[1]}"
         closure="$(readlink -f -- "$link")"
         [[ "$closure" == /nix/store/*-nixos-system-* && -x "$closure/init" ]] || fail "unsafe pinned system closure $name"
+        [[ -z "$expected_closure" || "$closure" == "$expected_closure" ]] || fail "system profile closure mismatch"
         entry="nixos-$name-generation-$generation.conf"
+        if [[ "$name" == system ]]; then
+          [[ -n "$expected_closure" ]] || fail "system entry requires exact target closure"
+          entry="nixos-generation-$generation.conf"
+        fi
         entry_file="/boot/loader/entries/$entry"
         if [[ ! -f "$entry_file" ]]; then
           # NixOS 26.11 names generated boot entries by their content hash,
@@ -35,7 +45,7 @@ let
             entry_digest="''${BASH_REMATCH[1]}"
             actual_digest="$(sha256sum -- "$candidate")"
             [[ "''${actual_digest%% *}" == "$entry_digest" ]] || continue
-            grep -qxF "title NixOS [$name]" "$candidate" || continue
+            grep -qxF "title $title" "$candidate" || continue
             grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "$candidate" || continue
             grep -q "^version Generation $generation " "$candidate" || continue
             matches=$((matches + 1))
@@ -51,7 +61,7 @@ let
           fi
         fi
         [[ -f "$entry_file" && ! -L "$entry_file" ]] || fail "missing pinned boot entry $entry"
-        grep -qxF "title NixOS [$name]" "$entry_file" || fail "wrong profile for $entry"
+        grep -qxF "title $title" "$entry_file" || fail "wrong profile for $entry"
         grep -qxF ${lib.escapeShellArg loaderSortKeyLine} "$entry_file" || fail "wrong sort-key for $entry"
         [[ "$(grep -c '^version ' "$entry_file" || true)" == 1 ]] || fail "ambiguous boot version in $entry"
         grep -q "^version Generation $generation " "$entry_file" || fail "wrong pinned generation in $entry"
@@ -105,13 +115,22 @@ let
       }
 
       # Refuse accidental writes against a missing or wrongly mounted ESP.
-      [[ "$#" == 0 ]] || fail "no arguments accepted"
       [[ "$(findmnt --first-only -r -n -o FSTYPE --mountpoint /boot)" == "vfat" ]] || fail "/boot is not a mounted vfat EFI partition"
-      select_approved_boot
+      # Read-only target resolution for the existing managed next-boot path.
+      # Selecting an EFI OneShot remains a separately authorized effect.
+      if [[ "$#" == 3 && "$1" == "--resolve-profile-entry" ]]; then
+        [[ -n "$3" ]] || fail "profile resolution requires exact closure"
+        pinned_entry "$2" "$3"
+      else
+        [[ "$#" == 0 ]] || fail "unsupported arguments"
+        select_approved_boot
+      fi
     '';
   };
 in
 {
+  environment.systemPackages = [ bootProfileSelection ];
+
   # Reapply *after* the NixOS-generated loader.conf and any separate private
   # LUKS entry patch. EFI LoaderEntryDefault takes precedence over loader.conf.
   boot.loader.systemd-boot.extraInstallCommands =
