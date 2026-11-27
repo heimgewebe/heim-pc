@@ -41,6 +41,36 @@ class ProductionSourceTests(unittest.TestCase):
         self.assertIn("nixos-integrity-manifest.json", production)
         self.assertIn("systemd.services.grabowski-operator", production)
 
+    def test_native_ingress_overrides_only_existing_unit_command(self):
+        source = (MODULES / "seagate-primary-candidate.nix").read_text()
+        block = source.split("  ingressDropIn = port: token: {", 1)[1].split(
+            "  # Keep the already-reviewed comparison", 1
+        )[0]
+        self.assertIn('overrideStrategy = "asDropin";', block)
+        self.assertIn('serviceConfig.ExecStart = [\n      ""', block)
+        self.assertIn(
+            '/bin/python3 -I -B -m grabowski_transport_ingress', block
+        )
+        self.assertIn('${config.heimPc.grabowskiProduction.operatorPackage}', block)
+        self.assertIn(
+            '--selector-file %h/.local/state/grabowski/transport-connectors/operator-routing-selector.json',
+            block,
+        )
+        self.assertIn(
+            '--token-file %h/.local/state/grabowski/transport-connectors/${token}.token',
+            block,
+        )
+        self.assertNotIn("wantedBy", block)
+        self.assertNotIn("unitConfig", block)
+        self.assertIn(
+            'lib.mkIf config.heimPc.grabowskiProduction.enable (ingressDropIn 18180 "primary")',
+            source,
+        )
+        self.assertIn(
+            'lib.mkIf config.heimPc.grabowskiProduction.enable (ingressDropIn 18183 "maulwurf-x")',
+            source,
+        )
+
 
 class RebindTests(unittest.TestCase):
     def setUp(self):
