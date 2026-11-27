@@ -54,6 +54,55 @@ class WorktreeHygieneWrapperTests(unittest.TestCase):
             self.assertEqual(summary["repositories_checked"], 1)
             self.assertEqual(summary["cleaned"], 1)
 
+    def test_degraded_cycle_retains_bounded_blocker_details(self):
+        result = {
+            "status": "degraded", "completed": False, "actions": 2,
+            "receipts": [
+                {"status": "passed", "output": {"cleaned": [{}]}},
+                {
+                    "status": "blocked", "receipt_sha256": "a" * 64,
+                    "output": {
+                        "repository": wrapper.REPOSITORIES[0],
+                        "errors": [
+                            {"path": "/checkout/one", "error": "terminal owner binding differs from checkout"},
+                            {"path": "/checkout/two", "error": "terminal_owner_exact_merge_not_proven"},
+                            {"path": "/checkout/three", "error": "x" * 1000},
+                            {"path": "/checkout/four", "error": "cleanup plan is not safe to apply"},
+                            {"path": "/checkout/five", "error": "omitted"},
+                        ],
+                        "unrelated": "not for journal",
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Path(directory) / "runner.py"
+            runner.write_text(
+                "def _apply_periodic_worktree_hygiene(**kwargs):\n"
+                f"    return {result!r}\n"
+            )
+            out = io.StringIO()
+            with (
+                patch.object(sys, "argv", [str(SCRIPT), str(runner)]),
+                patch.object(wrapper.Path, "is_dir", return_value=True),
+                redirect_stdout(out),
+            ):
+                self.assertEqual(wrapper.main(), 2)
+        summary = json.loads(out.getvalue())
+        self.assertEqual(summary["blocked"], 1)
+        self.assertEqual(summary["cleaned"], 1)
+        details = summary["blocked_details"]
+        self.assertEqual(len(details), 1)
+        detail = details[0]
+        self.assertEqual(detail["repository"], wrapper.REPOSITORIES[0])
+        self.assertEqual(detail["receipt_sha256"], "a" * 64)
+        self.assertEqual(detail["error_count"], 5)
+        self.assertEqual(detail["omitted_error_count"], 1)
+        self.assertEqual(len(detail["errors"]), 4)
+        self.assertEqual(detail["errors"][0], result["receipts"][1]["output"]["errors"][0])
+        self.assertLessEqual(len(detail["errors"][2]["error"]), 256)
+        self.assertNotIn("not for journal", out.getvalue())
+
     def test_missing_roots_are_not_broadly_substituted(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = Path(directory) / "runner.py"

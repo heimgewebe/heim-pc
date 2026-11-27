@@ -26,6 +26,28 @@ ROOTS = (
 )
 
 
+def _blocked_details(receipts):
+    """Project only bounded diagnostics from the existing Grip receipts."""
+    details = []
+    for receipt in receipts:
+        if receipt.get("status") != "blocked":
+            continue
+        output = receipt.get("output", {})
+        errors = output.get("errors", [])
+        details.append({
+            "repository": output.get("repository"),
+            "receipt_sha256": receipt.get("receipt_sha256"),
+            "error_count": len(errors),
+            "omitted_error_count": max(0, len(errors) - 4),
+            "errors": [
+                {"path": str(error.get("path", ""))[:256],
+                 "error": str(error.get("error", ""))[:256]}
+                for error in errors[:4]
+            ],
+        })
+    return details
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("expected exactly one pinned retention-runner path")
@@ -55,6 +77,7 @@ def main() -> int:
         "archived": sum(len(r.get("output", {}).get("archived", [])) for r in receipts),
         "cleaned": sum(len(r.get("output", {}).get("cleaned", [])) for r in receipts),
         "blocked": sum(r.get("status") == "blocked" for r in receipts),
+        "blocked_details": _blocked_details(receipts),
     }, sort_keys=True))
     return 0 if result["status"] == "passed" and result["completed"] else 2
 
