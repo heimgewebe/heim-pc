@@ -808,6 +808,25 @@ def test_partial_owned_oneshot_failure_restores_prior_state(boot_runtime):
     assert not list(executor.GC_ROOT_DIR.iterdir())
 
 
+def test_next_boot_recovery_bypass_is_scoped_to_older_boot_restore(boot_runtime):
+    state, boot, calls, runner, candidate, args = boot_runtime
+    seen = []
+
+    def fail_after_set(argv, closure):
+        if argv[-1] == "boot":
+            seen.append((closure, executor._minimal_env(closure).get("NIXOS_NO_CHECK")))
+        runner(argv, closure)
+        if "set-oneshot" in argv and argv[-1]:
+            raise executor.RuntimeExecutorError("injected partial EFI write")
+
+    with pytest.raises(executor.RuntimeExecutorError, match="prior boot state restored"):
+        executor.execute_activation(runner=fail_after_set, **args)
+    assert seen == [(CLOSURE, None), (PRIOR, "1")]
+    assert "NIXOS_NO_CHECK" not in executor._minimal_env(PRIOR)
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert boot["oneshot"] is None
+
+
 def test_foreign_oneshot_before_our_effect_is_not_cleared(boot_runtime):
     state, boot, calls, runner, candidate, args = boot_runtime
 

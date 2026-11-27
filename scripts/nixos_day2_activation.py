@@ -1534,7 +1534,13 @@ def _recover_next_boot(
         if observed["profile"] != baseline["profile"]:
             runner(_profile_set_argv(baseline["current"], baseline["profile"]), baseline["current"])
         if boot_attempted:
-            runner(_switch_argv(baseline["profile"], "boot"), baseline["profile"])
+            # Older immutable generations can still carry the removed
+            # downgrade check. Only this verified recovery invocation may skip it.
+            token = _RECOVERY_SKIP_PRE_SWITCH_CHECKS.set(True)
+            try:
+                runner(_switch_argv(baseline["profile"], "boot"), baseline["profile"])
+            finally:
+                _RECOVERY_SKIP_PRE_SWITCH_CHECKS.reset(token)
             # The normal install hook already restores defaults. Reuse its
             # fixed action only if an older immutable closure did not do so.
             restored = _observe_boot_state(target)
