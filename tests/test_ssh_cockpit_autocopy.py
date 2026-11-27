@@ -89,42 +89,58 @@ class AutocopyTests(unittest.TestCase):
                                       stdin=slave, stdout=slave, stderr=slave, env=env,
                                       start_new_session=True)
             os.close(slave)
+            second_master, second_slave = pty.openpty()
+            second_client = subprocess.Popen(
+                ["tmux", "-S", socket, "attach", "-t", "probe"],
+                stdin=second_slave, stdout=second_slave, stderr=second_slave,
+                env=env, start_new_session=True,
+            )
+            os.close(second_slave)
+            second_updates = []
 
             def drain(seconds):
-                raw = b""
+                raw = {master: b"", second_master: b""}
                 until = time.monotonic() + seconds
                 while time.monotonic() < until:
-                    if select.select([master], [], [], 0.1)[0]:
-                        try:
-                            raw += os.read(master, 65536)
-                        except OSError:
-                            break
-                return [base64.b64decode(value) for value in OSC52.findall(raw)]
+                    for fd in select.select([master, second_master], [], [], 0.1)[0]:
+                        raw[fd] += os.read(fd, 65536)
+                second_updates[:] = [base64.b64decode(value) for value in OSC52.findall(raw[second_master])]
+                return [base64.b64decode(value) for value in OSC52.findall(raw[master])]
 
             try:
                 drain(3)
                 os.write(master, b"printf 'AUTO_NORMAL_73\\n'\r")
                 normal = drain(4)
                 self.assertTrue(any(b"\nAUTO_NORMAL_73\n" in p for p in normal), normal)
+                self.assertTrue(any(b"\nAUTO_NORMAL_73\n" in p for p in second_updates), second_updates)
                 os.write(master, b"printf 'password=synthetic-test-only\\n'\r")
                 self.assertFalse(drain(4), "sensitive output copied")
+                self.assertFalse(second_updates, "sensitive output copied (second client)")
                 os.write(master, b"printf 'AUTO_RECOVERY_91\\n'\r")
                 recovered = drain(4)
                 self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in recovered), recovered)
                 self.assertTrue(all(b"synthetic-test-only" not in p for p in recovered))
+                self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in second_updates), second_updates)
+                self.assertTrue(all(b"synthetic-test-only" not in p for p in second_updates))
                 os.write(master, b"true\r")
                 self.assertFalse(drain(3.5), "command without output copied")
+                self.assertFalse(second_updates, "command without output copied (second client)")
                 os.write(master, b"unsubmitted-input")
                 self.assertFalse(drain(3.5), "unsubmitted input copied")
+                self.assertFalse(second_updates, "unsubmitted input copied (second client)")
                 os.write(master, b"\x15")
                 self.assertFalse(drain(3.5), "clearing input recopied old output")
+                self.assertFalse(second_updates, "clearing input recopied old output (second client)")
                 tm("set-environment", "-t", "=probe", "HEIM_AUTOCOPY", "off")
                 os.write(master, b"printf 'AUTO_DISABLED_55\\n'\r")
                 self.assertFalse(drain(4), "opt-out ignored")
+                self.assertFalse(second_updates, "opt-out ignored (second client)")
             finally:
                 tm("kill-server")
                 client.wait(timeout=5)
+                second_client.wait(timeout=5)
                 os.close(master)
+                os.close(second_master)
 
 
 if __name__ == "__main__":

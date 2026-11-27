@@ -257,7 +257,9 @@ def watch(socket: str) -> int:
                         current_ttys = active_panes(socket) or {}
                         attached = current_ttys.get(pane)
                         targets = pane_ids[pane][0].intersection(attached[0] if attached else set())
-                        if any(write_clipboard_tty(tty, data) for tty in sorted(targets)):
+                        # Attempt every attached client; any(generator) short-circuits.
+                        results = [write_clipboard_tty(tty, data) for tty in sorted(targets)]
+                        if any(results):
                             observed[pane] = (digest, prev[1], True, marker)
                             published[pane] = marker
                 else:

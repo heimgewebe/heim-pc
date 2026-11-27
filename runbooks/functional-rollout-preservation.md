@@ -16,7 +16,8 @@ führende Orientierung. Keine zweite Registry und keine pauschale Boot-Sperre.
   Laufende Sitzungen werden nicht beendet; neue Server bzw. Sitzungen
   müssen den tatsächlich verwendeten Hook nachweisen.
 - Regression: `python3 tests/test_ssh_cockpit_autocopy.py`. Der Linux-PTY-Test
-  prüft die tatsächlich ausgesendete OSC52-Sequenz, normales Ergebnis,
+  prüft die tatsächlich ausgesendete OSC52-Sequenz an zwei gleichzeitig
+  verbundenen Clients, normales Ergebnis,
   historische sensitive Ausgabe, keine Ausgabe, Eingabe ohne Ausführung und
   expliziten Opt-out. Ein übersprungener PTY-Test ist kein Funktionsnachweis.
 - Produktiv: Generation und Quellrevision vergleichen, den neuen Hook und
