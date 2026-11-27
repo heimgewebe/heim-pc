@@ -71,6 +71,12 @@ TRUSTED_UID = 0
 REQUEST_ROOT = Path("/run/heim-pc/nixos-activation/requests")
 CURRENT_SYSTEM_LINK = Path("/run/current-system")
 SYSTEM_PROFILE_LINK = Path("/nix/var/nix/profiles/system")
+BOOTED_SYSTEM_LINK = Path("/run/booted-system")
+BOOT_PROFILE_ROOT = Path("/nix/var/nix/profiles/system-profiles")
+EFI_VAR_ROOT = Path("/sys/firmware/efi/efivars")
+EFI_LOADER_GUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+LOADER_CONF = Path("/boot/loader/loader.conf")
+BOOT_ENTRY_RE = re.compile(r"nixos-[A-Za-z0-9_.+\-]{1,180}\.conf\Z")
 LOCK_PATH = Path("/run/lock/heim-pc-nixos-activation.lock")
 SELF_CGROUP_PATH = Path("/proc/self/cgroup")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -145,10 +151,8 @@ def _load_contract() -> dict[str, Any]:
         "activation": {
             "plan_kind": managed_nix.ACTIVATION_PLAN_KIND,
             "executor_authority": managed_nix.ACTIVATION_EXECUTOR_AUTHORITY,
-            "executable_modes": {"test": "test"},
-            "deferred_modes": {
-                "next-boot": "requires-reviewed-one-shot-boot-state-contract"
-            },
+            "executable_modes": {"test": "test", "next-boot": "boot"},
+            "deferred_modes": {},
         },
         "persistent-promotion": {
             "plan_kind": managed_nix.PERSISTENT_PROMOTION_PLAN_KIND,
@@ -268,7 +272,7 @@ def _load_contract() -> dict[str, Any]:
 
     if raw.get("successor_boundaries") != [
         "root-owned request staging, dedicated transient scope launch, and capability authorization",
-        "boot-critical one-shot next-boot activation and post-boot proof",
+        "boot-critical one-shot post-boot proof",
         "independent live-closure readback",
         "independent persistent-state observation provenance",
         "controlled reboot and post-boot readback",
@@ -397,7 +401,6 @@ def _require_link_target(path: Path, expected: str, *, label: str) -> str:
             f"{label} mismatch: expected {expected}, observed {observed}"
         )
     return observed
-
 
 def _persistent_state_payload(*, target: str, current_closure: str, profile_closure: str) -> dict[str, Any]:
     return {
@@ -910,7 +913,17 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
 
 
 def _run_exact(argv: Sequence[str], target_closure: str) -> None:
-    if not argv or any(not isinstance(item, str) or not item for item in argv):
+    # systemd-boot defines the empty entry ID as the exact OneShot clear
+    # operation. No other empty argument is admitted by this executor.
+    clear_oneshot = (
+        len(argv) == 4
+        and isinstance(argv[0], str)
+        and Path(argv[0]).name == "bootctl"
+        and list(argv[1:]) == ["--esp-path=/boot", "set-oneshot", ""]
+    )
+    if not argv or any(not isinstance(item, str) for item in argv) or (
+        any(not item for item in argv) and not clear_oneshot
+    ):
         raise RuntimeExecutorError("executor argv is invalid")
     if not argv[0].startswith("/nix/store/"):
         raise RuntimeExecutorError("executor command must be closure-bound")
@@ -1366,6 +1379,266 @@ def _execution_receipt(
     return receipt
 
 
+def _boot_profile_tool(closure: str) -> Path:
+    return _require_executable(
+        Path(closure) / "sw" / "bin" / "heim-pc-boot-profile-selection",
+        label="closure-bound boot profile resolver",
+    )
+
+
+def _boot_entry_id(value: str) -> str:
+    if BOOT_ENTRY_RE.fullmatch(value) is None:
+        raise RuntimeExecutorError("invalid native NixOS boot entry identity")
+    return value
+
+
+def _resolve_boot_entry(closure: str, profile: str, expected: str) -> str:
+    argv = [str(_boot_profile_tool(closure)), "--resolve-profile-entry", profile, expected]
+    try:
+        result = subprocess.run(
+            argv, cwd="/", env=_minimal_env(closure), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeExecutorError(f"boot entry resolution failed: {exc}") from exc
+    if result.returncode:
+        raise RuntimeExecutorError(
+            f"boot profile {profile} resolution failed: {result.stderr[-1000:]}"
+        )
+    return _boot_entry_id(result.stdout.strip())
+
+
+def _read_efi_entry(name: str, *, optional: bool = False) -> str | None:
+    path = EFI_VAR_ROOT / f"{name}-{EFI_LOADER_GUID}"
+    try:
+        if path.is_symlink():
+            raise RuntimeExecutorError(f"{name} must not be a symlink")
+        with path.open("rb") as stream:
+            raw = stream.read(513)
+    except FileNotFoundError as exc:
+        if optional and EFI_VAR_ROOT.is_dir():
+            return None
+        raise RuntimeExecutorError(f"{name} unavailable: {exc}") from exc
+    except OSError as exc:
+        raise RuntimeExecutorError(f"{name} unavailable: {exc}") from exc
+    if not 6 <= len(raw) <= 512 or len(raw) % 2:
+        raise RuntimeExecutorError(f"{name} has invalid EFI variable length")
+    try:
+        value = raw[4:].decode("utf-16-le")
+    except UnicodeError as exc:
+        raise RuntimeExecutorError(f"{name} is not valid UTF-16") from exc
+    if not value.endswith("\0") or "\0" in value[:-1]:
+        raise RuntimeExecutorError(f"{name} has invalid EFI string terminator")
+    return _boot_entry_id(value[:-1])
+
+
+def _observe_boot_state(closure: str) -> dict[str, Any]:
+    def observed(path: Path, label: str) -> str:
+        value = _resolve_link(path, label=label)
+        try:
+            return managed_nix._require_closure(value, label)
+        except managed_nix.ManagedNixError as exc:
+            raise RuntimeExecutorError(f"{label} is not a system closure") from exc
+
+    state = {
+        "current": observed(CURRENT_SYSTEM_LINK, "current system"),
+        "booted": observed(BOOTED_SYSTEM_LINK, "booted system"),
+        "profile": observed(SYSTEM_PROFILE_LINK, "system profile"),
+        "approved": observed(BOOT_PROFILE_ROOT / "heim-pc-approved", "approved profile"),
+        "recovery": observed(BOOT_PROFILE_ROOT / "heim-pc-recovery", "recovery profile"),
+    }
+    state["approved_entry"] = _resolve_boot_entry(closure, "heim-pc-approved", state["approved"])
+    state["recovery_entry"] = _resolve_boot_entry(closure, "heim-pc-recovery", state["recovery"])
+    state["default"] = _read_efi_entry("LoaderEntryDefault")
+    state["sysfail"] = _read_efi_entry("LoaderEntrySysFail")
+    state["oneshot"] = _read_efi_entry("LoaderEntryOneShot", optional=True)
+    try:
+        if LOADER_CONF.is_symlink():
+            raise RuntimeExecutorError("loader.conf must not be a symlink")
+        with LOADER_CONF.open(encoding="utf-8") as stream:
+            data = stream.read(65537)
+        if len(data) > 65536:
+            raise RuntimeExecutorError("loader.conf is unexpectedly large")
+        defaults = [line[8:] for line in data.splitlines() if line.startswith("default ")]
+        if len(defaults) != 1:
+            raise RuntimeExecutorError("loader.conf must contain one default")
+        state["loader_default"] = _boot_entry_id(defaults[0])
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeExecutorError(f"loader.conf unavailable: {exc}") from exc
+    return state
+
+
+def _require_approved_defaults(state: Mapping[str, Any]) -> None:
+    if (
+        state["default"] != state["approved_entry"]
+        or state["loader_default"] != state["approved_entry"]
+        or state["sysfail"] != state["recovery_entry"]
+    ):
+        raise RuntimeExecutorError("EFI/loader defaults do not match approved and recovery profiles")
+
+
+def _require_boot_state(
+    observed: Mapping[str, Any], baseline: Mapping[str, Any], *,
+    profile: str, oneshot: str | None,
+) -> None:
+    expected = dict(baseline, profile=profile, oneshot=oneshot)
+    if dict(observed) != expected:
+        changed = sorted(key for key in expected if observed.get(key) != expected[key])
+        raise RuntimeExecutorError("boot state drift: " + ", ".join(changed))
+
+
+def _oneshot_argv(closure: str, entry: str | None) -> list[str]:
+    path = _require_executable(
+        Path(closure) / "sw" / "bin" / "bootctl", label="closure-bound bootctl"
+    )
+    return [str(path), "--esp-path=/boot", "set-oneshot", "" if entry is None else _boot_entry_id(entry)]
+
+
+def _recover_next_boot(
+    *, baseline: Mapping[str, Any], target: str, candidate: str | None,
+    boot_attempted: bool, oneshot_attempted: bool, runner: Runner,
+) -> None:
+    # Do not overwrite another operator's pending boot or changed named pins.
+    # A failed native boot install can temporarily select our exact candidate.
+    # Only that candidate (or the original default) is recoverable here.
+    with _defer_termination():
+        observed = _observe_boot_state(target)
+        pinned_keys = ("current", "booted", "approved", "recovery", "approved_entry", "recovery_entry")
+        if any(observed[key] != baseline[key] for key in pinned_keys):
+            raise RuntimeExecutorError("boot recovery refused: named pins or running system drifted")
+        if observed["profile"] not in {baseline["profile"], target}:
+            raise RuntimeExecutorError("boot recovery refused: system profile drifted")
+        if boot_attempted and candidate is None and observed["profile"] == target:
+            try:
+                candidate = _resolve_boot_entry(target, "system", target)
+            except RuntimeExecutorError:
+                # The boot installation may have failed before writing its entry.
+                # This is recoverable only if the existing defaults are intact.
+                pass
+        allowed_defaults = {baseline["default"]}
+        if boot_attempted and candidate is not None:
+            allowed_defaults.add(candidate)
+        if (
+            observed["default"] not in allowed_defaults
+            or observed["loader_default"] not in allowed_defaults
+            or observed["sysfail"] != baseline["sysfail"]
+            or (observed["oneshot"] is not None and (
+                not oneshot_attempted or candidate is None or observed["oneshot"] != candidate
+            ))
+        ):
+            raise RuntimeExecutorError("boot recovery refused: unrelated EFI selection observed")
+        if observed["oneshot"] is not None:
+            runner(_oneshot_argv(target, None), target)
+            if _read_efi_entry("LoaderEntryOneShot", optional=True) is not None:
+                raise RuntimeExecutorError("boot recovery failed to clear owned OneShot")
+        if observed["profile"] != baseline["profile"]:
+            runner(_profile_set_argv(baseline["current"], baseline["profile"]), baseline["current"])
+        if boot_attempted:
+            runner(_switch_argv(baseline["profile"], "boot"), baseline["profile"])
+            # The normal install hook already restores defaults. Reuse its
+            # fixed action only if an older immutable closure did not do so.
+            restored = _observe_boot_state(target)
+            if any(restored[key] != baseline[key] for key in pinned_keys) or restored["oneshot"] is not None:
+                raise RuntimeExecutorError("boot recovery refused: state drift during restoration")
+            if restored["profile"] != baseline["profile"]:
+                raise RuntimeExecutorError("boot recovery failed to restore system profile")
+            if any(restored[key] != baseline[key] for key in ("default", "sysfail", "loader_default")):
+                runner([str(_boot_profile_tool(target))], target)
+        _require_boot_state(
+            _observe_boot_state(target), baseline, profile=baseline["profile"], oneshot=None,
+        )
+
+
+def _execute_next_boot(
+    *, request_id: str, plan: Mapping[str, Any], build_digest: str,
+    plan_digest: str, executor_cgroup: str, reauthorize: Callable[[], Mapping[str, Any]],
+    runner: Runner,
+) -> dict[str, Any]:
+    target = plan["system_closure"]
+    prior = plan["prior_closure"]
+    baseline = _observe_boot_state(target)
+    _require_approved_defaults(baseline)
+    if baseline["current"] != prior or baseline["booted"] != baseline["approved"]:
+        raise RuntimeExecutorError("next-boot requires bound current system and booted approved fallback")
+    if baseline["oneshot"] is not None:
+        raise RuntimeExecutorError("existing OneShot must be reconciled before staging a new boot")
+    # The normal profile can differ from the live/approved closure. Pin its
+    # actual preimage, rather than inventing equality and blocking valid work.
+    gc_prior = baseline["profile"] if baseline["profile"] != target else prior
+    profile_argv = _profile_set_argv(prior, target)
+    boot_argv = _switch_argv(target, "boot")
+    _profile_set_argv(prior, baseline["profile"])
+    _switch_argv(baseline["profile"], "boot")
+    _oneshot_argv(target, None)
+    commands: list[list[str]] = []
+    candidate: str | None = None
+    boot_attempted = False
+    oneshot_attempted = False
+    with _pinned_transaction_closures(
+        request_id=request_id, prior_closure=gc_prior, target_closure=target,
+    ) as (gc_roots, gc_root_argvs, release_gc_roots, retain_gc_roots):
+        with _controlled_termination() as termination:
+            _require_boot_state(_observe_boot_state(target), baseline, profile=baseline["profile"], oneshot=None)
+            plan = reauthorize()
+            _raise_if_termination_requested(termination)
+            try:
+                if baseline["profile"] != target:
+                    commands.append(profile_argv)
+                    runner(profile_argv, prior)
+                    _raise_if_termination_requested(termination)
+                    _require_boot_state(_observe_boot_state(target), baseline, profile=target, oneshot=None)
+                boot_attempted = True
+                commands.append(boot_argv)
+                runner(boot_argv, target)
+                _raise_if_termination_requested(termination)
+                candidate = _resolve_boot_entry(target, "system", target)
+                _require_boot_state(_observe_boot_state(target), baseline, profile=target, oneshot=None)
+                oneshot_argv = _oneshot_argv(target, candidate)
+                commands.append(oneshot_argv)
+                oneshot_attempted = True
+                runner(oneshot_argv, target)
+                _raise_if_termination_requested(termination)
+                post = _observe_boot_state(target)
+                _require_boot_state(post, baseline, profile=target, oneshot=candidate)
+                if _resolve_boot_entry(target, "system", target) != candidate:
+                    raise RuntimeExecutorError("candidate boot entry changed during staging")
+                release_gc_roots()
+            except _ProcessTerminationUncertain:
+                raise
+            except (_ExecutorInterrupted, KeyboardInterrupt, RuntimeExecutorError) as effect_error:
+                try:
+                    _recover_next_boot(
+                        baseline=baseline, target=target, candidate=candidate,
+                        boot_attempted=boot_attempted, oneshot_attempted=oneshot_attempted, runner=runner,
+                    )
+                except _ProcessTerminationUncertain:
+                    raise
+                except RuntimeExecutorError as recovery_error:
+                    retain_gc_roots()
+                    raise RuntimeExecutorError(
+                        f"next-boot staging failed and recovery is incomplete: {effect_error}; {recovery_error}"
+                    ) from recovery_error
+                raise RuntimeExecutorError(
+                    f"next-boot staging failed; prior boot state restored: {effect_error}"
+                ) from effect_error
+    receipt = _execution_receipt(
+        request_id=request_id, operation="activation", mode="next-boot",
+        plan=plan, build_receipt_sha256=build_digest, plan_sha256=plan_digest,
+        argv=boot_argv, effect_argvs=commands, gc_root_argvs=gc_root_argvs,
+        executor_cgroup=executor_cgroup, prior_gc_root=str(gc_roots["prior"]),
+        target_gc_root=str(gc_roots["target"]), pre_current=baseline["current"],
+        pre_profile=baseline["profile"], post_current=post["current"],
+        post_profile=post["profile"], profile_mutated=baseline["profile"] != target,
+    )
+    receipt.update(
+        boot_state_before=baseline, boot_state_after=post, candidate_entry=candidate,
+        prior_gc_root_closure=gc_prior, next_boot_staged=True, boot_proven=False,
+    )
+    receipt.pop("receipt_sha256")
+    receipt["receipt_sha256"] = _sha256_json(receipt)
+    return receipt
+
+
 def execute_activation(
     *,
     request_id: str,
@@ -1411,11 +1684,19 @@ def execute_activation(
             expected_target=expected_target,
             now=_utc_now(),
         )
-        if plan["mode"] != "test":
-            raise RuntimeExecutorError(
-                "next-boot runtime execution is deferred until a reviewed "
-                "one-shot boot-state contract exists"
+        if plan["mode"] == "next-boot":
+            return _execute_next_boot(
+                request_id=request_id, plan=plan, build_digest=build_digest,
+                plan_digest=plan_digest, executor_cgroup=executor_cgroup,
+                reauthorize=lambda: managed_nix.authorize_activation_plan_execution(
+                    locked_build, locked_authority, locked_plan,
+                    expected_authority_sha256=expected_authority_sha256,
+                    expected_target=expected_target, now=_utc_now(),
+                ),
+                runner=runner,
             )
+        if plan["mode"] != "test":
+            raise RuntimeExecutorError("unsupported activation mode")
 
         pre_current = _require_link_target(
             CURRENT_SYSTEM_LINK,
@@ -1572,7 +1853,7 @@ def execute_persistent_promotion(
         if validated_build["effect_scope"] == "boot-critical":
             raise RuntimeExecutorError(
                 "boot-critical persistent promotion requires a successful "
-                "next-boot successor proof; that runtime path is not implemented here"
+                "next-boot successor proof; promotion after reboot is not implemented here"
             )
         structural_plan = managed_nix.validate_persistent_promotion_plan(locked_plan)
         pre_current = _require_link_target(

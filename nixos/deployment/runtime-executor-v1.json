@@ -7,11 +7,10 @@
       "plan_kind": "heim_pc.nixos_activation_plan",
       "executor_authority": "successor-task-typed-activation-only",
       "executable_modes": {
-        "test": "test"
+        "test": "test",
+        "next-boot": "boot"
       },
-      "deferred_modes": {
-        "next-boot": "requires-reviewed-one-shot-boot-state-contract"
-      }
+      "deferred_modes": {}
     },
     "persistent-promotion": {
       "plan_kind": "heim_pc.nixos_persistent_promotion_plan_v2",
@@ -108,7 +107,7 @@
   ],
   "successor_boundaries": [
     "root-owned request staging, dedicated transient scope launch, and capability authorization",
-    "boot-critical one-shot next-boot activation and post-boot proof",
+    "boot-critical one-shot post-boot proof",
     "independent live-closure readback",
     "independent persistent-state observation provenance",
     "controlled reboot and post-boot readback",
