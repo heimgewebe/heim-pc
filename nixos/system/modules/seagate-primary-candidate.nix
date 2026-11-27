@@ -1,5 +1,15 @@
 { config, lib, pkgs, ... }:
 let
+  # The existing private user units own enablement, credentials, routing and
+  # lifecycle. Only replace their command with the package of this generation.
+  # Isolated Python deliberately ignores the old user PYTHONPATH drop-in.
+  ingressDropIn = port: token: {
+    overrideStrategy = "asDropin";
+    serviceConfig.ExecStart = [
+      ""
+      "${config.heimPc.grabowskiProduction.operatorPackage}/bin/python3 -I -B -m grabowski_transport_ingress --host 127.0.0.1 --port ${toString port} --selector-file %h/.local/state/grabowski/transport-connectors/operator-routing-selector.json --token-file %h/.local/state/grabowski/transport-connectors/${token}.token"
+    ];
+  };
   # Keep the already-reviewed comparison and its documentation in the same
   # immutable target closure. No live checkout, network or mutable user path.
   integrationInventory = pkgs.runCommand "heim-pc-integration-inventory" {} ''
@@ -129,6 +139,15 @@ in
       esac
       true
     '';
+
+  # No base unit, WantedBy or token is created for an unconfigured connector.
+  # A regular boot starts existing units with these exact immutable commands.
+  # For a live switch the coordinated rollout must reload the user manager
+  # and restart only configured ingress units, then verify the real connector.
+  systemd.user.services."grabowski-transport-ingress" =
+    lib.mkIf config.heimPc.grabowskiProduction.enable (ingressDropIn 18180 "primary");
+  systemd.user.services."grabowski-transport-ingress-maulwurf-x" =
+    lib.mkIf config.heimPc.grabowskiProduction.enable (ingressDropIn 18183 "maulwurf-x");
 
   # Consume the already-computed catalog CI report. The timer remains native
   # and only alex's user manager may register proposal-only Bureau candidates.
