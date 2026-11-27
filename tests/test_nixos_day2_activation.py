@@ -734,6 +734,7 @@ def boot_runtime(runtime, monkeypatch):
         "sysfail": recovery_id, "oneshot": None,
     }
     calls = []
+    monkeypatch.setattr(executor, "_read_boot_id", lambda: "11111111-1111-1111-1111-111111111111")
 
     monkeypatch.setattr(executor, "_observe_boot_state", lambda _: dict(boot, **state))
 
@@ -777,9 +778,69 @@ def test_native_next_boot_stages_without_switch_or_promotion(boot_runtime):
     assert calls[1][-1] == "boot"
     assert result["next_boot_staged"] is True
     assert result["boot_proven"] is False
+    assert result["staging_boot_id"] == "11111111-1111-1111-1111-111111111111"
     assert result["prior_gc_root_closure"] == prior_profile
     assert result["candidate_entry"] == candidate
     assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+def _postboot_fixture(boot_runtime, monkeypatch):
+    state, boot, calls, runner, candidate, args = boot_runtime
+    receipt = executor.execute_activation(runner=runner, **args)
+    path = executor.REQUEST_ROOT / args["request_id"] / "staging-receipt.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    path.chmod(0o600)
+    state["current"] = CLOSURE
+    boot.update(booted=CLOSURE, oneshot=None)
+    monkeypatch.setattr(executor, "_read_boot_id", lambda: "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setattr(executor, "_read_efi_entry", lambda name, **_: candidate if name == "LoaderEntrySelected" else boot["oneshot"])
+    observe = dict(
+        request_id=args["request_id"],
+        expected_staging_receipt_sha256=managed_nix.sha256_json(receipt),
+        expected_target=TARGET,
+    )
+    return state, boot, calls, candidate, receipt, observe
+
+
+def test_postboot_observation_binds_new_boot_and_exact_entry(boot_runtime, monkeypatch):
+    state, boot, calls, candidate, receipt, observe = _postboot_fixture(boot_runtime, monkeypatch)
+    before = list(calls)
+    result = executor.observe_next_boot(**observe)
+    assert result["boot_identity_established"] is True
+    assert result["application_health_established"] is False
+    assert result["persistent_promotion_authorized"] is False
+    assert result["selected_entry"] == candidate
+    assert result["staging_boot_id"] != result["observed_boot_id"]
+    assert result["boot_state"]["approved"] == PRIOR
+    assert calls == before
+
+
+@pytest.mark.parametrize("drift", ["same-boot", "wrong-closure", "wrong-entry", "oneshot-present", "approved-drift", "digest", "self-digest", "target"])
+def test_postboot_observation_rejects_unproven_boot(boot_runtime, monkeypatch, drift):
+    state, boot, calls, candidate, receipt, observe = _postboot_fixture(boot_runtime, monkeypatch)
+    if drift == "same-boot":
+        monkeypatch.setattr(executor, "_read_boot_id", lambda: receipt["staging_boot_id"])
+    elif drift == "wrong-closure":
+        boot["booted"] = PRIOR
+    elif drift == "wrong-entry":
+        monkeypatch.setattr(executor, "_read_efi_entry", lambda *_args, **_kw: "nixos-generation-99.conf")
+    elif drift == "oneshot-present":
+        boot["oneshot"] = candidate
+    elif drift == "approved-drift":
+        boot["approved"] = CLOSURE
+    elif drift == "digest":
+        observe["expected_staging_receipt_sha256"] = "0" * 64
+    elif drift == "self-digest":
+        receipt["receipt_sha256"] = "0" * 64
+        path = executor.REQUEST_ROOT / observe["request_id"] / "staging-receipt.json"
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        observe["expected_staging_receipt_sha256"] = managed_nix.sha256_json(receipt)
+    elif drift == "target":
+        observe["expected_target"] = "unrelated-target"
+    before = list(calls)
+    with pytest.raises(executor.RuntimeExecutorError):
+        executor.observe_next_boot(**observe)
+    assert calls == before
 
 
 def test_existing_oneshot_refuses_without_effect(boot_runtime):
@@ -840,6 +901,18 @@ def test_foreign_oneshot_before_our_effect_is_not_cleared(boot_runtime):
     assert boot["oneshot"] == candidate
     assert not any("set-oneshot" in cmd for cmd in calls)
     assert list(executor.GC_ROOT_DIR.iterdir())
+
+
+def test_read_boot_id_requires_kernel_uuid(monkeypatch, tmp_path):
+    path = tmp_path / "boot_id"
+    monkeypatch.setattr(executor, "BOOT_ID_PATH", path)
+    boot_id = "f40f9628-a1bb-4eb8-bfda-25e2cb469845"
+    path.write_text(boot_id + "\n", encoding="ascii")
+    assert executor._read_boot_id() == boot_id
+    for invalid in ("", "not-a-uuid", boot_id + "\nextra", " " + boot_id):
+        path.write_text(invalid, encoding="ascii")
+        with pytest.raises(executor.RuntimeExecutorError, match="invalid kernel boot ID"):
+            executor._read_boot_id()
 
 
 def test_read_native_efi_entry(monkeypatch, tmp_path):
@@ -1594,6 +1667,12 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     activation = contract["supported_operations"]["activation"]
     assert activation["executable_modes"] == {"test": "test", "next-boot": "boot"}
     assert activation["deferred_modes"] == {}
+    assert contract["supported_operations"]["observe-next-boot"] == {
+        "staging_receipt_file": "staging-receipt.json",
+        "external_expected_sha256_required": True,
+        "effect": "read-only",
+        "promotion_authorized": False,
+    }
     promotion = contract["supported_operations"]["persistent-promotion"]
     assert promotion["boot_critical_requires_next_boot_successor_proof"] is True
     assert promotion["boot_critical_execution_implemented_here"] is False

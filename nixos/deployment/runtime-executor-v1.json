@@ -12,6 +12,12 @@
       },
       "deferred_modes": {}
     },
+    "observe-next-boot": {
+      "staging_receipt_file": "staging-receipt.json",
+      "external_expected_sha256_required": true,
+      "effect": "read-only",
+      "promotion_authorized": false
+    },
     "persistent-promotion": {
       "plan_kind": "heim_pc.nixos_persistent_promotion_plan_v2",
       "executor_authority": "successor-task-typed-persistent-promotion-only",
