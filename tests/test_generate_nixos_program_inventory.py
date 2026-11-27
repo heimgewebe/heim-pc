@@ -188,6 +188,7 @@ def fake_closure(root, units=(), links=(), masked=()):
     for scope in ("system", "user"):
         (root / "etc/systemd" / scope).mkdir(parents=True)
     (root / "sw/share/applications").mkdir(parents=True)
+    (root / "sw/bin").mkdir(parents=True)
     for scope, name in units:
         (root / "etc/systemd" / scope / name).write_text("[Unit]\n")
     for scope, name in masked:
@@ -257,3 +258,51 @@ def test_closure_diff_tracks_opaque_links_and_extra_systemd_unit_types(tmp_path)
     assert report["changes"]["system_dependency_links"]["removed"] == [
         inv.opaque_name("multi-user.target.wants/personal@abc.service")]
     assert "personal@" not in json.dumps(report)
+
+def test_closure_diff_detects_cli_and_etc_path_removals(tmp_path):
+    before = fake_closure(tmp_path / "old")
+    after = fake_closure(tmp_path / "new")
+    for closure in (before, after):
+        (closure / "etc/heim-pc").mkdir()
+        (closure / "sw/bin/kept-tool").symlink_to("/nonexistent/store/kept")
+        (closure / "etc/heim-pc/kept.conf").write_text("different content is not metadata")
+    (before / "sw/bin/tmux-autocopy-watch").symlink_to("/nonexistent/store/old")
+    (before / "etc/heim-pc/tmux-autocopy.conf").write_text("synthetic private content")
+    (after / "sw/bin/replacement-tool").symlink_to("/nonexistent/store/new")
+    (after / "etc/heim-pc/kept.conf").write_text("changed")
+    report = inv.compare_closures(before, after, "")
+    assert report["changes"]["cli_entries"] == {
+        "added": ["replacement-tool"], "removed": ["tmux-autocopy-watch"]}
+    assert report["changes"]["etc_paths"] == {
+        "added": [], "removed": ["heim-pc/tmux-autocopy.conf"]}
+    assert "synthetic private content" not in json.dumps(report)
+    assert "/nonexistent/store" not in json.dumps(report)
+
+
+def test_declared_path_names_do_not_traverse_nested_symlinks(tmp_path):
+    before = fake_closure(tmp_path / "old")
+    after = fake_closure(tmp_path / "new")
+    external = tmp_path / "outside"
+    external.mkdir()
+    (external / "outside-child").write_text("not part of closure")
+    (before / "etc/linked").symlink_to(external, target_is_directory=True)
+    (before / "etc/loop").symlink_to(before / "etc", target_is_directory=True)
+    (before / "sw/bin/private@tool").symlink_to(external / "outside-child")
+    (before / "etc/secret-dir").mkdir()
+    (before / "etc/secret-dir/private.conf").write_text("synthetic")
+    report = inv.compare_closures(before, after, "")
+    assert report["changes"]["cli_entries"]["removed"] == [inv.opaque_name("private@tool")]
+    assert report["changes"]["etc_paths"]["removed"] == sorted([
+        "linked", "loop", inv.opaque_name("secret-dir"), inv.opaque_name("secret-dir/private.conf")])
+    assert report["opaque_metadata_names"]["baseline"]["etc_paths"] == 2
+    assert "outside-child" not in json.dumps(report)
+    assert "secret-dir" not in json.dumps(report)
+    assert "private@tool" not in json.dumps(report)
+
+
+def test_closure_diff_refuses_missing_cli_surface(tmp_path):
+    before = fake_closure(tmp_path / "old")
+    after = fake_closure(tmp_path / "new")
+    (after / "sw/bin").rmdir()
+    with pytest.raises(ValueError, match="missing declared CLI directory"):
+        inv.compare_closures(before, after, "")
