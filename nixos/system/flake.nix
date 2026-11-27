@@ -1534,6 +1534,12 @@ PY
           ) [ target proprietary open ];
           assert !vm.hardware.cpu.amd.updateMicrocode;
           assert !vm.heimPc.hardware.nvidia.enable && !vm.heimPc.physicalGates.enable;
+          # The physical Ethernet diagnostic is owned by the generation.
+          assert target.networking.interfaces.enp7s0.wakeOnLan.enable;
+          assert builtins.any (package: (package.name or "") == "heim-pc-network-link-diagnostics")
+            target.environment.systemPackages;
+          assert !(builtins.any (package: (package.name or "") == "heim-pc-network-link-diagnostics")
+            vm.environment.systemPackages);
           assert builtins.all (c:
             c.services.logind.settings.Login.IdleAction == "ignore"
             && c.environment.etc."xdg/powerdevilrc".text == ''
