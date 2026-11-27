@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import importlib.util
 import os
@@ -63,8 +64,27 @@ class AutocopyTests(unittest.TestCase):
         redraw = prompt + b"printf hello\nhe   "
         self.assertIsNone(watcher.output_marker(redraw, "bash"))
         self.assertEqual(watcher.copy_payload(redraw, "bash"), b"")
+        no_output_after_redraw = prompt + b"printf hello\nhetrue   \n" + prompt
+        self.assertEqual(watcher.output_marker(no_output_after_redraw, "bash"), marker)
         old = prompt + b"echo example\npassword=synthetic-test-only\n"
         self.assertEqual(watcher.copy_payload(old + result, "bash"), prompt + b"printf hello\nhello")
+
+    def test_private_history_boundary(self):
+        spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        prompt = b"[probe@heim-pc:~]$ "
+        # Inline prompt after disabled output; the prefix includes the old
+        # bytes, but the outgoing payload must not.
+        prior = prompt + b"printf hidden\nPRIVATE_OLD" + prompt
+        anchor = watcher.private_anchor(prior, "bash")
+        self.assertIsNotNone(anchor)
+        current = prior + b"printf safe\nSAFE\n" + prompt
+        self.assertIn(b"SAFE", watcher.private_payload(current, "bash", anchor))
+        self.assertNotIn(b"PRIVATE_OLD", watcher.private_payload(current, "bash", anchor))
+        self.assertEqual(watcher.private_payload(prompt + b"printf safe\nSAFE\n" + prompt, "bash", anchor), b"")
+        self.assertEqual(watcher.private_payload(current, "vim", anchor), b"")
+        self.assertEqual(watcher.private_payload(current, "bash", None), b"")
 
     def test_migration_and_rollback_preserve_legacy(self):
         module = load_migration()
@@ -98,7 +118,83 @@ class AutocopyTests(unittest.TestCase):
             self.assertTrue(config.is_symlink())
             self.assertEqual(target.read_bytes(), b"custom")
 
+    def test_direct_new_session_and_slow_native_osc52(self):
+        missing = [name for name in ("tmux", "setsid", "bash") if not shutil.which(name)]
+        if sys.platform != "linux" or missing:
+            reason = f"Linux tmux PTY prerequisites unavailable: {missing}"
+            if sys.platform == "linux" and os.environ.get("GITHUB_ACTIONS") == "true":
+                self.fail(reason)
+            self.skipTest(reason)
+        with tempfile.TemporaryDirectory(prefix="autocopy-direct-") as directory:
+            path = Path(directory)
+            socket = str(path / "sock")
+            watcher = path / "watch"
+            watcher.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(SOURCE / "watch.py")) + ' "$@"\n')
+            watcher.chmod(0o700)
+            config = path / "tmux.conf"
+            config.write_text((SOURCE / "tmux.conf.in").read_text()
+                              .replace("@setsid@", shutil.which("setsid"))
+                              .replace("@watcher@", str(watcher))
+                              .replace("@omnicopy@", shutil.which("true")))
+            env = dict(os.environ, TERM="xterm-256color")
+            for key in ("TMUX", "TMUX_PANE", "PROMPT_COMMAND"):
+                env.pop(key, None)
+            env["PS1"] = "[probe@heim-pc:~]$ "
+            tm = lambda *a: subprocess.run(["tmux", "-S", socket, *a], env=env, capture_output=True, timeout=10)
+            lock_name = "heim-cockpit-autocopy-" + hashlib.sha256(socket.encode()).hexdigest()[:12] + ".lock"
+            lock = os.open(path / lock_name, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            master, slave = pty.openpty()
+            # No detached session and no later attach: this exercises the
+            # direct new-session lifecycle and a transient lock handoff.
+            client = subprocess.Popen(
+                ["tmux", "-S", socket, "-f", str(config), "new-session", "-s", "probe",
+                 "bash --noprofile --norc -i"],
+                stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
+            )
+            os.close(slave)
+
+            def drain(seconds):
+                raw = b""
+                until = time.monotonic() + seconds
+                while time.monotonic() < until:
+                    if select.select([master], [], [], 0.1)[0]:
+                        raw += os.read(master, 65536)
+                return raw
+
+            try:
+                drain(0.5)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                drain(3)
+                # Withhold PTY reads while native tmux queues a long OSC52
+                # publication, then send another command and drain both.
+                os.write(master, b"printf 'NATIVE_LONG_%030000d_TAIL\\n' 7\r")
+                time.sleep(4)
+                os.write(master, b"printf 'NATIVE_AFTER_67\\n'\r")
+                raw = drain(5)
+                payloads = [base64.b64decode(value) for value in OSC52.findall(raw)]
+                large = b"NATIVE_LONG_" + b"0" * 29999 + b"7_TAIL"
+                self.assertTrue(any(large in data for data in payloads),
+                                [(len(data), data[:100]) for data in payloads])
+                self.assertTrue(any(b"\nNATIVE_AFTER_67" in data for data in payloads),
+                                [(len(data), data[-100:]) for data in payloads])
+            finally:
+                tm("kill-server")
+                try:
+                    client.wait(timeout=5)
+                finally:
+                    if client.poll() is None:
+                        client.terminate()
+                    os.close(master)
+                    os.close(lock)
+
     def test_real_pty_osc52_and_opt_out(self):
+        self._exercise_real_pty(include_sensitive_history=True)
+
+    def test_real_pty_opt_out_history(self):
+        self._exercise_real_pty(include_sensitive_history=False)
+
+    def _exercise_real_pty(self, *, include_sensitive_history):
         missing = [name for name in ("tmux", "setsid", "bash") if not shutil.which(name)]
         if sys.platform != "linux" or missing:
             reason = f"Linux tmux PTY prerequisites unavailable: {missing}"
@@ -162,15 +258,16 @@ class AutocopyTests(unittest.TestCase):
                 os.write(master, b"\x15")
                 self.assertFalse(drain(3.5), "clearing inline input recopied output")
                 self.assertFalse(second_updates, "clearing inline input recopied output (second client)")
-                os.write(master, b"printf 'password=synthetic-test-only\\n'\r")
-                self.assertFalse(drain(4), "sensitive output copied")
-                self.assertFalse(second_updates, "sensitive output copied (second client)")
-                os.write(master, b"printf 'AUTO_RECOVERY_91\\n'\r")
-                recovered = drain(4)
-                self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in recovered), recovered)
-                self.assertTrue(all(b"synthetic-test-only" not in p for p in recovered))
-                self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in second_updates), second_updates)
-                self.assertTrue(all(b"synthetic-test-only" not in p for p in second_updates))
+                if include_sensitive_history:
+                    os.write(master, b"printf 'password=synthetic-test-only\\n'\r")
+                    self.assertFalse(drain(4), "sensitive output copied")
+                    self.assertFalse(second_updates, "sensitive output copied (second client)")
+                    os.write(master, b"printf 'AUTO_RECOVERY_91\\n'\r")
+                    recovered = drain(4)
+                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in recovered), recovered)
+                    self.assertTrue(all(b"synthetic-test-only" not in p for p in recovered))
+                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in second_updates), second_updates)
+                    self.assertTrue(all(b"synthetic-test-only" not in p for p in second_updates))
                 os.write(master, b"true\r")
                 self.assertFalse(drain(3.5), "command without output copied")
                 self.assertFalse(second_updates, "command without output copied (second client)")
@@ -191,6 +288,10 @@ class AutocopyTests(unittest.TestCase):
                 reenabled = drain(4)
                 self.assertTrue(any(b"\nAUTO_REENABLED_83" in p for p in reenabled), reenabled)
                 self.assertTrue(any(b"\nAUTO_REENABLED_83" in p for p in second_updates), second_updates)
+                self.assertFalse(any(b"AUTO_DISABLED_55" in p for p in reenabled + second_updates),
+                                 "disabled-session history included in later safe publication")
+                marker = tm("show-environment", "-t", "=probe", "HEIM_AUTOCOPY_PRIVATE_HISTORY")
+                self.assertEqual(marker.stdout.strip(), b"HEIM_AUTOCOPY_PRIVATE_HISTORY=1")
             finally:
                 tm("kill-server")
                 client.wait(timeout=5)
