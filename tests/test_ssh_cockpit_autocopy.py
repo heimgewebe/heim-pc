@@ -32,6 +32,21 @@ class AutocopyTests(unittest.TestCase):
     def test_watcher_selftest(self):
         subprocess.run([sys.executable, str(SOURCE / "watch.py"), "--self-test"], check=True)
 
+    def test_long_sensitive_command_and_safe_recovery(self):
+        spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        # Entirely synthetic pane text, no commands executed or private files read.
+        prompt = b"[probe@heim-pc:~]$ "
+        sensitive = prompt + b"cat /run/secrets/example\n"
+        neutral_lines = b"synthetic-output\n" * 30
+        safe = prompt + b"printf OK\nOK\n"
+        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines + prompt, "bash"), b"")
+        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines, "cat"), b"")
+        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines + safe + prompt, "bash"), safe.rstrip(b"\n"))
+        ordinary = prompt + b"printf ordinary\n" + neutral_lines + prompt
+        self.assertEqual(watcher.copy_payload(ordinary, "bash"), ordinary)
+
     def test_migration_and_rollback_preserve_legacy(self):
         module = load_migration()
         old = b"known synthetic legacy config\n"
@@ -64,8 +79,13 @@ class AutocopyTests(unittest.TestCase):
             self.assertTrue(config.is_symlink())
             self.assertEqual(target.read_bytes(), b"custom")
 
-    @unittest.skipUnless(sys.platform == "linux" and shutil.which("tmux") and shutil.which("setsid") and shutil.which("bash"), "Linux tmux PTY prerequisites unavailable")
     def test_real_pty_osc52_and_opt_out(self):
+        missing = [name for name in ("tmux", "setsid", "bash") if not shutil.which(name)]
+        if sys.platform != "linux" or missing:
+            reason = f"Linux tmux PTY prerequisites unavailable: {missing}"
+            if sys.platform == "linux" and os.environ.get("GITHUB_ACTIONS") == "true":
+                self.fail(reason)
+            self.skipTest(reason)
         with tempfile.TemporaryDirectory(prefix="autocopy-") as directory:
             path = Path(directory)
             socket = str(path / "sock")

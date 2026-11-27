@@ -57,7 +57,7 @@ def payload(raw: bytes) -> bytes:
     ).rstrip("\n")
     if not text.strip():
         return b""
-    if SENSITIVE.search(text) or SENSITIVE_COMMAND.search("\n".join(text.splitlines()[-20:])):
+    if SENSITIVE.search(text) or SENSITIVE_COMMAND.search(text):
         return b""
     encoded = text.encode("utf-8")
     if len(encoded) <= BYTES:

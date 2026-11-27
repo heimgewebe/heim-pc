@@ -18,9 +18,13 @@ führende Orientierung. Keine zweite Registry und keine pauschale Boot-Sperre.
 - Regression: `python3 tests/test_ssh_cockpit_autocopy.py`. Der Linux-PTY-Test
   prüft die tatsächlich ausgesendete OSC52-Sequenz an zwei gleichzeitig
   verbundenen Clients, normales Ergebnis,
-  historische sensitive Ausgabe, keine Ausgabe, Eingabe ohne Ausführung und
+  historische sensitive Ausgabe, lange Ausgabe sensibler Befehle, keine
+  Ausgabe, Eingabe ohne Ausführung und
   expliziten Opt-out und Wiederaufnahme ohne erneuten Attach. Ein
-  übersprungener PTY-Test ist kein Funktionsnachweis.
+  übersprungener PTY-Test ist kein Funktionsnachweis; im Linux-GitHub-CI
+  sind die PTY-Voraussetzungen verpflichtend. Die Erkennung sensibler
+  Ausgaben ist eine Heuristik innerhalb des erfassten Pane-Ausschnitts,
+  keine Garantie zur Geheimniserkennung.
 - Produktiv: Generation und Quellrevision vergleichen, den neuen Hook und
   die Migration prüfen, mit neutralem Ergebnis OSC52 über einen isolierten
   PTY nachweisen. Der reale iPad-Paste bleibt eine separate Client-Abnahme.
