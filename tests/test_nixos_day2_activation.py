@@ -850,6 +850,212 @@ def _postboot_fixture(boot_runtime, monkeypatch):
     return state, boot, calls, candidate, receipt, observe
 
 
+@pytest.fixture
+def approved_promotion_runtime(boot_runtime, monkeypatch):
+    state, boot, calls, candidate, staged, observe = _postboot_fixture(
+        boot_runtime, monkeypatch,
+    )
+    before = executor.observe_next_boot(**observe)
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    authority["prior_persistent_state_sha256"] = before["persistent_state_sha256"]
+    plan = persistent_plan(receipt, authority)
+    bundle = {
+        "build-receipt.json": receipt, "authority.json": authority,
+        "plan.json": plan, "staging-receipt.json": staged,
+    }
+    effect_calls = []
+    old_entry = boot["approved_entry"]
+    new_entry = "nixos-heim-pc-approved-generation-10.conf"
+    generation = {"value": 9}
+    options = {"failure": None}
+
+    def generation_read(expected):
+        if boot["approved"] != expected:
+            raise executor.RuntimeExecutorError("simulated named Approved mismatch")
+        return generation["value"]
+
+    monkeypatch.setattr(executor, "_read_approved_generation", generation_read)
+    monkeypatch.setattr(executor, "_require_approved_generation", lambda *_: None)
+    monkeypatch.setattr(
+        executor, "_observe_boot_links_and_defaults",
+        lambda: {k: v for k, v in dict(boot, **state).items()
+                 if k not in ("approved_entry", "recovery_entry")},
+    )
+
+    def resolve(_closure, profile, expected):
+        if profile == "system":
+            assert expected == state["profile"]
+            return candidate
+        if profile == "heim-pc-approved":
+            assert expected == boot["approved"]
+            return new_entry if expected == CLOSURE else old_entry
+        if profile == "heim-pc-recovery":
+            assert expected == boot["recovery"]
+            return boot["recovery_entry"]
+        raise AssertionError(profile)
+
+    monkeypatch.setattr(executor, "_resolve_boot_entry", resolve)
+
+    def runner(argv, closure):
+        effect_calls.append(list(argv))
+        assert closure == CLOSURE
+        if "--set" in argv:
+            assert argv[-3] == str(executor.BOOT_PROFILE_ROOT / "heim-pc-approved")
+            assert argv[-1] == CLOSURE
+            generation["value"] = 10
+            boot["approved"] = CLOSURE
+            if options["failure"] == "set":
+                raise executor.RuntimeExecutorError("simulated profile set failure")
+            if options["failure"] == "foreign-drift":
+                boot["recovery"] = CLOSURE
+                raise executor.RuntimeExecutorError("simulated unrelated recovery drift")
+        elif "--switch-generation" in argv:
+            assert argv[-3] == str(executor.BOOT_PROFILE_ROOT / "heim-pc-approved")
+            assert argv[-1] == "9"
+            generation["value"] = 9
+            boot["approved"] = PRIOR
+        else:
+            assert argv == executor._switch_argv(CLOSURE, "boot")
+            entry = new_entry if boot["approved"] == CLOSURE else old_entry
+            boot.update(approved_entry=entry, default=entry, loader_default=entry)
+            if options["failure"] == "boot" and boot["approved"] == CLOSURE:
+                raise executor.RuntimeExecutorError("simulated boot install failure")
+            if options["failure"] == "recovery" and boot["approved"] == CLOSURE:
+                raise executor.RuntimeExecutorError("simulated boot install failure")
+            if options["failure"] == "recovery" and boot["approved"] == PRIOR:
+                raise executor.RuntimeExecutorError("simulated restoration failure")
+
+    args = dict(
+        request_id="promotion-testboot", request_bundle=bundle,
+        expected_staging_receipt_sha256=observe["expected_staging_receipt_sha256"],
+        expected_observed_boot_id=before["observed_boot_id"],
+        expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+        runner=runner, **bindings(receipt, authority, plan),
+    )
+    return state, boot, effect_calls, generation, options, before, args
+
+
+def test_boot_critical_promotion_uses_bound_testboot_and_named_approved_only(
+    approved_promotion_runtime,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    result = executor.execute_persistent_promotion(**args)
+    assert len(calls) == 2
+    assert result["named_approved_promoted"] is True
+    assert result["profile_mutated"] is False
+    assert result["boot_state_before"] == before["boot_state"]
+    assert result["boot_state_after"]["approved_entry"] == "nixos-heim-pc-approved-generation-10.conf"
+    assert result["boot_state_after"]["recovery_entry"] == boot["recovery_entry"]
+    assert result["boot_state_after"]["approved"] == CLOSURE
+    assert result["prior_approved_generation"] == 9
+    assert result["promoted_approved_generation"] == 10
+    assert result["pre_persistent_state_sha256"] != result["post_persistent_state_sha256"]
+    assert result["final_activation_receipt_established"] is False
+    assert result["independent_runtime_readback_established"] is False
+    assert result["persistent_state_observation_provenance_established"] is False
+    assert state == {"current": CLOSURE, "profile": CLOSURE}
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+@pytest.mark.parametrize("failure,expected_commands", [("set", 2), ("boot", 4)])
+def test_boot_critical_promotion_failure_restores_exact_approved_generation(
+    approved_promotion_runtime, failure, expected_commands,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    options["failure"] = failure
+    with pytest.raises(executor.RuntimeExecutorError, match="prior boot state restored"):
+        executor.execute_persistent_promotion(**args)
+    assert generation["value"] == 9
+    assert dict(boot, **state) == before["boot_state"]
+    assert len(calls) == expected_commands
+    assert any("--switch-generation" in argv for argv in calls)
+    assert state == {"current": CLOSURE, "profile": CLOSURE}
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+@pytest.mark.parametrize("failure", ["foreign-drift", "recovery"])
+def test_boot_critical_promotion_incomplete_recovery_preserves_gc_roots(
+    approved_promotion_runtime, failure,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    options["failure"] = failure
+    with pytest.raises(executor.RuntimeExecutorError, match="recovery is incomplete"):
+        executor.execute_persistent_promotion(**args)
+    assert state == {"current": CLOSURE, "profile": CLOSURE}
+    assert len(list(executor.GC_ROOT_DIR.iterdir())) == 2
+    if failure == "foreign-drift":
+        assert len(calls) == 1
+        assert boot["recovery"] == CLOSURE
+
+
+@pytest.mark.parametrize("drift", [
+    "staging-digest", "other-build", "same-boot", "recovery", "authority",
+    "wrong-expected-boot", "missing-expected-boot",
+])
+def test_boot_critical_promotion_rejects_unbound_successor_before_effect(
+    approved_promotion_runtime, monkeypatch, drift,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    if drift == "staging-digest":
+        args["expected_staging_receipt_sha256"] = "0"*64
+    elif drift == "other-build":
+        staged = args["request_bundle"]["staging-receipt.json"]
+        staged["build_receipt_sha256"] = "0"*64
+        staged.pop("receipt_sha256")
+        staged["receipt_sha256"] = executor._sha256_json(staged)
+        args["expected_staging_receipt_sha256"] = managed_nix.sha256_json(staged)
+    elif drift == "same-boot":
+        monkeypatch.setattr(executor, "_read_boot_id", lambda: before["staging_boot_id"])
+    elif drift == "recovery":
+        boot["recovery"] = CLOSURE
+    elif drift == "authority":
+        args["expected_authority_sha256"] = "0"*64
+    elif drift == "wrong-expected-boot":
+        args["expected_observed_boot_id"] = "33333333-3333-3333-3333-333333333333"
+    elif drift == "missing-expected-boot":
+        args.pop("expected_observed_boot_id")
+    with pytest.raises((executor.RuntimeExecutorError, managed_nix.ManagedNixError)):
+        executor.execute_persistent_promotion(**args)
+    assert calls == []
+    assert generation["value"] == 9
+    assert state == {"current": CLOSURE, "profile": CLOSURE}
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+def test_boot_critical_promotion_rechecks_successor_after_gc_pinning(
+    approved_promotion_runtime, monkeypatch,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    original = executor._run_gc_root_command
+
+    def pin(argv, closure):
+        original(argv, closure)
+        boot["oneshot"] = before["selected_entry"]
+
+    monkeypatch.setattr(executor, "_run_gc_root_command", pin)
+    with pytest.raises(executor.RuntimeExecutorError, match="post-boot state"):
+        executor.execute_persistent_promotion(**args)
+    assert calls == []
+    assert generation["value"] == 9
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+def test_named_approved_generation_reads_exact_retained_link(monkeypatch, tmp_path):
+    monkeypatch.setattr(executor, "BOOT_PROFILE_ROOT", tmp_path)
+    closure = tmp_path / "closure"
+    closure.mkdir()
+    generation = tmp_path / "heim-pc-approved-31-link"
+    generation.symlink_to(closure)
+    profile = tmp_path / "heim-pc-approved"
+    profile.symlink_to(generation.name)
+    assert executor._read_approved_generation(str(closure)) == 31
+    profile.unlink()
+    profile.symlink_to(closure)
+    with pytest.raises(executor.RuntimeExecutorError, match="invalid named Approved generation"):
+        executor._read_approved_generation(str(closure))
+
+
 def test_postboot_observation_binds_new_boot_and_exact_entry(boot_runtime, monkeypatch):
     state, boot, calls, candidate, receipt, observe = _postboot_fixture(boot_runtime, monkeypatch)
     before = list(calls)
@@ -1844,8 +2050,11 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
     }
     promotion = contract["supported_operations"]["persistent-promotion"]
     assert promotion["boot_critical_requires_next_boot_successor_proof"] is True
-    assert promotion["boot_critical_execution_implemented_here"] is False
-    assert promotion["named_approved_promotion_implemented_here"] is False
+    assert promotion["boot_critical_execution_implemented_here"] is True
+    assert promotion["named_approved_promotion_implemented_here"] is True
+    assert promotion["boot_critical_staging_receipt_file"] == "staging-receipt.json"
+    assert promotion["boot_critical_external_expected_boot_id_required"] is True
+    assert promotion["boot_critical_switch_argument"] == "boot"
     persistent_state = contract["persistent_state"]
     assert persistent_state["schema_version"] == 2
     assert persistent_state["kind"] == executor.PERSISTENT_STATE_KIND

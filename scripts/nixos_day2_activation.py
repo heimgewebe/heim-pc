@@ -174,8 +174,11 @@ def _load_contract() -> dict[str, Any]:
             "executor_authority": managed_nix.PERSISTENT_PROMOTION_EXECUTOR_AUTHORITY,
             "switch_argument": "switch",
             "boot_critical_requires_next_boot_successor_proof": True,
-            "boot_critical_execution_implemented_here": False,
-            "named_approved_promotion_implemented_here": False,
+            "boot_critical_execution_implemented_here": True,
+            "named_approved_promotion_implemented_here": True,
+            "boot_critical_staging_receipt_file": "staging-receipt.json",
+            "boot_critical_external_expected_boot_id_required": True,
+            "boot_critical_switch_argument": "boot",
         },
     }
     if raw.get("supported_operations") != expected_operations:
@@ -404,6 +407,7 @@ def _stage_bound_request_files(
         raise RuntimeExecutorError("request_id is not canonical")
     if set(expected_digests) not in (
         set(_REQUIRED_REQUEST_FILES), {"staging-receipt.json"},
+        set(_REQUIRED_REQUEST_FILES) | {"staging-receipt.json"},
     ) or not isinstance(files, Mapping) or set(files) != set(expected_digests):
         raise RuntimeExecutorError("invalid request bundle fields")
     encoded = {}
@@ -442,7 +446,7 @@ def _stage_bound_request_files(
 def _parse_request_bundle(text: str | None) -> dict[str, Any] | None:
     if text is None:
         return None
-    if len(text.encode("utf-8")) > 3 * MAX_FILE_BYTES:
+    if len(text.encode("utf-8")) > 4 * MAX_FILE_BYTES:
         raise RuntimeExecutorError("request bundle exceeds size limit")
     try:
         value = json.loads(text)
@@ -1548,7 +1552,8 @@ def _read_boot_id() -> str:
     return _require_boot_id(value.removesuffix("\n"))
 
 
-def _observe_boot_state(closure: str) -> dict[str, Any]:
+def _observe_boot_links_and_defaults() -> dict[str, Any]:
+    """Read the partial boot state even before a new named entry exists."""
     def observed(path: Path, label: str) -> str:
         value = _resolve_link(path, label=label)
         try:
@@ -1563,8 +1568,6 @@ def _observe_boot_state(closure: str) -> dict[str, Any]:
         "approved": observed(BOOT_PROFILE_ROOT / "heim-pc-approved", "approved profile"),
         "recovery": observed(BOOT_PROFILE_ROOT / "heim-pc-recovery", "recovery profile"),
     }
-    state["approved_entry"] = _resolve_boot_entry(closure, "heim-pc-approved", state["approved"])
-    state["recovery_entry"] = _resolve_boot_entry(closure, "heim-pc-recovery", state["recovery"])
     state["default"] = _read_efi_entry("LoaderEntryDefault")
     state["sysfail"] = _read_efi_entry("LoaderEntrySysFail")
     state["oneshot"] = _read_efi_entry("LoaderEntryOneShot", optional=True)
@@ -1581,6 +1584,13 @@ def _observe_boot_state(closure: str) -> dict[str, Any]:
         state["loader_default"] = _boot_entry_id(defaults[0])
     except (OSError, UnicodeError) as exc:
         raise RuntimeExecutorError(f"loader.conf unavailable: {exc}") from exc
+    return state
+
+
+def _observe_boot_state(closure: str) -> dict[str, Any]:
+    state = _observe_boot_links_and_defaults()
+    state["approved_entry"] = _resolve_boot_entry(closure, "heim-pc-approved", state["approved"])
+    state["recovery_entry"] = _resolve_boot_entry(closure, "heim-pc-recovery", state["recovery"])
     return state
 
 
@@ -1784,90 +1794,102 @@ def observe_next_boot(
                 "staging-receipt.json": expected_staging_receipt_sha256,
             })
         receipt = _read_bound_json(_request_dir(request_id) / "staging-receipt.json")
-        digest = _require_canonical_digest(
-            receipt, expected_staging_receipt_sha256, "staging receipt"
+        return _observe_bound_next_boot(
+            request_id=request_id, receipt=receipt,
+            expected_staging_receipt_sha256=expected_staging_receipt_sha256,
+            expected_target=expected_target,
         )
-        material = dict(receipt)
-        self_digest = material.pop("receipt_sha256", None)
-        if self_digest != _sha256_json(material):
-            raise RuntimeExecutorError("invalid staging receipt self digest")
-        if (
-            receipt.get("schema_version") != 1
-            or receipt.get("kind") != "heim_pc.nixos_activation_runtime_execution_v1"
-            or receipt.get("result") != "executed"
-            or receipt.get("operation") != "activation"
-            or receipt.get("mode") != "next-boot"
-            or receipt.get("target") != expected_target
-            or receipt.get("next_boot_staged") is not True
-            or receipt.get("boot_proven") is not False
-        ):
-            raise RuntimeExecutorError("receipt is not a bound staged next-boot activation")
-        try:
-            target = managed_nix._require_closure(receipt.get("system_closure"), "staged closure")
-        except managed_nix.ManagedNixError as exc:
-            raise RuntimeExecutorError("invalid staged closure") from exc
-        candidate = _boot_entry_id(receipt.get("candidate_entry", ""))
-        before = receipt.get("boot_state_before")
-        staged = receipt.get("boot_state_after")
-        if not isinstance(before, dict) or not isinstance(staged, dict):
-            raise RuntimeExecutorError("missing staged boot state")
-        required = set(BOOT_STATE_FIELDS)
-        if set(before) != required or set(staged) != required:
-            raise RuntimeExecutorError("invalid staged boot state fields")
-        _require_approved_defaults(before)
-        if (
-            before["oneshot"] is not None
-            or before["booted"] != before["approved"]
-            or before["current"] != receipt.get("prior_closure")
-        ):
-            raise RuntimeExecutorError("invalid staged boot preimage")
-        _require_boot_state(staged, before, profile=target, oneshot=candidate)
-        staging_id = _require_boot_id(receipt.get("staging_boot_id"))
-        boot_id = _read_boot_id()
-        if boot_id == staging_id:
-            raise RuntimeExecutorError("new boot not observed")
-        expected = dict(staged, current=target, booted=target, oneshot=None)
-        observed = _observe_boot_state(target)
-        if observed != expected:
-            raise RuntimeExecutorError("post-boot state does not match staged target and preserved fallback")
-        selected = _read_efi_entry("LoaderEntrySelected")
-        if selected != candidate or _resolve_boot_entry(target, "system", target) != candidate:
-            raise RuntimeExecutorError("selected boot entry does not match staged candidate")
-        if (
-            _observe_boot_state(target) != observed
-            or _read_efi_entry("LoaderEntrySelected") != selected
-            or _read_boot_id() != boot_id
-        ):
-            raise RuntimeExecutorError("post-boot observation changed during readback")
-        result = {
-            "schema_version": 1,
-            "kind": "heim_pc.nixos_next_boot_observation_v1",
-            "result": "observed",
-            "request_id": request_id,
-            "staging_request_id": receipt.get("request_id"),
-            "staging_receipt_sha256": digest,
-            "target": expected_target,
-            "system_closure": target,
-            "staging_boot_id": staging_id,
-            "observed_boot_id": boot_id,
-            "selected_entry": selected,
-            "boot_state": observed,
-            "persistent_state_kind": PERSISTENT_STATE_KIND,
-            "persistent_state_sha256": persistent_state_sha256(
-                target=expected_target, boot_state=observed,
-            ),
-            "observed_at": _utc_now(),
-            "boot_identity_established": True,
-            "application_health_established": False,
-            "independent_runtime_readback_established": False,
-            "persistent_promotion_authorized": False,
-            "does_not_establish": [
-                "controlled reboot causality", "application health",
-                "independent runtime observation", "persistent promotion authority",
-            ],
-        }
-        result["receipt_sha256"] = _sha256_json(result)
-        return result
+
+
+def _observe_bound_next_boot(
+    *, request_id: str, receipt: Mapping[str, Any],
+    expected_staging_receipt_sha256: str, expected_target: str,
+) -> dict[str, Any]:
+    """Reuse the exact native successor proof while the caller holds the lock."""
+    digest = _require_canonical_digest(
+        receipt, expected_staging_receipt_sha256, "staging receipt"
+    )
+    material = dict(receipt)
+    self_digest = material.pop("receipt_sha256", None)
+    if self_digest != _sha256_json(material):
+        raise RuntimeExecutorError("invalid staging receipt self digest")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind") != "heim_pc.nixos_activation_runtime_execution_v1"
+        or receipt.get("result") != "executed"
+        or receipt.get("operation") != "activation"
+        or receipt.get("mode") != "next-boot"
+        or receipt.get("target") != expected_target
+        or receipt.get("next_boot_staged") is not True
+        or receipt.get("boot_proven") is not False
+    ):
+        raise RuntimeExecutorError("receipt is not a bound staged next-boot activation")
+    try:
+        target = managed_nix._require_closure(receipt.get("system_closure"), "staged closure")
+    except managed_nix.ManagedNixError as exc:
+        raise RuntimeExecutorError("invalid staged closure") from exc
+    candidate = _boot_entry_id(receipt.get("candidate_entry", ""))
+    before = receipt.get("boot_state_before")
+    staged = receipt.get("boot_state_after")
+    if not isinstance(before, dict) or not isinstance(staged, dict):
+        raise RuntimeExecutorError("missing staged boot state")
+    required = set(BOOT_STATE_FIELDS)
+    if set(before) != required or set(staged) != required:
+        raise RuntimeExecutorError("invalid staged boot state fields")
+    _require_approved_defaults(before)
+    if (
+        before["oneshot"] is not None
+        or before["booted"] != before["approved"]
+        or before["current"] != receipt.get("prior_closure")
+    ):
+        raise RuntimeExecutorError("invalid staged boot preimage")
+    _require_boot_state(staged, before, profile=target, oneshot=candidate)
+    staging_id = _require_boot_id(receipt.get("staging_boot_id"))
+    boot_id = _read_boot_id()
+    if boot_id == staging_id:
+        raise RuntimeExecutorError("new boot not observed")
+    expected = dict(staged, current=target, booted=target, oneshot=None)
+    observed = _observe_boot_state(target)
+    if observed != expected:
+        raise RuntimeExecutorError("post-boot state does not match staged target and preserved fallback")
+    selected = _read_efi_entry("LoaderEntrySelected")
+    if selected != candidate or _resolve_boot_entry(target, "system", target) != candidate:
+        raise RuntimeExecutorError("selected boot entry does not match staged candidate")
+    if (
+        _observe_boot_state(target) != observed
+        or _read_efi_entry("LoaderEntrySelected") != selected
+        or _read_boot_id() != boot_id
+    ):
+        raise RuntimeExecutorError("post-boot observation changed during readback")
+    result = {
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_next_boot_observation_v1",
+        "result": "observed",
+        "request_id": request_id,
+        "staging_request_id": receipt.get("request_id"),
+        "staging_receipt_sha256": digest,
+        "target": expected_target,
+        "system_closure": target,
+        "staging_boot_id": staging_id,
+        "observed_boot_id": boot_id,
+        "selected_entry": selected,
+        "boot_state": observed,
+        "persistent_state_kind": PERSISTENT_STATE_KIND,
+        "persistent_state_sha256": persistent_state_sha256(
+            target=expected_target, boot_state=observed,
+        ),
+        "observed_at": _utc_now(),
+        "boot_identity_established": True,
+        "application_health_established": False,
+        "independent_runtime_readback_established": False,
+        "persistent_promotion_authorized": False,
+        "does_not_establish": [
+            "controlled reboot causality", "application health",
+            "independent runtime observation", "persistent promotion authority",
+        ],
+    }
+    result["receipt_sha256"] = _sha256_json(result)
+    return result
 
 
 def execute_activation(
@@ -2049,6 +2071,245 @@ def execute_activation(
             profile_mutated=False,
         )
 
+def _require_approved_generation(generation: int, expected: str) -> None:
+    _require_link_target(
+        BOOT_PROFILE_ROOT / f"heim-pc-approved-{generation}-link", expected,
+        label="retained named Approved generation",
+    )
+
+
+def _read_approved_generation(expected: str) -> int:
+    path = BOOT_PROFILE_ROOT / "heim-pc-approved"
+    try:
+        name = os.readlink(path)
+    except OSError as exc:
+        raise RuntimeExecutorError("Approved generation link unavailable") from exc
+    match = re.fullmatch(r"heim-pc-approved-([1-9][0-9]*)-link", name)
+    if match is None:
+        raise RuntimeExecutorError("invalid named Approved generation link")
+    generation = int(match.group(1))
+    _require_link_target(path, expected, label="named Approved profile")
+    _require_approved_generation(generation, expected)
+    try:
+        unchanged = os.readlink(path) == name
+    except OSError as exc:
+        raise RuntimeExecutorError("Approved generation vanished during readback") from exc
+    if not unchanged:
+        raise RuntimeExecutorError("Approved generation changed during readback")
+    return generation
+
+
+def _approved_profile_argv(closure: str, *, target: str | None = None,
+                           generation: int | None = None) -> list[str]:
+    nix_env = _require_executable(Path(closure) / "sw/bin/nix-env", label="closure-bound nix-env")
+    argv = [str(nix_env), "--profile", str(BOOT_PROFILE_ROOT / "heim-pc-approved")]
+    if target is not None and generation is None:
+        return argv + ["--set", target]
+    if target is None and type(generation) is int and generation > 0:
+        return argv + ["--switch-generation", str(generation)]
+    raise RuntimeExecutorError("invalid named Approved profile operation")
+
+
+def _require_promotion_boot_identity(proof: Mapping[str, Any]) -> None:
+    if (
+        _read_boot_id() != proof["observed_boot_id"]
+        or _read_efi_entry("LoaderEntrySelected") != proof["selected_entry"]
+    ):
+        raise RuntimeExecutorError("testboot identity changed during promotion")
+
+
+def _recover_approved_promotion(
+    *, proof: Mapping[str, Any], prior_generation: int, target: str,
+    boot_attempted: bool, promoted_generation: int | None, runner: Runner,
+) -> None:
+    """Restore only the original named profile; never switch/reboot the live system."""
+    baseline = proof["boot_state"]
+    prior = baseline["approved"]
+    with _defer_termination():
+        _require_promotion_boot_identity(proof)
+        _require_approved_generation(prior_generation, prior)
+        observed = _observe_boot_links_and_defaults()
+        pinned = ("current", "booted", "profile", "recovery", "sysfail", "oneshot")
+        if any(observed[key] != baseline[key] for key in pinned):
+            raise RuntimeExecutorError("Approved recovery refused: unrelated boot state drift")
+        if observed["approved"] not in {prior, target}:
+            raise RuntimeExecutorError("Approved recovery refused: unrelated named profile")
+        if _resolve_boot_entry(target, "heim-pc-recovery", baseline["recovery"]) != baseline["recovery_entry"]:
+            raise RuntimeExecutorError("Approved recovery refused: recovery entry drift")
+        allowed = {baseline["approved_entry"]}
+        if boot_attempted and observed["approved"] == target:
+            try:
+                allowed.add(_resolve_boot_entry(target, "heim-pc-approved", target))
+            except RuntimeExecutorError:
+                # The native install may not yet have generated the entry.
+                # Only the previous known defaults are then recoverable.
+                pass
+        if observed["default"] not in allowed or observed["loader_default"] not in allowed:
+            raise RuntimeExecutorError("Approved recovery refused: unrelated boot default")
+        if observed["approved"] == target:
+            if promoted_generation is not None and _read_approved_generation(target) != promoted_generation:
+                raise RuntimeExecutorError("Approved recovery refused: named generation drift")
+            runner(_approved_profile_argv(target, generation=prior_generation), target)
+        if _read_approved_generation(prior) != prior_generation:
+            raise RuntimeExecutorError("Approved recovery did not restore original generation")
+        if boot_attempted:
+            runner(_switch_argv(target, "boot"), target)
+        if _observe_boot_state(target) != baseline:
+            raise RuntimeExecutorError("Approved recovery did not restore exact boot state")
+        _require_promotion_boot_identity(proof)
+
+
+def _execute_approved_promotion(
+    *, request_id: str, build: Mapping[str, Any], authority: Mapping[str, Any],
+    candidate_plan: Mapping[str, Any], build_digest: str, plan_digest: str,
+    expected_authority_sha256: str, expected_target: str,
+    source_artifact_digest: str, executor_cgroup: str,
+    expected_staging_receipt_sha256: str, expected_observed_boot_id: str,
+    runner: Runner,
+) -> dict[str, Any]:
+    """Promote a proven OneShot boot using the existing native boot installer.
+
+    The external scope authorizer must bind the exact tested boot identity and
+    its application acceptance; the staging proof alone grants no authority.
+    """
+    staging = _read_bound_json(_request_dir(request_id) / "staging-receipt.json")
+    structural = managed_nix.validate_persistent_promotion_plan(candidate_plan)
+    expected_boot_id = _require_boot_id(expected_observed_boot_id)
+    target = structural["system_closure"]
+    prior = structural["prior_closure"]
+
+    def observe_and_authorize() -> tuple[dict[str, Any], dict[str, Any]]:
+        _require_canonical_digest(staging, expected_staging_receipt_sha256, "staging receipt")
+        if (
+            staging.get("build_receipt_sha256") != build_digest
+            or staging.get("source_revision") != structural["source_revision"]
+            or staging.get("system_closure") != target
+        ):
+            raise RuntimeExecutorError("next-boot proof does not bind promotion build and rollback generation")
+        proof = _observe_bound_next_boot(
+            request_id=request_id, receipt=staging,
+            expected_staging_receipt_sha256=expected_staging_receipt_sha256,
+            expected_target=expected_target,
+        )
+        if proof["system_closure"] != target or proof["boot_state"]["approved"] != prior:
+            raise RuntimeExecutorError("next-boot proof does not bind promotion build and rollback generation")
+        if proof["observed_boot_id"] != expected_boot_id:
+            raise RuntimeExecutorError("next-boot proof does not match externally expected tested boot ID")
+        plan = managed_nix.authorize_persistent_promotion_execution(
+            build, authority, candidate_plan,
+            expected_authority_sha256=expected_authority_sha256,
+            expected_target=expected_target,
+            expected_source_artifact_sha256=source_artifact_digest,
+            expected_prior_closure=proof["boot_state"]["approved"],
+            expected_prior_persistent_state_sha256=proof["persistent_state_sha256"],
+            now=_utc_now(),
+        )
+        return proof, plan
+
+    proof, plan = observe_and_authorize()
+    baseline = proof["boot_state"]
+    prior_generation = _read_approved_generation(prior)
+    set_argv = _approved_profile_argv(target, target=target)
+    boot_argv = _switch_argv(target, "boot")
+    _approved_profile_argv(target, generation=prior_generation)
+    boot_attempted = False
+    promoted_generation: int | None = None
+    with _pinned_transaction_closures(
+        request_id=request_id, prior_closure=prior, target_closure=target,
+    ) as (gc_roots, gc_root_argvs, release_gc_roots, retain_gc_roots):
+        with _controlled_termination() as termination:
+            fresh_proof, plan = observe_and_authorize()
+            if (
+                fresh_proof["boot_state"] != baseline
+                or fresh_proof["observed_boot_id"] != proof["observed_boot_id"]
+                or fresh_proof["selected_entry"] != proof["selected_entry"]
+                or _read_approved_generation(prior) != prior_generation
+            ):
+                raise RuntimeExecutorError("testboot or Approved generation drifted before promotion")
+            _raise_if_termination_requested(termination)
+            try:
+                runner(set_argv, target)
+                _raise_if_termination_requested(termination)
+                promoted_generation = _read_approved_generation(target)
+                if promoted_generation == prior_generation:
+                    raise RuntimeExecutorError("Approved promotion reused prior generation")
+                _require_approved_generation(prior_generation, prior)
+                _require_promotion_boot_identity(proof)
+                expected_partial = {
+                    k: v for k, v in baseline.items()
+                    if k not in ("approved_entry", "recovery_entry")
+                }
+                expected_partial["approved"] = target
+                if (
+                    _observe_boot_links_and_defaults() != expected_partial
+                    or _resolve_boot_entry(target, "heim-pc-recovery", baseline["recovery"])
+                    != baseline["recovery_entry"]
+                ):
+                    raise RuntimeExecutorError("boot state drifted after named profile staging")
+                boot_attempted = True
+                runner(boot_argv, target)
+                _raise_if_termination_requested(termination)
+                post = _observe_boot_state(target)
+                expected = dict(
+                    baseline, approved=target, approved_entry=post["approved_entry"],
+                    default=post["approved_entry"], loader_default=post["approved_entry"],
+                )
+                if post != expected or post["approved_entry"] == baseline["approved_entry"]:
+                    raise RuntimeExecutorError("Approved promotion did not establish exact boot default")
+                _require_approved_defaults(post)
+                _require_approved_generation(prior_generation, prior)
+                if _read_approved_generation(target) != promoted_generation:
+                    raise RuntimeExecutorError("Approved generation drifted after boot installation")
+                _require_promotion_boot_identity(proof)
+                if _observe_boot_state(target) != post:
+                    raise RuntimeExecutorError("Approved boot state changed during readback")
+                post_state_digest = persistent_state_sha256(target=expected_target, boot_state=post)
+                if post_state_digest == proof["persistent_state_sha256"]:
+                    raise RuntimeExecutorError("Approved persistent state did not change")
+                release_gc_roots()
+            except _ProcessTerminationUncertain:
+                raise
+            except (_ExecutorInterrupted, KeyboardInterrupt, RuntimeExecutorError) as effect_error:
+                try:
+                    _recover_approved_promotion(
+                        proof=proof, prior_generation=prior_generation, target=target,
+                        boot_attempted=boot_attempted, promoted_generation=promoted_generation,
+                        runner=runner,
+                    )
+                except _ProcessTerminationUncertain:
+                    raise
+                except RuntimeExecutorError as recovery_error:
+                    retain_gc_roots()
+                    raise RuntimeExecutorError(
+                        f"Approved promotion failed and recovery is incomplete: {effect_error}; {recovery_error}"
+                    ) from recovery_error
+                raise RuntimeExecutorError(
+                    f"Approved promotion failed; prior boot state restored: {effect_error}"
+                ) from effect_error
+    result = _execution_receipt(
+        request_id=request_id, operation="persistent-promotion", mode="boot-critical-approved",
+        plan=plan, build_receipt_sha256=build_digest, plan_sha256=plan_digest,
+        argv=boot_argv, effect_argvs=(set_argv, boot_argv), gc_root_argvs=gc_root_argvs,
+        executor_cgroup=executor_cgroup, prior_gc_root=str(gc_roots["prior"]),
+        target_gc_root=str(gc_roots["target"]), pre_current=baseline["current"],
+        pre_profile=baseline["profile"], post_current=post["current"],
+        post_profile=post["profile"], profile_mutated=False,
+    )
+    result["does_not_establish"].remove("named Approved boot promotion")
+    result.update(
+        named_approved_promoted=True, boot_state_before=baseline, boot_state_after=post,
+        prior_approved_generation=prior_generation, promoted_approved_generation=promoted_generation,
+        staging_receipt_sha256=proof["staging_receipt_sha256"],
+        postboot_observation_sha256=managed_nix.sha256_json(fresh_proof),
+        boot_id=proof["observed_boot_id"],
+        pre_persistent_state_sha256=proof["persistent_state_sha256"],
+        post_persistent_state_sha256=post_state_digest,
+    )
+    result.pop("receipt_sha256")
+    result["receipt_sha256"] = _sha256_json(result)
+    return result
+
+
 def execute_persistent_promotion(
     *,
     request_id: str,
@@ -2057,43 +2318,53 @@ def execute_persistent_promotion(
     expected_plan_sha256: str,
     expected_target: str,
     expected_source_artifact_sha256: str,
+    expected_staging_receipt_sha256: str | None = None,
+    expected_observed_boot_id: str | None = None,
+    request_bundle: Mapping[str, Any] | None = None,
     runner: Runner = _run_exact,
 ) -> dict[str, Any]:
     _require_root()
     executor_cgroup = _require_dedicated_scope(request_id)
-    build_receipt, authority, candidate_plan = _load_request(request_id)
-    build_digest = _require_canonical_digest(
-        build_receipt, expected_build_receipt_sha256, "build receipt"
-    )
-    _require_canonical_digest(
-        authority, expected_authority_sha256, "persistent promotion authority"
-    )
-    plan_digest = _require_canonical_digest(
-        candidate_plan, expected_plan_sha256, "persistent promotion plan"
-    )
     source_artifact_digest = _require_sha256(
         expected_source_artifact_sha256, "expected source artifact sha256"
     )
-
     with _exclusive_lock(executor_cgroup):
+        if request_bundle is not None:
+            digests = {
+                "build-receipt.json": expected_build_receipt_sha256,
+                "authority.json": expected_authority_sha256,
+                "plan.json": expected_plan_sha256,
+            }
+            if expected_staging_receipt_sha256 is not None:
+                digests["staging-receipt.json"] = expected_staging_receipt_sha256
+            _stage_bound_request_files(request_id, request_bundle, digests)
         locked_build, locked_authority, locked_plan = _load_request(request_id)
-        _require_canonical_digest(
+        build_digest = _require_canonical_digest(
             locked_build, expected_build_receipt_sha256, "locked build receipt"
         )
         _require_canonical_digest(
-            locked_authority,
-            expected_authority_sha256,
-            "locked persistent promotion authority",
+            locked_authority, expected_authority_sha256, "locked persistent promotion authority"
         )
-        _require_canonical_digest(
+        plan_digest = _require_canonical_digest(
             locked_plan, expected_plan_sha256, "locked persistent promotion plan"
         )
         validated_build = managed_nix.validate_build_receipt(locked_build)
         if validated_build["effect_scope"] == "boot-critical":
-            raise RuntimeExecutorError(
-                "boot-critical persistent promotion requires a successful "
-                "next-boot successor proof; promotion after reboot is not implemented here"
+            if expected_staging_receipt_sha256 is None or expected_observed_boot_id is None:
+                raise RuntimeExecutorError(
+                    "boot-critical persistent promotion requires a successful next-boot successor proof and externally expected tested boot ID"
+                )
+            return _execute_approved_promotion(
+                request_id=request_id, build=locked_build, authority=locked_authority,
+                candidate_plan=locked_plan, build_digest=build_digest, plan_digest=plan_digest,
+                expected_authority_sha256=expected_authority_sha256,
+                expected_target=expected_target, source_artifact_digest=source_artifact_digest,
+                executor_cgroup=executor_cgroup,
+                expected_staging_receipt_sha256=expected_staging_receipt_sha256,
+                expected_observed_boot_id=expected_observed_boot_id, runner=runner,
             )
+        if expected_staging_receipt_sha256 is not None or expected_observed_boot_id is not None:
+            raise RuntimeExecutorError("staging receipt and tested boot ID are only valid for boot-critical promotion")
         structural_plan = managed_nix.validate_persistent_promotion_plan(locked_plan)
         pre_current = _require_link_target(
             CURRENT_SYSTEM_LINK,
@@ -2277,6 +2548,9 @@ def build_parser() -> argparse.ArgumentParser:
     promotion = sub.add_parser("execute-persistent-promotion")
     common(promotion)
     promotion.add_argument("--expected-source-artifact-sha256", required=True)
+    promotion.add_argument("--expected-staging-receipt-sha256")
+    promotion.add_argument("--expected-observed-boot-id")
+    promotion.add_argument("--request-bundle-json")
     return parser
 
 
@@ -2310,6 +2584,9 @@ def main(argv: list[str] | None = None) -> int:
                     expected_plan_sha256=args.expected_plan_sha256,
                     expected_target=args.expected_target,
                     expected_source_artifact_sha256=args.expected_source_artifact_sha256,
+                    expected_staging_receipt_sha256=args.expected_staging_receipt_sha256,
+                    expected_observed_boot_id=args.expected_observed_boot_id,
+                    request_bundle=_parse_request_bundle(args.request_bundle_json),
                 )
             else:
                 parser.error("unsupported command")
