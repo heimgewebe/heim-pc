@@ -73,6 +73,22 @@ class AutocopyTests(unittest.TestCase):
         old = prompt + b"echo example\nexample=value\n"
         self.assertEqual(watcher.copy_payload(old + result, "bash"), old + result)
 
+    def test_completed_output_after_producer_scrolls_out(self):
+        spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
+        watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(watcher)
+        prompt = b"[probe@heim-pc:~]$ "
+        lines = b"".join(f"SCROLL_{i:04d}\n".encode() for i in range(1200))
+        full = prompt + b"printf fixture\n" + lines + prompt
+        retained = b"\n".join(full.splitlines()[-1024:])
+        marker = watcher.output_marker(retained, "bash")
+        self.assertIsNotNone(marker)
+        self.assertIn(b"SCROLL_1199", watcher.copy_payload(retained, "bash"))
+        self.assertTrue(watcher.already_published(marker, marker))
+        self.assertIsNone(watcher.output_marker(retained + b"unsubmitted", "bash"))
+        self.assertIsNone(watcher.output_marker(retained + b"true\n" + prompt, "bash"))
+        self.assertIsNone(watcher.output_marker(prompt, "bash"))
+
     def test_private_history_boundary(self):
         spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
         watcher = importlib.util.module_from_spec(spec)
@@ -182,6 +198,18 @@ class AutocopyTests(unittest.TestCase):
                                 [(len(data), data[:100]) for data in payloads])
                 self.assertTrue(any(b"\nNATIVE_AFTER_67" in data for data in payloads),
                                 [(len(data), data[-100:]) for data in payloads])
+                # A fast result larger than the capture window leaves only
+                # the completed output tail and the final shell prompt.
+                os.write(master, b"printf 'SCROLL_%04d\\n' {1..1200}\r")
+                scroll = [base64.b64decode(value) for value in OSC52.findall(drain(5))]
+                self.assertTrue(any(b"SCROLL_1200" in data and b"SCROLL_0001" not in data
+                                    for data in scroll), [(len(data), data[-100:]) for data in scroll])
+                os.write(master, b"unsubmitted")
+                self.assertFalse(OSC52.findall(drain(3.5)))
+                os.write(master, b"\x15")
+                self.assertFalse(OSC52.findall(drain(3.5)))
+                os.write(master, b"true\r")
+                self.assertFalse(OSC52.findall(drain(3.5)))
             finally:
                 tm("kill-server")
                 try:

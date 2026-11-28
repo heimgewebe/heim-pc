@@ -123,6 +123,17 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
                 producer = "\n".join(rows[:start + 1]).encode()
                 result_rows = str(len(between)).encode()
                 return hashlib.sha256(b"shell-result\0" + producer + b"\0" + result_rows).digest()
+        elif current_command in SHELLS and any(
+            row.strip() and not row.lstrip().startswith(("> ", "... "))
+            for row in rows[:end]
+        ):
+            # A large result may scroll its producing prompt out of the
+            # capture window. The single remaining clean prompt still
+            # establishes completion. Bind only the retained output, not
+            # the editable prompt; watch() seeds this marker on first sight
+            # so attaching to existing history does not publish it.
+            retained = "\n".join(rows[:end]).encode()
+            return hashlib.sha256(b"shell-retained-result\0" + retained).digest()
         return None
     # Terminal apps with no detectable shell prompt retain their prior
     # behavior; for unknown shell prompts avoid auto-copying typed input.
