@@ -48,6 +48,23 @@ class MobileTransferTargetsTests(unittest.TestCase):
         for route in self.contract["routing"].values():
             self.assertTrue(set(route["eligibleTargets"]).issubset(target_ids))
 
+    def test_nixos_drive_mount_matches_canonical_contract(self):
+        module = (ROOT / "nixos/system/modules/google-drive.nix").read_text()
+        desktop = (ROOT / "nixos/system/modules/desktop.nix").read_text()
+        backup = (ROOT / "nixos/system/modules/restic-seagate-backup.nix").read_text()
+        self.assertIn("./google-drive.nix", desktop)
+        self.assertIn("systemd.user.services.google-drive-rclone", module)
+        self.assertIn('ConditionUser = "alex"', module)
+        self.assertIn('ConditionPathExists = "%h/.config/rclone/rclone.conf"', module)
+        self.assertIn('Type = "notify"', module)
+        self.assertIn("rclone mount gdrive: %h/GDrive", module)
+        self.assertIn("--vfs-cache-mode full", module)
+        self.assertNotIn("--allow-other", module)
+        self.assertNotIn("--allow-non-empty", module)
+        self.assertIn("/home/alex/GDrive", backup)
+        self.assertLess(backup.index("heim-pc-restic-hard-gdrive-excludes"),
+                        backup.index("heim-pc-restic-hard-plaintext-excludes"))
+
 
 if __name__ == "__main__":
     unittest.main()

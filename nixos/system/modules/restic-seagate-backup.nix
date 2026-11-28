@@ -52,6 +52,9 @@
       # Preserve completed model blobs and every other home file; do not ignore errors.
       # Hard exclusion follows private negations; plaintext exclusion stays LAST.
       "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-ollama-partials" "/home/alex/.local/share/heimgewebe/assist/ollama/models/blobs/*-partial-*\n"}"
+      # Google Drive is a user-only FUSE mount, not local authoritative data.
+      # Keep the OAuth config and pending VFS cache subject to normal home policy.
+      "--exclude-file=${pkgs.writeText "heim-pc-restic-hard-gdrive-excludes" "/home/alex/GDrive\n"}"
       # Even a dump created after backupPrepareCommand must never enter Restic.
       # The owner-private exclude file can contain negations; this immutable
       # rule therefore comes LAST and protects the snapshot itself.
