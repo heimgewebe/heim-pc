@@ -170,5 +170,131 @@ class ExactMergeGroupReuseTests(unittest.TestCase):
         self.assertIn("nixer-headless-systemd-vm-proof", build)
 
 
+class QueueAdmissionTests(unittest.TestCase):
+    BASE = "b" * 40
+
+    @staticmethod
+    def rules():
+        identity = {
+            "ruleset_id": 21590094,
+            "ruleset_source_type": "Repository",
+            "ruleset_source": REPO,
+        }
+        return [
+            dict(identity, type="merge_queue", parameters={
+                "grouping_strategy": "ALLGREEN", "merge_method": "MERGE",
+            }),
+            dict(identity, type="required_status_checks", parameters={
+                "strict_required_status_checks_policy": True,
+                "do_not_enforce_on_create": False,
+                "required_status_checks": [
+                    {"context": name, "integration_id": 15368}
+                    for name in ("validate", "guard / verify", "smoke / verify", "live-system")
+                ],
+            }),
+        ]
+
+    def select(self, *, env=None, rules=None, base=None, diff_rc=0, failed=False):
+        workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        selector = workflow.split("- name: Select lightweight PR queue admission\n", 1)[1]
+        script = textwrap.dedent(selector.split("\n      - name:", 1)[0].split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            variables = {
+                "EVENT_NAME": "pull_request", "REPOSITORY": REPO, "BASE_REF": "main",
+                "HEAD_REPOSITORY": REPO, "BASE_SHA": self.BASE, "HEAD_SHA": SHA,
+                "GITHUB_OUTPUT": str(output),
+            }
+            variables.update(env or {})
+            responses = [
+                subprocess.CompletedProcess([], 0, json.dumps({
+                    "object": {"sha": self.BASE if base is None else base}
+                }), ""),
+                subprocess.CompletedProcess([], diff_rc, "", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(
+                    self.rules() if rules is None else rules
+                ), ""),
+            ]
+            with patch.dict(os.environ, variables), patch(
+                "subprocess.run", side_effect=(
+                    subprocess.TimeoutExpired("gh", 10) if failed else responses
+                )
+            ) as api, patch("sys.stdout", new_callable=io.StringIO):
+                exec(compile(script, "<workflow admission selector>", "exec"), {})
+            return output.read_text().strip(), [call.args[0] for call in api.call_args_list]
+
+    def test_exact_queued_main_pr_admission(self):
+        result, calls = self.select()
+        self.assertEqual("admission=true", result)
+        self.assertEqual([
+            ["gh", "api", f"repos/{REPO}/git/ref/heads/main"],
+            ["git", "diff", "--quiet", "--no-renames", self.BASE, SHA, "--",
+             ".github/workflows", ".github/grabowski-required-checks.json",
+             "scripts/ci", "tests/test_ci_nix_reuse.py", "tests/test_nix_changed.py"],
+            ["gh", "api", f"repos/{REPO}/rules/branches/main?per_page=100"],
+        ], calls)
+
+    def test_never_admit_other_contexts(self):
+        for env in (
+            {"EVENT_NAME": "merge_group"}, {"EVENT_NAME": "push"},
+            {"EVENT_NAME": "workflow_dispatch"}, {"REPOSITORY": "other/repo"},
+            {"BASE_REF": "other"}, {"HEAD_REPOSITORY": "fork/repo"},
+            {"BASE_SHA": "invalid"}, {"HEAD_SHA": "invalid"}, {"HEAD_SHA": self.BASE},
+        ):
+            with self.subTest(env=env):
+                self.assertEqual(("admission=false", []), self.select(env=env))
+
+    def test_base_control_and_api_failures_require_full_build(self):
+        for kwargs in (
+            {"base": "c" * 40}, {"diff_rc": 1}, {"diff_rc": 128}, {"failed": True},
+            {"rules": []}, {"rules": {"bad": True}}, {"rules": [None]},
+            {"rules": self.rules() * 50},
+        ):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual("admission=false", self.select(**kwargs)[0])
+
+    def test_invalid_rules_require_full_build(self):
+        for case in ("no-queue", "duplicate-queue", "no-checks", "wrong-id", "wrong-source",
+                     "wrong-method", "wrong-grouping", "loose-checks", "creation-exempt",
+                     "missing-check", "wrong-integration"):
+            rules = self.rules()
+            with self.subTest(case=case):
+                if case == "no-queue":
+                    rules.pop(0)
+                elif case == "duplicate-queue":
+                    rules.append(copy.deepcopy(rules[0]))
+                elif case == "no-checks":
+                    rules.pop(1)
+                elif case == "wrong-id":
+                    rules[0]["ruleset_id"] = 1
+                elif case == "wrong-source":
+                    rules[0]["ruleset_source"] = "other/repo"
+                elif case == "wrong-method":
+                    rules[0]["parameters"]["merge_method"] = "SQUASH"
+                elif case == "wrong-grouping":
+                    rules[0]["parameters"]["grouping_strategy"] = "HEADGREEN"
+                elif case == "loose-checks":
+                    rules[1]["parameters"]["strict_required_status_checks_policy"] = False
+                elif case == "creation-exempt":
+                    rules[1]["parameters"]["do_not_enforce_on_create"] = True
+                elif case == "missing-check":
+                    rules[1]["parameters"]["required_status_checks"].pop()
+                else:
+                    rules[1]["parameters"]["required_status_checks"][-1]["integration_id"] = 1
+                self.assertEqual("admission=false", self.select(rules=rules)[0])
+
+    def test_workflow_keeps_full_merge_group_and_fresh_checks(self):
+        workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        live = workflow.split("  live-system:\n", 1)[1]
+        admission = live.split("- name: Select lightweight PR queue admission", 1)[1]
+        before, build = admission.split("- name: " + BUILD, 1)
+        self.assertIn("github.event_name == 'pull_request'", before)
+        self.assertIn("needs.detect.result == 'success'", before)
+        self.assertIn("needs.detect.outputs.control_changed == 'false'", before)
+        self.assertIn("steps.admission.outputs.admission != 'true' &&", build)
+        self.assertLess(live.index("Evaluate live trust and lifecycle contracts"),
+                        live.index("Select lightweight PR queue admission"))
+
+
 if __name__ == "__main__":
     unittest.main()

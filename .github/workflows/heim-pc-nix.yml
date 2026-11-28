@@ -364,6 +364,100 @@ jobs:
           nix eval --no-update-lock-file --raw .#checks.x86_64-linux.supply-chain-trust.drvPath
           nix eval --no-update-lock-file --raw .#checks.x86_64-linux.nix-lifecycle-contract.drvPath
 
+      # Admission is not integration evidence: the mandatory ALLGREEN queue
+      # must still build the actual group. Before removing the queue or adding
+      # bypass actors, restore full PR builds and revalidate open PR checks.
+      - name: Select lightweight PR queue admission
+        id: admission
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.detect.result == 'success' &&
+          needs.detect.outputs.control_changed == 'false' &&
+          needs.detect.outputs.nix_changed == 'true'
+        shell: python
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json
+          import os
+          import re
+          import subprocess
+
+          repo = os.environ.get("REPOSITORY")
+          base, head = os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", "")
+
+          def api(path):
+              return json.loads(subprocess.run(
+                  ["gh", "api", path], check=True, capture_output=True,
+                  text=True, timeout=10,
+              ).stdout)
+
+          def admits():
+              if not (
+                  os.environ.get("EVENT_NAME") == "pull_request"
+                  and repo == "heimgewebe/heim-pc"
+                  and os.environ.get("HEAD_REPOSITORY") == repo
+                  and os.environ.get("BASE_REF") == "main"
+                  and re.fullmatch(r"[0-9a-f]{40}", base)
+                  and re.fullmatch(r"[0-9a-f]{40}", head)
+                  and base != head
+              ):
+                  return False
+              # A stale base or changed CI controls never grants admission.
+              if api(f"repos/{repo}/git/ref/heads/main")["object"]["sha"] != base:
+                  return False
+              if subprocess.run(
+                  ["git", "diff", "--quiet", "--no-renames", base, head, "--",
+                   ".github/workflows", ".github/grabowski-required-checks.json",
+                   "scripts/ci", "tests/test_ci_nix_reuse.py", "tests/test_nix_changed.py"],
+                  check=False, capture_output=True, timeout=10,
+              ).returncode != 0:
+                  return False
+              rules = api(f"repos/{repo}/rules/branches/main?per_page=100")
+              if not isinstance(rules, list) or not 0 < len(rules) < 100:
+                  return False
+              queues = [r for r in rules if r.get("type") == "merge_queue"]
+              required = [r for r in rules if r.get("type") == "required_status_checks"]
+              if len(queues) != 1 or len(required) != 1:
+                  return False
+              queue, checks = queues[0], required[0]
+              if any(
+                  r.get("ruleset_source_type") != "Repository"
+                  or r.get("ruleset_source") != repo
+                  or r.get("ruleset_id") != 21590094
+                  for r in (queue, checks)
+              ):
+                  return False
+              qp, cp = queue["parameters"], checks["parameters"]
+              return (
+                  qp.get("grouping_strategy") == "ALLGREEN"
+                  and qp.get("merge_method") == "MERGE"
+                  and cp.get("strict_required_status_checks_policy") is True
+                  and cp.get("do_not_enforce_on_create") is False
+                  and all(
+                      {"context": name, "integration_id": 15368}
+                      in cp["required_status_checks"]
+                      for name in ("validate", "guard / verify", "smoke / verify", "live-system")
+                  )
+              )
+
+          admission = False
+          try:
+              admission = admits()
+          except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+              # Missing or ambiguous evidence means the normal full build.
+              pass
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"admission={'true' if admission else 'false'}", file=output)
+          print("PR queue admission only; full build required in merge_group"
+                if admission else "No queue admission proof; normal build policy")
+
       - name: Select exact merge-group build reuse
         id: reuse
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -468,6 +562,7 @@ jobs:
       - name: Build deployed live closure and execute both systemd VM proofs
         if: >-
           steps.reuse.outputs.reuse != 'true' &&
+          steps.admission.outputs.admission != 'true' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
           (needs.detect.result != 'success' ||
            needs.detect.outputs.control_changed != 'false' ||
