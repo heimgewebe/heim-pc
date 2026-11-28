@@ -33,20 +33,19 @@ class AutocopyTests(unittest.TestCase):
     def test_watcher_selftest(self):
         subprocess.run([sys.executable, str(SOURCE / "watch.py"), "--self-test"], check=True)
 
-    def test_long_sensitive_command_and_safe_recovery(self):
+    def test_complete_visible_output_preserved(self):
         spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
         watcher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(watcher)
-        # Entirely synthetic pane text, no commands executed or private files read.
         prompt = b"[probe@heim-pc:~]$ "
-        sensitive = prompt + b"cat /run/secrets/example\n"
+        # Deliberately artificial text: it matched the old content heuristic.
+        fixture = prompt + b"printf 'password=synthetic-test-only'\npassword=synthetic-test-only\n"
         neutral_lines = b"synthetic-output\n" * 30
         safe = prompt + b"printf OK\nOK\n"
-        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines + prompt, "bash"), b"")
-        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines, "cat"), b"")
-        self.assertEqual(watcher.copy_payload(sensitive + neutral_lines + safe + prompt, "bash"), safe.rstrip(b"\n"))
-        ordinary = prompt + b"printf ordinary\n" + neutral_lines + prompt
-        self.assertEqual(watcher.copy_payload(ordinary, "bash"), ordinary)
+        for command in ("bash", "cat"):
+            raw = fixture + neutral_lines + safe + prompt
+            self.assertEqual(watcher.copy_payload(raw, command), raw)
+        self.assertEqual(watcher.copy_payload(raw + b"unsubmitted", "bash"), b"")
 
     def test_inline_prompt_after_output_without_newline(self):
         spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
@@ -66,8 +65,8 @@ class AutocopyTests(unittest.TestCase):
         self.assertEqual(watcher.copy_payload(redraw, "bash"), b"")
         no_output_after_redraw = prompt + b"printf hello\nhetrue   \n" + prompt
         self.assertEqual(watcher.output_marker(no_output_after_redraw, "bash"), marker)
-        old = prompt + b"echo example\npassword=synthetic-test-only\n"
-        self.assertEqual(watcher.copy_payload(old + result, "bash"), prompt + b"printf hello\nhello")
+        old = prompt + b"echo example\nexample=value\n"
+        self.assertEqual(watcher.copy_payload(old + result, "bash"), old + result)
 
     def test_private_history_boundary(self):
         spec = importlib.util.spec_from_file_location("autocopy_watcher", SOURCE / "watch.py")
@@ -188,13 +187,79 @@ class AutocopyTests(unittest.TestCase):
                     os.close(master)
                     os.close(lock)
 
+    def test_nested_copy_off_and_manual_version_binding(self):
+        missing = [name for name in ("tmux", "bash") if not shutil.which(name)]
+        if sys.platform != "linux" or missing:
+            reason = f"Linux tmux PTY prerequisites unavailable: {missing}"
+            if sys.platform == "linux" and os.environ.get("GITHUB_ACTIONS") == "true":
+                self.fail(reason)
+            self.skipTest(reason)
+        with tempfile.TemporaryDirectory(prefix="autocopy-nested-") as directory:
+            path = Path(directory)
+            socket = str(path / "socket")
+            tmux = shutil.which("tmux")
+            env = dict(os.environ, TERM="xterm-256color")
+            for key in ("TMUX", "TMUX_PANE", "PROMPT_COMMAND"):
+                env.pop(key, None)
+            env["PS1"] = "[probe@heim-pc:~]$ "
+            tm = lambda *a: subprocess.run([tmux, "-S", socket, *a], env=env, capture_output=True, timeout=10, check=True)
+            master, slave = pty.openpty()
+            client = subprocess.Popen([tmux, "-S", socket, "-f", "/dev/null", "new-session", "-s", "probe",
+                                       "bash --noprofile --norc -i"], stdin=slave, stdout=slave,
+                                      stderr=slave, env=env, start_new_session=True)
+            os.close(slave)
+
+            def wait_for(predicate, seconds=8):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        os.read(master, 65536)
+                    try:
+                        result = predicate()
+                        if result:
+                            return result
+                    except subprocess.CalledProcessError:
+                        pass
+                self.fail("tmux state did not converge")
+
+            try:
+                wait_for(lambda: tm("list-clients", "-F", "#{client_session}").stdout.strip() == b"probe")
+                os.write(master, b"printf 'MANUAL_COPY_FIXTURE\\n'\r")
+                wait_for(lambda: b"MANUAL_COPY_FIXTURE\n" in tm("capture-pane", "-p", "-t", "probe").stdout)
+                pid, pane = tm("display-message", "-p", "-t", "probe", "#{pid} #{pane_id}").stdout.decode().split()
+                fake = path / "tmux"
+                fake.write_text("#!/bin/sh\nexit 99\n")
+                fake.chmod(0o700)
+                manual_env = dict(env, PATH=str(path) + os.pathsep + env["PATH"],
+                                  TMUX=f"{socket},{pid},0", TMUX_PANE=pane)
+                for args in ([], [pane, "--socket", socket, "--tmux-bin", f"/proc/{pid}/exe"]):
+                    subprocess.run([sys.executable, str(SOURCE / "omnicopy.py"), *args],
+                                   env=manual_env, capture_output=True, timeout=10, check=True)
+                    self.assertIn(b"MANUAL_COPY_FIXTURE", tm("show-buffer").stdout)
+                command = "bash " + shlex.quote(str(SOURCE / "copy-off.sh"))
+                os.write(master, command.encode() + b"\r")
+                new = wait_for(lambda: next((s for s in tm("list-clients", "-F", "#{client_session}").stdout.decode().splitlines()
+                                             if s.startswith("copy-off-")), None))
+                self.assertEqual(tm("show-environment", "-t", "=" + new, "HEIM_AUTOCOPY").stdout.strip(),
+                                 b"HEIM_AUTOCOPY=off")
+                self.assertIn(b"probe", tm("list-sessions", "-F", "#{session_name}").stdout.splitlines())
+                self.assertEqual(tm("display-message", "-p", "-t", "=" + new, "#{pid}").stdout.strip(), pid.encode())
+            finally:
+                subprocess.run([tmux, "-S", socket, "kill-server"], env=env, capture_output=True, timeout=5)
+                try:
+                    client.wait(timeout=5)
+                finally:
+                    if client.poll() is None:
+                        client.terminate()
+                    os.close(master)
+
     def test_real_pty_osc52_and_opt_out(self):
-        self._exercise_real_pty(include_sensitive_history=True)
+        self._exercise_real_pty(include_full_history=True)
 
     def test_real_pty_opt_out_history(self):
-        self._exercise_real_pty(include_sensitive_history=False)
+        self._exercise_real_pty(include_full_history=False)
 
-    def _exercise_real_pty(self, *, include_sensitive_history):
+    def _exercise_real_pty(self, *, include_full_history):
         missing = [name for name in ("tmux", "setsid", "bash") if not shutil.which(name)]
         if sys.platform != "linux" or missing:
             reason = f"Linux tmux PTY prerequisites unavailable: {missing}"
@@ -258,16 +323,15 @@ class AutocopyTests(unittest.TestCase):
                 os.write(master, b"\x15")
                 self.assertFalse(drain(3.5), "clearing inline input recopied output")
                 self.assertFalse(second_updates, "clearing inline input recopied output (second client)")
-                if include_sensitive_history:
-                    os.write(master, b"printf 'password=synthetic-test-only\\n'\r")
-                    self.assertFalse(drain(4), "sensitive output copied")
-                    self.assertFalse(second_updates, "sensitive output copied (second client)")
+                if include_full_history:
+                    os.write(master, b"printf 'EXAMPLE_OPTION=fixture-only\\n'\r")
+                    complete = drain(4)
+                    self.assertTrue(any(b"EXAMPLE_OPTION=fixture-only" in p for p in complete), complete)
+                    self.assertTrue(any(b"EXAMPLE_OPTION=fixture-only" in p for p in second_updates), second_updates)
                     os.write(master, b"printf 'AUTO_RECOVERY_91\\n'\r")
                     recovered = drain(4)
-                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in recovered), recovered)
-                    self.assertTrue(all(b"synthetic-test-only" not in p for p in recovered))
-                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p for p in second_updates), second_updates)
-                    self.assertTrue(all(b"synthetic-test-only" not in p for p in second_updates))
+                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p and b"EXAMPLE_OPTION=fixture-only" in p for p in recovered), recovered)
+                    self.assertTrue(any(b"\nAUTO_RECOVERY_91" in p and b"EXAMPLE_OPTION=fixture-only" in p for p in second_updates), second_updates)
                 os.write(master, b"true\r")
                 self.assertFalse(drain(3.5), "command without output copied")
                 self.assertFalse(second_updates, "command without output copied (second client)")

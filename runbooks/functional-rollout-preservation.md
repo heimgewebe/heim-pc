@@ -20,16 +20,21 @@ führende Orientierung. Keine zweite Registry und keine pauschale Boot-Sperre.
 - Regression: `python3 tests/test_ssh_cockpit_autocopy.py`. Der Linux-PTY-Test
   prüft die tatsächlich ausgesendete OSC52-Sequenz an zwei gleichzeitig
   verbundenen Clients, direkten Neusitzungsstart, serialisierte native
-  tmux-Clipboard-Ausgabe auch bei kurzzeitigem Rückstau, normales Ergebnis,
-  historische sensitive Ausgabe, lange Ausgabe sensibler Befehle, keine
-  Ausgabe, Eingabe ohne Ausführung (auch nach Ausgabe ohne Zeilenumbruch) und
-  expliziten Opt-out und Wiederaufnahme ohne erneuten Attach. Ein
-  übersprungener PTY-Test ist kein Funktionsnachweis; im Linux-GitHub-CI
-  sind die PTY-Voraussetzungen verpflichtend. Die Erkennung sensibler
-  Ausgaben ist eine Heuristik innerhalb des erfassten Pane-Ausschnitts,
-  keine Garantie zur Geheimniserkennung. Bei Shell-Ausgaben ohne sicher
-  erkannte Abschlussgrenze wird vorsorglich nicht kopiert. Normale
-  Sitzungen behalten die bisherige Ausgabeerkennung.
+  tmux-Clipboard-Ausgabe auch bei kurzzeitigem Rückstau, vollständige sichtbare
+  Ausgabe innerhalb der Transportgrenzen, keine Ausgabe, Eingabe ohne
+  Ausführung (auch nach Ausgabe ohne Zeilenumbruch), verschachteltes copy-off,
+  manuelle Kopierhilfe mit der Version des laufenden Servers sowie Opt-out
+  und Wiederaufnahme ohne erneuten Attach. Ein übersprungener PTY-Test ist
+  kein Funktionsnachweis; im Linux-GitHub-CI sind die PTY-Voraussetzungen
+  verpflichtend.
+- Betreiberentscheidung vom 28. November 2026: Die sichtbare Terminalausgabe
+  wird nicht inhaltlich klassifiziert oder gefiltert. Sie kann vertrauliche
+  Inhalte enthalten; vor einer nicht zu kopierenden Ausgabe explizit
+  copy-off verwenden. Automatische Übernahme bleibt auf angeschlossene
+  Clients und aktive Panes begrenzt (1000 Zeilen/32 KiB; manuell 180 Zeilen/
+  45 KB). Steuerzeichen werden bereinigt; nicht ausgeführte Eingaben oder
+  Wiederzeichnungen sind keine neuen Ausgabeereignisse. Bei Shell-Ausgaben
+  ohne sicher erkannte Abschlussgrenze wird nicht automatisch kopiert.
 - Eine mit copy-off eröffnete oder vom Watcher als deaktiviert beobachtete
   Sitzung behält einen privaten Historienmarker in ihrer tmux-Umgebung.
   Nach Wiederaufnahme werden nur neue, ab einer tatsächlich beobachteten

@@ -28,17 +28,6 @@ SHELL_PROMPT = re.compile(
 )
 SHELLS = {"bash", "sh", "dash", "zsh", "fish"}
 
-SENSITIVE = re.compile(
-    r"-----BEGIN (?:OPENSSH |RSA |EC |DSA |PGP )?PRIVATE KEY-----"
-    r"|\b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*\S+",
-    re.IGNORECASE,
-)
-SENSITIVE_COMMAND = re.compile(
-    r"(?:\b(?:passwd|ssh-add)\b|gpg\s+--export-secret-keys|"
-    r"(?:cat|less|head|tail)\s+[^\n]*(?:\.ssh/id_|/run/secrets/))",
-    re.IGNORECASE,
-)
-
 def tmux(socket: str, *args: str, content: bytes | None = None):
     try:
         return subprocess.run(
@@ -54,8 +43,6 @@ def payload(raw: bytes) -> bytes:
         ch for ch in text if ch in "\n\t" or (ord(ch) >= 32 and ord(ch) != 127)
     ).rstrip("\n")
     if not text.strip():
-        return b""
-    if SENSITIVE.search(text) or SENSITIVE_COMMAND.search(text):
         return b""
     encoded = text.encode("utf-8")
     if len(encoded) <= BYTES:
@@ -140,32 +127,13 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
 
 
 def copy_payload(raw: bytes, current_command: str) -> bytes:
-    """Keep normal pane copying; recover only a safe current shell result."""
+    """Copy visible output without content classification; skip editable prompts."""
     rows = capture_rows(raw) if current_command in SHELLS else []
     if current_command in SHELLS:
         active = SHELL_PROMPT.match(rows[-1]) if rows else None
         if not active or rows[-1][active.end():].strip():
             return b""
-    data = payload(raw)
-    if data or current_command not in SHELLS:
-        return data
-    prompts = [(i, SHELL_PROMPT.match(row)) for i, row in enumerate(rows)
-               if SHELL_PROMPT.match(row)]
-    if not prompts:
-        return b""
-    end, match = prompts[-1]
-    if end < len(rows) - 1:
-        block = rows[end:]
-    elif not rows[end][match.end():].strip() and len(prompts) >= 2:
-        block = rows[prompts[-2][0]:end]
-    else:
-        return b""
-    if len(block) < 2 or not any(line.strip() for line in block[1:]):
-        return b""
-    candidate = "\n".join(block)
-    if SENSITIVE_COMMAND.search(candidate):
-        return b""
-    return payload(candidate.encode("utf-8"))
+    return payload(raw)
 
 
 def already_published(marker: bytes | None, last_published: bytes | None) -> bool:
@@ -385,15 +353,10 @@ def main() -> int:
         assert already_published(b"prior", b"prior")  # typing then clearing must not re-copy
         assert not already_published(b"new output", b"prior")
         assert not already_published(b"first output", None)
-        assert payload(b"password=abc123\n") == b""
-        old_sensitive = real_prompt + b"echo example\npassword=synthetic-test-only\n"
-        safe_result = real_prompt + b"printf OK\nOK\n"
-        assert copy_payload(old_sensitive + safe_result + real_prompt, "bash") == safe_result.rstrip(b"\n")
-        assert copy_payload(old_sensitive + real_prompt, "bash") == b""
-        assert copy_payload(safe_result + old_sensitive + real_prompt, "bash") == b""
-        assert copy_payload(old_sensitive + safe_result + real_prompt, "vim") == b""
-        assert copy_payload(old_sensitive + real_prompt + b"cat ~/.ssh/id_test\nexample\n" + real_prompt, "bash") == b""
-        assert copy_payload(old_sensitive + real_prompt + b"unsubmitted", "bash") == b""
+        fixture = real_prompt + b"printf 'example=value'\nexample=value\n"
+        next_result = real_prompt + b"printf OK\nOK\n"
+        assert copy_payload(fixture + next_result + real_prompt, "bash") == payload(fixture + next_result + real_prompt)
+        assert copy_payload(fixture + real_prompt + b"unsubmitted", "bash") == b""
 
         assert payload(b"normal\n" * 10000).startswith(b"[autocopy:")
         assert len(payload(b"normal\n" * 10000)) <= BYTES
