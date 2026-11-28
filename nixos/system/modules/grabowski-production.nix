@@ -424,6 +424,50 @@ in
       };
     };
 
+    # Retry only existing durable notifications through the same dispatcher,
+    # lock and receipt validation as the event-triggered user units. The
+    # historical delivery hold is never changed by this service. This is
+    # at-least-once delivery: remote acceptance before durable ACK remains
+    # an ambiguous failure window, not an exactly-once guarantee.
+    systemd.services."grabowski-ntfy-retry" = lib.mkIf admit {
+      description = "Retry pending Grabowski ntfy notifications";
+      wants = [ "network-online.target" "user@1000.service" ];
+      after = [ "network-online.target" "user@1000.service" "grabowski-operator.service" ];
+      unitConfig = {
+        RequiresMountsFor = "/home/alex";
+        ConditionPathExists = "/home/alex/.config/grabowski/ntfy-topic";
+      };
+      path = [ cfg.operatorPackage pkgs.systemd pkgs.coreutils ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "alex";
+        Group = "users";
+        WorkingDirectory = "/home/alex";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B -m grabowski_ntfy_dispatch";
+        Environment = [
+          "HOME=/home/alex"
+          "XDG_RUNTIME_DIR=/run/user/1000"
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+          "PYTHONDONTWRITEBYTECODE=1"
+        ];
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ReadWritePaths = [ "/home/alex/.local/state/grabowski" ];
+        UMask = "0077";
+      };
+    };
+    systemd.timers."grabowski-ntfy-retry" = lib.mkIf admit {
+      description = "Periodically retry existing Grabowski ntfy outboxes";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "*:0/5";
+        Persistent = false;
+        Unit = "grabowski-ntfy-retry.service";
+      };
+    };
+
     # Keep worktree cleanup independent from job retention. A blocked job
     # archive must not prevent already-proven safe worktree hygiene.
     systemd.services."grabowski-worktree-hygiene" = lib.mkIf admit {
