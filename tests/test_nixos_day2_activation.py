@@ -96,11 +96,21 @@ def activation_plan(receipt: dict, authority: dict) -> dict:
     )
 
 
+def persistent_boot_state(**overrides) -> dict:
+    approved_entry = "nixos-heim-pc-approved-generation-31.conf"
+    recovery_entry = "nixos-heim-pc-recovery-generation-1.conf"
+    return dict({
+        "current": PRIOR, "booted": PRIOR, "profile": PRIOR,
+        "approved": PRIOR, "recovery": PRIOR,
+        "approved_entry": approved_entry, "recovery_entry": recovery_entry,
+        "default": approved_entry, "loader_default": approved_entry,
+        "sysfail": recovery_entry, "oneshot": None,
+    }, **overrides)
+
+
 def persistent_authority(receipt: dict) -> dict:
     prior_state = executor.persistent_state_sha256(
-        target=TARGET,
-        current_closure=PRIOR,
-        profile_closure=PRIOR,
+        target=TARGET, boot_state=persistent_boot_state(),
     )
     return {
         "schema_version": 2,
@@ -186,6 +196,9 @@ def runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(executor, "_require_gc_root", simulated_gc_root)
 
     state = {"current": PRIOR, "profile": PRIOR}
+    monkeypatch.setattr(
+        executor, "_observe_boot_state", lambda _: persistent_boot_state(**state)
+    )
 
     def resolve(path: Path, *, label: str) -> str:
         del label
@@ -847,6 +860,13 @@ def test_postboot_observation_binds_new_boot_and_exact_entry(boot_runtime, monke
     assert result["selected_entry"] == candidate
     assert result["staging_boot_id"] != result["observed_boot_id"]
     assert result["boot_state"]["approved"] == PRIOR
+    assert result["persistent_state_kind"] == "heim_pc.nixos_persistent_runtime_state_v2"
+    assert result["persistent_state_sha256"] == executor.persistent_state_sha256(
+        target=TARGET, boot_state=result["boot_state"],
+    )
+    material = dict(result)
+    digest = material.pop("receipt_sha256")
+    assert digest == executor._sha256_json(material)
     assert calls == before
 
 
@@ -1612,24 +1632,137 @@ def test_post_effect_gc_root_cleanup_failure_recovers_before_returning_error(
     assert not os.path.lexists(executor._gc_root_path(request_id, "target"))
 
 
-def test_persistent_state_digest_changes_with_runtime_state() -> None:
+def test_persistent_state_digest_distinguishes_testboot_from_approved_promotion() -> None:
+    # The current/booted/system links already point at the candidate after
+    # the testboot. Only the named Approved profile and boot defaults advance.
+    old_entry = "nixos-heim-pc-approved-generation-31.conf"
+    new_entry = "nixos-heim-pc-approved-generation-32.conf"
+    recovery_entry = "nixos-heim-pc-recovery-generation-1.conf"
+    testboot = {
+        "current": CLOSURE, "booted": CLOSURE, "profile": CLOSURE,
+        "approved": PRIOR, "recovery": PRIOR,
+        "approved_entry": old_entry, "recovery_entry": recovery_entry,
+        "default": old_entry, "loader_default": old_entry,
+        "sysfail": recovery_entry, "oneshot": None,
+    }
+    promoted = dict(testboot, approved=CLOSURE, approved_entry=new_entry,
+                    default=new_entry, loader_default=new_entry)
+    assert executor.persistent_state_sha256(target=TARGET, boot_state=testboot) != (
+        executor.persistent_state_sha256(target=TARGET, boot_state=promoted)
+    )
+
+
+@pytest.mark.parametrize("changes", [
+    {"current": CLOSURE}, {"profile": CLOSURE}, {"booted": CLOSURE},
+    {"approved": CLOSURE}, {"recovery": CLOSURE},
+    {"oneshot": "nixos-generation-42.conf"},
+    {"approved_entry": "nixos-heim-pc-approved-generation-32.conf",
+     "default": "nixos-heim-pc-approved-generation-32.conf",
+     "loader_default": "nixos-heim-pc-approved-generation-32.conf"},
+    {"recovery_entry": "nixos-heim-pc-recovery-generation-2.conf",
+     "sysfail": "nixos-heim-pc-recovery-generation-2.conf"},
+])
+def test_persistent_state_digest_changes_with_runtime_state(changes) -> None:
     prior = executor.persistent_state_sha256(
-        target=TARGET,
-        current_closure=PRIOR,
-        profile_closure=PRIOR,
+        target=TARGET, boot_state=persistent_boot_state(),
     )
-    changed_current = executor.persistent_state_sha256(
-        target=TARGET,
-        current_closure=CLOSURE,
-        profile_closure=PRIOR,
+    changed = executor.persistent_state_sha256(
+        target=TARGET, boot_state=persistent_boot_state(**changes),
     )
-    changed_profile = executor.persistent_state_sha256(
-        target=TARGET,
-        current_closure=PRIOR,
-        profile_closure=CLOSURE,
+    assert prior != changed
+
+
+@pytest.mark.parametrize("changes", [
+    {"approved": "/tmp/not-a-closure"},
+    {"default": "nixos-generation-42.conf"},
+    {"loader_default": "nixos-generation-42.conf"},
+    {"sysfail": "nixos-generation-42.conf"},
+    {"oneshot": "not-a-native-entry"},
+    {"unbound": "extra"},
+])
+def test_persistent_state_digest_rejects_invalid_boot_state(changes) -> None:
+    with pytest.raises(executor.RuntimeExecutorError):
+        executor.persistent_state_sha256(
+            target=TARGET, boot_state=persistent_boot_state(**changes),
+        )
+
+
+def test_promotion_reauthorizes_approved_preimage_after_gc_setup(runtime, monkeypatch):
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    request_id = "approved-preimage-drift"
+    write_request(request_root, request_id, receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+    boot = persistent_boot_state()
+    monkeypatch.setattr(executor, "_observe_boot_state", lambda _: dict(boot, **state))
+    authorization_digests = []
+
+    def authorize(build, candidate, candidate_plan, **kwargs):
+        authorization_digests.append(kwargs["expected_prior_persistent_state_sha256"])
+        # Exercise the actual unpatched validator. Only the runtime's current
+        # universal boot-critical floor is replaced by the future-mode fixture.
+        checked = managed_nix.authorize_persistent_promotion_execution(
+            build, candidate, candidate_plan, **kwargs,
+        )
+        new_entry = "nixos-heim-pc-approved-generation-32.conf"
+        boot.update(approved=CLOSURE, approved_entry=new_entry,
+                    default=new_entry, loader_default=new_entry)
+        return checked
+
+    monkeypatch.setattr(executor.managed_nix, "authorize_persistent_promotion_execution", authorize)
+    with pytest.raises(managed_nix.ManagedNixError, match="prior persistent state does not match"):
+        executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=lambda *_args: pytest.fail("no effect after Approved drift"),
+            **bindings(receipt, authority, plan),
+        )
+    assert len(authorization_digests) == 2
+    assert authorization_digests[0] == authority["prior_persistent_state_sha256"]
+    assert authorization_digests[0] != authorization_digests[1]
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+def test_legacy_persistent_state_digest_cannot_authorize_new_preimage() -> None:
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    legacy = executor._sha256_json({
+        "schema_version": 1,
+        "kind": "heim_pc.nixos_persistent_runtime_state_v1",
+        "target": TARGET,
+        "current_closure": PRIOR,
+        "persistent_profile_closure": PRIOR,
+    })
+    authority["prior_persistent_state_sha256"] = legacy
+    with pytest.raises(managed_nix.ManagedNixError, match="prior persistent state does not match"):
+        managed_nix.validate_persistent_promotion_authority(
+            receipt, authority,
+            expected_authority_sha256=managed_nix.sha256_json(authority),
+            expected_target=TARGET,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            expected_prior_closure=PRIOR,
+            expected_prior_persistent_state_sha256=executor.persistent_state_sha256(
+                target=TARGET, boot_state=persistent_boot_state(),
+            ),
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("changes", [
+    {"current": CLOSURE}, {"profile": CLOSURE},
+    {"oneshot": "nixos-generation-42.conf"},
+])
+def test_persistent_preimage_rejects_drift_or_pending_oneshot(monkeypatch, changes):
+    monkeypatch.setattr(
+        executor, "_observe_boot_state", lambda _: persistent_boot_state(**changes)
     )
-    assert prior != changed_current
-    assert prior != changed_profile
+    with pytest.raises(executor.RuntimeExecutorError):
+        executor._read_persistent_state_sha256(
+            target=TARGET, current_closure=PRIOR, profile_closure=PRIOR,
+        )
 
 def test_request_files_must_be_root_boundary_equivalent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1707,33 +1840,28 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
         "external_expected_sha256_required": True,
         "effect": "request-staging-and-read-only-boot-observation",
         "promotion_authorized": False,
+        "persistent_state_kind": executor.PERSISTENT_STATE_KIND,
     }
     promotion = contract["supported_operations"]["persistent-promotion"]
     assert promotion["boot_critical_requires_next_boot_successor_proof"] is True
     assert promotion["boot_critical_execution_implemented_here"] is False
+    assert promotion["named_approved_promotion_implemented_here"] is False
     persistent_state = contract["persistent_state"]
+    assert persistent_state["schema_version"] == 2
     assert persistent_state["kind"] == executor.PERSISTENT_STATE_KIND
     assert persistent_state["algorithm"] == "canonical-json-sha256-v1"
     assert persistent_state["fields"] == [
-        "schema_version",
-        "kind",
-        "target",
-        "current_closure",
-        "persistent_profile_closure",
+        "schema_version", "kind", "target", "boot_state",
     ]
+    assert set(persistent_state["boot_state_fields"]) == set(persistent_boot_state())
     assert executor.persistent_state_sha256(
-        target=TARGET,
-        current_closure=PRIOR,
-        profile_closure=PRIOR,
-    ) == executor._sha256_json(
-        {
-            "schema_version": 1,
-            "kind": executor.PERSISTENT_STATE_KIND,
-            "target": TARGET,
-            "current_closure": PRIOR,
-            "persistent_profile_closure": PRIOR,
-        }
-    )
+        target=TARGET, boot_state=persistent_boot_state(),
+    ) == executor._sha256_json({
+        "schema_version": 2,
+        "kind": executor.PERSISTENT_STATE_KIND,
+        "target": TARGET,
+        "boot_state": persistent_boot_state(),
+    })
     assert contract["execution_receipt"]["final_activation_receipt_established"] is False
     assert (
         contract["execution_receipt"]["independent_runtime_readback_established"]
