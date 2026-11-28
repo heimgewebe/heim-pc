@@ -24,8 +24,11 @@
       "executor_authority": "successor-task-typed-persistent-promotion-only",
       "switch_argument": "switch",
       "boot_critical_requires_next_boot_successor_proof": true,
-      "boot_critical_execution_implemented_here": false,
-      "named_approved_promotion_implemented_here": false
+      "boot_critical_execution_implemented_here": true,
+      "named_approved_promotion_implemented_here": true,
+      "boot_critical_staging_receipt_file": "staging-receipt.json",
+      "boot_critical_switch_argument": "boot",
+      "boot_critical_external_expected_boot_id_required": true
     }
   },
   "request": {
