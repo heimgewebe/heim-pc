@@ -236,17 +236,30 @@ class AutocopyTests(unittest.TestCase):
                 env.pop(key, None)
             env["PS1"] = "[probe@heim-pc:~]$ "
             tm = lambda *a: subprocess.run([tmux, "-S", socket, *a], env=env, capture_output=True, timeout=10, check=True)
+            import struct
+            import termios
+            helper = path / "omnicopy"
+            helper.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(SOURCE / "omnicopy.py")) + ' "$@"\n')
+            helper.chmod(0o700)
+            config = path / "tmux.conf"
+            config.write_text((SOURCE / "tmux.conf.in").read_text()
+                              .replace("@setsid@", shutil.which("true"))
+                              .replace("@watcher@", shutil.which("true"))
+                              .replace("@omnicopy@", str(helper)))
             master, slave = pty.openpty()
-            client = subprocess.Popen([tmux, "-S", socket, "-f", "/dev/null", "new-session", "-s", "probe",
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 240, 0, 0))
+            client = subprocess.Popen([tmux, "-S", socket, "-f", str(config), "new-session", "-s", "probe",
                                        "bash --noprofile --norc -i"], stdin=slave, stdout=slave,
                                       stderr=slave, env=env, start_new_session=True)
             os.close(slave)
+
+            received = bytearray()
 
             def wait_for(predicate, seconds=8):
                 deadline = time.monotonic() + seconds
                 while time.monotonic() < deadline:
                     if select.select([master], [], [], 0.1)[0]:
-                        os.read(master, 65536)
+                        received.extend(os.read(master, 65536))
                     try:
                         result = predicate()
                         if result:
@@ -269,6 +282,17 @@ class AutocopyTests(unittest.TestCase):
                     subprocess.run([sys.executable, str(SOURCE / "omnicopy.py"), *args],
                                    env=manual_env, capture_output=True, timeout=10, check=True)
                     self.assertIn(b"MANUAL_COPY_FIXTURE", tm("show-buffer").stdout)
+                os.write(master, b"printf 'MANUAL_LONG_%03d_%0200d_END\\n' {1..280}\r")
+                wait_for(lambda: b"MANUAL_LONG_279_" in tm("capture-pane", "-p", "-S", "-180", "-t", pane).stdout)
+                # Manual helper must carry data beyond tmux's argv limit and the
+                # shipped prefix+Y binding must emit OSC52 to the actual PTY.
+                received.clear()
+                os.write(master, b"\x02Y")
+                def manual_large_payload():
+                    return any(len(data) > 16384 and b"MANUAL_LONG_279_" in data
+                               for data in (base64.b64decode(v) for v in OSC52.findall(received)))
+                wait_for(manual_large_payload)
+                self.assertIn(b"MANUAL_LONG_279_", tm("show-buffer").stdout)
                 command = "bash " + shlex.quote(str(SOURCE / "copy-off.sh"))
                 os.write(master, command.encode() + b"\r")
                 new = wait_for(lambda: next((s for s in tm("list-clients", "-F", "#{client_session}").stdout.decode().splitlines()

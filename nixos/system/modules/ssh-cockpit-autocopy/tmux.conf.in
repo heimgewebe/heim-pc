@@ -11,4 +11,4 @@ set-hook -g client-session-changed 'run-shell -b "@setsid@ -f @watcher@ --socket
 bind-key -T copy-mode-vi v send-keys -X begin-selection
 bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode-vi Enter send-keys -X copy-selection-and-cancel
-bind-key Y run-shell -b "@omnicopy@ '#{pane_id}' --socket #{q:socket_path} --tmux-bin /proc/#{pid}/exe"
+bind-key Y run-shell -b "@omnicopy@ '#{pane_id}' --socket #{q:socket_path} --tmux-bin /proc/#{pid}/exe --client #{q:client_tty}"

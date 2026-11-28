@@ -8,6 +8,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("pane", nargs="?", default=os.environ.get("TMUX_PANE", ""))
 parser.add_argument("--socket")
 parser.add_argument("--tmux-bin")
+parser.add_argument("--client")
 args = parser.parse_args()
 p = args.pane
 if not p.startswith("%") or not p[1:].isdigit():
@@ -37,5 +38,7 @@ s = r.stdout.decode("utf-8", "replace").strip("\n")
 data = s.encode()
 if len(data) > 45000:
     s = "[last 45 KB of pane]\n" + data[-44900:].decode("utf-8", "replace")
-subprocess.run([*tmux, "set-buffer", "-w", "--", s], check=True, timeout=5)
+target = ["-t", args.client] if args.client else []
+subprocess.run([*tmux, "load-buffer", "-w", *target, "-"], input=s.encode(),
+               check=True, timeout=5)
 print("omnicopy: copied")
