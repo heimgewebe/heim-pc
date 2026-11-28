@@ -65,6 +65,11 @@ class AutocopyTests(unittest.TestCase):
         self.assertEqual(watcher.copy_payload(redraw, "bash"), b"")
         no_output_after_redraw = prompt + b"printf hello\nhetrue   \n" + prompt
         self.assertEqual(watcher.output_marker(no_output_after_redraw, "bash"), marker)
+        # Actual PTY shape: Ctrl-U destroys the inline prompt; the next
+        # producer is no longer recognizable but its result adds a row.
+        new_output_after_redraw = prompt + b"printf hello\nheprintf next   \nNEXT\n" + prompt
+        self.assertNotEqual(watcher.output_marker(new_output_after_redraw, "bash"), marker)
+        self.assertIn(b"NEXT", watcher.copy_payload(new_output_after_redraw, "bash"))
         old = prompt + b"echo example\nexample=value\n"
         self.assertEqual(watcher.copy_payload(old + result, "bash"), old + result)
 

@@ -115,11 +115,14 @@ def output_marker(raw: bytes, current_command: str) -> bytes | None:
                 if line.strip() and not line.lstrip().startswith(("> ", "... "))
             ]
             if between:
-                # A completed shell command is a publication event. Redraw
-                # of its old result, including a subsequent command whose
-                # prompt was erased, is not a new recognized producer.
+                # Readline can erase the inline prompt before a subsequent
+                # command. The recognized producer then remains the old one.
+                # Count substantive result rows: a redraw/no-output command
+                # preserves the count, whereas a newly appended result adds
+                # rows even when its own prompt was overwritten.
                 producer = "\n".join(rows[:start + 1]).encode()
-                return hashlib.sha256(b"shell-result\0" + producer).digest()
+                result_rows = str(len(between)).encode()
+                return hashlib.sha256(b"shell-result\0" + producer + b"\0" + result_rows).digest()
         return None
     # Terminal apps with no detectable shell prompt retain their prior
     # behavior; for unknown shell prompts avoid auto-copying typed input.
