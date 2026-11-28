@@ -16,14 +16,16 @@
       "staging_receipt_file": "staging-receipt.json",
       "external_expected_sha256_required": true,
       "effect": "request-staging-and-read-only-boot-observation",
-      "promotion_authorized": false
+      "promotion_authorized": false,
+      "persistent_state_kind": "heim_pc.nixos_persistent_runtime_state_v2"
     },
     "persistent-promotion": {
       "plan_kind": "heim_pc.nixos_persistent_promotion_plan_v2",
       "executor_authority": "successor-task-typed-persistent-promotion-only",
       "switch_argument": "switch",
       "boot_critical_requires_next_boot_successor_proof": true,
-      "boot_critical_execution_implemented_here": false
+      "boot_critical_execution_implemented_here": false,
+      "named_approved_promotion_implemented_here": false
     }
   },
   "request": {
@@ -120,18 +122,29 @@
     "final activation or persistent-promotion receipt publication"
   ],
   "persistent_state": {
-    "schema_version": 1,
-    "kind": "heim_pc.nixos_persistent_runtime_state_v1",
+    "schema_version": 2,
+    "kind": "heim_pc.nixos_persistent_runtime_state_v2",
     "algorithm": "canonical-json-sha256-v1",
     "fields": [
       "schema_version",
       "kind",
       "target",
-      "current_closure",
-      "persistent_profile_closure"
+      "boot_state"
+    ],
+    "boot_state_fields": [
+      "current",
+      "booted",
+      "profile",
+      "approved",
+      "recovery",
+      "approved_entry",
+      "recovery_entry",
+      "default",
+      "sysfail",
+      "oneshot",
+      "loader_default"
     ],
     "target_source": "externally-bound-plan-target",
-    "current_closure_source": "/run/current-system",
-    "persistent_profile_closure_source": "/nix/var/nix/profiles/system"
+    "boot_state_source": "native-named-profile-and-EFI-readback"
   }
 }

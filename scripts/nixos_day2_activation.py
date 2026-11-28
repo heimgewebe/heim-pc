@@ -80,6 +80,11 @@ EFI_VAR_ROOT = Path("/sys/firmware/efi/efivars")
 EFI_LOADER_GUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 LOADER_CONF = Path("/boot/loader/loader.conf")
 BOOT_ENTRY_RE = re.compile(r"nixos-[A-Za-z0-9_.+\-]{1,180}\.conf\Z")
+BOOT_STATE_FIELDS = (
+    "current", "booted", "profile", "approved", "recovery",
+    "approved_entry", "recovery_entry", "default", "sysfail",
+    "oneshot", "loader_default",
+)
 LOCK_PATH = Path("/run/lock/heim-pc-nixos-activation.lock")
 SELF_CGROUP_PATH = Path("/proc/self/cgroup")
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -162,6 +167,7 @@ def _load_contract() -> dict[str, Any]:
             "external_expected_sha256_required": True,
             "effect": "request-staging-and-read-only-boot-observation",
             "promotion_authorized": False,
+            "persistent_state_kind": "heim_pc.nixos_persistent_runtime_state_v2",
         },
         "persistent-promotion": {
             "plan_kind": managed_nix.PERSISTENT_PROMOTION_PLAN_KIND,
@@ -169,6 +175,7 @@ def _load_contract() -> dict[str, Any]:
             "switch_argument": "switch",
             "boot_critical_requires_next_boot_successor_proof": True,
             "boot_critical_execution_implemented_here": False,
+            "named_approved_promotion_implemented_here": False,
         },
     }
     if raw.get("supported_operations") != expected_operations:
@@ -231,19 +238,13 @@ def _load_contract() -> dict[str, Any]:
         raise RuntimeExecutorError("runtime executor effect boundary drifted")
 
     if raw.get("persistent_state") != {
-        "schema_version": 1,
-        "kind": "heim_pc.nixos_persistent_runtime_state_v1",
+        "schema_version": 2,
+        "kind": "heim_pc.nixos_persistent_runtime_state_v2",
         "algorithm": "canonical-json-sha256-v1",
-        "fields": [
-            "schema_version",
-            "kind",
-            "target",
-            "current_closure",
-            "persistent_profile_closure",
-        ],
+        "fields": ["schema_version", "kind", "target", "boot_state"],
+        "boot_state_fields": list(BOOT_STATE_FIELDS),
         "target_source": "externally-bound-plan-target",
-        "current_closure_source": str(CURRENT_SYSTEM_LINK),
-        "persistent_profile_closure_source": str(SYSTEM_PROFILE_LINK),
+        "boot_state_source": "native-named-profile-and-EFI-readback",
     }:
         raise RuntimeExecutorError("persistent runtime state digest contract drifted")
 
@@ -474,24 +475,51 @@ def _require_link_target(path: Path, expected: str, *, label: str) -> str:
         )
     return observed
 
-def _persistent_state_payload(*, target: str, current_closure: str, profile_closure: str) -> dict[str, Any]:
+def _persistent_state_payload(
+    *, target: str, boot_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the real boot default, not just the ordinary system profile.
+
+    Version 1 aliased a successful OneShot testboot with its later Approved
+    promotion. Its digests must not satisfy this version's preimage gate.
+    """
+    if not isinstance(boot_state, Mapping) or set(boot_state) != set(BOOT_STATE_FIELDS):
+        raise RuntimeExecutorError("invalid persistent boot state fields")
+    state = dict(boot_state)
+    try:
+        target = managed_nix._require_canonical_string(target, "target")
+        for key in ("current", "booted", "profile", "approved", "recovery"):
+            state[key] = managed_nix._require_closure(state[key], key)
+    except managed_nix.ManagedNixError as exc:
+        raise RuntimeExecutorError("invalid persistent boot state identity") from exc
+    for key in ("approved_entry", "recovery_entry", "default", "sysfail", "loader_default"):
+        state[key] = _boot_entry_id(state[key])
+    if state["oneshot"] is not None:
+        state["oneshot"] = _boot_entry_id(state["oneshot"])
+    _require_approved_defaults(state)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": PERSISTENT_STATE_KIND,
         "target": target,
-        "current_closure": current_closure,
-        "persistent_profile_closure": profile_closure,
+        "boot_state": state,
     }
 
 
-def persistent_state_sha256(*, target: str, current_closure: str, profile_closure: str) -> str:
-    return _sha256_json(
-        _persistent_state_payload(
-            target=target,
-            current_closure=current_closure,
-            profile_closure=profile_closure,
-        )
-    )
+def persistent_state_sha256(*, target: str, boot_state: Mapping[str, Any]) -> str:
+    return _sha256_json(_persistent_state_payload(target=target, boot_state=boot_state))
+
+
+def _read_persistent_state_sha256(
+    *, target: str, current_closure: str, profile_closure: str,
+) -> str:
+    # Observe using the verified running closure, never a new unapproved
+    # executable selected by a prospective promotion request.
+    state = _observe_boot_state(current_closure)
+    if state["current"] != current_closure or state["profile"] != profile_closure:
+        raise RuntimeExecutorError("persistent boot state drifted during readback")
+    if state["oneshot"] is not None:
+        raise RuntimeExecutorError("pending OneShot must be reconciled before promotion")
+    return persistent_state_sha256(target=target, boot_state=state)
 
 
 def _require_executable(path: Path, *, label: str) -> Path:
@@ -1445,6 +1473,7 @@ def _execution_receipt(
             "controlled reboot completion",
             "final activation receipt",
             "final persistent-promotion receipt",
+            "named Approved boot promotion",
         ],
     }
     receipt["receipt_sha256"] = _sha256_json(receipt)
@@ -1782,11 +1811,7 @@ def observe_next_boot(
         staged = receipt.get("boot_state_after")
         if not isinstance(before, dict) or not isinstance(staged, dict):
             raise RuntimeExecutorError("missing staged boot state")
-        required = {
-            "current", "booted", "profile", "approved", "recovery",
-            "approved_entry", "recovery_entry", "default", "sysfail",
-            "oneshot", "loader_default",
-        }
+        required = set(BOOT_STATE_FIELDS)
         if set(before) != required or set(staged) != required:
             raise RuntimeExecutorError("invalid staged boot state fields")
         _require_approved_defaults(before)
@@ -1827,6 +1852,10 @@ def observe_next_boot(
             "observed_boot_id": boot_id,
             "selected_entry": selected,
             "boot_state": observed,
+            "persistent_state_kind": PERSISTENT_STATE_KIND,
+            "persistent_state_sha256": persistent_state_sha256(
+                target=expected_target, boot_state=observed,
+            ),
             "observed_at": _utc_now(),
             "boot_identity_established": True,
             "application_health_established": False,
@@ -2076,7 +2105,7 @@ def execute_persistent_promotion(
             structural_plan["prior_closure"],
             label="persistent system profile before persistent promotion",
         )
-        prior_state_digest = persistent_state_sha256(
+        prior_state_digest = _read_persistent_state_sha256(
             target=structural_plan["target"],
             current_closure=pre_current,
             profile_closure=pre_profile,
@@ -2122,7 +2151,7 @@ def execute_persistent_promotion(
                 )
                 _raise_if_termination_requested(termination)
                 _preflight_recovery_commands(plan["prior_closure"], "switch")
-                prior_state_digest = persistent_state_sha256(
+                prior_state_digest = _read_persistent_state_sha256(
                     target=plan["target"],
                     current_closure=pre_current,
                     profile_closure=pre_profile,
