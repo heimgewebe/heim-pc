@@ -42,6 +42,11 @@
       "owns_runtime_nixpkgs": true,
       "runtime_nixpkgs_lock_node": "nixpkgs",
       "runtime_nixpkgs_required_revision": "fa1373130d5a21c040a47c5dbe1913d59ed91808"
+    },
+    "nabu": {
+      "lock_node": "nabu",
+      "required_revision": "fd2a2649177bcff2a98bd6f400b0d8e1d3e9a0ca",
+      "required_nar_hash": "sha256-8tdY3kMGJuo4GK2PUvzGTA5OY+kDCjYaFTb2HzPxKwA="
     }
   },
   "managed_nix_verifier": {

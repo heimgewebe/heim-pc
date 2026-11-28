@@ -11,8 +11,12 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixer.url = "github:heimgewebe/nixer/b229f81de906cc28b3e9cf8d29bf757232b6ed97";
+    nabu = {
+      url = "github:heimgewebe/nabu/fd2a2649177bcff2a98bd6f400b0d8e1d3e9a0ca";
+      flake = false;
+    };
   };
 
-  outputs = inputs@{ self, nixpkgs, microvm, nixer }:
+  outputs = inputs@{ self, nixpkgs, microvm, nixer, nabu }:
     (import ./nixos/system/flake.nix).outputs inputs;
 }

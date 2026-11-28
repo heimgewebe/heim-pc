@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "nixos" / "system"
-ROOT_LOCK_SHA256 = "594231545410ccbd05838f279bff11feece3c4c7f94f7d2b5781dbfe56758107"
+ROOT_LOCK_SHA256 = "2b2513f9a2e99f289f87bc73b39ac53743eea099b9951454693ba9584994e056"
 TEST_SOURCE_REVISION = "a" * 40
 
 
@@ -62,7 +62,7 @@ class T(unittest.TestCase):
         inputs = r"  inputs = \{.*?\n  \};"
         self.assertEqual(re.search(metadata, root_flake).group(), re.search(metadata, nested).group())
         self.assertEqual(re.search(inputs, root_flake, re.S).group(), re.search(inputs, nested, re.S).group())
-        self.assertIn("outputs = inputs@{ self, nixpkgs, microvm, nixer }:", root_flake)
+        self.assertIn("outputs = inputs@{ self, nixpkgs, microvm, nixer, nabu }:", root_flake)
         self.assertIn("(import ./nixos/system/flake.nix).outputs inputs", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).description", root_flake)
         self.assertNotIn("(import ./nixos/system/flake.nix).inputs", root_flake)
@@ -132,6 +132,34 @@ class T(unittest.TestCase):
                 altered_system["nodes"][altered_system["root"]]["inputs"]["nixer"] = "microvm"
             with self.subTest(attack=attack):
                 self.assertFalse(bound(altered_trust, altered_root, altered_system))
+
+    def test_nabu_source_is_nonflake_and_generation_bound(self):
+        lock = json.loads((ROOT / "flake.lock").read_text())
+        trust = json.loads((ROOT / "nixos/production/trust-contract-v1.json").read_text())
+        name = lock["nodes"][lock["root"]]["inputs"]["nabu"]
+        pin = trust["inputs"]["nabu"]
+        node = lock["nodes"][name]
+        self.assertEqual(name, pin["lock_node"])
+        self.assertFalse(node["flake"])
+        self.assertEqual(node["locked"]["rev"], pin["required_revision"])
+        self.assertEqual(node["locked"]["narHash"], pin["required_nar_hash"])
+        self.assertEqual(node["locked"]["owner"], "heimgewebe")
+        self.assertEqual(node["locked"]["repo"], "nabu")
+        flake = (SOURCE / "flake.nix").read_text()
+        self.assertIn('inputMatches "nabu" nabu', flake)
+        self.assertIn("nabu.rev == trust.inputs.nabu.required_revision", flake)
+        self.assertIn("nabu.narHash == trust.inputs.nabu.required_nar_hash", flake)
+        self.assertIn("(import ./modules/nabu-release.nix nabu)", flake)
+        module = (SOURCE / "modules/nabu-release.nix").read_text()
+        self.assertIn('environment.etc."heim-pc/nabu-release.json".source = release;', module)
+        self.assertIn("--pinned-release", module)
+        self.assertIn('environment.etc."heim-pc/nabu-source".source = nabu.outPath;', module)
+        self.assertIn('pkgs.writeShellScriptBin "nabu-install-sender"', module)
+        self.assertIn("nabu.outPath}/nixos/system/nabu/setup_chatgpt_sender.py", module)
+        self.assertIn("environment.systemPackages = [ deploy installSender ];", module)
+        self.assertIn("source = toString nabu.outPath;", module)
+        self.assertNotIn("systemd.services", module)
+        self.assertNotIn("activationScripts", module)
 
     def test_nixer_image_preparation_has_bounded_network_retry(self):
         module = (SOURCE / "modules/nixer.nix").read_text()
@@ -336,7 +364,7 @@ class T(unittest.TestCase):
         pins = canonical["nodes"][canonical["root"]]["inputs"]
         inputs = {name: {key: canonical["nodes"][pins[name]]["locked"][key]
                          for key in ("rev", "narHash")}
-                  for name in ("nixpkgs", "microvm", "nixer")}
+                  for name in ("nixpkgs", "microvm", "nixer", "nabu")}
         inputs["self"] = {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -362,7 +390,7 @@ class T(unittest.TestCase):
                 result = evaluate(inputs, entry)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("nixosConfigurations", result.stdout)
-                for name in ("nixpkgs", "microvm", "nixer"):
+                for name in ("nixpkgs", "microvm", "nixer", "nabu"):
                     for key in ("rev", "narHash"):
                         altered = json.loads(json.dumps(inputs))
                         altered[name][key] = "unreviewed-input"
