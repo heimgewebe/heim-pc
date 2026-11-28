@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -828,6 +830,151 @@ class OperatorEntryTests(unittest.TestCase):
             drifted = checker.check(home=home, require_installed=True)
             self.assertFalse(drifted["valid"])
             self.assertIn("installed reposAgentPointer is missing or differs from canonical source", drifted["errors"])
+
+
+    @contextmanager
+    def _canonical_install_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            repo = home / "repos/heim-pc"
+            repo.mkdir(parents=True)
+            source_names = (
+                "SOURCE_CONTRACT", "SOURCE_AGENT_POINTER", "SOURCE_REPOS_AGENT_POINTER",
+                "SOURCE_README_POINTER", "SOURCE_MANAGED_BUILD", "SOURCE_STORAGE_INVENTORY",
+                "SOURCE_MANAGED_BUILD_POLICY",
+            )
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Operator Entry Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("config", "core.hooksPath", "/dev/null")
+            git("remote", "add", "origin", "https://github.com/heimgewebe/heim-pc.git")
+
+            with ExitStack() as stack:
+                for name in source_names:
+                    original = getattr(installer, name)
+                    target = repo / original.relative_to(ROOT)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(original.read_bytes())
+                    stack.enter_context(patch.object(installer, name, target))
+                stack.enter_context(patch.object(installer, "ROOT", repo))
+
+                def publish_fixture_commit(message):
+                    git("add", ".")
+                    git("commit", "-m", message)
+                    head = git("rev-parse", "HEAD")
+                    git("update-ref", "refs/remotes/origin/main", head)
+                    return head
+
+                publish_fixture_commit("initial fixture")
+                installer.install(home=home, apply=True)
+                yield home, repo, git, publish_fixture_commit
+
+    def test_convergence_updates_only_known_managed_preimages_and_is_idempotent(self):
+        with self._canonical_install_fixture() as (home, repo, git, publish):
+            installed = home / ".config/heimgewebe/operator-entry.v1.json"
+            before = installed.read_bytes()
+            receipt_path = home / installer.RECEIPT_RELATIVE_PATH
+            old_receipt = receipt_path.read_bytes()
+            installer.SOURCE_CONTRACT.write_bytes(before + b"\n")
+            head = publish("change the canonical contract")
+            plan = installer.install(home=home, apply=False, converge=True)
+            self.assertEqual(plan["convergenceSourceCommit"], head)
+            self.assertEqual(receipt_path.read_bytes(), old_receipt)
+            self.assertEqual(installed.read_bytes(), before)
+
+            receipt = installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(receipt["convergence"], {"status": "applied", "sourceCommit": head})
+            self.assertEqual(installed.read_bytes(), installer.SOURCE_CONTRACT.read_bytes())
+            entry = receipt["files"][0]
+            self.assertEqual(Path(entry["backup"]).read_bytes(), before)
+            after = receipt_path.read_bytes()
+            repeated = installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(repeated["convergence"]["status"], "unchanged")
+            self.assertEqual(receipt_path.read_bytes(), after)
+
+    def test_convergence_rejects_unknown_edit_before_any_projection_write(self):
+        with self._canonical_install_fixture() as (home, repo, git, publish):
+            installed = home / ".config/heimgewebe/operator-entry.v1.json"
+            before = installed.read_bytes()
+            receipt_path = home / installer.RECEIPT_RELATIVE_PATH
+            old_receipt = receipt_path.read_bytes()
+            installer.SOURCE_CONTRACT.write_bytes(before + b"\n")
+            publish("change the canonical contract")
+            (home / "AGENTS.md").write_text("local customization\n")
+            with self.assertRaisesRegex(installer.InstallConflict, "unknown preimage"):
+                installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(installed.read_bytes(), before)
+            self.assertEqual((home / "AGENTS.md").read_text(), "local customization\n")
+            self.assertEqual(receipt_path.read_bytes(), old_receipt)
+
+    def test_convergence_rejects_untrusted_source_and_missing_receipt(self):
+        with self._canonical_install_fixture() as (home, repo, git, publish):
+            installed = home / ".config/heimgewebe/operator-entry.v1.json"
+            before = installed.read_bytes()
+            git("switch", "-c", "feature")
+            with self.assertRaisesRegex(installer.InstallConflict, "requires main"):
+                installer.install(home=home, apply=True, converge=True)
+            git("switch", "main")
+            installer.SOURCE_CONTRACT.write_bytes(before + b"\n")
+            with self.assertRaisesRegex(installer.InstallConflict, "dirty"):
+                installer.install(home=home, apply=True, converge=True)
+            git("add", ".")
+            git("commit", "-m", "unpublished change")
+            with self.assertRaisesRegex(installer.InstallConflict, "origin/main"):
+                installer.install(home=home, apply=True, converge=True)
+            git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"))
+            git("remote", "set-url", "origin", "https://example.invalid/other.git")
+            with self.assertRaisesRegex(installer.InstallConflict, "unexpected canonical Git origin"):
+                installer.install(home=home, apply=True, converge=True)
+            git("remote", "set-url", "origin", "https://github.com/heimgewebe/heim-pc.git")
+            (home / installer.RECEIPT_RELATIVE_PATH).unlink()
+            with self.assertRaisesRegex(installer.InstallConflict, "existing installation receipt"):
+                installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(installed.read_bytes(), before)
+
+
+    def test_convergence_does_not_recreate_deleted_or_widen_local_projection(self):
+        with self._canonical_install_fixture() as (home, repo, git, publish):
+            installed = home / ".config/heimgewebe/operator-entry.v1.json"
+            before = installed.read_bytes()
+            installer.SOURCE_CONTRACT.write_bytes(before + b"\n")
+            publish("change the canonical contract")
+            agent = home / "AGENTS.md"
+            agent.chmod(0o600)
+            with self.assertRaisesRegex(installer.InstallConflict, "unexpected mode"):
+                installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(stat.S_IMODE(agent.stat().st_mode), 0o600)
+            self.assertEqual(installed.read_bytes(), before)
+            agent.unlink()
+            with self.assertRaisesRegex(installer.InstallConflict, "unknown preimage"):
+                installer.install(home=home, apply=True, converge=True)
+            self.assertFalse(agent.exists())
+            self.assertEqual(installed.read_bytes(), before)
+
+    def test_convergence_recovers_known_partial_application(self):
+        with self._canonical_install_fixture() as (home, repo, git, publish):
+            installed = home / ".config/heimgewebe/operator-entry.v1.json"
+            before = installed.read_bytes()
+            receipt_path = home / installer.RECEIPT_RELATIVE_PATH
+            old_receipt = receipt_path.read_bytes()
+            installer.SOURCE_CONTRACT.write_bytes(before + b"\n")
+            installer.SOURCE_AGENT_POINTER.write_bytes(installer.SOURCE_AGENT_POINTER.read_bytes() + b"\n")
+            publish("change two managed projections")
+            # An interrupted earlier application has already installed one target.
+            installed.write_bytes(installer.SOURCE_CONTRACT.read_bytes())
+            receipt = installer.install(home=home, apply=True, converge=True)
+            self.assertEqual(receipt["convergence"]["status"], "applied")
+            self.assertNotEqual(receipt_path.read_bytes(), old_receipt)
+            self.assertEqual((home / "AGENTS.md").read_bytes(), installer.SOURCE_AGENT_POINTER.read_bytes())
+            self.assertEqual(installed.read_bytes(), installer.SOURCE_CONTRACT.read_bytes())
 
 
 if __name__ == "__main__":
