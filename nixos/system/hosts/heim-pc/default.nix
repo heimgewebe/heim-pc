@@ -38,7 +38,7 @@ let
   );
 in
 {
-  imports = [ ../../modules/brotli-security.nix ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ../../modules/grosser-adler.nix ];
+  imports = [ ../../modules/brotli-security.nix ../../modules/desktop.nix ../../modules/nvidia.nix ../../modules/build-reproducibility.nix ../../modules/audio.nix ../../modules/development.nix ../../modules/ssh-cockpit-autocopy.nix ../../modules/containers.nix ../../modules/grabowski.nix ../../modules/bureau.nix ../../modules/networking.nix ../../modules/backup.nix ../../modules/nix-trust.nix ../../modules/nix-lifecycle.nix ../../modules/observability.nix ../../modules/host-protection.nix ../../modules/physical-gates.nix ../../modules/day2-activation.nix ../../modules/grosser-adler.nix ];
   networking.hostName = "heim-pc";
   nixpkgs.config.allowUnfree = true;
   # Canonical local interaction policy for the physical workstation.  Reuse the

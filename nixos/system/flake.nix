@@ -1463,6 +1463,14 @@ PY
           assert target.heimPc.hostProtection.enable;
           assert proprietary.heimPc.hostProtection.enable && open.heimPc.hostProtection.enable;
           assert !vm.heimPc.hostProtection.enable;
+          # The desktop generation owns the clipboard integration.
+          assert builtins.hasAttr "heim-pc/tmux-autocopy.conf" target.environment.etc;
+          assert builtins.hasAttr "tmux.conf" target.environment.etc;
+          assert nixpkgs.lib.hasInfix "--tmux-bin /proc/#{pid}/exe"
+            target.environment.etc."heim-pc/tmux-autocopy.conf".text;
+          assert target.systemd.user.services.heim-pc-tmux-autocopy-migration.unitConfig.ConditionUser == "alex";
+          assert !(builtins.hasAttr "heim-pc/tmux-autocopy.conf" vm.environment.etc);
+
           assert target.zramSwap.enable;
           assert target.zramSwap.algorithm == "zstd";
           assert target.zramSwap.memoryPercent == 25;
