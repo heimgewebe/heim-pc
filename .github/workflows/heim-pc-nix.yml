@@ -485,6 +485,13 @@ jobs:
           # the old thermal unit was enabled but silently skipped at boot.
           closure="$(nix eval --no-update-lock-file --raw .#nixosConfigurations.heim-pc-seagate-grabowski-headless-candidate.config.system.build.toplevel.outPath)"
           test -e "$closure/etc/systemd/system/multi-user.target.wants/heim-pc-thermal-mitigation.service"
+          # Prove the actual deployed profile includes the SSH clipboard integration.
+          for command in tmux tmux-autocopy-watch omnicopy copy-off; do
+            test -x "$closure/sw/bin/$command"
+          done
+          test -s "$closure/etc/tmux.conf"
+          test -s "$closure/etc/heim-pc/tmux-autocopy.conf"
+          test -e "$closure/etc/systemd/user/heim-pc-tmux-autocopy-migration.service"
           log="$(mktemp)"
           trap 'rm -f "$log"' EXIT
           LC_ALL=C SYSTEMD_LOG_LEVEL=info SYSTEMD_UNIT_PATH="$closure/etc/systemd/system" \

@@ -416,6 +416,7 @@
         self.nixosConfigurations.heim-pc-seagate-nixer-headless-candidate.extendModules {
           modules = [
             ./modules/restic-seagate-backup.nix
+            ./modules/ssh-cockpit-autocopy.nix
             ./modules/fotoatelier.nix
             ./modules/grosser-adler.nix
             ./modules/netdata.nix
