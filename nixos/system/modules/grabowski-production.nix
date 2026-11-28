@@ -10,8 +10,8 @@ let
     inherit lib pkgs;
     packageOnly = true;
   };
-  expectedReleaseId = "2651d589-nixos-lock264e747ad05a-contract07fba47985cb";
-  expectedRevision = "2651d5894908a6777dce0748b2eaae47bad125f3";
+  expectedReleaseId = "43b9bfba-nixos-lock264e747ad05a-contract07fba47985cb";
+  expectedRevision = "43b9bfbaf4ee037a42730c9c6e13fe53aa52faa8";
   expectedLockSha256 = "264e747ad05a536e9ca7639c6cba5a45636b93df0fe3153b4ae040ec14d456e3";
   # systemd After=grabowski-operator.service waits for process start, not
   # the MCP listener. A GET without MCP session legitimately returns HTTP 406
@@ -474,6 +474,7 @@ in
     # The NixOS system operator and user tunnel must keep their existing split.
     # Reuse the authenticated tools/list observer; do not substitute its
     # server-loopback receipt for a ChatGPT platform publication receipt.
+    # After an approved generation is active, reconcile its existing publication journal.
     systemd.user.services."grabowski-client-snapshot-refresh" = lib.mkIf admit {
       description = "Renew source-bound Grabowski MCP tools/list and schema snapshot";
       after = [ "tunnel-client-grabowski.service" "grabowski-transport-ingress.service" ];
@@ -481,7 +482,7 @@ in
         Type = "oneshot";
         WorkingDirectory = "/home/alex";
         ExecStartPre = mcpListenerReady;
-        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId}";
+        ExecStart = "${cfg.operatorPackage}/bin/python3 -I -B ${./grabowski-client-snapshot-refresh.py} --expected-release-id ${cfg.releaseId} --runtime-manifest ${cfg.operatorPackage}/share/grabowski/nixos-integrity-manifest.json";
         Environment = [
           "HOME=/home/alex"
           "XDG_RUNTIME_DIR=/run/user/1000"

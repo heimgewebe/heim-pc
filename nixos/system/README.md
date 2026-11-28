@@ -38,6 +38,18 @@ persistente Daten und externe/manuelle Integrationen sind anschließend über
 die vorhandenen Funktions- und Recovery-Proben zu prüfen. Kein Neustart nur
 zur Erzeugung eines Prüfnachweises. Der native User-Timer `systemkatalog-drift-watch.timer` übernimmt stündlich den bereits erzeugten zentralen CI-Bericht (kein zweiter Scan). Nicht darstellbare Unit-/Link-Namen werden im lokalen Vergleich als opake Identitäten erfasst, nicht stillschweigend ausgelassen.
 
+## Generationseigene Ethernet-Diagnose
+
+Der physische NixOS-Host stellt das bestehende lesende Diagnoseprogramm als
+`heim-pc-network-link-diagnostics --strict` bereit. Python, ethtool und die
+Netzwerk-Policy stammen aus derselben Generation. Die NixOS-Schnittstelle
+für Wake-on-LAN ist zugleich die Soll-Schnittstelle der Diagnose; die
+bisherige Mindestgeschwindigkeit aus der bestehenden JSON-Policy bleibt
+erhalten. Die Legacy-Policy für den älteren Installer wird nicht verändert.
+Die Diagnose verändert weder den Link noch seine Konfiguration; ein
+erfolgreicher Probeaufruf belegt die beobachtete Ethernet-Verhandlung,
+nicht die Erreichbarkeit externer Anwendungen.
+
 ## Freigegebener Bootstandard und Recovery auf dem physischen NixOS-Host
 
 Das native `systemd-boot`-Installationsskript setzt bei jeder regulären

@@ -34,10 +34,10 @@ in
     environment.etc."heim-pc/nixos-day2-runtime-executor-contract.json".source =
       runtimeExecutorContractSource;
 
-    # These directories are intentionally root-only. The future capability
-    # broker may stage exact hash-bound requests, but this module grants no
-    # caller the ability to do so and exposes no systemd service or broad root
-    # command. Each execution must be launched externally in the exact transient
+    # These directories are intentionally root-only. The executor can stage
+    # exact hash-bound request bundles within the existing privileged scope.
+    # This module grants no root authority and exposes no broad root command.
+    # Each execution must be launched externally in the exact transient
     # system scope required by runtime-executor-v1; the executor verifies that
     # cgroup boundary before taking the activation lock and proves peer
     # quiescence after each mutating child cleanup before recovery can proceed.

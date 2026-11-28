@@ -7,11 +7,16 @@
       "plan_kind": "heim_pc.nixos_activation_plan",
       "executor_authority": "successor-task-typed-activation-only",
       "executable_modes": {
-        "test": "test"
+        "test": "test",
+        "next-boot": "boot"
       },
-      "deferred_modes": {
-        "next-boot": "requires-reviewed-one-shot-boot-state-contract"
-      }
+      "deferred_modes": {}
+    },
+    "observe-next-boot": {
+      "staging_receipt_file": "staging-receipt.json",
+      "external_expected_sha256_required": true,
+      "effect": "request-staging-and-read-only-boot-observation",
+      "promotion_authorized": false
     },
     "persistent-promotion": {
       "plan_kind": "heim_pc.nixos_persistent_promotion_plan_v2",
@@ -74,7 +79,7 @@
     "shell_execution_allowed": false,
     "nix_rebuild_allowed": false,
     "broad_root_shell_allowed": false,
-    "request_staging_implemented_here": false,
+    "request_staging_implemented_here": true,
     "rootbroker_authorization_implemented_here": false,
     "reboot_implemented_here": false
   },
@@ -107,8 +112,8 @@
     "firmware-flash"
   ],
   "successor_boundaries": [
-    "root-owned request staging, dedicated transient scope launch, and capability authorization",
-    "boot-critical one-shot next-boot activation and post-boot proof",
+    "dedicated transient scope launch and capability authorization",
+    "boot-critical one-shot post-boot proof",
     "independent live-closure readback",
     "independent persistent-state observation provenance",
     "controlled reboot and post-boot readback",
