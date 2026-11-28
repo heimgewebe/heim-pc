@@ -12,13 +12,26 @@ das Profil nicht automatisch.
   Pipelineoptionen und Zielpfade. OCI-IDs und RepoDigests bezeichnen den
   getesteten Bestand, nicht eine Behauptung über das jeweils neueste Image.
 - `native_commands.yaml`: additive deutsche HassLightSet-Sätze, die Farben
-  Lila/Hellgelb/Türkis, eindeutige Musik-Stopp-Befehle und explizite
+  Lila/Hellgelb/Türkis, eindeutige Musik-Stopp-/Preset-Befehle und explizite
   Farbaufträge für den Wohnzimmerprojektor. Unbekannte Ziele, Fragen,
   Negationen und mehrdeutige Mehrfachbefehle bleiben beim normalen Fallback.
-- `native_intent_scripts.yaml`: NabuStopMusic und NabuProjectorDifferentColor.
+- `native_intent_scripts.yaml`: NabuStopMusic, NabuProjectorDifferentColor,
+  NabuPlayRadio und NabuPlayRelaxedMusic.
   Die bestehende Music-Assistant-Entität `media_player.nabu_musik_motu`
   muss vorhanden und verwendbar sein. Der Handler ruft `media_stop`, nicht
-  `media_pause` auf.
+  `media_pause` auf. Explizites Radio/Deutschlandfunk nutzt den bereits
+  in `radio.py` festgelegten Standard-RadioBrowser-Sender. Entspannte Musik
+  startet die im realen Music-Assistant-Aufruf am 25.11.2026 belegte Playlist
+  `Entspannter Sonntagmorgen`. Die Startantwort meldet den Auftrag, nicht
+  nachweislich hörbaren Ton. Andere Sender, Stimmungen, unklare Geschmacks-
+  wünsche und Mehrfachbefehle bleiben im normalen Fallback. Die bestehende
+  generische Musikstart-Grammatik und ihr Handler bleiben unverändert.
+  Die drei neuen bzw. korrigierten Start-/Farbwechselantworten verwenden
+  die explizite Skriptrückgabe `action_response.accepted`. In der erprobten
+  HA-Version kann selbst `stop` mit `error: true` auf oberster Ebene zu
+  `ACTION_DONE` und einem statischen Erfolgstext führen. Deshalb keine
+  Erfolgsaussage bei fehlender oder negativer Ergebnisrückgabe; `ACTION_DONE`
+  allein ist kein Nachweis für eine physische Aktion.
 - `prompt-addendum.txt`: zusätzliche Regel für kompakte Werkzeugentscheidungen
   und frische Grabowski-Auftragsstatusabfragen. Sie wird einmal an den
   vorhandenen privaten Nabu-Systemprompt angefügt, nicht statt seiner geladen.
@@ -42,7 +55,7 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
 2. Die native Grammatik nach
    `~/.local/share/heimgewebe/home-assistant/custom_sentences/de/nabu_native_commands.yaml`
    übernehmen. Die vorhandene `nabu_music.yaml` bleibt erhalten.
-   Die beiden Blöcke aus `native_intent_scripts.yaml` unter dem vorhandenen
+   Die Blöcke aus `native_intent_scripts.yaml` unter dem vorhandenen
    `intent_script:`-Mapping ergänzen, nicht die vollständige
    `configuration.yaml` ersetzen. Bereits abweichend definierte Handler
    nicht still überschreiben.
@@ -94,7 +107,11 @@ Bei fehlenden oder abweichenden Profilbestandteilen:
   exponierten realen Namen bzw. Registry-Kopie prüfen. Für einzelne Lampen
   und Raumwünsche exakt Zielentitäten, Farbwerte und Prozent/Kelvin prüfen;
   keine zusätzlichen Hue-Raumgruppen. Musik aus muss den vorgesehenen
-  Player stoppen. Negative/mehrdeutige Fälle dürfen keinen neu eingeführten
+  Player stoppen. Radio und entspannte Musik müssen genau einen passenden
+  `music_assistant.play_media`-Aufruf an denselben Player auslösen, mit
+  RadioBrowser-ID bzw. exaktem Playlistnamen, `enqueue: replace`, und ohne
+  LLM-Aufruf. Unverfügbarkeit darf keinen Start melden.
+  Negative/mehrdeutige Fälle dürfen keinen neu eingeführten
   Geräte- oder Musikbefehl auslösen. Projektor mit/ohne Raumzusatz auf
   Hintergrundlicht, Ein/Aus ausschließlich auf Master; andere Farbe auf
   einen um 120 Grad verschobenen Farbton bei vorhandenem HS-Wert. Falscher

@@ -16,12 +16,88 @@ NabuProjectorDifferentColor:
         - condition: template
           value_template: "{{ states('light.wohnzimmer_projektor_background') in ['unknown', 'unavailable'] }}"
       then:
+        - variables:
+            result:
+              accepted: false
         - stop: "Projektor nicht verfügbar"
-          error: true
+          response_variable: result
     - action: light.turn_on
       target:
         entity_id: light.wohnzimmer_projektor_background
       data:
         hs_color: "{{ [((current_hs[0] | float(0) + 120) % 360), 100] if current_hs is sequence and current_hs | length == 2 else [210, 100] }}"
+    - variables:
+        result:
+          accepted: true
+    - stop: "Projektorfarbe angefordert"
+      response_variable: result
   speech:
-    text: "Andere Projektorfarbe eingestellt."
+    text: >-
+      {% if action_response is defined and action_response.accepted | default(false) %}
+      Andere Projektorfarbe angefordert.
+      {% else %}
+      Ich konnte die Projektorfarbe nicht ändern.
+      {% endif %}
+
+NabuPlayRadio:
+  description: "Den Standardradiosender Deutschlandfunk auf dem Heim-PC starten"
+  action:
+    - if:
+        - condition: template
+          value_template: "{{ states('media_player.nabu_musik_motu') in ['unknown', 'unavailable'] }}"
+      then:
+        - variables:
+            result:
+              accepted: false
+        - stop: "Nabu-Musik-MOTU nicht verfügbar"
+          response_variable: result
+    - action: music_assistant.play_media
+      target:
+        entity_id: media_player.nabu_musik_motu
+      data:
+        media_id: "radiobrowser://radio/1c3e8be2-5b14-4933-bad3-87cbc227cba4"
+        media_type: radio
+        enqueue: replace
+    - variables:
+        result:
+          accepted: true
+    - stop: "Musikstart angefordert"
+      response_variable: result
+  speech:
+    text: >-
+      {% if action_response is defined and action_response.accepted | default(false) %}
+      Ich starte Deutschlandfunk.
+      {% else %}
+      Ich konnte das Radio nicht starten.
+      {% endif %}
+NabuPlayRelaxedMusic:
+  description: "Die bekannte Playlist für entspannte Musik auf dem Heim-PC starten"
+  action:
+    - if:
+        - condition: template
+          value_template: "{{ states('media_player.nabu_musik_motu') in ['unknown', 'unavailable'] }}"
+      then:
+        - variables:
+            result:
+              accepted: false
+        - stop: "Nabu-Musik-MOTU nicht verfügbar"
+          response_variable: result
+    - action: music_assistant.play_media
+      target:
+        entity_id: media_player.nabu_musik_motu
+      data:
+        media_id: "Entspannter Sonntagmorgen"
+        media_type: playlist
+        enqueue: replace
+    - variables:
+        result:
+          accepted: true
+    - stop: "Musikstart angefordert"
+      response_variable: result
+  speech:
+    text: >-
+      {% if action_response is defined and action_response.accepted | default(false) %}
+      Ich starte entspannte Musik.
+      {% else %}
+      Ich konnte die entspannte Musik nicht starten.
+      {% endif %}
