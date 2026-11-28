@@ -8,9 +8,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixer.url = "github:heimgewebe/nixer/b229f81de906cc28b3e9cf8d29bf757232b6ed97";
+    nabu = {
+      url = "github:heimgewebe/nabu/fd2a2649177bcff2a98bd6f400b0d8e1d3e9a0ca";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, microvm, nixer }:
+  outputs = { self, nixpkgs, microvm, nixer, nabu }:
     let
       # Root flake.lock is the sole authority; nixos/system/flake.lock is its
       # generated compatibility projection (scripts/ci/check_flake_lock.py).
@@ -28,6 +32,9 @@
         && inputMatches "nixpkgs" nixpkgs
         && inputMatches "microvm" microvm
         && inputMatches "nixer" nixer
+        && inputMatches "nabu" nabu
+        && nabu.rev == trust.inputs.nabu.required_revision
+        && nabu.narHash == trust.inputs.nabu.required_nar_hash
         && nixpkgs.rev == trust.inputs.root_nixpkgs.required_revision
         && microvm.rev == trust.inputs.microvm.required_revision
         && nixer.rev == trust.inputs.nixer.required_revision
@@ -379,6 +386,7 @@
             ./modules/audio.nix
             ./modules/development.nix
             ./modules/containers.nix
+            (import ./modules/nabu-release.nix nabu)
             ({ lib, ... }: {
               # Stage0 deliberately has X disabled; override ONLY in this
               # explicitly named, non-activated workstation successor.
@@ -1614,6 +1622,7 @@ PY
             systemRootNode = builtins.getAttr systemLock.root systemLock.nodes;
             rootNixpkgsNode = builtins.getAttr contract.inputs.root_nixpkgs.lock_node lock.nodes;
             microvmNode = builtins.getAttr contract.inputs.microvm.lock_node lock.nodes;
+            nabuNode = builtins.getAttr contract.inputs.nabu.lock_node lock.nodes;
             nixerNode = builtins.getAttr contract.inputs.nixer.lock_node lock.nodes;
             systemNixerNode = builtins.getAttr contract.inputs.nixer.lock_node systemLock.nodes;
             nixerRuntimeNixpkgsNode =
@@ -1636,6 +1645,11 @@ PY
           assert microvmNode.locked.rev == contract.inputs.microvm.required_revision;
           assert contract.inputs.microvm.nixpkgs_follows_root;
           assert microvmNode.inputs.nixpkgs == [ "nixpkgs" ];
+          assert rootNode.inputs.nabu == contract.inputs.nabu.lock_node;
+          assert systemRootNode.inputs.nabu == contract.inputs.nabu.lock_node;
+          assert nabuNode.flake == false;
+          assert nabuNode.locked.rev == contract.inputs.nabu.required_revision;
+          assert nabuNode.locked.narHash == contract.inputs.nabu.required_nar_hash;
           assert rootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert systemRootNode.inputs.nixer == contract.inputs.nixer.lock_node;
           assert nixerNode.locked.rev == contract.inputs.nixer.required_revision;

@@ -21,6 +21,23 @@
         "type": "github"
       }
     },
+    "nabu": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795851150,
+        "narHash": "sha256-8tdY3kMGJuo4GK2PUvzGTA5OY+kDCjYaFTb2HzPxKwA=",
+        "owner": "heimgewebe",
+        "repo": "nabu",
+        "rev": "fd2a2649177bcff2a98bd6f400b0d8e1d3e9a0ca",
+        "type": "github"
+      },
+      "original": {
+        "owner": "heimgewebe",
+        "repo": "nabu",
+        "rev": "fd2a2649177bcff2a98bd6f400b0d8e1d3e9a0ca",
+        "type": "github"
+      }
+    },
     "nixer": {
       "inputs": {
         "nixpkgs": "nixpkgs"
@@ -75,6 +92,7 @@
     "root": {
       "inputs": {
         "microvm": "microvm",
+        "nabu": "nabu",
         "nixer": "nixer",
         "nixpkgs": "nixpkgs_2"
       }
