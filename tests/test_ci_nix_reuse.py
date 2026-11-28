@@ -194,10 +194,11 @@ class QueueAdmissionTests(unittest.TestCase):
             }),
         ]
 
-    def select(self, *, env=None, rules=None, base=None, diff_rc=0, failed=False):
+    def select(self, *, env=None, rules=None, base=None, diff_rc=0, failed=False,
+               git_checkout=None):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
         selector = workflow.split("- name: Select lightweight PR queue admission\n", 1)[1]
-        script = textwrap.dedent(selector.split("\n      - name:", 1)[0].split("        run: |\n", 1)[1])
+        script = textwrap.dedent(selector.split("\n  nix:", 1)[0].split("        run: |\n", 1)[1])
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
             variables = {
@@ -215,10 +216,19 @@ class QueueAdmissionTests(unittest.TestCase):
                     self.rules() if rules is None else rules
                 ), ""),
             ]
+            real_run = subprocess.run
+            response_iter = iter(responses)
+
+            def dispatch(argv, **kwargs):
+                if failed:
+                    raise subprocess.TimeoutExpired("gh", 10)
+                response = next(response_iter)
+                if git_checkout is not None and argv[0] == "git":
+                    return real_run(argv, cwd=git_checkout, **kwargs)
+                return response
+
             with patch.dict(os.environ, variables), patch(
-                "subprocess.run", side_effect=(
-                    subprocess.TimeoutExpired("gh", 10) if failed else responses
-                )
+                "subprocess.run", side_effect=dispatch
             ) as api, patch("sys.stdout", new_callable=io.StringIO):
                 exec(compile(script, "<workflow admission selector>", "exec"), {})
             return output.read_text().strip(), [call.args[0] for call in api.call_args_list]
@@ -283,17 +293,51 @@ class QueueAdmissionTests(unittest.TestCase):
                     rules[1]["parameters"]["required_status_checks"][-1]["integration_id"] = 1
                 self.assertEqual("admission=false", self.select(rules=rules)[0])
 
+    def test_actual_git_history_is_required_for_admission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "full"
+            repo.mkdir()
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",
+                     "-c", "commit.gpgSign=false", *args], cwd=repo, text=True
+                ).strip()
+
+            git("init", "-q")
+            (repo / "README.md").write_text("base\n")
+            git("add", "README.md")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            (repo / "flake.nix").write_text("{}\n")
+            git("add", "flake.nix")
+            git("commit", "-qm", "Nix change")
+            head = git("rev-parse", "HEAD")
+            env = {"BASE_SHA": base, "HEAD_SHA": head}
+            self.assertEqual("admission=true", self.select(
+                env=env, base=base, git_checkout=repo
+            )[0])
+            shallow = Path(directory) / "shallow"
+            git("clone", "-q", "--depth=1", repo.as_uri(), str(shallow))
+            self.assertEqual("admission=false", self.select(
+                env=env, base=base, git_checkout=shallow
+            )[0])
+
     def test_workflow_keeps_full_merge_group_and_fresh_checks(self):
         workflow = (ROOT / ".github/workflows/heim-pc-nix.yml").read_text()
+        detect = workflow.split("  detect:\n", 1)[1].split("\n  nix:", 1)[0]
         live = workflow.split("  live-system:\n", 1)[1]
-        admission = live.split("- name: Select lightweight PR queue admission", 1)[1]
-        before, build = admission.split("- name: " + BUILD, 1)
-        self.assertIn("github.event_name == 'pull_request'", before)
-        self.assertIn("needs.detect.result == 'success'", before)
-        self.assertIn("needs.detect.outputs.control_changed == 'false'", before)
-        self.assertIn("steps.admission.outputs.admission != 'true' &&", build)
-        self.assertLess(live.index("Evaluate live trust and lifecycle contracts"),
-                        live.index("Select lightweight PR queue admission"))
+        before, admission = detect.split("- name: Select lightweight PR queue admission", 1)
+        self.assertIn("fetch-depth: 0", before)
+        self.assertIn("Verify detector source identity", before)
+        self.assertIn("admission: ${{ steps.admission.outputs.admission }}", before)
+        self.assertIn("github.event_name == 'pull_request'", admission)
+        self.assertIn("steps.control.outputs.control_changed == 'false'", admission)
+        self.assertIn("steps.changes.outputs.nix_changed == 'true'", admission)
+        self.assertNotIn("Select lightweight PR queue admission", live)
+        before_build, build = live.split("- name: " + BUILD, 1)
+        self.assertIn("Evaluate live trust and lifecycle contracts", before_build)
+        self.assertIn("(needs.detect.result != 'success' || needs.detect.outputs.admission != 'true') &&", build)
 
 
 if __name__ == "__main__":
