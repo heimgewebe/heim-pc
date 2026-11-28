@@ -260,7 +260,8 @@ async def _wait_sender_receipt(nonce: str, issued_at: int, *, seconds: float = 3
     deadline = time.monotonic() + seconds
     while True:
         stage = await asyncio.to_thread(_read_sender_receipt, nonce, issued_at)
-        if stage is not None and stage != "click_attempted":
+        # A document replacement may still produce a positive receipt.
+        if stage is not None and stage not in {"click_attempted", "send_unconfirmed"}:
             return stage
         if time.monotonic() >= deadline:
             return stage
