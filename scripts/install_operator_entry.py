@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import stat as stat_module
+import subprocess
 import tempfile
 import sys
 from datetime import datetime, timezone
@@ -195,8 +196,8 @@ def _public_item(item: dict[str, Any], *, backup: Path | None = None) -> dict[st
     }
 
 
-def _validate_source_contract() -> None:
-    contract = json.loads(SOURCE_CONTRACT.read_text(encoding="utf-8"))
+def _validate_source_contract(source_bytes: bytes | None = None) -> None:
+    contract = json.loads(SOURCE_CONTRACT.read_bytes() if source_bytes is None else source_bytes)
     if contract.get("kind") != "heim_pc_operator_entry" or contract.get("schemaVersion") != 1:
         raise ValueError("operator entry source has an unsupported kind or schemaVersion")
     path_resolution = contract.get("pathResolution", {})
@@ -204,21 +205,144 @@ def _validate_source_contract() -> None:
         raise ValueError("operator entry source must declare unresolved public host paths")
 
 
-def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[str, Any]:
+def _canonical_git(*argv: str) -> bytes:
+    # Do not let caller-provided Git environment or repository hooks select a
+    # different source. This checks local canonical refs; it never fetches.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "-c", "core.fsmonitor=false",
+             "-c", "core.hooksPath=" + os.devnull, *argv],
+            env=env, capture_output=True, check=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise InstallConflict("cannot establish canonical Git source") from exc
+    return result.stdout
+
+
+def _convergence_source(home: Path, plan: list[dict[str, Any]]) -> str:
+    """Bind the proposed bytes to the clean canonical local main checkout."""
+    if ROOT != home / "repos/heim-pc":
+        raise InstallConflict("automatic convergence requires the canonical heim-pc checkout")
+    if _canonical_git("rev-parse", "--show-toplevel").decode().strip() != str(ROOT):
+        raise InstallConflict("unexpected canonical Git worktree")
+    origin = _canonical_git("config", "--local", "--get", "remote.origin.url").decode().strip()
+    if origin not in {
+        "https://github.com/heimgewebe/heim-pc",
+        "https://github.com/heimgewebe/heim-pc.git",
+        "git@github.com:heimgewebe/heim-pc.git",
+        "ssh://git@github.com/heimgewebe/heim-pc.git",
+    }:
+        raise InstallConflict("unexpected canonical Git origin")
+    if _canonical_git("symbolic-ref", "--short", "HEAD").strip() != b"main":
+        raise InstallConflict("automatic convergence requires main")
+    head = _canonical_git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    if (
+        _canonical_git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}").decode().strip()
+        != head
+        or _canonical_git("status", "--porcelain", "--untracked-files=no")
+    ):
+        raise InstallConflict("canonical main is dirty or does not match local origin/main")
+    # Use the frozen plan bytes, not a second read of mutable working files.
+    _validate_source_contract(plan[0]["sourceBytes"])
+    for item in plan:
+        source = item["source"]
+        relative = source.relative_to(ROOT).as_posix()
+        if source.resolve() != source or not source.is_file():
+            raise InstallConflict(f"unexpected source file: {source}")
+        if _canonical_git("cat-file", "blob", f"{head}:{relative}") != item["sourceBytes"]:
+            raise InstallConflict(f"source differs from the canonical commit: {relative}")
+    if _canonical_git("rev-parse", "--verify", "HEAD^{commit}").decode().strip() != head:
+        raise InstallConflict("canonical source changed during preflight")
+    if _canonical_git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}").decode().strip() != head:
+        raise InstallConflict("canonical tracking ref changed during preflight")
+    return head
+
+
+def _convergence_preimage(home: Path, plan: list[dict[str, Any]]) -> tuple[dict[str, Any], bytes]:
+    """Only replace projections previously installed by this managed installer."""
+    receipt_path = home / RECEIPT_RELATIVE_PATH
+    _assert_safe_target(home, receipt_path)
+    raw = _read_existing(receipt_path)
+    if raw is None:
+        raise InstallConflict("automatic convergence requires an existing installation receipt")
+    try:
+        prior = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise InstallConflict("invalid previous installation receipt") from exc
+    if (
+        not isinstance(prior, dict)
+        or prior.get("schemaVersion") != 1
+        or prior.get("kind") != "heim_pc_operator_entry_install_receipt"
+        or prior.get("valid") is not True
+        or prior.get("apply") is not True
+        or prior.get("home") != str(home)
+        or prior.get("receiptPath") != str(receipt_path)
+        or not isinstance(prior.get("files"), list)
+    ):
+        raise InstallConflict("invalid previous installation receipt")
+    by_target = {}
+    for entry in prior["files"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("target"), str):
+            raise InstallConflict("invalid previous installation receipt file binding")
+        if entry["target"] in by_target:
+            raise InstallConflict("duplicate previous installation receipt target")
+        by_target[entry["target"]] = entry
+    if set(by_target) != {str(item["target"]) for item in plan}:
+        raise InstallConflict("managed projection set changed; review the explicit installer plan")
+    for item in plan:
+        entry = by_target[str(item["target"])]
+        digest = entry.get("afterSha256")
+        if (
+            entry.get("source") != str(item["source"])
+            or entry.get("mode") != oct(item["mode"])
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise InstallConflict("invalid previous installation receipt file binding")
+        # A partial previous install may already have reached the new bytes.
+        # Neither an unrelated edit nor a deletion is an implicit replacement mandate.
+        if item["beforeSha256"] not in (digest, item["afterSha256"]):
+            raise InstallConflict(f"managed projection has an unknown preimage: {item['target']}")
+        if stat_module.S_IMODE(item["target"].stat().st_mode) != item["mode"]:
+            raise InstallConflict(f"managed projection has an unexpected mode: {item['target']}")
+    if prior.get("sourceContractSha256") != by_target[str(plan[0]["target"])]["afterSha256"]:
+        raise InstallConflict("previous receipt contract digest does not match its file binding")
+    return prior, raw
+
+
+def install(
+    *, home: Path, apply: bool, replace_existing: bool = False, converge: bool = False
+) -> dict[str, Any]:
     home = home.expanduser().resolve()
     if not home.is_dir():
         raise ValueError(f"home directory does not exist: {home}")
     _validate_source_contract()
+    if converge and replace_existing:
+        raise InstallConflict("automatic convergence cannot be combined with --replace-existing")
 
     if not apply:
         plan = _plan(home)
+        source_commit = _convergence_source(home, plan) if converge else None
+        if converge:
+            _convergence_preimage(home, plan)
         return {
             "schemaVersion": 1,
             "kind": "heim_pc_operator_entry_install_plan",
             "apply": False,
             "replaceExisting": replace_existing,
             "home": str(home),
-            "sourceContractSha256": _sha256_bytes(SOURCE_CONTRACT.read_bytes()),
+            "sourceContractSha256": plan[0]["afterSha256"],
+            **({"convergenceSourceCommit": source_commit} if converge else {}),
             "requiresReplaceExisting": any(item["requiresReplacement"] for item in plan),
             "files": [_public_item(item) for item in plan],
             "doesNotEstablish": [
@@ -238,13 +362,26 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
     with _open_lock_file(lock_path) as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         plan = _plan(home)
+        source_commit = _convergence_source(home, plan) if converge else None
+        prior_receipt, prior_bytes = _convergence_preimage(home, plan) if converge else (None, None)
+        if converge and prior_receipt is not None and all(
+            item["action"] == "unchanged" for item in plan
+        ):
+            old_digests = {entry["target"]: entry["afterSha256"] for entry in prior_receipt["files"]}
+            if all(old_digests[str(item["target"])] == item["afterSha256"] for item in plan):
+                return {
+                    **prior_receipt,
+                    "convergence": {"status": "unchanged", "sourceCommit": source_commit},
+                }
         conflicts = [str(item["target"]) for item in plan if item["requiresReplacement"]]
-        if conflicts and not replace_existing:
+        if conflicts and not (replace_existing or converge):
             raise InstallConflict(
                 "existing projections differ; rerun with --replace-existing after reviewing the plan: "
                 + ", ".join(conflicts)
             )
 
+        if converge and _read_existing(home / RECEIPT_RELATIVE_PATH) != prior_bytes:
+            raise InstallConflict("previous receipt changed after preflight")
         public_files: list[dict[str, Any]] = []
         for item in plan:
             backup: Path | None = None
@@ -268,6 +405,13 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
                 _chmod_unchanged_regular(item["target"], item["sourceBytes"], item["mode"])
             public_files.append(_public_item(item, backup=backup))
 
+        if converge:
+            for item in plan:
+                if (
+                    _read_existing(item["target"]) != item["sourceBytes"]
+                    or stat_module.S_IMODE(item["target"].stat().st_mode) != item["mode"]
+                ):
+                    raise InstallConflict(f"projection readback differs: {item['target']}")
         receipt_path = home / RECEIPT_RELATIVE_PATH
         _assert_safe_target(home, receipt_path)
         receipt = {
@@ -278,7 +422,8 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
             "replaceExisting": replace_existing,
             "installedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "home": str(home),
-            "sourceContractSha256": _sha256_bytes(SOURCE_CONTRACT.read_bytes()),
+            "sourceContractSha256": plan[0]["afterSha256"],
+            **({"convergence": {"status": "applied", "sourceCommit": source_commit}} if converge else {}),
             "receiptPath": str(receipt_path),
             "transaction": {
                 "serializedByLock": str(lock_path),
@@ -295,7 +440,7 @@ def install(*, home: Path, apply: bool, replace_existing: bool = False) -> dict[
             ],
         }
         receipt_bytes = (json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        receipt_before = _read_existing(receipt_path)
+        receipt_before = prior_bytes if converge else _read_existing(receipt_path)
         _atomic_write(receipt_path, receipt_bytes, 0o600, expected_before=receipt_before)
         return receipt
 
@@ -309,12 +454,18 @@ def main() -> int:
         action="store_true",
         help="replace differing existing projections after backing them up",
     )
+    parser.add_argument(
+        "--converge",
+        action="store_true",
+        help="converge previously installed projections from clean canonical main; reject unknown edits",
+    )
     args = parser.parse_args()
     try:
         receipt = install(
             home=args.home,
             apply=args.apply,
             replace_existing=args.replace_existing,
+            converge=args.converge,
         )
     except InstallConflict as exc:
         print(
