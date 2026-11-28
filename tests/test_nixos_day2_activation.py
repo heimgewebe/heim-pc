@@ -1687,6 +1687,45 @@ def test_persistent_state_digest_rejects_invalid_boot_state(changes) -> None:
         )
 
 
+def test_promotion_reauthorizes_approved_preimage_after_gc_setup(runtime, monkeypatch):
+    request_root, state, _runner = runtime
+    receipt = build_receipt()
+    authority = persistent_authority(receipt)
+    plan = persistent_plan(receipt, authority)
+    request_id = "approved-preimage-drift"
+    write_request(request_root, request_id, receipt, authority, plan)
+    _allow_future_promotion(monkeypatch)
+    boot = persistent_boot_state()
+    monkeypatch.setattr(executor, "_observe_boot_state", lambda _: dict(boot, **state))
+    authorization_digests = []
+
+    def authorize(build, candidate, candidate_plan, **kwargs):
+        authorization_digests.append(kwargs["expected_prior_persistent_state_sha256"])
+        # Exercise the actual unpatched validator. Only the runtime's current
+        # universal boot-critical floor is replaced by the future-mode fixture.
+        checked = managed_nix.authorize_persistent_promotion_execution(
+            build, candidate, candidate_plan, **kwargs,
+        )
+        new_entry = "nixos-heim-pc-approved-generation-32.conf"
+        boot.update(approved=CLOSURE, approved_entry=new_entry,
+                    default=new_entry, loader_default=new_entry)
+        return checked
+
+    monkeypatch.setattr(executor.managed_nix, "authorize_persistent_promotion_execution", authorize)
+    with pytest.raises(managed_nix.ManagedNixError, match="prior persistent state does not match"):
+        executor.execute_persistent_promotion(
+            request_id=request_id,
+            expected_source_artifact_sha256=SOURCE_ARTIFACT_DIGEST,
+            runner=lambda *_args: pytest.fail("no effect after Approved drift"),
+            **bindings(receipt, authority, plan),
+        )
+    assert len(authorization_digests) == 2
+    assert authorization_digests[0] == authority["prior_persistent_state_sha256"]
+    assert authorization_digests[0] != authorization_digests[1]
+    assert state == {"current": PRIOR, "profile": PRIOR}
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
 def test_legacy_persistent_state_digest_cannot_authorize_new_preimage() -> None:
     receipt = build_receipt()
     authority = persistent_authority(receipt)
