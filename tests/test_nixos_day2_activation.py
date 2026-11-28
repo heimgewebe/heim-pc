@@ -1056,6 +1056,132 @@ def test_named_approved_generation_reads_exact_retained_link(monkeypatch, tmp_pa
         executor._read_approved_generation(str(closure))
 
 
+def test_observe_approved_promotion_returns_fresh_native_evidence_without_effect(
+    approved_promotion_runtime,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    receipt = executor.execute_persistent_promotion(**args)
+    old_calls = list(calls)
+    result = executor.observe_approved_promotion(
+        request_id="promotion-independent-readback",
+        promotion_receipt=receipt,
+        expected_promotion_receipt_sha256=managed_nix.sha256_json(receipt),
+        expected_plan_sha256=receipt["plan_sha256"],
+        expected_target=TARGET,
+    )
+    assert result["boot_state"] == receipt["boot_state_after"]
+    assert result["observed_boot_id"] == receipt["boot_id"]
+    assert result["persistent_state_observation"]["persistent_state_sha256"] == (
+        receipt["post_persistent_state_sha256"]
+    )
+    assert result["persistent_state_observation"]["readback_evidence_sha256"] == (
+        result["native_observation_sha256"]
+    )
+    assert result["independent_runtime_readback_established"] is False
+    assert result["final_persistent_promotion_receipt_established"] is False
+    assert result["application_health_established"] is False
+    material = dict(result)
+    self_digest = material.pop("receipt_sha256")
+    assert self_digest == executor._sha256_json(material)
+    for field in ("persistent_state_observation", "independent_runtime_readback_established",
+                  "persistent_state_observation_provenance_established",
+                  "final_persistent_promotion_receipt_established", "application_health_established"):
+        material.pop(field)
+    native_digest = material.pop("native_observation_sha256")
+    assert native_digest == executor._sha256_json(material)
+    assert managed_nix.validate_persistent_state_observation(
+        result["persistent_state_observation"], now=result["observed_at"],
+    ) == result["persistent_state_observation"]
+    assert calls == old_calls
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+@pytest.mark.parametrize("drift", [
+    "digest", "self-digest", "plan", "target", "same-request",
+    "boot", "selected-entry", "approved", "recovery", "oneshot",
+    "generation", "old-link", "state-digest", "before-execution",
+])
+def test_observe_approved_promotion_rejects_stale_or_unbound_readback(
+    approved_promotion_runtime, monkeypatch, drift,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    receipt = executor.execute_persistent_promotion(**args)
+    old_calls = list(calls)
+    observe = dict(
+        request_id="promotion-independent-readback",
+        promotion_receipt=receipt,
+        expected_promotion_receipt_sha256=managed_nix.sha256_json(receipt),
+        expected_plan_sha256=receipt["plan_sha256"],
+        expected_target=TARGET,
+    )
+    if drift == "digest":
+        observe["expected_promotion_receipt_sha256"] = "0"*64
+    elif drift == "self-digest":
+        receipt["receipt_sha256"] = "0"*64
+        observe["expected_promotion_receipt_sha256"] = managed_nix.sha256_json(receipt)
+    elif drift == "plan":
+        observe["expected_plan_sha256"] = "0"*64
+    elif drift == "target":
+        observe["expected_target"] = "wrong-target"
+    elif drift == "same-request":
+        observe["request_id"] = receipt["request_id"]
+    elif drift == "boot":
+        monkeypatch.setattr(executor, "_read_boot_id", lambda: "33333333-3333-3333-3333-333333333333")
+    elif drift == "selected-entry":
+        monkeypatch.setattr(executor, "_read_efi_entry", lambda *_args, **_kw: "nixos-generation-99.conf")
+    elif drift == "approved":
+        boot["approved"] = PRIOR
+    elif drift == "recovery":
+        boot["recovery"] = CLOSURE
+    elif drift == "oneshot":
+        boot["oneshot"] = "nixos-generation-99.conf"
+    elif drift == "generation":
+        generation["value"] = 99
+    elif drift == "old-link":
+        def lost(*_args):
+            raise executor.RuntimeExecutorError("retained generation unavailable")
+        monkeypatch.setattr(executor, "_require_approved_generation", lost)
+    elif drift == "state-digest":
+        receipt["post_persistent_state_sha256"] = "0"*64
+        receipt.pop("receipt_sha256")
+        receipt["receipt_sha256"] = executor._sha256_json(receipt)
+        observe["expected_promotion_receipt_sha256"] = managed_nix.sha256_json(receipt)
+    elif drift == "before-execution":
+        monkeypatch.setattr(executor, "_utc_now", lambda: "2000-01-01T00:00:00Z")
+    with pytest.raises((executor.RuntimeExecutorError, managed_nix.ManagedNixError)):
+        executor.observe_approved_promotion(**observe)
+    assert calls == old_calls
+    assert not list(executor.GC_ROOT_DIR.iterdir())
+
+
+def test_observe_approved_promotion_rejects_drift_between_native_observations(
+    approved_promotion_runtime, monkeypatch,
+):
+    state, boot, calls, generation, options, before, args = approved_promotion_runtime
+    receipt = executor.execute_persistent_promotion(**args)
+    old_calls = list(calls)
+    original = executor._observe_boot_state
+    reads = []
+
+    def read(target):
+        result = original(target)
+        reads.append(result)
+        if len(reads) == 1:
+            boot["oneshot"] = "nixos-generation-99.conf"
+        return result
+
+    monkeypatch.setattr(executor, "_observe_boot_state", read)
+    with pytest.raises(executor.RuntimeExecutorError, match="promoted boot state"):
+        executor.observe_approved_promotion(
+            request_id="promotion-independent-readback",
+            promotion_receipt=receipt,
+            expected_promotion_receipt_sha256=managed_nix.sha256_json(receipt),
+            expected_plan_sha256=receipt["plan_sha256"],
+            expected_target=TARGET,
+        )
+    assert calls == old_calls
+
+
 def test_postboot_observation_binds_new_boot_and_exact_entry(boot_runtime, monkeypatch):
     state, boot, calls, candidate, receipt, observe = _postboot_fixture(boot_runtime, monkeypatch)
     before = list(calls)
@@ -2047,6 +2173,14 @@ def test_runtime_contract_keeps_capability_and_observer_boundaries_separate() ->
         "effect": "request-staging-and-read-only-boot-observation",
         "promotion_authorized": False,
         "persistent_state_kind": executor.PERSISTENT_STATE_KIND,
+    }
+    assert contract["supported_operations"]["observe-approved-promotion"] == {
+        "effect": "read-only-boot-observation",
+        "external_promotion_receipt_sha256_required": True,
+        "external_plan_sha256_required": True,
+        "same_tested_boot_required": True,
+        "persistent_state_kind": executor.PERSISTENT_STATE_KIND,
+        "observation_provenance_established_here": False,
     }
     promotion = contract["supported_operations"]["persistent-promotion"]
     assert promotion["boot_critical_requires_next_boot_successor_proof"] is True
