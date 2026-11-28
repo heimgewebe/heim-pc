@@ -29,6 +29,14 @@
       "boot_critical_staging_receipt_file": "staging-receipt.json",
       "boot_critical_switch_argument": "boot",
       "boot_critical_external_expected_boot_id_required": true
+    },
+    "observe-approved-promotion": {
+      "effect": "read-only-boot-observation",
+      "external_promotion_receipt_sha256_required": true,
+      "external_plan_sha256_required": true,
+      "same_tested_boot_required": true,
+      "persistent_state_kind": "heim_pc.nixos_persistent_runtime_state_v2",
+      "observation_provenance_established_here": false
     }
   },
   "request": {

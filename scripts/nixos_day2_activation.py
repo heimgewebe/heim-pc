@@ -169,6 +169,14 @@ def _load_contract() -> dict[str, Any]:
             "promotion_authorized": False,
             "persistent_state_kind": "heim_pc.nixos_persistent_runtime_state_v2",
         },
+        "observe-approved-promotion": {
+            "effect": "read-only-boot-observation",
+            "external_promotion_receipt_sha256_required": True,
+            "external_plan_sha256_required": True,
+            "same_tested_boot_required": True,
+            "persistent_state_kind": "heim_pc.nixos_persistent_runtime_state_v2",
+            "observation_provenance_established_here": False,
+        },
         "persistent-promotion": {
             "plan_kind": managed_nix.PERSISTENT_PROMOTION_PLAN_KIND,
             "executor_authority": managed_nix.PERSISTENT_PROMOTION_EXECUTOR_AUTHORITY,
@@ -2310,6 +2318,150 @@ def _execute_approved_promotion(
     return result
 
 
+def observe_approved_promotion(
+    *, request_id: str, promotion_receipt: Mapping[str, Any],
+    expected_promotion_receipt_sha256: str, expected_plan_sha256: str,
+    expected_target: str,
+) -> dict[str, Any]:
+    """Observe the committed named promotion in a separate, read-only request.
+
+    External provenance and application acceptance are still required. A
+    caller-provided digest or this self-hashed observation does not grant
+    either privilege or final acceptance.
+    """
+    _require_root()
+    executor_cgroup = _require_dedicated_scope(request_id)
+    with _exclusive_lock(executor_cgroup):
+        if not isinstance(promotion_receipt, Mapping):
+            raise RuntimeExecutorError("promotion receipt must be an object")
+        if len(_canonical_json(promotion_receipt)) > MAX_FILE_BYTES:
+            raise RuntimeExecutorError("promotion receipt exceeds size limit")
+        receipt = dict(promotion_receipt)
+        digest = _require_canonical_digest(
+            receipt, expected_promotion_receipt_sha256, "promotion receipt",
+        )
+        self_digest = receipt.pop("receipt_sha256", None)
+        if self_digest != _sha256_json(receipt):
+            raise RuntimeExecutorError("invalid promotion receipt self digest")
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("kind") != "heim_pc.nixos_activation_runtime_execution_v1"
+            or receipt.get("result") != "executed"
+            or receipt.get("operation") != "persistent-promotion"
+            or receipt.get("mode") != "boot-critical-approved"
+            or receipt.get("target") != expected_target
+            or receipt.get("named_approved_promoted") is not True
+            or receipt.get("profile_mutated") is not False
+            or receipt.get("transaction_gc_roots_released") is not True
+            or not isinstance(receipt.get("request_id"), str)
+            or REQUEST_ID_RE.fullmatch(receipt["request_id"]) is None
+            or receipt.get("request_id") == request_id
+            or receipt.get("plan_sha256") != _require_sha256(
+                expected_plan_sha256, "expected plan sha256"
+            )
+        ):
+            raise RuntimeExecutorError("receipt is not a bound completed Approved promotion")
+        target = managed_nix._require_closure(receipt.get("system_closure"), "promoted closure")
+        prior = managed_nix._require_closure(receipt.get("prior_closure"), "prior closure")
+        boot_id = _require_boot_id(receipt.get("boot_id"))
+        before = receipt.get("boot_state_before")
+        after = receipt.get("boot_state_after")
+        pre_digest = persistent_state_sha256(target=expected_target, boot_state=before)
+        post_digest = persistent_state_sha256(target=expected_target, boot_state=after)
+        if (
+            prior == target or before["approved"] != prior
+            or before["approved_entry"] == after["approved_entry"]
+            or pre_digest == post_digest
+            or pre_digest != receipt.get("pre_persistent_state_sha256")
+            or post_digest != receipt.get("post_persistent_state_sha256")
+            or any(before[k] != target for k in ("current", "booted", "profile"))
+            or before["oneshot"] is not None
+            or after != dict(before, approved=target, approved_entry=after["approved_entry"],
+                             default=after["approved_entry"], loader_default=after["approved_entry"])
+        ):
+            raise RuntimeExecutorError("invalid named Approved promotion transition")
+        old_generation = receipt.get("prior_approved_generation")
+        new_generation = receipt.get("promoted_approved_generation")
+        if (
+            type(old_generation) is not int or old_generation <= 0
+            or type(new_generation) is not int or new_generation <= 0
+            or old_generation == new_generation
+        ):
+            raise RuntimeExecutorError("invalid named Approved generation transition")
+        executed = managed_nix._parse_time(receipt.get("executed_at"), "promotion executed_at")
+
+        def read() -> tuple[dict[str, Any], str]:
+            if _read_boot_id() != boot_id:
+                raise RuntimeExecutorError("promotion readback is not on the tested boot")
+            # Before invoking any closure-bound resolver, establish that this
+            # is the currently running, already promoted closure.
+            partial = _observe_boot_links_and_defaults()
+            expected_partial = {
+                k: v for k, v in after.items()
+                if k not in ("approved_entry", "recovery_entry")
+            }
+            if partial != expected_partial:
+                raise RuntimeExecutorError("promoted boot state does not match receipt")
+            observed = _observe_boot_state(target)
+            if observed != after:
+                raise RuntimeExecutorError("promoted boot state does not match receipt")
+            if _read_approved_generation(target) != new_generation:
+                raise RuntimeExecutorError("promoted Approved generation drifted")
+            _require_approved_generation(old_generation, prior)
+            selected = _read_efi_entry("LoaderEntrySelected")
+            if selected != _resolve_boot_entry(target, "system", target):
+                raise RuntimeExecutorError("promotion readback selected entry mismatch")
+            if _read_boot_id() != boot_id:
+                raise RuntimeExecutorError("promotion readback boot identity changed")
+            return observed, selected
+
+        observed, selected = read()
+        if read() != (observed, selected):
+            raise RuntimeExecutorError("promoted boot state changed during readback")
+        now = _utc_now()
+        if managed_nix._parse_time(now, "observed_at") < executed:
+            raise RuntimeExecutorError("promotion readback predates execution")
+        material = {
+            "schema_version": 1,
+            "kind": "heim_pc.nixos_approved_promotion_observation_v1",
+            "result": "observed",
+            "request_id": request_id,
+            "promotion_receipt_sha256": digest,
+            "plan_sha256": expected_plan_sha256,
+            "target": expected_target,
+            "system_closure": target,
+            "observed_boot_id": boot_id,
+            "selected_entry": selected,
+            "boot_state": observed,
+            "prior_approved_generation": old_generation,
+            "promoted_approved_generation": new_generation,
+            "persistent_state_kind": PERSISTENT_STATE_KIND,
+            "persistent_state_sha256": post_digest,
+            "observed_at": now,
+        }
+        evidence_digest = _sha256_json(material)
+        observation = managed_nix.validate_persistent_state_observation({
+            "schema_version": managed_nix._PERSISTENT_PROMOTION_CONTRACT_VERSION,
+            "kind": managed_nix.PERSISTENT_STATE_OBSERVATION_KIND,
+            "target": expected_target,
+            "system_closure": target,
+            "persistent_state_sha256": post_digest,
+            "readback_evidence_sha256": evidence_digest,
+            "observed_at": now,
+            "freshness_seconds": managed_nix.PERSISTENT_STATE_OBSERVATION_MAX_AGE_SECONDS,
+        }, now=now)
+        result = dict(
+            material, native_observation_sha256=evidence_digest,
+            persistent_state_observation=observation,
+            independent_runtime_readback_established=False,
+            persistent_state_observation_provenance_established=False,
+            final_persistent_promotion_receipt_established=False,
+            application_health_established=False,
+        )
+        result["receipt_sha256"] = _sha256_json(result)
+        return result
+
+
 def execute_persistent_promotion(
     *,
     request_id: str,
@@ -2545,6 +2697,13 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--expected-target", required=True)
     observe.add_argument("--request-bundle-json")
 
+    readback = sub.add_parser("observe-approved-promotion")
+    readback.add_argument("--request-id", required=True)
+    readback.add_argument("--expected-promotion-receipt-sha256", required=True)
+    readback.add_argument("--expected-plan-sha256", required=True)
+    readback.add_argument("--expected-target", required=True)
+    readback.add_argument("--promotion-receipt-json", required=True)
+
     promotion = sub.add_parser("execute-persistent-promotion")
     common(promotion)
     promotion.add_argument("--expected-source-artifact-sha256", required=True)
@@ -2575,6 +2734,14 @@ def main(argv: list[str] | None = None) -> int:
                     expected_staging_receipt_sha256=args.expected_staging_receipt_sha256,
                     expected_target=args.expected_target,
                     request_bundle=_parse_request_bundle(args.request_bundle_json),
+                )
+            elif args.command == "observe-approved-promotion":
+                result = observe_approved_promotion(
+                    request_id=args.request_id,
+                    expected_promotion_receipt_sha256=args.expected_promotion_receipt_sha256,
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_target=args.expected_target,
+                    promotion_receipt=_parse_request_bundle(args.promotion_receipt_json),
                 )
             elif args.command == "execute-persistent-promotion":
                 result = execute_persistent_promotion(
